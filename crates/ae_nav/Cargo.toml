@@ -1,0 +1,22 @@
+[package]
+name = "ae_nav"
+description = "Deterministic large-scale navigation: sector/portal hierarchy, flow fields, ORCA avoidance, collision."
+version.workspace = true
+# Lifted from the pathsim prototype unchanged; stays on its original edition.
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "nav"
+harness = false
+
+[lib]
+# Benches live in benches/ (criterion); keeps `cargo bench -- <criterion args>` working.
+bench = false

@@ -1,0 +1,105 @@
+{
+  "suite": "nav",
+  "commit": "uncommitted",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "map2560/terrain_generate",
+      "kind": "time",
+      "value": 926434321.0,
+      "unit": "ns",
+      "spread": 0.035918596975208564
+    },
+    {
+      "metric": "map2560/terrain_digest_low32",
+      "kind": "info",
+      "value": 558620204.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/hierarchy_build_1t",
+      "kind": "time",
+      "value": 3830676915.0,
+      "unit": "ns",
+      "spread": 0.02600987115615309
+    },
+    {
+      "metric": "map2560/hierarchy_build_8t",
+      "kind": "time",
+      "value": 679135253.0,
+      "unit": "ns",
+      "spread": 0.028541734381148376
+    },
+    {
+      "metric": "map2560/abstract_nodes",
+      "kind": "info",
+      "value": 12702.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/abstract_edges",
+      "kind": "info",
+      "value": 49146.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/hierarchy_bytes",
+      "kind": "counter",
+      "value": 54882080.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/context_expansions",
+      "kind": "counter",
+      "value": 10157.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/context_build",
+      "kind": "time",
+      "value": 625524.0,
+      "unit": "ns",
+      "spread": 0.0356836828003402
+    },
+    {
+      "metric": "map2560/field_expansions",
+      "kind": "counter",
+      "value": 3817.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/field_reachable_cells",
+      "kind": "info",
+      "value": 3817.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "map2560/flow_field_build",
+      "kind": "time",
+      "value": 245715.0,
+      "unit": "ns",
+      "spread": 0.02274586411086014
+    },
+    {
+      "metric": "orca10000/step_1t",
+      "kind": "time",
+      "value": 6296502.0,
+      "unit": "ns",
+      "spread": 0.024294918035442536
+    },
+    {
+      "metric": "orca10000/step_8t",
+      "kind": "time",
+      "value": 1248548.0,
+      "unit": "ns",
+      "spread": 0.19874686435763783
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "suite": "ecs-structural",
+  "commit": "uncommitted",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "50k_5000cmd/digest_low32",
+      "kind": "info",
+      "value": 3665022946.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "50k_5000cmd/live_rows",
+      "kind": "info",
+      "value": 50000.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "50k_5000cmd/chunks",
+      "kind": "counter",
+      "value": 8.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "50k_5000cmd/populate",
+      "kind": "time",
+      "value": 12688327.0,
+      "unit": "ns",
+      "spread": 0.10313574043291918
+    },
+    {
+      "metric": "50k_5000cmd/apply_tick_commands",
+      "kind": "time",
+      "value": 418849.0,
+      "unit": "ns",
+      "spread": 0.06658963015311008
+    },
+    {
+      "metric": "50k_5000cmd/digest_scan",
+      "kind": "time",
+      "value": 23921.0,
+      "unit": "ns",
+      "spread": 0.04761506625977175
+    }
+  ]
+}

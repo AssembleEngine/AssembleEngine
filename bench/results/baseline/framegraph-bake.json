@@ -1,0 +1,217 @@
+{
+  "suite": "framegraph-bake",
+  "commit": "uncommitted",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "34p/passes",
+      "kind": "info",
+      "value": 34.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/resources",
+      "kind": "info",
+      "value": 33.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/physical_resources",
+      "kind": "counter",
+      "value": 10.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/estimated_bytes",
+      "kind": "counter",
+      "value": 12058624.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/barriers_first_frame",
+      "kind": "counter",
+      "value": 66.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/declare",
+      "kind": "time",
+      "value": 4821.0,
+      "unit": "ns",
+      "spread": 0.15328769964737607
+    },
+    {
+      "metric": "34p/signature",
+      "kind": "time",
+      "value": 12650.0,
+      "unit": "ns",
+      "spread": 0.014229249011857707
+    },
+    {
+      "metric": "34p/bake",
+      "kind": "time",
+      "value": 20141.0,
+      "unit": "ns",
+      "spread": 0.23186534928752298
+    },
+    {
+      "metric": "34p/bake_no_alias",
+      "kind": "time",
+      "value": 20480.0,
+      "unit": "ns",
+      "spread": 0.041064453125
+    },
+    {
+      "metric": "34p/plan_barriers",
+      "kind": "time",
+      "value": 1490.0,
+      "unit": "ns",
+      "spread": 0.014093959731543624
+    },
+    {
+      "metric": "258p/passes",
+      "kind": "info",
+      "value": 258.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/resources",
+      "kind": "info",
+      "value": 257.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/physical_resources",
+      "kind": "counter",
+      "value": 17.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/estimated_bytes",
+      "kind": "counter",
+      "value": 19398656.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/barriers_first_frame",
+      "kind": "counter",
+      "value": 514.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/declare",
+      "kind": "time",
+      "value": 42671.0,
+      "unit": "ns",
+      "spread": 0.03351222141501254
+    },
+    {
+      "metric": "258p/signature",
+      "kind": "time",
+      "value": 98872.0,
+      "unit": "ns",
+      "spread": 0.11460271866655879
+    },
+    {
+      "metric": "258p/bake",
+      "kind": "time",
+      "value": 237066.0,
+      "unit": "ns",
+      "spread": 0.1770857060902871
+    },
+    {
+      "metric": "258p/bake_no_alias",
+      "kind": "time",
+      "value": 237046.0,
+      "unit": "ns",
+      "spread": 0.13934426229508196
+    },
+    {
+      "metric": "258p/plan_barriers",
+      "kind": "time",
+      "value": 15001.0,
+      "unit": "ns",
+      "spread": 0.295246983534431
+    },
+    {
+      "metric": "1026p/passes",
+      "kind": "info",
+      "value": 1026.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/resources",
+      "kind": "info",
+      "value": 1025.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/physical_resources",
+      "kind": "counter",
+      "value": 34.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/estimated_bytes",
+      "kind": "counter",
+      "value": 37224448.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/barriers_first_frame",
+      "kind": "counter",
+      "value": 2050.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/declare",
+      "kind": "time",
+      "value": 223205.0,
+      "unit": "ns",
+      "spread": 0.27024932237181065
+    },
+    {
+      "metric": "1026p/signature",
+      "kind": "time",
+      "value": 396389.0,
+      "unit": "ns",
+      "spread": 0.12709989429575494
+    },
+    {
+      "metric": "1026p/bake",
+      "kind": "time",
+      "value": 1799801.0,
+      "unit": "ns",
+      "spread": 0.09706795362376174
+    },
+    {
+      "metric": "1026p/bake_no_alias",
+      "kind": "time",
+      "value": 1803900.0,
+      "unit": "ns",
+      "spread": 0.056806363989134655
+    },
+    {
+      "metric": "1026p/plan_barriers",
+      "kind": "time",
+      "value": 59051.0,
+      "unit": "ns",
+      "spread": 0.028958019339215255
+    }
+  ]
+}

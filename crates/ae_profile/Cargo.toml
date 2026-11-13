@@ -1,0 +1,12 @@
+[package]
+name = "ae_profile"
+description = "Profiling zones, plots and frame marks. Compiles to nothing unless the `tracy` feature is on."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+tracy = ["dep:tracy-client"]
+
+[dependencies]
+tracy-client = { version = "0.19", optional = true }

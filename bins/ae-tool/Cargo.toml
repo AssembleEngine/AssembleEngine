@@ -1,0 +1,14 @@
+[package]
+name = "ae-tool"
+description = "Developer tool: subsystem benches and benchmark regression diffing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+tracy = ["ae_profile/tracy"]
+
+[dependencies]
+ae_bench.workspace = true
+ae_profile.workspace = true
+anyhow.workspace = true

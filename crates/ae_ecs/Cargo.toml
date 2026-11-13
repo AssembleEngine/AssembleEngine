@@ -1,0 +1,10 @@
+[package]
+name = "ae_ecs"
+description = "Engine storage/query layer. Flecs is an implementation detail of the flecs_backend module."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flecs_ecs_sys.workspace = true

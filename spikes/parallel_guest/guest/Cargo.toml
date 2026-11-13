@@ -1,0 +1,16 @@
+# Guest for the parallel-instances spike. Built by ../build.rs for
+# wasm32-wasip1-threads; not part of the main workspace.
+[package]
+name = "parallel_guest_module"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

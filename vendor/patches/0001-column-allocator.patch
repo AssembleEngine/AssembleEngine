@@ -1,0 +1,130 @@
+--- a/flecs.c	2026-10-18 00:11:08.642320324 +0200
++++ b/flecs.c	2026-10-18 00:13:45.473719188 +0200
+@@ -4983,7 +4983,7 @@
+     
+     for (int32_t i = 0; i < result->column_count; i ++) {
+         ecs_column_t *column = &result->data.columns[i];
+-        column->data = ecs_os_malloc(column->ti->size * v_entities.size);
++        column->data = ecs_column_malloc(column->ti->size * v_entities.size);
+     }
+ 
+     result->data.entities = v_entities.array;
+@@ -18375,6 +18375,35 @@
+     return ecs_strbuf_get(&lib);
+ }
+ 
++/* ecs_sim patch: column storage allocator (see flecs.h). */
++static ecs_column_allocator_t ecs_column_alloc_api;
++
++void ecs_column_allocator_set(const ecs_column_allocator_t *allocator) {
++    if (allocator) {
++        ecs_column_alloc_api = *allocator;
++    } else {
++        ecs_os_zeromem(&ecs_column_alloc_api);
++    }
++}
++
++void* ecs_column_malloc(ecs_size_t size) {
++    return ecs_column_alloc_api.malloc_
++        ? ecs_column_alloc_api.malloc_(size) : ecs_os_malloc(size);
++}
++
++void* ecs_column_realloc(void *ptr, ecs_size_t size) {
++    return ecs_column_alloc_api.realloc_
++        ? ecs_column_alloc_api.realloc_(ptr, size) : ecs_os_realloc(ptr, size);
++}
++
++void ecs_column_free(void *ptr) {
++    if (ecs_column_alloc_api.free_) {
++        ecs_column_alloc_api.free_(ptr);
++    } else {
++        ecs_os_free(ptr);
++    }
++}
++
+ void ecs_os_set_api_defaults(void)
+ {
+     /* Don't overwrite if already initialized */
+@@ -41754,7 +41783,7 @@
+             int32_t c, column_count = table->column_count;
+             for (c = 0; c < column_count; c ++) {
+                 ecs_column_t *column = &columns[c];
+-                ecs_os_free(column->data);
++                ecs_column_free(column->data);
+                 column->data = NULL;
+             }
+ 
+@@ -42075,15 +42104,15 @@
+     if (!new_size) {
+         column->data = NULL;
+     } else if (count && (ti->hooks.ctor_move_dtor || new_size < old_size)) {
+-        void *ptr = ecs_os_malloc(ti->size * new_size);
++        void *ptr = ecs_column_malloc(ti->size * new_size);
+         flecs_type_info_ctor_move_dtor(ptr, old, count, ti);
+         column->data = ptr;
+     } else {
+-        column->data = ecs_os_realloc(old, ti->size * new_size);
++        column->data = ecs_column_realloc(old, ti->size * new_size);
+         return;
+     }
+ 
+-    ecs_os_free(old);
++    ecs_column_free(old);
+ }
+ 
+ static FLECS_ALWAYS_INLINE int32_t flecs_table_grow_data(
+@@ -42116,7 +42145,7 @@
+         if (prev_size != entities.size) {
+             for (int32_t i = 0; i < table->column_count; i ++) {
+                 ecs_column_t *column = &table->data.columns[i];
+-                column->data = ecs_os_realloc(
++                column->data = ecs_column_realloc(
+                     column->data, column->ti->size * entities.size);
+             }
+         }
+@@ -42726,16 +42755,16 @@
+                 flecs_type_info_ctor_move_dtor(
+                     ECS_ELEM(dst->data, ti->size, dst_count),
+                     src->data, src_count, ti);
+-                ecs_os_free(src->data);
++                ecs_column_free(src->data);
+             } else {
+-                ecs_os_free(dst->data);
++                ecs_column_free(dst->data);
+                 dst->data = src->data;
+             }
+ 
+             flecs_table_mark_table_dirty(world, dst_table, ++ dst_i);
+         } else {
+             flecs_table_invoke_dtor(src, 0, src_count);
+-            ecs_os_free(src->data);
++            ecs_column_free(src->data);
+         }
+ 
+         src->data = NULL;
+--- a/flecs.h	2026-10-18 00:11:08.643626165 +0200
++++ b/flecs.h	2026-10-18 00:13:45.453926032 +0200
+@@ -3943,6 +3943,23 @@
+ FLECS_API
+ void ecs_os_set_api_defaults(void);
+ 
++/* ecs_sim patch: component column storage allocator.
++ * Table column arrays (ecs_column_t.data) are allocated through these hooks
++ * instead of ecs_os_malloc/realloc/free so an embedder can place component data
++ * in memory shared with a sandboxed guest, while all other Flecs allocations
++ * (world, tables, queries, entity arrays) stay on the host heap. When no
++ * allocator is set the hooks fall back to ecs_os_*. */
++typedef struct ecs_column_allocator_t {
++    void* (*malloc_)(ecs_size_t size);
++    void* (*realloc_)(void *ptr, ecs_size_t size);
++    void (*free_)(void *ptr);
++} ecs_column_allocator_t;
++
++FLECS_API void ecs_column_allocator_set(const ecs_column_allocator_t *allocator);
++FLECS_API void* ecs_column_malloc(ecs_size_t size);
++FLECS_API void* ecs_column_realloc(void *ptr, ecs_size_t size);
++FLECS_API void ecs_column_free(void *ptr);
++
+ /** Macro utilities 
+  * \cond
+  */
