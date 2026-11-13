@@ -28,8 +28,10 @@ dependencies = [
  "ae_framegraph",
  "ae_nav",
  "ae_profile",
+ "ae_spatial",
  "anyhow",
  "ash",
+ "rayon",
  "serde",
  "serde_json",
 ]
@@ -58,6 +60,7 @@ dependencies = [
  "criterion",
  "rayon",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -79,6 +82,14 @@ dependencies = [
  "ae_wasm",
  "anyhow",
  "wasmtime",
+]
+
+[[package]]
+name = "ae_spatial"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "rayon",
 ]
 
 [[package]]

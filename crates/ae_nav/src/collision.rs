@@ -3,7 +3,7 @@
 //! and bounce, but makes no claim to solve congestion or deadlock globally.
 use crate::math::WorldPos;
 use crate::par::Par;
-use crate::terrain::Terrain;
+use crate::terrain::{Medium, Terrain};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug)]
@@ -174,7 +174,19 @@ impl Broadphase {
     }
 }
 
-fn resolve_obstacles(b: &mut Body, terrain: &Terrain, restitution: f32) -> u32 {
+/// Per-body movement media: which cells are walls for which body. Body `i`
+/// collides with every cell not open to `media[class_of[i]]`.
+#[derive(Clone, Copy)]
+pub struct BodyMedia<'a> {
+    pub media: &'a [Medium],
+    pub class_of: &'a [u8],
+}
+
+impl BodyMedia<'_> {
+    fn of(&self, i: usize) -> &Medium { &self.media[self.class_of[i] as usize] }
+}
+
+fn resolve_obstacles(b: &mut Body, terrain: &Terrain, medium: &Medium, restitution: f32) -> u32 {
     let mut contacts = 0;
     let g = &terrain.geom;
     let cs = g.cell_size;
@@ -192,7 +204,7 @@ fn resolve_obstacles(b: &mut Body, terrain: &Terrain, restitution: f32) -> u32 {
             for cy in min_y..=max_y {
                 for cx in min_x..=max_x {
                     if !g.in_bounds(crate::math::CellPos::new(cx, cy)) { continue; }
-                    if terrain.blocked[(cy * g.cells_x + cx) as usize] == 0 { continue; }
+                    if terrain.open_for((cy * g.cells_x + cx) as usize, medium) { continue; }
                     let rect_min_x = cx as f32 * cs;
                     let rect_min_y = cy as f32 * cs;
                     let rect_max_x = rect_min_x + cs;
@@ -256,6 +268,7 @@ pub struct Collider {
 impl Collider {
     pub fn new() -> Self { Self::default() }
 
+    /// Every body collides with obstacle cells only (pathsim's behaviour).
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -269,6 +282,28 @@ impl Collider {
         contacts_out: &mut Vec<ContactView>,
         contact_limit: usize,
     ) -> CollisionStats {
+        self.step_in_media(ids, bodies, terrain, None, cfg, dt, substeps, par, contacts_out, contact_limit)
+    }
+
+    /// As [`Self::step`]; with `media`, each body also collides with the
+    /// cells its medium may not enter (a ship with the shore, a tank with
+    /// deep water).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_in_media(
+        &mut self,
+        ids: &[u32],
+        bodies: &mut [Body],
+        terrain: &Terrain,
+        media: Option<BodyMedia<'_>>,
+        cfg: &CollisionConfig,
+        dt: f32,
+        substeps: u32,
+        par: &Par,
+        contacts_out: &mut Vec<ContactView>,
+        contact_limit: usize,
+    ) -> CollisionStats {
+        if let Some(m) = &media { assert_eq!(m.class_of.len(), bodies.len()); }
+        let medium = |i: usize| media.as_ref().map_or(&Medium::ANY, |m| m.of(i));
         let start = std::time::Instant::now();
         let mut stats = CollisionStats { substeps, ..CollisionStats::default() };
         let r = cfg.restitution;
@@ -277,12 +312,13 @@ impl Collider {
             // integration and opening obstacle pass, in one sweep per body.
             let closing = s > 0;
             let t = std::time::Instant::now();
-            let obstacle: u32 = par.chunks_mut(bodies, |chunk| {
+            let obstacle: u32 = par.chunks_mut_at(bodies, |start, chunk| {
                 let mut n = 0;
-                for b in chunk {
-                    if closing { n += resolve_obstacles(b, terrain, r); }
+                for (k, b) in chunk.iter_mut().enumerate() {
+                    let m = medium(start + k);
+                    if closing { n += resolve_obstacles(b, terrain, m, r); }
                     b.pos = b.pos.add(b.vel.scaled(dt));
-                    n += resolve_obstacles(b, terrain, r);
+                    n += resolve_obstacles(b, terrain, m, r);
                 }
                 n
             }).into_iter().sum();
@@ -299,7 +335,7 @@ impl Collider {
         }
         if substeps > 0 {
             let t = std::time::Instant::now();
-            stats.obstacle_contacts += par.chunks_mut(bodies, |chunk| chunk.iter_mut().map(|b| resolve_obstacles(b, terrain, r)).sum::<u32>())
+            stats.obstacle_contacts += par.chunks_mut_at(bodies, |start, chunk| chunk.iter_mut().enumerate().map(|(k, b)| resolve_obstacles(b, terrain, medium(start + k), r)).sum::<u32>())
                 .into_iter().sum::<u32>();
             lap(&mut stats.integrate_ms, t);
         }

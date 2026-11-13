@@ -617,7 +617,7 @@ mod tests {
     use crate::terrain::TestTerrain;
 
     fn zero_clearance() -> Vec<MovementProfile> {
-        vec![MovementProfile { id: 0, name: "pt".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0 }]
+        vec![MovementProfile { id: 0, name: "pt".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0, medium: crate::terrain::Medium::ANY }]
     }
 
     #[test]

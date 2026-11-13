@@ -38,7 +38,8 @@ pub fn time<R>(budget: Budget, mut f: impl FnMut() -> R) -> Sample {
     summarise(&mut samples)
 }
 
-fn summarise(samples: &mut [f64]) -> Sample {
+/// Order statistics of raw samples (sorted in place).
+pub fn summarise(samples: &mut [f64]) -> Sample {
     samples.sort_by(|a, b| a.total_cmp(b));
     let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
     let median = at(0.5);

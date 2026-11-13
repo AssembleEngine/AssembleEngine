@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn hierarchical_fields_match_reference_on_random_maps() {
-        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0 }];
+        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0, medium: crate::terrain::Medium::ANY }];
         let mut compared = 0;
         let mut worst_ratio = 1.0f64;
         for seed in 1..=12u64 {
@@ -361,7 +361,7 @@ mod tests {
         let mut tt = TestTerrain::new(40, 8);
         for y in 0..8 { for x in 0..40 { tt.height[(y * 40 + x) as usize] = (x * 12) as i16; } }
         let t = Arc::new(tt.into_terrain(1));
-        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0 }];
+        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0, medium: crate::terrain::Medium::ANY }];
         let h = NavHierarchy::build(t.clone(), &profile);
         let (a, b) = (CellPos::new(2, 4), CellPos::new(37, 4));
         let (up, _) = follow(&h, 0, a, b).unwrap();

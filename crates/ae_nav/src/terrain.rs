@@ -13,12 +13,70 @@ pub const TERRAIN_VERSION_INITIAL: u32 = 1;
 pub struct TerrainConfig {
     pub seed: u64,
     pub geom: WorldGeometry,
+    /// How the generator treats low ground and lake basins.
+    #[serde(default)]
+    pub water: WaterMode,
 }
 
 impl TerrainConfig {
     pub fn new(seed: u64, cells: i32, cell_size: f32, sector_cells: i32) -> Self {
-        Self { seed, geom: WorldGeometry::new(cells, cells, cell_size, sector_cells) }
+        Self { seed, geom: WorldGeometry::new(cells, cells, cell_size, sector_cells), water: WaterMode::Obstacle }
     }
+}
+
+/// Water in generated terrain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaterMode {
+    /// pathsim's behaviour: low ground and lakes are solid obstacles; no
+    /// water level. Every unit is a land unit.
+    #[default]
+    Obstacle,
+    /// Low ground and the two lake basins lie under a water surface at
+    /// `SURFACE_WATER_LEVEL`; they are open cells, and movement profiles
+    /// decide by depth who may enter them (ships, hover, amphibious).
+    Surface,
+}
+
+/// Water surface height (decimetres) of `WaterMode::Surface` maps: the
+/// height below which pathsim's generator made cells water.
+pub const SURFACE_WATER_LEVEL: i16 = 168;
+
+/// `Terrain::water_level` of a map without water.
+pub const NO_WATER: i16 = i16::MIN;
+
+/// Which water depths a unit may stand in, and whether it moves on the
+/// surface (ships, hover) or on the ground (land, amphibious).
+///
+/// Depth is decimetres of water above the ground; dry cells have depth 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Medium {
+    pub min_depth: i16,
+    pub max_depth: i16,
+    /// Floats over water of any depth (and still crosses dry land).
+    pub hover: bool,
+}
+
+impl Medium {
+    /// Anything that is not an obstacle: pathsim's units.
+    pub const ANY: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: false };
+    /// Ground units that ford water up to `max_depth`.
+    pub const fn land(max_depth: i16) -> Medium { Medium { min_depth: 0, max_depth, hover: false } }
+    /// Ships: water at least `min_depth` deep.
+    pub const fn ship(min_depth: i16) -> Medium { Medium { min_depth, max_depth: i16::MAX, hover: false } }
+    /// Hovercraft: land and water of any depth.
+    pub const HOVER: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: true };
+    /// Amphibious: drives along the bottom at any depth.
+    pub const AMPHIBIOUS: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: false };
+
+    #[inline]
+    pub fn allows(&self, depth: i16) -> bool { self.hover || (depth >= self.min_depth && depth <= self.max_depth) }
+    /// Moves on the water surface, so slopes and climbs are measured there.
+    #[inline]
+    pub fn on_surface(&self) -> bool { self.hover || self.min_depth > 0 }
+}
+
+impl Default for Medium {
+    fn default() -> Self { Medium::ANY }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,13 +86,25 @@ pub struct Terrain {
     pub version: u32,
     /// 0 = open, 1 = solid rock/water obstacle.
     pub blocked: Vec<u8>,
-    /// Decimetres above an arbitrary datum, 0..=2400.
+    /// What a unit stands on, in decimetres above an arbitrary datum: the
+    /// ground (0..=2400), or the water surface where the ground is under
+    /// water. Ground height is `height - depth`.
     pub height: Vec<i16>,
     /// Integer traversal cost in tenths (10 = ordinary ground).
     pub move_cost: Vec<u8>,
     /// Palette / material id for display only.
     pub material: Vec<u8>,
+    /// Water surface height in decimetres; `NO_WATER` for a dry map. Cells
+    /// whose ground is below it are under water.
+    #[serde(default = "no_water")]
+    pub water_level: i16,
+    /// Water depth per cell (decimetres); empty on a dry map. Kept apart
+    /// from `height` so dry maps run pathsim's code with no water work.
+    #[serde(default)]
+    pub water_depth: Vec<i16>,
 }
+
+fn no_water() -> i16 { NO_WATER }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Material {
@@ -112,7 +182,10 @@ impl Terrain {
             geom: g.clone(), seed: cfg.seed, version: TERRAIN_VERSION_INITIAL,
             blocked: vec![0; n], height: vec![0; n], move_cost: vec![10; n],
             material: vec![Material::Grass as u8; n],
+            water_level: NO_WATER, water_depth: Vec::new(),
         };
+        let surface = cfg.water == WaterMode::Surface;
+        if surface { t.water_level = SURFACE_WATER_LEVEL; }
         let mut rng = Rng::new(cfg.seed);
         let water_seed = rng.next_u64();
         let forest_seed = rng.next_u64();
@@ -128,7 +201,9 @@ impl Terrain {
                 let h = h.round().clamp(0.0, 2400.0) as i16;
                 t.height[i] = h;
                 let moist = fbm(water_seed, wx / 410.0 + 31.0, wy / 410.0 - 17.0, 3, 2.0, 0.55);
-                if h < 168 {
+                if h < 168 && surface {
+                    t.material[i] = Material::Water as u8;
+                } else if h < 168 {
                     t.blocked[i] = 1;
                     t.material[i] = Material::Water as u8;
                     t.move_cost[i] = 255;
@@ -157,9 +232,16 @@ impl Terrain {
         let sr = |v: i32| (v * cx.min(cy) / 2560).max(2);
         let spans = |v: &[(i32, i32)], f: &dyn Fn(i32) -> i32| v.iter().map(|&(a, b)| (f(a), f(b).max(f(a) + 3))).collect::<Vec<_>>();
         // A few irregular lake basins, independent of the global noise field.
-        stamp_ellipse(&mut t, sx(1330), sy(1620), sr(92), sr(56), sr(27), water_seed);
+        let lake = if surface { stamp_lake } else { stamp_ellipse };
+        lake(&mut t, sx(1330), sy(1620), sr(92), sr(56), sr(27), water_seed);
         stamp_ellipse(&mut t, sx(520), sy(470), sr(54), sr(34), sr(22), rock_seed);
-        stamp_ellipse(&mut t, sx(2200), sy(1760), sr(78), sr(45), sr(25), water_seed ^ 9);
+        lake(&mut t, sx(2200), sy(1760), sr(78), sr(45), sr(25), water_seed ^ 9);
+        if surface {
+            // A river from the north edge to the south edge separating the
+            // spawn plaza (west) from the destinations (east), with two
+            // fords; the road crosses it on a causeway (`stamp_road`).
+            stamp_river(&mut t, (sx(600), 0), (sx(1700), cy - 1), sr(22), sr(60), &[sy(700), sy(2000)], sr(7), water_seed ^ 0x51);
+        }
         stamp_ellipse(&mut t, sx(1550), sy(430), sr(55), sr(38), sr(18), rock_seed ^ 4);
         stamp_ellipse(&mut t, sx(1930), sy(650), sr(40), sr(26), sr(14), rock_seed ^ 7);
         stamp_ellipse(&mut t, sx(340), sy(1950), sr(32), sr(22), sr(18), rock_seed ^ 3);
@@ -197,7 +279,19 @@ impl Terrain {
         let road: Vec<(i32, i32)> = [(250, 2300), (700, 2100), (1020, 1900), (1400, 1560), (1740, 1100), (2050, 650), (2290, 300)]
             .iter().map(|&(x, y)| (sx(x), sy(y))).collect();
         stamp_road(&mut t, &natural_height, &road, 5);
+        // Generation worked on ground heights; now put water on top.
+        if surface { t.flood(SURFACE_WATER_LEVEL); }
         t
+    }
+
+    /// Put water up to `level` over a map whose `height` is still bare
+    /// ground: cells below it get a depth, and `height` becomes the water
+    /// surface there. Once per map.
+    pub fn flood(&mut self, level: i16) {
+        assert!(self.water_depth.is_empty(), "map already has water");
+        self.water_level = level;
+        self.water_depth = self.height.iter().map(|&g| (level as i32 - g as i32).max(0) as i16).collect();
+        for h in &mut self.height { *h = (*h).max(level); }
     }
 
     pub fn len(&self) -> usize { self.blocked.len() }
@@ -208,6 +302,33 @@ impl Terrain {
     pub fn height_at(&self, c: CellPos) -> i16 { self.height[self.geom.cell_index(c)] }
     pub fn cost_at(&self, c: CellPos) -> u8 { self.move_cost[self.geom.cell_index(c)] }
     pub fn material_at(&self, c: CellPos) -> u8 { self.material[self.geom.cell_index(c)] }
+
+    #[inline]
+    pub fn has_water(&self) -> bool { !self.water_depth.is_empty() }
+
+    /// Water depth (decimetres) over cell index `i`; 0 when dry.
+    #[inline]
+    pub fn depth(&self, i: usize) -> i16 {
+        if self.water_depth.is_empty() { 0 } else { self.water_depth[i] }
+    }
+
+    /// Ground height at cell index `i`, under any water.
+    #[inline]
+    pub fn ground_height(&self, i: usize) -> i16 { self.height[i] - self.depth(i) }
+
+    /// Height of what a unit in `medium` stands on at cell index `i`: the
+    /// water surface for surface movers, the ground (river bed) otherwise.
+    #[inline]
+    pub fn standing_height(&self, i: usize, medium: &Medium) -> i16 {
+        if medium.on_surface() { self.height[i] } else { self.ground_height(i) }
+    }
+
+    /// Whether a unit in `medium` may occupy cell index `i` (ignoring slope
+    /// and clearance): not an obstacle and a depth the medium allows.
+    #[inline]
+    pub fn open_for(&self, i: usize, medium: &Medium) -> bool {
+        self.blocked[i] == 0 && medium.allows(self.depth(i))
+    }
     pub fn world_of_cell(&self, c: CellPos) -> WorldPos { self.geom.cell_center(c) }
     pub fn cell_of_world(&self, p: WorldPos) -> CellPos { self.geom.world_to_cell(p) }
 
@@ -227,7 +348,16 @@ impl Terrain {
             if e.x < 0 || e.y < 0 || e.x >= self.geom.cells_x || e.y >= self.geom.cells_y { continue; }
             let i = (e.y * self.geom.cells_x + e.x) as usize;
             if let Some(b) = e.blocked { self.blocked[i] = b as u8; }
-            if let Some(h) = e.height { self.height[i] = h.clamp(0, 2400); }
+            if let Some(h) = e.height {
+                // An edit sets the ground; the water surface stays where it is.
+                let ground = h.clamp(0, 2400);
+                if self.water_depth.is_empty() {
+                    self.height[i] = ground;
+                } else {
+                    self.water_depth[i] = (self.water_level as i32 - ground as i32).max(0) as i16;
+                    self.height[i] = ground.max(self.water_level);
+                }
+            }
             if let Some(c) = e.cost { self.move_cost[i] = c; }
             if let Some(m) = e.material { self.material[i] = m; }
             if e.blocked == Some(true) {
@@ -247,7 +377,7 @@ impl Terrain {
     /// Callers cache band digests so an edit rehashes only its own bands.
     pub fn digest(&self) -> u64 {
         let bands: Vec<u64> = (0..self.digest_bands()).map(|b| self.band_digest(b)).collect();
-        Self::digest_of_bands(self.version, &bands)
+        Self::digest_of_bands_with_water(self.version, self.water_level, &bands)
     }
 
     pub fn digest_bands(&self) -> usize { (self.geom.cells_y.max(0) as usize).div_ceil(DIGEST_BAND_ROWS) }
@@ -260,15 +390,24 @@ impl Terrain {
         let lo = band * DIGEST_BAND_ROWS * w;
         let hi = (lo + DIGEST_BAND_ROWS * w).min(self.blocked.len());
         let mut h = crate::rng::StateHasher::new();
+        let wet = !self.water_depth.is_empty();
         for i in lo..hi {
             h.u64(((self.blocked[i] as u64) << 40) | ((self.move_cost[i] as u64) << 16) | (self.height[i] as u16 as u64));
+            if wet { h.u32(self.water_depth[i] as u16 as u32); }
         }
         h.finish()
     }
 
     pub fn digest_of_bands(version: u32, bands: &[u64]) -> u64 {
+        Self::digest_of_bands_with_water(version, NO_WATER, bands)
+    }
+
+    /// As `digest_of_bands`; the water level is hashed only on a map with
+    /// water, so dry maps keep pathsim's digests.
+    pub fn digest_of_bands_with_water(version: u32, water_level: i16, bands: &[u64]) -> u64 {
         let mut h = crate::rng::StateHasher::new();
         h.u32(version);
+        if water_level != NO_WATER { h.u32(0x57A7_E400 | water_level as u16 as u32); }
         for &b in bands { h.u64(b); }
         h.finish()
     }
@@ -296,6 +435,8 @@ pub const DIGEST_BAND_ROWS: usize = 16;
 
 fn paint_block(t: &mut Terrain, x: i32, y: i32, blocked: bool) {
     if let Some(i) = idx(&t.geom, x, y) {
+        // Walls and rocks stop at open water: they never dam a river.
+        if blocked && t.water_level != NO_WATER && t.blocked[i] == 0 && t.material[i] == Material::Water as u8 { return; }
         t.blocked[i] = blocked as u8;
         if blocked {
             t.material[i] = Material::Rock as u8;
@@ -324,6 +465,89 @@ fn stamp_ellipse(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32
                 let i = t.geom.cell_index_xy(x, y).unwrap();
                 if t.height[i] < 380 {
                     t.material[i] = Material::Water as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Height gain (decimetres per cell) of lake and river banks: gentler than
+/// any profile's slope limit.
+const BANK_RAMP: f32 = 50.0;
+
+/// Widest bank needed to climb from the water to the highest ground.
+fn bank_cells(t: &Terrain) -> i32 { ((2400.0 - t.water_level as f32) / BANK_RAMP).ceil() as i32 + 1 }
+
+/// A lake basin under the water surface: the ellipse of `stamp_ellipse`,
+/// carved down to between 4 and 16 m deep (deepest in the middle) instead of
+/// raised into an obstacle, inside banks that ramp up from the water at
+/// `BANK_RAMP` until they meet the natural ground, so the shore is no cliff.
+fn stamp_lake(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32, seed: u64) {
+    let level = t.water_level as f32;
+    let bank = bank_cells(t);
+    let r_min = rx.min(ry).max(1) as f32;
+    for y in cy - ry - rough - bank..=cy + ry + rough + bank {
+        for x in cx - rx - rough - bank..=cx + rx + rough + bank {
+            let Some(i) = idx(&t.geom, x, y) else { continue };
+            let nx = (x - cx) as f32 / rx as f32;
+            let ny = (y - cy) as f32 / ry as f32;
+            let d = nx * nx + ny * ny;
+            let jitter = (hash2(seed, x, y) as f32 / u32::MAX as f32 - 0.5) * 0.16;
+            let edge = 1.0 + jitter;
+            if d < edge {
+                let depth = 40.0 + 120.0 * (1.0 - d.min(1.0));
+                let floor = (level - depth).round() as i16;
+                t.height[i] = t.height[i].min(floor).max(0);
+                t.blocked[i] = 0;
+                t.material[i] = Material::Water as u8;
+                t.move_cost[i] = 10;
+            } else {
+                // Distance beyond the shore, in cells along the short axis.
+                let beyond = (d.sqrt() - edge.sqrt()) * r_min;
+                if beyond > bank as f32 { continue; }
+                let bank_height = (level + 6.0 + beyond * BANK_RAMP).round() as i16;
+                if bank_height < t.height[i] {
+                    t.height[i] = bank_height;
+                    if t.blocked[i] == 0 { t.material[i] = Material::Sand as u8; t.move_cost[i] = 12; }
+                }
+            }
+        }
+    }
+}
+
+/// A river along the line `from`..`to` (cells), wobbling sideways by up to
+/// `wobble` cells: `half_width` cells of water each side of its centre (1 m
+/// deep at the edge, 10 m in the middle), then banks ramping up at
+/// `BANK_RAMP` until they meet the natural ground. Rows within `ford_half` of
+/// each `fords` row are only 1.2 m deep (land units of `water_profiles` wade
+/// across).
+#[allow(clippy::too_many_arguments)]
+fn stamp_river(t: &mut Terrain, from: (i32, i32), to: (i32, i32), half_width: i32, wobble: i32, fords: &[i32], ford_half: i32, seed: u64) {
+    let level = t.water_level as f32;
+    let bank = bank_cells(t);
+    let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
+    let phase = (seed % 628) as f32 / 100.0;
+    for y in y0..=y1 {
+        let f = (y - from.1) as f32 / (to.1 - from.1).max(1) as f32;
+        let wob = (f * 9.0 + phase).sin() * 0.7 + (f * 23.0 + phase * 2.0).sin() * 0.3;
+        let cx = from.0 as f32 + (to.0 - from.0) as f32 * f + wob * wobble as f32;
+        let ford = fords.iter().any(|&fy| (y - fy).abs() <= ford_half);
+        let reach = half_width + bank;
+        for x in (cx as i32 - reach)..=(cx as i32 + reach) {
+            let Some(i) = idx(&t.geom, x, y) else { continue };
+            let dist = (x as f32 + 0.5 - cx).abs();
+            if dist <= half_width as f32 {
+                let k = dist / half_width.max(1) as f32;
+                let depth = if ford { 12.0 } else { 10.0 + 90.0 * (1.0 - k * k) };
+                t.height[i] = t.height[i].min((level - depth).round() as i16).max(0);
+                t.blocked[i] = 0;
+                t.material[i] = Material::Water as u8;
+                t.move_cost[i] = 10;
+            } else {
+                let bank_height = (level + 6.0 + (dist - half_width as f32) * BANK_RAMP).round() as i16;
+                if bank_height < t.height[i] {
+                    t.height[i] = bank_height;
+                    if t.blocked[i] == 0 { t.material[i] = Material::Sand as u8; t.move_cost[i] = 12; }
                 }
             }
         }
@@ -400,7 +624,8 @@ fn stamp_road(t: &mut Terrain, natural_height: &[i16], points: &[(i32, i32)], ha
                         t.blocked[i] = 0;
                         t.move_cost[i] = 8;
                         t.material[i] = Material::Road as u8;
-                        t.height[i] = natural_height[i];
+                        // On a map with water the road crosses it on a causeway.
+                        t.height[i] = natural_height[i].max(t.water_level);
                     }
                 }
             }
@@ -436,7 +661,7 @@ impl TestTerrain {
         let material = self.cost.iter().map(|_| Material::Grass as u8).collect();
         Terrain {
             geom: self.geom, seed, version: 1, blocked: self.blocked,
-            height: self.height, move_cost: self.cost, material,
+            height: self.height, move_cost: self.cost, material, water_level: NO_WATER, water_depth: Vec::new(),
         }
     }
 }

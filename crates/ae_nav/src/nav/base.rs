@@ -1,7 +1,7 @@
 //! Movement profiles, clearance-aware traversal, edge costs, and the
 //! deterministic single-level A*/Dijkstra reference solver.
 use crate::math::{CellPos, NEIGHBORS8};
-use crate::terrain::Terrain;
+use crate::terrain::{Medium, Terrain};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -18,6 +18,9 @@ pub struct MovementProfile {
     pub max_slope: i16,
     pub unit_radius: f32,
     pub base_speed: f32,
+    /// Water depths the unit may enter (default: anything not an obstacle).
+    #[serde(default)]
+    pub medium: Medium,
 }
 
 /// Largest random radius factor applied to a profile's nominal radius at
@@ -44,14 +47,44 @@ pub fn profiles_for(cell_size: f32, radius_scale: f32) -> Vec<MovementProfile> {
         MovementProfile {
             id: 0, name: "Scout".into(), clearance_cells: clearance(1, light_radius),
             max_slope: 135, unit_radius: light_radius,
-            base_speed: cell_size * 14.0,
+            base_speed: cell_size * 14.0, medium: Medium::ANY,
         },
         MovementProfile {
             id: 1, name: "Heavy".into(), clearance_cells: clearance(2, heavy_radius),
             max_slope: 95, unit_radius: heavy_radius,
-            base_speed: cell_size * 10.0,
+            base_speed: cell_size * 10.0, medium: Medium::ANY,
         },
     ]
+}
+
+/// Deepest water (decimetres) the land profiles of [`water_profiles`] ford.
+pub const FORD_DEPTH: i16 = 20;
+/// Shallowest water (decimetres) the ship profile of [`water_profiles`] sails.
+pub const SHIP_DRAFT: i16 = 30;
+
+/// pathsim's two land profiles (now fording up to `FORD_DEPTH`) plus a ship,
+/// a hovercraft and an amphibious profile, ids 0..=4 in that order. For maps
+/// with water (`WaterMode::Surface`).
+pub fn water_profiles(cell_size: f32) -> Vec<MovementProfile> {
+    let mut out = profiles_for(cell_size, 1.0);
+    for p in &mut out { p.medium = Medium::land(FORD_DEPTH); }
+    let clearance = |design: i32, r: f32| design.max(min_clearance_cells(r * RADIUS_JITTER_MAX, cell_size));
+    let ship_radius = (cell_size * 0.62).max(3.2);
+    let hover_radius = (cell_size * 0.40).max(2.0);
+    let amphibious_radius = (cell_size * 0.48).max(2.4);
+    out.push(MovementProfile {
+        id: 2, name: "Ship".into(), clearance_cells: clearance(2, ship_radius), max_slope: 60,
+        unit_radius: ship_radius, base_speed: cell_size * 9.0, medium: Medium::ship(SHIP_DRAFT),
+    });
+    out.push(MovementProfile {
+        id: 3, name: "Hover".into(), clearance_cells: clearance(1, hover_radius), max_slope: 110,
+        unit_radius: hover_radius, base_speed: cell_size * 13.0, medium: Medium::HOVER,
+    });
+    out.push(MovementProfile {
+        id: 4, name: "Amphibious".into(), clearance_cells: clearance(1, amphibious_radius), max_slope: 110,
+        unit_radius: amphibious_radius, base_speed: cell_size * 9.0, medium: Medium::AMPHIBIOUS,
+    });
+    out
 }
 
 /// Clearance/slope-filtered passability for one movement profile.
@@ -127,17 +160,31 @@ impl ProfileGrid {
         }
     }
 
-    /// Open terrain whose height step to every open 8-neighbour is within the
-    /// profile's slope limit.
+    /// Terrain open to the profile's medium whose height step to every such
+    /// open 8-neighbour is within the profile's slope limit. Surface movers
+    /// measure slope on the water surface; ground movers on the ground.
     fn base_ok(&self, terrain: &Terrain, x: i32, y: i32) -> bool {
         let g = &terrain.geom;
         let i = (y * g.cells_x + x) as usize;
-        if terrain.blocked[i] != 0 { return false; }
-        let h = terrain.height[i];
+        if !terrain.has_water() {
+            // Dry map: pathsim's test, without the per-neighbour depth work.
+            if terrain.blocked[i] != 0 { return false; }
+            let h = terrain.height[i];
+            for &(dx, dy) in &NEIGHBORS8 {
+                if let Some(j) = g.cell_index_xy(x + dx, y + dy) {
+                    if terrain.blocked[j] != 0 { continue; }
+                    if (terrain.height[j] - h).abs() > self.profile.max_slope { return false; }
+                }
+            }
+            return true;
+        }
+        let m = &self.profile.medium;
+        if !terrain.open_for(i, m) { return false; }
+        let h = terrain.standing_height(i, m);
         for &(dx, dy) in &NEIGHBORS8 {
             if let Some(j) = g.cell_index_xy(x + dx, y + dy) {
-                if terrain.blocked[j] != 0 { continue; }
-                if (terrain.height[j] - h).abs() > self.profile.max_slope { return false; }
+                if !terrain.open_for(j, m) { continue; }
+                if (terrain.standing_height(j, m) - h).abs() > self.profile.max_slope { return false; }
             }
         }
         true
@@ -160,6 +207,9 @@ pub fn traversal_cost_units(terrain: &Terrain, from: CellPos, dx: i32, dy: i32) 
     let ti = terrain.geom.cell_index(to);
     let base = ((terrain.move_cost[fi] as u64 + terrain.move_cost[ti] as u64) / 2).max(1);
     let mut cost = base * step_base(dx, dy);
+    // `height` is the water surface over water, so climbs there are
+    // measured on the surface (the same for every profile, so fields stay
+    // shareable); on dry ground this is pathsim's climb, unchanged.
     let dh = terrain.height[ti] as i64 - terrain.height[fi] as i64;
     if dh > 0 {
         // Uphill has a deterministic surcharge. Downhill is not made cheaper so
@@ -305,7 +355,7 @@ mod tests {
     use crate::terrain::TestTerrain;
 
     fn profile() -> MovementProfile {
-        MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0 }
+        MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0, medium: crate::terrain::Medium::ANY }
     }
 
     #[test]

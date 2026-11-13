@@ -7,6 +7,8 @@ use anyhow::Result;
 pub mod ecs_structural;
 pub mod framegraph_bake;
 pub mod nav;
+pub mod nav_sim;
+pub mod spatial;
 
 /// Options shared by all suites.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +30,8 @@ pub const SUITES: &[Suite] = &[
     Suite { name: "framegraph-bake", about: "frame graph declare, signature, bake and barrier planning", run: framegraph_bake::run },
     Suite { name: "ecs-structural", about: "spawn, despawn, add and remove commands on the ECS backend; id repeatability", run: ecs_structural::run },
     Suite { name: "nav", about: "terrain, nav hierarchy, destination context, flow field, ORCA avoidance", run: nav::run },
+    Suite { name: "nav-sim", about: "whole navigation tick (NavService over body columns) at 1..N workers; equal digests required", run: nav_sim::run },
+    Suite { name: "spatial", about: "grid rebuild and batch radius / nearest-k / sweep queries; equal hits at 1 and N threads", run: spatial::run },
 ];
 
 pub fn find(name: &str) -> Option<&'static Suite> {

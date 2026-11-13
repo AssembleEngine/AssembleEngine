@@ -287,6 +287,73 @@ Next: scheduler with read/write sets and layers (from `ecs_sim/src/engine/schedu
 section and SDK derive, events as columnar streams, cadences, the order-independent digest from
 `hash.rs`, `ae-headless`, a sim-dispatch bench suite, and the 10k/50k-entity exit runs.
 
+### M2 progress
+
+Started before M1 finished, on request: the services are built and tested standalone, with columnar
+APIs, and get wired into the sim schedule once the M1 scheduler exists.
+
+Done and tested (`cargo test -p ae_nav -p ae_spatial`; benches `ae-tool bench nav-sim`, `bench spatial`):
+- `ae_nav::reference`: pathsim's whole simulation (`sim.rs`, `commands.rs`, `replay.rs`) lifted
+  unchanged, plus navbench as `ae_nav`'s `navbench` binary. State hashes pinned against the original
+  crate at 1 and 4 threads; navbench at 10k units gives the original's hashes and counters exactly.
+- `ae_nav::service::NavService`: the columnar service carved from the reference. Units are added and
+  removed by entity id; `step(BodyColumns)` reads position, velocity and radius from caller columns and
+  writes position and velocity back, so the ECS owns bodies between ticks and the service keeps only
+  navigation bookkeeping (cohorts, slots, fields, jobs). A body moved by the caller is taken as placed
+  there. Driven with the reference's scenario it gives the reference's state hashes; with units added
+  and removed while moving it is equal at 1 and 4 threads. `take_terrain_changes()` reports each terrain
+  version when it becomes authoritative, with its dirty cell rectangle (for render and the copy layer).
+- Movement classes and water: a water level per map, `Terrain::height` as the standing surface (the
+  water surface over water) plus a `water_depth` layer that exists only on wet maps, and a
+  `Medium {min_depth, max_depth, hover}` per movement profile, used by passability, slope (surface
+  movers on the surface, ground movers on the bed), climb cost and collision walls (`Collider::step_in_media`: a ship collides with the shore, a tank with deep
+  water). `WaterMode::Surface` generates lakes with banks and a river with two fords and a causeway
+  between the spawn plaza and the goals. `water_profiles()`: scout, heavy (ford 2 m), ship (draft 3 m),
+  hovercraft, amphibious. Dry maps and default profiles are bit-identical to pathsim (all goldens pass
+  unchanged).
+- `ae_nav::scenario`: the land and water scenarios as library code, shared by tests and benches.
+- `ae_spatial`: uniform grid by counting sort; batch radius, box, nearest-k and swept-circle queries
+  answered as CSR hit streams in query order; hits in a fixed order, equal at any thread count; checked
+  against brute force including items outside the bounds and on cell edges.
+
+Measured (this machine, 24 threads, release; `bench/results/baseline/{nav-sim,spatial}.json`, recorded
+on the uncommitted M2 tree on top of `349fe80`):
+- 10k units, 8 workers, 600 ticks: land 4.0 ms median tick (pathsim's navbench on the same machine:
+  4.4 ms, of which 0.66 ms is its render snapshot, which the service does not make); water map with
+  all five classes 3.9–4.1 ms median, 4.8–5.8 ms p95 over two runs (tick spread ±25–35%). Equal
+  hashes at 1/2/4/8 workers. 1 worker: 16.7 ms. State hashes of a lake crossing and of the 768²
+  generated water map are pinned in `tests/water.rs` (identical in dev and release).
+- Dry-map cost of the water support: none measurable (hierarchy build 3.76 s vs 3.73 s, flow field
+  244 µs vs 244 µs, against the pre-M2 commit on the same machine). A first version that computed
+  surface heights on the fly in the edge cost made hierarchy and field builds 10–16% slower, hence the
+  surface-plus-depth layout.
+- 10k water crossing run to 4,500 ticks (150 s): 7,823 arrived (all 500 ships, 6,059 of 6,241 scouts,
+  659 of 773 hovercraft; heavies still queuing at the causeway), no unit outside its medium on any tick,
+  1,384 hover/amphibious units through deep water. Median tick 3.4–4.0 ms throughout, p95 up to 6.6 ms
+  as crowds pack at the goal.
+- Spatial, 50k units in squads, 10k queries: rebuild 0.45 ms; radius-160 queries (83 hits each)
+  12.5 ms at 1 thread, 2.0 ms at 8; nearest-8 9.7 / 1.55 ms; 360-unit sweeps 6.0 / 0.96 ms.
+
+Deviations from the plan, deliberate:
+- The service integrates and collides bodies itself ("Body in → Body out") instead of returning only
+  `PreferredVel`: pathsim's steering, ORCA and collision substeps are one coupled loop, and splitting
+  them would lose the bit-equality with the reference that makes the carve trustworthy. The ECS is
+  still authoritative between ticks. Splitting out `PreferredVel` stays possible later.
+- `NavService::state_hash` still hashes bodies (as the reference does, for the equality check); in the
+  engine digest the body part is redundant with the ECS digest and the nav part is the service's part.
+- One behaviour change from pathsim, in the service only: when arrival slots run out, a last pass drops
+  the line-of-sight rule (same component still required), so ships in a winding river get slots
+  instead of giving up. Counted in `NavRuntimeStats::fallback_slots`: 0 in the two scenarios checked
+  against pathsim (asserted in `service_vs_reference`; 0 in `nav-sim` land), 55 in the 10k water run.
+  pathsim's crowd and chokepoint navbench scenarios have not been driven through the service yet.
+- Terrain stays in `ae_nav::terrain`; the planned `ae_terrain` crate split waits for map files (M6) and
+  the render heightfield (M3).
+
+Next for M2: run the service from a sim system once the M1 scheduler lands (gather/scatter by entity
+through work ranges, a `MoveGoal` event stream instead of `CommandPayload`), movement classes from game
+data instead of `water_profiles()`, cost overlays, formation facing, and the spatial grid built from
+sim columns each tick.
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |

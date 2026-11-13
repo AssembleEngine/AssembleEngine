@@ -11,6 +11,7 @@ license = "MIT"
 
 [workspace.dependencies]
 ae_framegraph = { path = "crates/ae_framegraph" }
+ae_spatial = { path = "crates/ae_spatial" }
 ae_render_abi = { path = "crates/ae_render_abi" }
 ae_nav = { path = "crates/ae_nav" }
 ae_ecs = { path = "crates/ae_ecs" }

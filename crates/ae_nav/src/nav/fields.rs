@@ -357,7 +357,7 @@ mod tests {
         let mut tt = TestTerrain::new(32, 32);
         tt.wall(12, 8, 12, 14);
         let t = tt.into_terrain(1);
-        let p = crate::nav::MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0 };
+        let p = crate::nav::MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0, medium: crate::terrain::Medium::ANY };
         let grid = ProfileGrid::build(&t, &p);
         (t, grid)
     }
@@ -373,7 +373,7 @@ mod tests {
         let mut tt = TestTerrain::new(64, 64);
         tt.geom = WorldGeometry::new(64, 64, 1.0, 64);
         let t = tt.into_terrain(1);
-        let p = crate::nav::MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0 };
+        let p = crate::nav::MovementProfile { id: 0, name: "t".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0, medium: crate::terrain::Medium::ANY };
         let grid = ProfileGrid::build(&t, &p);
         let mut crowd = vec![0u8; 64];
         for by in 2..6 { for bx in 3..5 { crowd[by * 8 + bx] = crate::nav::crowd::block_extra(3, 0) as u8; } }

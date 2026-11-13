@@ -1,0 +1,77 @@
+{
+  "suite": "spatial",
+  "commit": "349fe80-dirty",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "units50000_queries10000/rebuild",
+      "kind": "time",
+      "value": 450291.0,
+      "unit": "ns",
+      "spread": 0.08705703644976248
+    },
+    {
+      "metric": "units50000_queries10000/radius160_1t",
+      "kind": "time",
+      "value": 12505850.0,
+      "unit": "ns",
+      "spread": 0.017714509609502754
+    },
+    {
+      "metric": "units50000_queries10000/nearest8_1t",
+      "kind": "time",
+      "value": 9652342.0,
+      "unit": "ns",
+      "spread": 0.064985782725063
+    },
+    {
+      "metric": "units50000_queries10000/sweep360_1t",
+      "kind": "time",
+      "value": 6048535.0,
+      "unit": "ns",
+      "spread": 0.045549211503281374
+    },
+    {
+      "metric": "units50000_queries10000/radius_hits",
+      "kind": "counter",
+      "value": 834463.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_queries10000/nearest_hits",
+      "kind": "counter",
+      "value": 80000.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_queries10000/sweep_hits",
+      "kind": "counter",
+      "value": 48404.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_queries10000/radius160_8t",
+      "kind": "time",
+      "value": 1975808.0,
+      "unit": "ns",
+      "spread": 0.19812198351256802
+    },
+    {
+      "metric": "units50000_queries10000/nearest8_8t",
+      "kind": "time",
+      "value": 1550917.0,
+      "unit": "ns",
+      "spread": 0.2226411858274814
+    },
+    {
+      "metric": "units50000_queries10000/sweep360_8t",
+      "kind": "time",
+      "value": 962203.0,
+      "unit": "ns",
+      "spread": 0.22143456214541007
+    }
+  ]
+}
