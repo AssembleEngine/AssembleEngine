@@ -4,7 +4,7 @@ use super::Options;
 use crate::measure::time;
 use crate::record::Report;
 use ae_framegraph::{
-    AccessState, BakeOptions, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, StateKey, bake,
+    AccessState, BakeOptions, descriptor, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, StateKey, bake,
     barriers::plan_frame,
 };
 use anyhow::{Result, anyhow};
@@ -70,6 +70,10 @@ pub fn run(options: &Options) -> Result<Report> {
         report.counter(&format!("{tag}/barriers_first_frame"), barriers.iter().map(Vec::len).sum::<usize>() as u64, "");
 
         report.time(&format!("{tag}/declare"), time(options.budget, || layered_graph(layers, width)));
+        // A render module hands the host this declaration; the host decodes it before baking.
+        let bytes = descriptor::encode(&graph, |_| 0);
+        report.info(&format!("{tag}/descriptor_bytes"), bytes.len() as u64, "B");
+        report.time(&format!("{tag}/descriptor_decode"), time(options.budget, || descriptor::decode(&bytes)));
         report.time(&format!("{tag}/signature"), time(options.budget, || graph.signature()));
         report.time(&format!("{tag}/bake"), time(options.budget, || bake(&graph, BakeOptions::default())));
         report.time(&format!("{tag}/bake_no_alias"), time(options.budget, || bake(&graph, BakeOptions { aliasing: false })));

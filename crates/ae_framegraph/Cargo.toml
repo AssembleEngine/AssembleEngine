@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 # Types only (formats, layouts, stage/access masks); nothing links libvulkan.
+ae_render_abi.workspace = true
 ash.workspace = true
 
 [dev-dependencies]

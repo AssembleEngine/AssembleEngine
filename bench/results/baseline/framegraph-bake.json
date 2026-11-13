@@ -1,6 +1,6 @@
 {
   "suite": "framegraph-bake",
-  "commit": "uncommitted",
+  "commit": "90d0d1c-dirty",
   "machine": "local",
   "records": [
     {
@@ -41,37 +41,51 @@
     {
       "metric": "34p/declare",
       "kind": "time",
-      "value": 4821.0,
+      "value": 4980.0,
       "unit": "ns",
-      "spread": 0.15328769964737607
+      "spread": 0.26706827309236947
+    },
+    {
+      "metric": "34p/descriptor_bytes",
+      "kind": "info",
+      "value": 4622.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "34p/descriptor_decode",
+      "kind": "time",
+      "value": 3610.0,
+      "unit": "ns",
+      "spread": 0.24681440443213296
     },
     {
       "metric": "34p/signature",
       "kind": "time",
-      "value": 12650.0,
+      "value": 12531.0,
       "unit": "ns",
-      "spread": 0.014229249011857707
+      "spread": 0.1532998164551911
     },
     {
       "metric": "34p/bake",
       "kind": "time",
-      "value": 20141.0,
+      "value": 20620.0,
       "unit": "ns",
-      "spread": 0.23186534928752298
+      "spread": 0.014597478176527644
     },
     {
       "metric": "34p/bake_no_alias",
       "kind": "time",
-      "value": 20480.0,
+      "value": 20621.0,
       "unit": "ns",
-      "spread": 0.041064453125
+      "spread": 0.03346103486736822
     },
     {
       "metric": "34p/plan_barriers",
       "kind": "time",
-      "value": 1490.0,
+      "value": 1570.0,
       "unit": "ns",
-      "spread": 0.014093959731543624
+      "spread": 0.025477707006369428
     },
     {
       "metric": "258p/passes",
@@ -111,37 +125,51 @@
     {
       "metric": "258p/declare",
       "kind": "time",
-      "value": 42671.0,
+      "value": 40741.0,
       "unit": "ns",
-      "spread": 0.03351222141501254
+      "spread": 0.13229915809626666
+    },
+    {
+      "metric": "258p/descriptor_bytes",
+      "kind": "info",
+      "value": 36270.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "258p/descriptor_decode",
+      "kind": "time",
+      "value": 23831.0,
+      "unit": "ns",
+      "spread": 0.10238764634299861
     },
     {
       "metric": "258p/signature",
       "kind": "time",
-      "value": 98872.0,
+      "value": 100632.0,
       "unit": "ns",
-      "spread": 0.11460271866655879
+      "spread": 0.06798036409889498
     },
     {
       "metric": "258p/bake",
       "kind": "time",
-      "value": 237066.0,
+      "value": 237565.0,
       "unit": "ns",
-      "spread": 0.1770857060902871
+      "spread": 0.15272030812619705
     },
     {
       "metric": "258p/bake_no_alias",
       "kind": "time",
-      "value": 237046.0,
+      "value": 236755.0,
       "unit": "ns",
-      "spread": 0.13934426229508196
+      "spread": 0.15286266393529177
     },
     {
       "metric": "258p/plan_barriers",
       "kind": "time",
-      "value": 15001.0,
+      "value": 15170.0,
       "unit": "ns",
-      "spread": 0.295246983534431
+      "spread": 0.2722478576137113
     },
     {
       "metric": "1026p/passes",
@@ -181,37 +209,51 @@
     {
       "metric": "1026p/declare",
       "kind": "time",
-      "value": 223205.0,
+      "value": 244885.0,
       "unit": "ns",
-      "spread": 0.27024932237181065
+      "spread": 0.17649508953182105
+    },
+    {
+      "metric": "1026p/descriptor_bytes",
+      "kind": "info",
+      "value": 145806.0,
+      "unit": "B",
+      "spread": 0.0
+    },
+    {
+      "metric": "1026p/descriptor_decode",
+      "kind": "time",
+      "value": 94812.0,
+      "unit": "ns",
+      "spread": 0.06549803822300974
     },
     {
       "metric": "1026p/signature",
       "kind": "time",
-      "value": 396389.0,
+      "value": 398899.0,
       "unit": "ns",
-      "spread": 0.12709989429575494
+      "spread": 0.03319135921624271
     },
     {
       "metric": "1026p/bake",
       "kind": "time",
-      "value": 1799801.0,
+      "value": 1822841.0,
       "unit": "ns",
-      "spread": 0.09706795362376174
+      "spread": 0.1198870334823498
     },
     {
       "metric": "1026p/bake_no_alias",
       "kind": "time",
-      "value": 1803900.0,
+      "value": 1798891.0,
       "unit": "ns",
-      "spread": 0.056806363989134655
+      "spread": 0.08126784780178455
     },
     {
       "metric": "1026p/plan_barriers",
       "kind": "time",
-      "value": 59051.0,
+      "value": 63102.0,
       "unit": "ns",
-      "spread": 0.028958019339215255
+      "spread": 0.0862096288548699
     }
   ]
 }

@@ -7,5 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
+ae_ecs.workspace = true
 anyhow.workspace = true
 wasmtime.workspace = true

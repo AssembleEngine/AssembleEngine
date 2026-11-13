@@ -1,0 +1,10 @@
+[package]
+name = "ae_wasm"
+description = "wasmtime runtime for sim modules: deterministic config, one shared linear memory, N instances with private stacks and TLS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+wasmtime.workspace = true

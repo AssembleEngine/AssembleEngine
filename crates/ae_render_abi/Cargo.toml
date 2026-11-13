@@ -1,0 +1,8 @@
+[package]
+name = "ae_render_abi"
+description = "Frame graph declaration wire format and the builder render modules use to write it. No dependencies, so it compiles into WASM guests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

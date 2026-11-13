@@ -1,0 +1,12 @@
+[package]
+name = "ae_sim"
+description = "Sim core: work ranges, deferred structural commands with a deterministic merge, guest command imports."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_ecs.workspace = true
+ae_wasm.workspace = true
+anyhow.workspace = true
+wasmtime.workspace = true

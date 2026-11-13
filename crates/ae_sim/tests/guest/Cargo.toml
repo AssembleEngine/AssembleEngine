@@ -1,0 +1,16 @@
+# Test sim module for crates/ae_sim/tests/parallel_commands.rs, built by the
+# test itself for wasm32-wasip1-threads. Not part of the main workspace.
+[package]
+name = "ae_sim_test_guest"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

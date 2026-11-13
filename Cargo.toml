@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "bins/*", "spikes/parallel_guest"]
 # The flecs build crate keeps its own manifest (see vendor/README.md).
-exclude = ["vendor", "spikes/parallel_guest/guest"]
+exclude = ["vendor", "spikes/parallel_guest/guest", "spikes/parallel_guest/guest2", "crates/ae_sim/tests/guest"]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,8 +11,11 @@ license = "MIT"
 
 [workspace.dependencies]
 ae_framegraph = { path = "crates/ae_framegraph" }
+ae_render_abi = { path = "crates/ae_render_abi" }
 ae_nav = { path = "crates/ae_nav" }
 ae_ecs = { path = "crates/ae_ecs" }
+ae_wasm = { path = "crates/ae_wasm" }
+ae_sim = { path = "crates/ae_sim" }
 ae_profile = { path = "crates/ae_profile" }
 ae_bench = { path = "crates/ae_bench" }
 

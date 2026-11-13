@@ -27,8 +27,18 @@ architecture and the milestone order. Four prototypes supply most of the hard pa
 | Body math | f32 under strict rules; cross-platform golden-hash check in M0, fixed-point only if it fails. |
 
 Assumed defaults (change if wrong): tick rate is per-game data, default 30 Hz; Linux + Windows on Vulkan 1.3,
-aarch64 as a determinism CI target; fuel off for trusted sim in release (epoch watchdog = fatal local error),
-fuel on in dev as a cost profiler.
+aarch64 as a determinism CI target.
+
+Decided from the M0 spike: the trusted sim runs with **no fuel and no epoch interruption** in release
+(both cost about 10% per row). A host watchdog thread catches a tick overrun, logs the system and row
+range that was running, and aborts: a fatal local error, never a sim-visible outcome. Fuel is on only in
+dev and bench builds, as the deterministic per-system cost counter. Untrusted modules always run with
+fuel and memory caps.
+
+NaN canonicalization stays on (cost up to about 45% on pure float kernels). M1 re-measures it on a mixed
+kernel and evaluates the alternative: canonicalize float fields only where bits become observable (digest,
+save, net encode; the schema knows which fields are floats) and forbid reading float bits in sim code
+(`to_bits`, `total_cmp`, `copysign`, sign tests).
 
 ## Architecture
 
@@ -245,6 +255,37 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
 | Later | M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+
+### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
+
+- Proven: N guest instances over one shared memory, each with a host-assigned shadow stack and TLS
+  block, running in place over real flecs columns allocated from a host arena inside that memory;
+  bit-identical to native at 1–16 workers, 6.4× at 8 workers.
+- The serial structural phase is the next bottleneck. On 1M entities a real table change (despawn,
+  or adding a component to a random entity) costs about 0.46 µs; spawning straight into the final table
+  costs about 0.1 µs. About 7,000 changes per tick take 2.6 ms. M1 adds enable-bit columns for
+  high-frequency toggles (no table change at all), spawns into final tables, and applies structural
+  commands batched by source and destination table.
+- Every sim module instance must get its stack pointer set before its first call; a module that is not
+  the heap owner must route `malloc` and friends to the host. Both become SDK and loader rules.
+- Nav lift is bit-faithful to pathsim (golden digests), also when compiled to WASM.
+- Release watchdog is a host thread, not fuel or epochs (see Assumed defaults).
+
+### M1 progress
+
+Done and tested (`cargo test --release -p ae_sim --test parallel_commands`):
+- `ae_ecs::arena`: deterministic column allocator over a host-claimed range of the shared memory.
+- `ae_wasm`: deterministic wasmtime config, shared memory, page claims, N instances with private
+  stacks and TLS (instance 0 owns the heap).
+- `ae_sim`: work ranges cut in table order, per-worker command buffers keyed `{system, range, seq}`,
+  merge by key, serial apply with direct-to-table spawns, and the `ae_spawn`/`ae_despawn`/`ae_add`/
+  `ae_remove` imports. 100k entities, 30 ticks of a system that despawns, spawns, adds and removes
+  components from parallel ranges: identical digest at 1, 2, 4 and 8 workers and equal to a native
+  reference. Merging by worker instead of key gives a different digest on every run (negative control).
+
+Next: scheduler with read/write sets and layers (from `ecs_sim/src/engine/schedule.rs`), schema custom
+section and SDK derive, events as columnar streams, cadences, the order-independent digest from
+`hash.rs`, `ae-headless`, a sim-dispatch bench suite, and the 10k/50k-entity exit runs.
 
 ### M0 risk spikes
 

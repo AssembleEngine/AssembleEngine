@@ -5,6 +5,7 @@
 //! [`flecs_backend`], so the ECS can be replaced without touching the guest
 //! ABI or any other crate.
 
+pub mod arena;
 pub mod flecs_backend;
 
 /// Engine entity id. Opaque to guests.

@@ -13,6 +13,7 @@ use std::ptr;
 
 pub type World = *mut ecs_world_t;
 pub type Query = *mut ecs_query_t;
+pub type Table = *mut ecs_table_t;
 
 // Values of flecs' `ecs_inout_kind_t` (EcsInOut, EcsIn).
 const FLECS_INOUT: i16 = 3;
@@ -79,6 +80,33 @@ pub unsafe fn register_component(world: World, name: &str, size: u32, align: u32
 pub unsafe fn create_entity(world: World) -> EntityId {
     let desc = unsafe { MaybeUninit::<ecs_entity_desc_t>::zeroed().assume_init() };
     EntityId(unsafe { ecs_entity_init(world, &desc) })
+}
+
+/// The table (archetype) holding exactly `components`, created if needed.
+pub unsafe fn find_table(world: World, components: &[ComponentId]) -> Result<Table> {
+    let mut ids: Vec<u64> = components.iter().map(|c| c.0).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let table = unsafe { ecs_table_find(world, ids.as_ptr(), ids.len() as i32) };
+    ensure!(!table.is_null(), "ecs_table_find failed");
+    Ok(table)
+}
+
+/// Create an entity directly in `table`. Setting its components afterwards
+/// writes in place: no table move.
+pub unsafe fn spawn_in_table(world: World, table: Table) -> EntityId {
+    EntityId(unsafe { ecs_new_w_table(world, table) })
+}
+
+/// Byte size of a component's values (0 for a tag).
+pub unsafe fn component_size(world: World, component: ComponentId) -> Result<usize> {
+    let info = unsafe { ecs_get_type_info(world, component.0) };
+    ensure!(!info.is_null(), "component {} has no type info", component.0);
+    Ok(unsafe { (*info).size } as usize)
+}
+
+pub unsafe fn has_component(world: World, entity: EntityId, component: ComponentId) -> bool {
+    unsafe { ecs_has_id(world, entity.0, component.0) }
 }
 
 /// Assign a component value to an entity (structural add when absent).

@@ -1,6 +1,6 @@
 {
   "suite": "ecs-structural",
-  "commit": "uncommitted",
+  "commit": "90d0d1c-dirty",
   "machine": "local",
   "records": [
     {
@@ -27,23 +27,23 @@
     {
       "metric": "50k_5000cmd/populate",
       "kind": "time",
-      "value": 12688327.0,
+      "value": 13074085.0,
       "unit": "ns",
-      "spread": 0.10313574043291918
+      "spread": 0.055066721686450715
     },
     {
       "metric": "50k_5000cmd/apply_tick_commands",
       "kind": "time",
-      "value": 418849.0,
+      "value": 418160.0,
       "unit": "ns",
-      "spread": 0.06658963015311008
+      "spread": 0.03233451310503157
     },
     {
       "metric": "50k_5000cmd/digest_scan",
       "kind": "time",
-      "value": 23921.0,
+      "value": 23461.0,
       "unit": "ns",
-      "spread": 0.04761506625977175
+      "spread": 0.015344614466561528
     }
   ]
 }

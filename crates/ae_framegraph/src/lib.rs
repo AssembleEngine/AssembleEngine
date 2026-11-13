@@ -15,6 +15,7 @@
 
 pub mod bake;
 pub mod barriers;
+pub mod descriptor;
 pub mod dot;
 
 pub use bake::{

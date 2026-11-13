@@ -46,6 +46,7 @@ dependencies = [
 name = "ae_framegraph"
 version = "0.0.1"
 dependencies = [
+ "ae_render_abi",
  "ash",
  "criterion",
 ]
@@ -64,6 +65,28 @@ name = "ae_profile"
 version = "0.0.1"
 dependencies = [
  "tracy-client",
+]
+
+[[package]]
+name = "ae_render_abi"
+version = "0.0.1"
+
+[[package]]
+name = "ae_sim"
+version = "0.0.1"
+dependencies = [
+ "ae_ecs",
+ "ae_wasm",
+ "anyhow",
+ "wasmtime",
+]
+
+[[package]]
+name = "ae_wasm"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "wasmtime",
 ]
 
 [[package]]
@@ -1421,6 +1444,7 @@ dependencies = [
 name = "spike_parallel_guest"
 version = "0.0.1"
 dependencies = [
+ "ae_ecs",
  "anyhow",
  "wasmtime",
 ]
