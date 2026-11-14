@@ -1,26 +1,26 @@
 {
   "suite": "sensors",
-  "commit": "d27cd83-dirty",
+  "commit": "b0cbe01-dirty",
   "machine": "local",
   "records": [
     {
       "metric": "units10000_allies2/stamp_1t",
       "kind": "time",
-      "value": 1231989.0,
+      "value": 1249189.0,
       "unit": "ns",
-      "spread": 0.05548994349787214
+      "spread": 0.1153404328728479
     },
     {
       "metric": "units10000_allies2/stamp_8t",
       "kind": "time",
-      "value": 761929.0,
+      "value": 798999.0,
       "unit": "ns",
-      "spread": 0.2846787561570698
+      "spread": 0.3006824789517884
     },
     {
       "metric": "units10000_allies2/stamped_cells",
       "kind": "counter",
-      "value": 11058004.0,
+      "value": 10617279.0,
       "unit": "",
       "spread": 0.0
     },
@@ -34,28 +34,28 @@
     {
       "metric": "units10000_allies2/radar_cells",
       "kind": "info",
-      "value": 31590.0,
+      "value": 447354.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "units10000_allies8/stamp_1t",
       "kind": "time",
-      "value": 1251671.0,
+      "value": 1247689.0,
       "unit": "ns",
-      "spread": 0.055511392370678876
+      "spread": 0.06996214601555356
     },
     {
       "metric": "units10000_allies8/stamp_8t",
       "kind": "time",
-      "value": 286326.0,
+      "value": 327678.0,
       "unit": "ns",
-      "spread": 0.4351787822272515
+      "spread": 0.4048272999713133
     },
     {
       "metric": "units10000_allies8/stamped_cells",
       "kind": "counter",
-      "value": 11058004.0,
+      "value": 10617279.0,
       "unit": "",
       "spread": 0.0
     },
@@ -69,28 +69,28 @@
     {
       "metric": "units10000_allies8/radar_cells",
       "kind": "info",
-      "value": 31590.0,
+      "value": 583915.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "units50000_allies8/stamp_1t",
       "kind": "time",
-      "value": 6224670.0,
+      "value": 6319737.0,
       "unit": "ns",
-      "spread": 0.026228539022952222
+      "spread": 0.05711440207084567
     },
     {
       "metric": "units50000_allies8/stamp_8t",
       "kind": "time",
-      "value": 1391563.0,
+      "value": 1421183.0,
       "unit": "ns",
-      "spread": 0.3557388346772658
+      "spread": 0.33786711493171534
     },
     {
       "metric": "units50000_allies8/stamped_cells",
       "kind": "counter",
-      "value": 55213183.0,
+      "value": 52928476.0,
       "unit": "",
       "spread": 0.0
     },
@@ -104,7 +104,7 @@
     {
       "metric": "units50000_allies8/radar_cells",
       "kind": "info",
-      "value": 32004.0,
+      "value": 630669.0,
       "unit": "",
       "spread": 0.0
     },

@@ -86,6 +86,7 @@ dependencies = [
  "ae_sensors",
  "ae_sim",
  "ae_spatial",
+ "ae_view",
  "anyhow",
  "ash",
  "rayon",
@@ -191,6 +192,13 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "rayon",
+]
+
+[[package]]
+name = "ae_view"
+version = "0.0.1"
+dependencies = [
+ "ae_sensors",
 ]
 
 [[package]]

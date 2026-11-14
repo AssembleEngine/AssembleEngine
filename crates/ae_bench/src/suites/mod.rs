@@ -11,6 +11,7 @@ pub mod nav_sim;
 pub mod sensors;
 pub mod sim_dispatch;
 pub mod spatial;
+pub mod view;
 
 /// Options shared by all suites.
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +36,7 @@ pub const SUITES: &[Suite] = &[
     Suite { name: "nav-sim", about: "whole navigation tick (NavService over body columns) at 1..N workers; equal digests required", run: nav_sim::run },
     Suite { name: "sensors", about: "line-of-sight and radar coverage per allyteam (ae_sensors), serial and parallel; equal bits required", run: sensors::run },
     Suite { name: "sim-dispatch", about: "sandbox game tick: layered schedule on the worker crew, merge, apply; equal digests at 1..N workers", run: sim_dispatch::run },
+    Suite { name: "view", about: "copy layer view tables per observer (ae_view): frame preparation, one build, a two-observer tick", run: view::run },
     Suite { name: "spatial", about: "grid rebuild and batch radius / nearest-k / sweep queries; equal hits at 1 and N threads", run: spatial::run },
 ];
 

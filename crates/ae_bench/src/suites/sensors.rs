@@ -22,7 +22,7 @@ struct Army {
 }
 
 /// `n` units in 40 squads; squad `s` belongs to allyteam `s % allies`.
-/// Line of sight 250..650 m; one unit in 20 has a 2,000 m radar.
+/// Line of sight 250..650 m; one unit in 23 has a 2,000 m radar (23: coprime with the 40 squads, so every allyteam gets some).
 fn army(n: usize, allies: u32) -> Army {
     let mut s = 0x5E45_0125_u64;
     let mut f = move || {
@@ -41,7 +41,7 @@ fn army(n: usize, allies: u32) -> Army {
         a.y.push(cy + d * t.sin());
         a.ally.push(squad as u32 % allies);
         a.los.push(250.0 + f() * 400.0);
-        a.radar.push(if i % 20 == 0 { 2000.0 } else { 0.0 });
+        a.radar.push(if i % 23 == 0 { 2000.0 } else { 0.0 });
     }
     a
 }

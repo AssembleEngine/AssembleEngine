@@ -1053,6 +1053,54 @@ and GPU culling, `terrain_cbt` with material tilesets, threaded recording, the G
 clean) is covered by the runs above (topology: the graph-file pass removal). What each part leaves open is in its "Not done" line. Next is
 M4 (copy layer and fog).
 
+### M4 progress
+
+Built as libraries first, with synthetic-world tests and benches, before the schema, the game or the
+client change.
+
+`ae_sensors` (coverage):
+- Per allyteam, one bit per cell for line of sight and for radar. A position becomes the cell
+  `floor(x / cell)` (clamped to the grid), a radius `floor(r / cell)` cells, and a unit covers the
+  cells with `dx² + dy² <= r²`, stamped per row as a span of half width `isqrt(r² - dy²)`. Integer
+  math after the cell step and no hash maps, so it can move into the sim as a native service
+  unchanged. Allyteams stamp in parallel, with the same bits as serial.
+- Tests: three random worlds against a brute-force oracle of the same predicate (units off the map,
+  zero and NaN radii, rows of unknown allyteams); parallel equals serial at 10k units; spans across
+  word boundaries; `isqrt` exact up to 2⁶⁴.
+- `ae-tool bench sensors` (baseline recorded): 10k units, 2 allyteams, 640² cells: 1.24 ms serial,
+  0.76 ms parallel; 8 allyteams 0.36 ms parallel; 50k units 6.2 ms serial, 1.4 ms parallel.
+
+`ae_view` (rule executor):
+- Input: one tick's capture (entity ids, one column per field, allyteam per row) and the coverage;
+  a `ViewSpec` gives each field a class (`Never`, `Always`, `OwnerOnly`, `Los`, `RadarDegraded`,
+  `Ghost`) and names the position fields. An `Observer` (an allyteam and a local seed) builds its
+  view table: rows `Own`, `Seen` (line of sight), `Blip` (radar only) or `Ghost`, a column per
+  non-`Never` field, a per-row mask of the fields it may know (hidden values are 0), in view-id
+  order.
+- View ids hide sim ids: given on coming into view, in an order shuffled by the observer's seed;
+  kept while the entity stays in view; new after a recycled id (new generation) or a return after
+  absence. A ghosting table (one with a `Ghost` field) keeps a row last seen in line of sight as a
+  `Ghost` with its last-seen `Ghost` and `Always` values, until the observer has line of sight to
+  that cell again; a returning entity takes its ghost's id back. Blip positions drift by up to
+  `wobble` world units, hashed from (seed, view id, tick bucket) and blended across `wobble_ticks`.
+- Property test (`crates/ae_view/tests/property.rs`): 4 seeds × plain and ghosting tables × 60
+  ticks, 300 entities, three allyteams, movement, churn with recycled ids, two observers, against an
+  oracle written from the documented class table: layout without `Never` columns; row states equal
+  the coverage; every entity in view has exactly one row; each field shown exactly where its class
+  allows, hidden values 0, shown values exact (blips within the wobble, ghosts equal to the last
+  sighting, never on a cell in line of sight); no word equals either half of a sim id; ids unique,
+  ascending, kept in view, reused only by a returning entity taking its ghost's id. It saw 105 ghost
+  rows, 61,820 blip positions, and the two observers differed on 170 ticks. Four mutants of the
+  executor fail it (`Los` shown in blips, an entity id in hidden values, ghosts kept in line of
+  sight, ids reset each tick). A unit test checks the wobble is bounded, smooth and differs by
+  observer and id.
+- `ae-tool bench view` (baseline recorded): 10k units, 2 allyteams, 7 fields shown, ~7,100 rows per
+  observer of which 1,630 blips: one observer 0.52 ms, a tick for two observers (preparation and both
+  builds) 1.08 ms, under the 2 ms exit budget; with a ghosting table 1.13 ms. 50k units and 8
+  allyteams: 3.3 ms for two observers.
+- Not done: the schema does not carry view classes yet, the crossing game has no teams or sensors,
+  and the client still draws from the raw capture; the fog pass does not exist.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

@@ -1,0 +1,9 @@
+[package]
+name = "ae_view"
+description = "Copy layer rule executor: per-observer view tables from captured sim columns, filtered by view class against sensor coverage (LOS, radar wobble, ghosts), with ViewIds that hide sim ids."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_sensors.workspace = true
