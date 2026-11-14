@@ -71,6 +71,8 @@ pub struct Schema {
     pub systems: Vec<SystemRecord>,
     /// The whole `schedule!`: module and host systems in registration order.
     pub order: Vec<Slot>,
+    /// Named data for engine services (`KIND_DATA` records), by name.
+    pub data: BTreeMap<String, Vec<u8>>,
 }
 
 /// Parse one component record (as `ae_sdk::Component::SCHEMA` holds it).
@@ -223,6 +225,7 @@ impl Schema {
         let mut components: BTreeMap<u64, ComponentDecl> = BTreeMap::new();
         let mut systems: BTreeMap<String, SystemRecord> = BTreeMap::new();
         let mut order: Option<Vec<String>> = None;
+        let mut data: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut at = 0;
         while at < section.len() {
             ensure!(at + 8 <= section.len(), "schema section truncated");
@@ -250,6 +253,16 @@ impl Schema {
                     order = Some((0..count).map(|_| r.string()).collect::<Result<_>>()?);
                     r.done()?;
                 }
+                abi::KIND_DATA => {
+                    let mut r = Reader { rec, at: 8 };
+                    let name_len = r.u32()? as usize;
+                    r.u32()?;
+                    let start = abi::pad4(name_len) + 16;
+                    ensure!(start <= rec.len(), "data record name overruns the record");
+                    let name = std::str::from_utf8(&rec[16..16 + name_len]).context("data record name is not UTF-8")?.to_string();
+                    ensure!(!data.contains_key(&name), "data `{name}` declared twice");
+                    data.insert(name, rec[start..].to_vec());
+                }
                 k => bail!("unknown schema record kind {k}"),
             }
             at += len;
@@ -276,7 +289,7 @@ impl Schema {
         if let Some(name) = systems.keys().next() {
             bail!("system `{name}` is missing from schedule!");
         }
-        let schema = Schema { components: components.into_values().collect(), systems: ordered, order: slots };
+        let schema = Schema { components: components.into_values().collect(), systems: ordered, order: slots, data };
         for s in &schema.systems {
             for (id, _) in &s.terms {
                 let c = schema.component(*id).with_context(|| format!("system `{}` queries unknown component {id:#x}", s.name))?;

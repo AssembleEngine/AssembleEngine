@@ -42,6 +42,11 @@ pub struct RuntimeConfig {
     pub event_pages: u64,
     pub stack_bytes: u32,
     pub metering: Metering,
+    /// Run a layer's host systems on the coordinating thread while the
+    /// crew's helpers start on its module systems, then join them
+    /// (otherwise: module systems first, then host systems). Never changes
+    /// results: commands and events are keyed by schedule position.
+    pub overlap_hosts: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -54,6 +59,7 @@ impl Default for RuntimeConfig {
             event_pages: 64,
             stack_bytes: ae_wasm::DEFAULT_STACK_BYTES,
             metering: Metering::None,
+            overlap_hosts: true,
         }
     }
 }
@@ -273,6 +279,11 @@ impl Runtime {
 
     /// Current size of the shared guest memory, in bytes (column arena,
     /// event staging and the guest heap).
+    /// Switch [`RuntimeConfig::overlap_hosts`] (results never change).
+    pub fn set_overlap_hosts(&mut self, on: bool) {
+        self.cfg.overlap_hosts = on;
+    }
+
     pub fn memory_bytes(&self) -> usize {
         self.shared.data_size()
     }
@@ -362,7 +373,7 @@ impl Runtime {
                 continue;
             }
             let names: Vec<&str> = mine.iter().map(|&h| self.hosts[h].decl.name.as_str()).collect();
-            let made = plugin.instantiate(&init, &names)?;
+            let made = plugin.instantiate(&init, &self.schema, &names)?;
             ensure!(made.len() == mine.len(), "host plugin made {} systems for {} names", made.len(), mine.len());
             for (h, system) in mine.into_iter().zip(made) {
                 hosts[h] = Some(system);
@@ -398,11 +409,37 @@ impl Runtime {
             }
             let mut commands = Vec::new();
             let mut events: Vec<Emitted> = Vec::new();
-            if let Some(batch) = batch {
-                let index_of: Vec<usize> = batch.systems.iter().map(|s| s.index).collect();
-                let started = Instant::now();
-                let outs = self.crew.run(Arc::new(batch), workers);
-                stats.systems_ns += started.elapsed().as_nanos() as u64;
+            // Host systems' queries are read here, on the coordinating
+            // thread; their runs then touch only their own rows, which no
+            // module system of the layer writes.
+            let jobs: Vec<HostJob> = hosts.iter().map(|&i| self.host_job(w, i)).collect::<Result<_>>()?;
+            let (crew_outs, host_outs) = {
+                let World { hosts: states, events: store, ids, spatial, param, .. } = &mut *w;
+                let (memory, param) = (self.memory, *param);
+                let run = move || run_hosts(jobs, memory, tick, param, states, store, ids, spatial);
+                match batch {
+                    None => (None, run()),
+                    Some(batch) => {
+                        let index_of: Vec<usize> = batch.systems.iter().map(|s| s.index).collect();
+                        let started = Instant::now();
+                        let (outs, host_outs) = if self.cfg.overlap_hosts {
+                            // The helpers start the batch while this thread
+                            // runs the host systems, then joins them.
+                            let (outs, host_outs) = self.crew.run_beside(Arc::new(batch), workers, run);
+                            // Module-system time beyond the host systems'.
+                            let host: u64 = host_outs.as_ref().map(|h| h.iter().map(|o| o.2).sum()).unwrap_or(0);
+                            stats.systems_ns += (started.elapsed().as_nanos() as u64).saturating_sub(host);
+                            (outs, host_outs)
+                        } else {
+                            let outs = self.crew.run(Arc::new(batch), workers);
+                            stats.systems_ns += started.elapsed().as_nanos() as u64;
+                            (outs, run())
+                        };
+                        (Some((index_of, outs)), host_outs)
+                    }
+                }
+            };
+            if let Some((index_of, outs)) = crew_outs {
                 for out in outs {
                     let WorkerOut { commands: c, events: e, fuel, calls, error } = out;
                     if let Some(error) = error {
@@ -416,11 +453,7 @@ impl Runtime {
                     }
                 }
             }
-            for i in hosts {
-                let _zone = ae_profile::zone_dyn(&self.systems[i].name);
-                let started = Instant::now();
-                let (c, e) = self.run_host(w, i, tick).with_context(|| format!("tick {tick}, host system `{}`", self.systems[i].name))?;
-                let ns = started.elapsed().as_nanos() as u64;
+            for (i, (c, e), ns) in host_outs.with_context(|| format!("tick {tick}, layer {layer}"))? {
                 stats.host_ns += ns;
                 stats.host_system_ns[i] += ns;
                 stats.calls += 1;
@@ -505,8 +538,8 @@ impl Runtime {
         Ok(Some(Batch::new(systems, jobs, tick, w.param, w.ids.clone(), self.memory, w.spatial.clone())))
     }
 
-    /// Run host system `i` (runtime order); its commands and events.
-    fn run_host(&self, w: &mut World, i: usize, tick: u64) -> Result<HostOut> {
+    /// Host system `i`'s (runtime order) inputs for this run.
+    fn host_job(&self, w: &World, i: usize) -> Result<HostJob> {
         let s = &self.systems[i];
         let Kind::Host(h) = s.kind else { unreachable!() };
         let decl = &self.hosts[h].decl;
@@ -517,26 +550,7 @@ impl Runtime {
             }
             None => (Vec::new(), Vec::new()),
         };
-        let mut buffer = crate::command::CommandBuffer::default();
-        buffer.begin(self.schedule.position[i], 0);
-        let World { hosts, events, ids, spatial, param, .. } = w;
-        let mut ctx = HostCtx {
-            tick,
-            param: *param,
-            ranges: &ranges,
-            sizes: &sizes,
-            memory: self.memory,
-            events,
-            reader: i,
-            reads: &decl.reads_events,
-            emits: &decl.emits,
-            commands: &mut buffer,
-            ids,
-            spatial,
-        };
-        hosts[h].run(&mut ctx)?;
-        let e = buffer.take_events();
-        Ok((buffer.take(), e))
+        Ok(HostJob { index: i, slot: h, name: s.name.clone(), position: self.schedule.position[i], ranges, sizes, reads: decl.reads_events.clone(), emits: decl.emits.clone() })
     }
 
     /// Order-independent digest of every hashed field of every live row,
@@ -641,6 +655,59 @@ impl Runtime {
 
 /// A host system run's commands and events.
 type HostOut = (Vec<(CommandKey, Command)>, Vec<Emitted>);
+
+/// One host system's run, prepared on the coordinating thread.
+struct HostJob {
+    /// Runtime order, host slot.
+    index: usize,
+    slot: usize,
+    name: Arc<str>,
+    position: u32,
+    ranges: Vec<WorkRange>,
+    sizes: Vec<usize>,
+    reads: Vec<u64>,
+    emits: Vec<u64>,
+}
+
+/// Run a layer's host systems in schedule order: per system, its runtime
+/// index, commands and events, and run time (ns).
+#[allow(clippy::too_many_arguments)]
+fn run_hosts(
+    jobs: Vec<HostJob>,
+    memory: GuestMemory,
+    tick: u64,
+    param: u64,
+    states: &mut [Box<dyn HostSystem>],
+    events: &mut EventStore,
+    ids: &IdMap,
+    spatial: &mut Option<Arc<SpatialIndex>>,
+) -> Result<Vec<(usize, HostOut, u64)>> {
+    let mut out = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let _zone = ae_profile::zone_dyn(&job.name);
+        let started = Instant::now();
+        let mut buffer = crate::command::CommandBuffer::default();
+        buffer.begin(job.position, 0);
+        let mut ctx = HostCtx {
+            tick,
+            param,
+            ranges: &job.ranges,
+            sizes: &job.sizes,
+            memory,
+            events,
+            reader: job.index,
+            reads: &job.reads,
+            emits: &job.emits,
+            commands: &mut buffer,
+            ids,
+            spatial,
+        };
+        states[job.slot].run(&mut ctx).with_context(|| format!("host system `{}`", job.name))?;
+        let e = buffer.take_events();
+        out.push((job.index, (buffer.take(), e), started.elapsed().as_nanos() as u64));
+    }
+    Ok(out)
+}
 
 fn write_mask(terms: &[(u64, Access)]) -> u32 {
     terms.iter().enumerate().filter(|(_, (_, a))| *a == Access::Write).fold(0u32, |m, (i, _)| m | 1 << i)

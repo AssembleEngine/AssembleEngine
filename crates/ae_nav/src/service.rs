@@ -202,6 +202,9 @@ pub struct TerrainChange {
     pub tick: u64,
     pub version: u32,
     pub cells: (i32, i32, i32, i32),
+    /// Some edit changed the ground (blocked, height or material), not only
+    /// traversal costs (cost edits, overlays).
+    pub ground: bool,
 }
 
 /// Unit bodies as columns, one row per unit in [`NavService::entities`] order.
@@ -599,6 +602,8 @@ struct PendingJob {
 struct QueuedCommand {
     payload: CommandPayload,
     submitted_at: Option<Instant>,
+    /// A curve formation's facing: the point its front faces.
+    facing: Option<WorldPos>,
 }
 
 /// Engine core. It is single-threaded; independent navigation jobs run on the
@@ -683,6 +688,11 @@ pub struct NavService {
     unrepaired_patches: Vec<TerrainPatch>,
     /// Cells covered by the repair job in flight.
     repair_rect: Option<(i32, i32, i32, i32)>,
+    /// The repair in flight changes the ground, not only costs.
+    repair_ground: bool,
+    /// Cost overlays by id: inclusive cell rectangle (clipped to the map)
+    /// and extra cost.
+    cost_overlays: BTreeMap<u64, ((i32, i32, i32, i32), u8)>,
 }
 
 impl NavService {
@@ -729,7 +739,7 @@ impl NavService {
             latency_ticks: Vec::new(), latency_ms: Vec::new(),
             last_terrain_edit_tick: None, pending_rect: None,
             last_snapshot: None, publishing: false, crowd: Arc::new(CrowdMap::default()), own_crowd: BTreeMap::new(), traffic: Traffic::default(), crowd_versions: 0, physics_rest: None, rng: Rng::new(cfg.seed ^ 0xABC), started: Instant::now(),
-            last_tick_ms: 0.0, phases: TickPhases::default(), terrain_digest: (0, 0), terrain_bands: Vec::new(), unrepaired_patches: Vec::new(), repair_rect: None,
+            last_tick_ms: 0.0, phases: TickPhases::default(), terrain_digest: (0, 0), terrain_bands: Vec::new(), unrepaired_patches: Vec::new(), repair_rect: None, repair_ground: false, cost_overlays: BTreeMap::new(),
         };
         sim.crowd = Arc::new(CrowdMap::empty(&sim.terrain.geom));
         sim.traffic = Traffic::new(&sim.crowd);
@@ -930,14 +940,64 @@ impl NavService {
     /// Inputs become visible at the next tick boundary and are recorded with
     /// that tick, so `ReplayLog` reproduces the run exactly.
     pub fn queue_command(&mut self, payload: CommandPayload) {
-        self.queued_commands.push_back(QueuedCommand { payload, submitted_at: Some(Instant::now()) });
+        self.queued_commands.push_back(QueuedCommand { payload, submitted_at: Some(Instant::now()), facing: None });
     }
     /// Queue a scripted/replayed command (no wall-clock latency sample).
     pub fn queue_command_at(&mut self, payload: CommandPayload) {
-        self.queued_commands.push_back(QueuedCommand { payload, submitted_at: None });
+        self.queued_commands.push_back(QueuedCommand { payload, submitted_at: None, facing: None });
+    }
+    /// Queue a scripted curve formation (`CommandKind::CurveFormation`)
+    /// whose front faces `toward`: along each part of the curve the first
+    /// row stands on the curve and further rows stack on the side away from
+    /// `toward`, instead of alternating on both sides (pathsim's layout,
+    /// which [`Self::queue_command_at`] keeps).
+    pub fn queue_formation_facing(&mut self, payload: CommandPayload, toward: WorldPos) {
+        self.queued_commands.push_back(QueuedCommand { payload, submitted_at: None, facing: Some(toward) });
     }
     pub fn queue_terrain_patch(&mut self, patch: TerrainPatch) {
         self.queued_terrain.push_back(patch);
+    }
+
+    /// Add cost overlay `id`: `cost` tenths of extra traversal cost on every
+    /// open cell of the inclusive rectangle `cells` (clipped to the map),
+    /// summed with other overlays there, an open cell's cost at most 254.
+    /// Unlike a cost edit it can be removed without knowing what was under
+    /// it. It lands like a terrain edit (a patch, with its nav repair).
+    /// `false` (and nothing changes) if `id` is in use or `cost` is 0.
+    pub fn add_cost_overlay(&mut self, id: u64, cells: (i32, i32, i32, i32), cost: u8) -> bool {
+        if cost == 0 || self.cost_overlays.contains_key(&id) { return false; }
+        let g = &self.terrain.geom;
+        let clipped = (cells.0.max(0), cells.1.max(0), cells.2.min(g.cells_x - 1), cells.3.min(g.cells_y - 1));
+        self.cost_overlays.insert(id, (clipped, cost));
+        self.queue_overlay(clipped);
+        true
+    }
+
+    /// Remove cost overlay `id`; `false` if there is none.
+    pub fn remove_cost_overlay(&mut self, id: u64) -> bool {
+        let Some((cells, _)) = self.cost_overlays.remove(&id) else { return false; };
+        self.queue_overlay(cells);
+        true
+    }
+
+    /// Ids, cells and costs of the cost overlays, by id.
+    pub fn cost_overlays(&self) -> impl Iterator<Item = (u64, (i32, i32, i32, i32), u8)> + '_ {
+        self.cost_overlays.iter().map(|(&id, &(cells, cost))| (id, cells, cost))
+    }
+
+    /// Queue a patch setting the overlay of every cell of `cells` to the
+    /// sum of the overlays covering it.
+    fn queue_overlay(&mut self, (x0, y0, x1, y1): (i32, i32, i32, i32)) {
+        if x1 < x0 || y1 < y0 { return; }
+        let near: Vec<((i32, i32, i32, i32), u8)> = self.cost_overlays.values().copied().filter(|&((a0, b0, a1, b1), _)| a0 <= x1 && x0 <= a1 && b0 <= y1 && y0 <= b1).collect();
+        let mut patch = TerrainPatch::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let sum = near.iter().filter(|&&((a0, b0, a1, b1), _)| (a0..=a1).contains(&x) && (b0..=b1).contains(&y)).fold(0u8, |s, &(_, c)| s.saturating_add(c));
+                patch.overlay.push((x, y, sum));
+            }
+        }
+        self.queue_terrain_patch(patch);
     }
     fn command_goal(&self, profile_id: u8, requested: WorldPos) -> Option<CellPos> {
         let geom = &self.hierarchy.terrain.geom;
@@ -1211,7 +1271,8 @@ impl NavService {
     /// `FORMATION_SEGMENT_CELLS` pieces of arc, one cohort per (profile,
     /// segment) with its stage target on the curve in that segment. A slot
     /// without line of sight to its segment target gets its own cohort.
-    fn plan_formation(&mut self, command_id: u64, curve: &[WorldPos], specs: Vec<(u8, Vec<usize>, CellPos)>, max_radius: f32, tolerance: i32, rec: &mut CommandRecord) -> Vec<ArrivalSlot> {
+    #[allow(clippy::too_many_arguments)]
+    fn plan_formation(&mut self, command_id: u64, curve: &[WorldPos], facing: Option<WorldPos>, specs: Vec<(u8, Vec<usize>, CellPos)>, max_radius: f32, tolerance: i32, rec: &mut CommandRecord) -> Vec<ArrivalSlot> {
         let h = Arc::clone(&self.hierarchy);
         let terrain = &h.terrain;
         let geom = &terrain.geom;
@@ -1264,14 +1325,20 @@ impl NavService {
             let t = (col as f32 + 0.5) * total / per_row as f32;
             let (base, tangent) = at(t);
             let normal = WorldPos::new(-tangent.y, tangent.x);
+            // With a facing, rows stack behind the curve (away from it).
+            let behind = facing.map(|p| { let d = p.sub(base); if d.x * normal.x + d.y * normal.y > 0.0 { -1.0 } else { 1.0 } });
             let mut members: Vec<(usize, u8)> = units[lo..hi].to_vec();
             members.sort_by(|a, b| self.units[a.0].body.pos.dist(base).total_cmp(&self.units[b.0].body.pos.dist(base))
                 .then(self.units[a.0].id.cmp(&self.units[b.0].id)));
             let mut next_row = 0usize;
             for (i, pid) in members {
-                // Row offsets 0, +1, -1, +2, -2, ... spacings off the curve.
+                // Row offsets 0, +1, -1, +2, -2, ... spacings off the curve
+                // (0, 1, 2, .. behind it with a facing).
                 let row_cell = |k: usize| {
-                    let off = if k == 0 { 0.0 } else if k % 2 == 1 { k.div_ceil(2) as f32 } else { -((k / 2) as f32) };
+                    let off = match behind {
+                        Some(b) => k as f32 * b,
+                        None => if k == 0 { 0.0 } else if k % 2 == 1 { k.div_ceil(2) as f32 } else { -((k / 2) as f32) },
+                    };
                     geom.world_to_cell(base.add(normal.scaled(off * spacing)))
                 };
                 let mut found = None;
@@ -1474,7 +1541,7 @@ impl NavService {
         }
         let mut slot_by_id: BTreeMap<u32, ArrivalSlot> = BTreeMap::new();
         if let CommandKind::CurveFormation { guide_points } = &payload.kind {
-            for s in self.plan_formation(payload.id, guide_points, cohort_specs, max_radius, tolerance, &mut rec) { slot_by_id.insert(s.unit_id, s); }
+            for s in self.plan_formation(payload.id, guide_points, q.facing, cohort_specs, max_radius, tolerance, &mut rec) { slot_by_id.insert(s.unit_id, s); }
         } else {
             let reserved = BTreeSet::new();
             for s in self.assign_command_slots(requested, &slot_groups, max_radius, &reserved) { slot_by_id.insert(s.unit_id, s); }
@@ -1816,7 +1883,7 @@ impl NavService {
     /// (`REPAIR_DELAY_MS`). One repair runs at a time; edits made meanwhile
     /// queue for the next, which starts as soon as the current one lands.
     fn handle_terrain_patch(&mut self, patch: TerrainPatch, tick: u64) {
-        if patch.cells.is_empty() { return; }
+        if patch.is_empty() { return; }
         let Some(rect) = patch.dirty_cells() else { return; };
         self.last_terrain_edit_tick = Some(tick);
         self.pending_rect = Some(union_rect(self.pending_rect, rect));
@@ -1829,6 +1896,7 @@ impl NavService {
         let patches = std::mem::take(&mut self.unrepaired_patches);
         let Some(rect) = patches.iter().filter_map(|p| p.dirty_cells()).reduce(|a, b| union_rect(Some(a), b)) else { return; };
         self.repair_rect = Some(rect);
+        self.repair_ground = patches.iter().any(|p| p.changes_ground());
         let job = WorkerJob::RepairHierarchy { previous: Arc::clone(&self.hierarchy), patches, rect, threads: self.cfg.worker_count };
         let due = tick_at_or_after_us(sim_time_us(self.tick) + REPAIR_DELAY_MS * 1000).max(self.tick + 1);
         self.submit(job, PendingKind::Repair, "terrain edit + nav repair", due);
@@ -1881,7 +1949,7 @@ impl NavService {
         self.terrain = Arc::clone(&self.hierarchy.terrain);
         if let Some(r) = self.repair_rect.take() {
             self.refresh_terrain_digest(Some((r.1, r.3)));
-            self.terrain_changes.push(TerrainChange { tick, version: self.terrain.version, cells: r });
+            self.terrain_changes.push(TerrainChange { tick, version: self.terrain.version, cells: r, ground: self.repair_ground });
         }
         self.pending_rect = self.unrepaired_patches.iter().filter_map(|p| p.dirty_cells()).reduce(|a, b| union_rect(Some(a), b));
         self.nav.terrain_rebuilds += 1;
@@ -2609,6 +2677,10 @@ impl NavService {
         h.u64(self.terrain_digest.1);
         h.u32(self.hierarchy.version);
         h.u64(uh.clone().finish()); h.u64(nh.clone().finish()); h.u64(ch.clone().finish());
+        // Only with overlays, so states without them keep their hashes.
+        for (id, ((x0, y0, x1, y1), cost)) in &self.cost_overlays {
+            h.u64(*id); h.i32(*x0); h.i32(*y0); h.i32(*x1); h.i32(*y1); h.u32(*cost as u32);
+        }
         StateHashParts {
             combined: h.finish(), bodies: uh.finish(), unit_nav: nh.finish(), commands: ch.finish(),
             terrain: self.terrain_digest.1, nav_version: self.hierarchy.version,

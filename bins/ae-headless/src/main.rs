@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare]";
+const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off]";
 
 struct Opts {
     game: String,
@@ -44,10 +44,12 @@ struct Opts {
     nav: Option<Map>,
     map_cells: i32,
     compare: bool,
+    /// Run host systems beside the layer's module systems.
+    overlap: bool,
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -68,6 +70,13 @@ fn parse() -> Result<Opts> {
             }
             "--map-cells" => o.map_cells = value()?.parse()?,
             "--compare" => o.compare = true,
+            "--overlap" => {
+                o.overlap = match value()?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    v => bail!("--overlap on|off, not {v}"),
+                }
+            }
             "--digest" => o.digest = true,
             "--fuel" => o.fuel = true,
             _ => bail!("unknown argument {a}\n{USAGE}"),
@@ -107,6 +116,7 @@ fn run() -> Result<bool> {
         max_workers: max,
         range_rows: o.range_rows,
         metering: if o.fuel { Metering::Fuel } else { Metering::None },
+        overlap_hosts: o.overlap,
         ..RuntimeConfig::default()
     };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
@@ -193,7 +203,7 @@ fn run() -> Result<bool> {
         if o.compare {
             let nav = rt.host_digest(&world, "nav").map(|h| h as u64);
             drop(world);
-            let (same_nav, standalone) = compare(&o, w, nav)?;
+            let (same_nav, standalone) = compare(&o, w, nav, &rt.schema)?;
             same &= same_nav;
             let med = |v: &[f64]| {
                 let mut s = v[1.min(v.len())..].to_vec();
@@ -245,9 +255,9 @@ fn run() -> Result<bool> {
 
 /// The same plan through the standalone nav service at `w` threads: whether
 /// its final state hash equals the sim's nav digest, and its tick times (ms).
-fn compare(o: &Opts, w: usize, sim_nav: Option<u64>) -> Result<(bool, Vec<f64>)> {
+fn compare(o: &Opts, w: usize, sim_nav: Option<u64>, schema: &ae_sim::schema::Schema) -> Result<(bool, Vec<f64>)> {
     let plugin = NavPlugin { map: o.nav.unwrap(), map_cells: o.map_cells };
-    let (nav, plan) = plugin.plan(o.units as u32, w);
+    let (nav, plan) = plugin.plan(o.units as u32, w, plugin.profiles(schema)?);
     let mut s = Scenario::from_plan(nav, &plan);
     let mut ms = Vec::with_capacity(o.ticks as usize);
     // The sim's first tick is the scenario's first step only when orders

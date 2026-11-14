@@ -1,5 +1,8 @@
 //! Crossing game: the M2 exit workload.
 //!
+//! It declares its movement classes (`movement_classes!`); the map's units
+//! use class indices 0..=4.
+//!
 //! The map (the host's `nav_spawn`) places units of every movement class
 //! and gives each a `Goal`. The game decides when units move: `orders`
 //! sends every unit with a goal there at tick `delay` (game parameter bits
@@ -21,18 +24,20 @@
 //! body whose index is 48 more than a multiple of 97, a raised square of
 //! ground (land in a lake, a hill on land). The second edit arrives while
 //! the first one's repair is still running, so it lands with the next
-//! repair. `landed` records each `TerrainChanged` the nav service reports.
+//! repair. `zones` adds a cost overlay (a slow zone) at the same tick and
+//! removes it 30 ticks later. `landed` records each `TerrainChanged` the
+//! nav service reports.
 //!
 //! `reorder` (tests only) gives every grouped unit a new order at one tick,
 //! by its group: stop, a route through two guide points near the goal, or a
-//! formation on a line through the goal.
+//! formation on a line through the goal, facing north-east.
 //!
 //! Game parameter: low 24 bits = unit count (read by the host's map), bits
 //! 24..32 = the quake tick (0: none), bits 32..40 = the tick orders are
 //! given, bits 40..48 = the reorder tick (0: none), bits 48..64 = the churn
 //! tick (0: no churn).
 
-use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, terrain};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, Goal, MoveOrder, MovementClass, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, terrain};
 use ae_sdk::{Component, Entity, Run, Spawn, add, despawn, emit, schedule, spatial_radius, system};
 
 /// Neighbours within four body radii, as of tick `tick`.
@@ -60,7 +65,19 @@ pub struct Landed {
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
+    pub flags: u32,
 }
+
+// The game's movement classes: the water map's five (scout, heavy, ship,
+// hovercraft, amphibious), declared here as a game would, with the same
+// values as `ae_nav::nav::water_profiles`.
+ae_sdk::movement_classes![
+    MovementClass { name: "Scout", clearance_cells: 1, max_slope: 135, radius: CELL_SIZE * 0.34, speed: CELL_SIZE * 14.0, min_depth: 0, max_depth: 20, hover: false },
+    MovementClass { name: "Heavy", clearance_cells: 2, max_slope: 95, radius: CELL_SIZE * 0.52, speed: CELL_SIZE * 10.0, min_depth: 0, max_depth: 20, hover: false },
+    MovementClass { name: "Ship", clearance_cells: 2, max_slope: 60, radius: CELL_SIZE * 0.62, speed: CELL_SIZE * 9.0, min_depth: 30, max_depth: ANY_DEPTH, hover: false },
+    MovementClass { name: "Hover", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.40, speed: CELL_SIZE * 13.0, min_depth: 0, max_depth: ANY_DEPTH, hover: true },
+    MovementClass { name: "Amphibious", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.48, speed: CELL_SIZE * 9.0, min_depth: 0, max_depth: ANY_DEPTH, hover: false },
+];
 
 const NEIGHBOUR_RADII: f32 = 4.0;
 
@@ -128,6 +145,11 @@ fn reorder(run: &Run) {
         for (index, (x, y)) in reorder_points(kind, g.x, g.y).into_iter().enumerate() {
             emit(&OrderPoint { group, index: index as u32, x, y, reserved: 0 });
         }
+        if kind == 2 {
+            // The formation's line runs north-west to south-east; it faces
+            // north-east.
+            emit(&OrderPoint { group, index: ae_sdk::nav::order::FACING, x: g.x + 200.0, y: g.y - 200.0, reserved: 0 });
+        }
         emit(&if kind == 1 { MoveOrder::route(ids[i], g.x, g.y, group) } else { MoveOrder::formation(ids[i], g.x, g.y, group) });
     }
 }
@@ -173,10 +195,29 @@ fn quake(run: &Run) {
     }
 }
 
+// `zones`, mirrored in `ae_services/tests/crossing.rs`: a slow zone across
+// the way from the plaza to the goals of the 768-cell map, from the quake
+// tick for `ZONE_TICKS` ticks.
+const ZONE: (i32, i32, i32, i32) = (200, 500, 320, 640);
+const ZONE_COST: u32 = 60;
+const ZONE_TICKS: u64 = 30;
+
+/// No query: runs once a tick.
+#[system(emits(CostOverlay))]
+fn zones(run: &Run) {
+    let at = (run.param() >> 24) & 0xFF;
+    let (x0, y0, x1, y1) = ZONE;
+    if at != 0 && run.tick() == at {
+        emit(&CostOverlay { id: 1, x0, y0, x1, y1, cost: ZONE_COST, op: ae_sdk::nav::overlay::ADD });
+    } else if at != 0 && run.tick() == at + ZONE_TICKS {
+        emit(&CostOverlay { id: 1, x0: 0, y0: 0, x1: 0, y1: 0, cost: 0, op: ae_sdk::nav::overlay::REMOVE });
+    }
+}
+
 #[system(reads_events(TerrainChanged))]
 fn landed(run: &Run) {
     for c in run.events::<TerrainChanged>() {
-        Spawn::new().with(&Landed { version: c.version, tick: run.tick() as u32, x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 }).submit();
+        Spawn::new().with(&Landed { version: c.version, tick: run.tick() as u32, x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, flags: c.flags }).submit();
     }
 }
 
@@ -206,4 +247,4 @@ fn churn(run: &Run) {
     }
 }
 
-schedule!(host(nav_spawn), orders, quake, reorder, host(nav), host(spatial), crowding, churn, landed);
+schedule!(host(nav_spawn), orders, quake, reorder, zones, host(nav), host(spatial), crowding, churn, landed);

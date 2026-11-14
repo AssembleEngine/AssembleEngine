@@ -5,7 +5,7 @@
 //! queued for tick 1; call [`Scenario::step`] once per tick.
 
 use crate::math::{CellPos, WorldPos};
-use crate::nav::{profiles_for, water_profiles};
+use crate::nav::{profiles_for, water_profiles, MovementProfile};
 use crate::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
 use crate::terrain::{reference_cell, Terrain, TerrainConfig, WaterMode};
 use std::collections::BTreeSet;
@@ -142,8 +142,15 @@ pub fn land_crossing(units: u32, map_cells: i32, workers: usize) -> Scenario {
 /// [`land_crossing`] as a service without units and its plan.
 pub fn land_crossing_plan(units: u32, map_cells: i32, workers: usize) -> (NavService, Plan) {
     let cfg = config(units, map_cells, workers);
+    land_crossing_plan_with(units, map_cells, workers, profiles_for(cfg.cell_size, cfg.radius_scale))
+}
+
+/// [`land_crossing_plan`] with other movement profiles (classes 0 and 1
+/// take the light and heavy units' places).
+pub fn land_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
+    assert!(profiles.len() >= 2, "the land map's units use classes 0 and 1");
+    let cfg = config(units, map_cells, workers);
     let terrain = Terrain::generate(&cfg.terrain_config());
-    let profiles = profiles_for(cfg.cell_size, cfg.radius_scale);
     let mut nav = NavService::with_terrain(cfg, terrain, profiles);
     let specs = nav.spawn_plan();
     let goal = cell_point(&nav, reference_cell(&nav.terrain.geom, 1020, 1900));
@@ -166,13 +173,20 @@ pub fn water_crossing(units: u32, map_cells: i32, workers: usize) -> Scenario {
 
 /// [`water_crossing`] as a service without units and its plan.
 pub fn water_crossing_plan(units: u32, map_cells: i32, workers: usize) -> (NavService, Plan) {
+    let cell_size = config(units, map_cells, workers).cell_size;
+    water_crossing_plan_with(units, map_cells, workers, water_profiles(cell_size))
+}
+
+/// [`water_crossing_plan`] with other movement profiles (classes 0..=4 take
+/// the places of scout, heavy, ship, hovercraft and amphibious units).
+pub fn water_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
     use class::*;
+    assert!(profiles.len() > AMPHIBIOUS as usize, "the water map's units use classes 0..=4");
     let ships = units / 20;
     let cfg = config(units - ships, map_cells, workers);
     let mut tc: TerrainConfig = cfg.terrain_config();
     tc.water = WaterMode::Surface;
     let terrain = Terrain::generate(&tc);
-    let profiles = water_profiles(cfg.cell_size);
     let mut nav = NavService::with_terrain(cfg, terrain, profiles.clone());
     let scout_radius = profiles[SCOUT as usize].unit_radius;
     let scout_speed = profiles[SCOUT as usize].base_speed;

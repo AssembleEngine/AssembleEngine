@@ -237,12 +237,19 @@ impl Crew {
     /// more helpers are woken than there are jobs). Outputs in worker order;
     /// their order does not matter to the merge.
     pub fn run(&mut self, batch: Arc<Batch>, active: usize) -> Vec<WorkerOut> {
+        self.run_beside(batch, active, || ()).0
+    }
+
+    /// [`Self::run`], but the caller first runs `first` while the helpers
+    /// start on the batch, then joins them on the jobs left.
+    pub fn run_beside<R>(&mut self, batch: Arc<Batch>, active: usize, first: impl FnOnce() -> R) -> (Vec<WorkerOut>, R) {
         let helpers = active.clamp(1, self.size()).min(batch.jobs.len().max(1)) - 1;
         for mb in &self.mailboxes[..helpers] {
             *mb.slot.lock().unwrap() = Slot::Work(batch.clone());
             mb.posted.store(true, Ordering::Release);
             mb.cv.notify_all();
         }
+        let r = first();
         let mut outs = vec![self.main.run(&batch)];
         for mb in &self.mailboxes[..helpers] {
             spin_until(&mb.finished);
@@ -261,7 +268,7 @@ impl Crew {
                 }
             }
         }
-        outs
+        (outs, r)
     }
 
     pub fn main_worker(&mut self) -> &mut Worker {

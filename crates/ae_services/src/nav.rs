@@ -17,7 +17,8 @@
 //!    group commands ([`group_orders`]);
 //! 4. turns the `TerrainEdit` events since its last run into one terrain
 //!    patch (event order; a later edit of a cell wins), see
-//!    [`terrain_patch`];
+//!    [`terrain_patch`], then adds and removes the `CostOverlay`s in event
+//!    order (each its own patch);
 //! 5. steps the service on the bodies in service order (positions,
 //!    velocities and radii from the rows) on the service's own thread pool,
 //!    then writes positions, velocities and each agent's mode back;
@@ -30,13 +31,15 @@
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, TERRAIN_CHANGED, TERRAIN_EDIT};
+use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, TERRAIN_CHANGED, TERRAIN_EDIT};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{self, Plan};
-use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavService, UnitSpec};
+use ae_nav::nav::{MovementProfile, min_clearance_cells, profiles_for, water_profiles};
+use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
+use ae_nav::terrain::Medium;
 use ae_nav::terrain::{CellEdit, TerrainPatch};
-use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, order, terrain};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, order, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -68,12 +71,32 @@ impl NavPlugin {
         (param & 0xFF_FFFF) as u32
     }
 
-    /// The service (without units) and the plan for `units` units.
-    pub fn plan(&self, units: u32, workers: usize) -> (NavService, Plan) {
+    /// The service (without units) and the plan for `units` units, with
+    /// these movement classes (see [`Self::profiles`]).
+    pub fn plan(&self, units: u32, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
         match self.map {
-            Map::WaterCrossing => scenario::water_crossing_plan(units, self.map_cells, workers),
-            Map::LandCrossing => scenario::land_crossing_plan(units, self.map_cells, workers),
+            Map::WaterCrossing => scenario::water_crossing_plan_with(units, self.map_cells, workers, profiles),
+            Map::LandCrossing => scenario::land_crossing_plan_with(units, self.map_cells, workers, profiles),
         }
+    }
+
+    /// The map's own movement classes.
+    pub fn map_profiles(&self) -> Vec<MovementProfile> {
+        let cfg = NavConfig::default();
+        match self.map {
+            Map::WaterCrossing => water_profiles(cfg.cell_size),
+            Map::LandCrossing => profiles_for(cfg.cell_size, cfg.radius_scale),
+        }
+    }
+
+    /// The classes a world uses: the module's ([`classes`]) if it declares
+    /// any, else the map's. The map's plan spawns units of its own class
+    /// indices, so the module must declare at least as many.
+    pub fn profiles(&self, schema: &Schema) -> Result<Vec<MovementProfile>> {
+        let map = self.map_profiles();
+        let Some(game) = classes(schema)? else { return Ok(map) };
+        ensure!(game.len() >= map.len(), "the module declares {} movement classes; the map's units use {}", game.len(), map.len());
+        Ok(game)
     }
 
     /// World extent in world units (the map is square, from the origin).
@@ -89,7 +112,7 @@ impl HostPlugin for NavPlugin {
         spawn.cadence = Cadence::Once;
         let mut nav = HostDecl::new("nav");
         nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
-        nav.reads_events = vec![MOVE_ORDER, ORDER_POINT, TERRAIN_EDIT];
+        nav.reads_events = vec![MOVE_ORDER, ORDER_POINT, TERRAIN_EDIT, COST_OVERLAY];
         nav.emits = vec![TERRAIN_CHANGED];
         vec![spawn, nav]
     }
@@ -101,16 +124,16 @@ impl HostPlugin for NavPlugin {
             "nav_spawn" => expect_component(schema, Goal::SCHEMA).map(drop),
             _ => {
                 ensure!(CELL_SIZE == ae_nav::service::NavConfig::default().cell_size, "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size");
-                for record in [<MoveOrder as Event>::SCHEMA, <OrderPoint as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA] {
+                for record in [<MoveOrder as Event>::SCHEMA, <OrderPoint as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA, <CostOverlay as Event>::SCHEMA] {
                     expect_component(schema, record)?;
                 }
-                Ok(())
+                self.profiles(schema).map(drop)
             }
         }
     }
 
-    fn instantiate(&self, init: &HostInit, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
-        let (service, plan) = self.plan(Self::units(init.param), init.workers);
+    fn instantiate(&self, init: &HostInit, schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
+        let (service, plan) = self.plan(Self::units(init.param), init.workers, self.profiles(schema)?);
         // The spawner and the stepper are separate systems over one plan.
         let mut service = Some(service);
         let mut plan = Some(plan);
@@ -232,6 +255,16 @@ impl HostSystem for Nav {
                 let (b, a) = unsafe { (*r.body, *r.agent) };
                 ensure!((a.profile as usize) < nav.profiles.len(), "entity {:#x}: movement profile {} of {}", r.entity, a.profile, nav.profiles.len());
                 ensure!(b.radius > 0.0 && a.max_speed >= 0.0, "entity {:#x}: bad body radius {} or speed {}", r.entity, b.radius, a.max_speed);
+                // Paths are only as wide as the class's clearance.
+                let class = &nav.profiles[a.profile as usize];
+                ensure!(
+                    min_clearance_cells(b.radius, nav.cfg.cell_size) <= class.clearance_cells,
+                    "entity {:#x}: body radius {} needs more than movement class `{}`'s clearance of {} cells",
+                    r.entity,
+                    b.radius,
+                    class.name,
+                    class.clearance_cells
+                );
                 nav.add_unit(r.entity, UnitSpec { pos: WorldPos::new(b.x, b.y), radius: b.radius, max_speed: a.max_speed, profile_id: a.profile as u8 });
             }
             s.units.clear();
@@ -243,10 +276,14 @@ impl HostSystem for Nav {
         // 3. Orders, grouped in order of each group's first event.
         let orders: Vec<MoveOrder> = ctx.events(MOVE_ORDER)?;
         let points: Vec<OrderPoint> = ctx.events(ORDER_POINT)?;
-        for command in group_orders(&orders, &points, |e| nav.local_id(e))? {
+        for (command, facing) in group_orders(&orders, &points, |e| nav.local_id(e))? {
             ensure!(self.used_groups.insert(command.id), "move order group {} was used before: a group id is a nav command id and must be new", command.id);
-            if !command.unit_ids.is_empty() {
-                nav.queue_command_at(command);
+            if command.unit_ids.is_empty() {
+                continue;
+            }
+            match facing {
+                Some(toward) => nav.queue_formation_facing(command, toward),
+                None => nav.queue_command_at(command),
             }
         }
 
@@ -257,6 +294,18 @@ impl HostSystem for Nav {
             let patch = terrain_patch(&edits, geom.cells_x, geom.cells_y)?;
             if !patch.cells.is_empty() {
                 nav.queue_terrain_patch(patch);
+            }
+        }
+        // Cost overlays, in event order (each one patch).
+        for o in ctx.events::<CostOverlay>(COST_OVERLAY)? {
+            match o.op {
+                overlay::ADD => {
+                    ensure!((1..=254).contains(&o.cost), "cost overlay {}: cost {} outside 1..=254", o.id, o.cost);
+                    ensure!(o.x0 <= o.x1 && o.y0 <= o.y1, "cost overlay {}: empty rectangle", o.id);
+                    ensure!(nav.add_cost_overlay(o.id, (o.x0, o.y0, o.x1, o.y1), o.cost as u8), "cost overlay {} added twice", o.id);
+                }
+                overlay::REMOVE => ensure!(nav.remove_cost_overlay(o.id), "cost overlay {} removed but not in use", o.id),
+                op => bail!("cost overlay {}: unknown op {op}", o.id),
             }
         }
 
@@ -298,7 +347,8 @@ impl HostSystem for Nav {
         // 6. Terrain versions that took effect.
         for c in nav.take_terrain_changes() {
             let (x0, y0, x1, y1) = c.cells;
-            ctx.emit(TERRAIN_CHANGED, bytes_of(&TerrainChanged { version: c.version, x0, y0, x1, y1 }))?;
+            let flags = if c.ground { changed::GROUND } else { 0 };
+            ctx.emit(TERRAIN_CHANGED, bytes_of(&TerrainChanged { version: c.version, x0, y0, x1, y1, flags }))?;
         }
         Ok(())
     }
@@ -333,22 +383,61 @@ pub fn terrain_patch(edits: &[TerrainEdit], cells_x: i32, cells_y: i32) -> Resul
     Ok(patch)
 }
 
+/// The movement classes a module declares (`ae_sdk::movement_classes!`, the
+/// `nav.classes` data record), as nav profiles with ids in declaration
+/// order; `None` without the declaration. Checked: 1..=255 classes, unique
+/// names, a clearance that fits the nominal radius (at most 16 cells),
+/// depths in range and `min_depth <= max_depth`.
+pub fn classes(schema: &Schema) -> Result<Option<Vec<MovementProfile>>> {
+    let Some(data) = schema.data.get(CLASSES_DATA) else { return Ok(None) };
+    ensure!(!data.is_empty() && data.len().is_multiple_of(CLASS_BYTES) && data.len() / CLASS_BYTES <= 255, "`{CLASSES_DATA}`: {} bytes is not 1..=255 classes of {CLASS_BYTES}", data.len());
+    let word = |c: &[u8], at: usize| u32::from_le_bytes(c[at..at + 4].try_into().unwrap());
+    let cell_size = NavConfig::default().cell_size;
+    let mut out: Vec<MovementProfile> = Vec::new();
+    for (id, c) in data.as_chunks::<CLASS_BYTES>().0.iter().enumerate() {
+        let name_len = c[..CLASS_NAME_MAX].iter().position(|&b| b == 0).unwrap_or(CLASS_NAME_MAX);
+        let name = std::str::from_utf8(&c[..name_len]).context("movement class name is not UTF-8")?;
+        ensure!(!name.is_empty() && c[name_len..CLASS_NAME_MAX].iter().all(|&b| b == 0), "movement class {id}: bad name");
+        ensure!(!out.iter().any(|p| p.name == name), "two movement classes are named `{name}`");
+        let [clearance, slope, radius, speed, min_depth, max_depth, hover, reserved] = [32, 36, 40, 44, 48, 52, 56, 60].map(|at| word(c, at));
+        let (radius, speed) = (f32::from_bits(radius), f32::from_bits(speed));
+        let depth = |d: u32| -> Result<i16> {
+            if d == ANY_DEPTH {
+                return Ok(i16::MAX);
+            }
+            i16::try_from(d).ok().filter(|&d| d < i16::MAX).with_context(|| format!("movement class `{name}`: depth {d} decimetres out of range"))
+        };
+        let medium = Medium { min_depth: depth(min_depth)?, max_depth: depth(max_depth)?, hover: hover == 1 };
+        ensure!(hover <= 1 && reserved == 0, "movement class `{name}`: bad flags");
+        ensure!(medium.min_depth <= medium.max_depth, "movement class `{name}`: min depth above max depth");
+        ensure!(radius.is_finite() && radius > 0.0 && speed.is_finite() && speed >= 0.0, "movement class `{name}`: radius {radius}, speed {speed}");
+        let clearance = clearance as i32;
+        ensure!((min_clearance_cells(radius, cell_size)..=16).contains(&clearance), "movement class `{name}`: clearance {clearance} cells does not fit radius {radius} (or exceeds 16)");
+        ensure!((1..i16::MAX as u32).contains(&slope), "movement class `{name}`: max slope {slope}");
+        out.push(MovementProfile { id: id as u8, name: name.into(), clearance_cells: clearance, max_slope: slope as i16, unit_radius: radius, base_speed: speed, medium });
+    }
+    Ok(Some(out))
+}
+
 /// Group commands from one run's orders and guide points: orders with the
 /// same `group` form one command whose id is the group, in order of each
 /// group's first order (events arrive in key order), with the kind and
 /// point of that first order and its units' ids ascending (orders for
 /// entities without a unit, gone or not navigable, are dropped). A group's
-/// guide points are its `OrderPoint`s by index. Errors (game bugs): a group
-/// 0, an unknown kind, two kinds in one group, points for a group without
-/// orders in the same run, for a move or stop, beyond `MAX_POINTS`, with a
-/// gap, or two copies of one point that differ.
-pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl Fn(u64) -> Option<u32>) -> Result<Vec<CommandPayload>> {
+/// guide points are its `OrderPoint`s by index; a formation's facing (the
+/// point its front faces) is its point of index `FACING`. Errors (game
+/// bugs): a group 0, an unknown kind, two kinds in one group, points for a
+/// group without orders in the same run, for a move or stop, beyond
+/// `MAX_POINTS`, with a gap, two copies of one point that differ, or a
+/// facing for a route.
+pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl Fn(u64) -> Option<u32>) -> Result<Vec<(CommandPayload, Option<WorldPos>)>> {
     struct Group {
         id: u64,
         kind: u32,
         to: WorldPos,
         units: Vec<u32>,
         points: Vec<Option<WorldPos>>,
+        facing: Option<WorldPos>,
     }
     let mut groups: Vec<Group> = Vec::new();
     let mut slot: BTreeMap<u64, usize> = BTreeMap::new();
@@ -356,7 +445,7 @@ pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl 
         ensure!(o.group != 0, "move order for {:#x} without a group", o.entity.0);
         ensure!(o.kind <= order::FORMATION, "move order for {:#x}: unknown kind {}", o.entity.0, o.kind);
         let g = *slot.entry(o.group).or_insert_with(|| {
-            groups.push(Group { id: o.group, kind: o.kind, to: WorldPos::new(o.x, o.y), units: Vec::new(), points: Vec::new() });
+            groups.push(Group { id: o.group, kind: o.kind, to: WorldPos::new(o.x, o.y), units: Vec::new(), points: Vec::new(), facing: None });
             groups.len() - 1
         });
         let group = &mut groups[g];
@@ -369,12 +458,19 @@ pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl 
         let Some(&g) = slot.get(&p.group) else { bail!("guide point for group {} without orders in the same tick", p.group) };
         let group = &mut groups[g];
         ensure!(matches!(group.kind, order::ROUTE | order::FORMATION), "guide point for group {}, whose orders are not a route or formation", p.group);
+        let at = WorldPos::new(p.x, p.y);
+        let same = |q: WorldPos| [q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits);
+        if p.index == order::FACING {
+            ensure!(group.kind == order::FORMATION, "facing for group {}, which is not a formation", p.group);
+            ensure!(group.facing.is_none_or(same), "facing of group {}: two different points", p.group);
+            group.facing = Some(at);
+            continue;
+        }
         ensure!(p.index < order::MAX_POINTS, "guide point {} of group {}: at most {} points", p.index, p.group, order::MAX_POINTS);
         let i = p.index as usize;
         if group.points.len() <= i {
             group.points.resize(i + 1, None);
         }
-        let at = WorldPos::new(p.x, p.y);
         match group.points[i] {
             None => group.points[i] = Some(at),
             Some(q) => ensure!([q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits), "guide point {i} of group {}: ({}, {}) and ({}, {})", p.group, q.x, q.y, at.x, at.y),
@@ -392,7 +488,7 @@ pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl 
             };
             g.units.sort_unstable();
             g.units.dedup();
-            Ok(CommandPayload { id: g.id, unit_ids: g.units, kind, requested_point: g.to, corridor_tolerance_world: CORRIDOR_TOLERANCE })
+            Ok((CommandPayload { id: g.id, unit_ids: g.units, kind, requested_point: g.to, corridor_tolerance_world: CORRIDOR_TOLERANCE }, g.facing))
         })
         .collect()
 }
@@ -411,7 +507,7 @@ mod tests {
 
     /// Entity `e` is unit `e` (entities above 100 have no unit).
     fn run(orders: &[MoveOrder], points: &[OrderPoint]) -> Result<Vec<CommandPayload>> {
-        group_orders(orders, points, |e| (e <= 100).then_some(e as u32))
+        Ok(group_orders(orders, points, |e| (e <= 100).then_some(e as u32))?.into_iter().map(|(c, _)| c).collect())
     }
 
     #[test]
@@ -434,13 +530,63 @@ mod tests {
         assert!(matches!(out[1].kind, CommandKind::Stop));
         let formation = run(&[MoveOrder::formation(Entity(1), 0.0, 0.0, 9)], &[])?;
         assert!(matches!(&formation[0].kind, CommandKind::CurveFormation { guide_points } if guide_points.is_empty()));
+        // A facing, sent by every unit.
+        let orders = [MoveOrder::formation(Entity(1), 0.0, 0.0, 9), MoveOrder::formation(Entity(2), 0.0, 0.0, 9)];
+        let facing = [point(9, order::FACING, 5.0), point(9, 0, 1.0), point(9, order::FACING, 5.0)];
+        let out = group_orders(&orders, &facing, |e| Some(e as u32))?;
+        assert_eq!(out[0].1, Some(WorldPos::new(5.0, 0.0)));
+        assert!(matches!(&out[0].0.kind, CommandKind::CurveFormation { guide_points } if guide_points.len() == 1));
         Ok(())
+    }
+
+    /// A module schema holding the record `movement_classes!` writes for
+    /// two classes (and an empty `schedule!`), parsed as the host does.
+    fn schema_with(classes: &[ae_sdk::nav::MovementClass; 2]) -> Schema {
+        let mut section = ae_sdk::nav::classes_record::<{ ae_sdk::nav::classes_record_len(2) }>(classes).to_vec();
+        for word in [ae_abi::KIND_ORDER, 16, 0, 0] {
+            section.extend_from_slice(&word.to_le_bytes());
+        }
+        Schema::parse(&section).unwrap()
+    }
+
+    const TANK: ae_sdk::nav::MovementClass = ae_sdk::nav::MovementClass { name: "tank", clearance_cells: 1, max_slope: 95, radius: 4.0, speed: 80.0, min_depth: 0, max_depth: 20, hover: false };
+
+    #[test]
+    fn declared_classes_become_profiles() -> Result<()> {
+        let boat = ae_sdk::nav::MovementClass { name: "boat", clearance_cells: 2, min_depth: 30, max_depth: ANY_DEPTH, ..TANK };
+        let got = classes(&schema_with(&[TANK, boat]))?.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[1].id, got[1].name.as_str(), got[1].clearance_cells, got[1].max_slope), (1, "boat", 2, 95));
+        assert_eq!(got[0].medium, Medium::land(20));
+        assert_eq!(got[1].medium, Medium::ship(30));
+        assert_eq!((got[0].unit_radius, got[0].base_speed), (4.0, 80.0));
+        assert!(classes(&Schema::default())?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bad_classes_are_errors() {
+        let cases = [
+            ([TANK, TANK], "two movement classes"),
+            ([TANK, ae_sdk::nav::MovementClass { name: "x", clearance_cells: 0, radius: 9.0, ..TANK }], "does not fit"),
+            ([TANK, ae_sdk::nav::MovementClass { name: "x", min_depth: 30, max_depth: 20, ..TANK }], "min depth"),
+            ([TANK, ae_sdk::nav::MovementClass { name: "x", max_depth: 40_000, ..TANK }], "out of range"),
+            ([TANK, ae_sdk::nav::MovementClass { name: "x", max_slope: 0, ..TANK }], "max slope"),
+            ([TANK, ae_sdk::nav::MovementClass { name: "x", radius: f32::NAN, ..TANK }], "radius"),
+        ];
+        for (c, error) in cases {
+            let e = classes(&schema_with(&c)).unwrap_err().to_string();
+            assert!(e.contains(error), "expected `{error}`, got `{e}`");
+        }
     }
 
     #[test]
     fn game_bugs_are_errors() {
         let route = MoveOrder::route(Entity(1), 0.0, 0.0, 7);
-        let cases: [(&[MoveOrder], &[OrderPoint], &str); 8] = [
+        let formation = MoveOrder::formation(Entity(1), 0.0, 0.0, 7);
+        let cases: [(&[MoveOrder], &[OrderPoint], &str); 10] = [
+            (&[route], &[point(7, order::FACING, 0.0)], "not a formation"),
+            (&[formation], &[point(7, order::FACING, 0.0), point(7, order::FACING, 1.0)], "two different points"),
             (&[MoveOrder::move_to(Entity(1), 0.0, 0.0, 0)], &[], "without a group"),
             (&[MoveOrder { kind: 4, ..route }], &[], "unknown kind"),
             (&[route, MoveOrder::stop(Entity(2), 7)], &[], "kinds"),

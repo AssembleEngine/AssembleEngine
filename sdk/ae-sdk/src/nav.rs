@@ -17,7 +17,8 @@
 //!   the nav command id, so a game never reuses one. [`OrderPoint`] events
 //!   give a route's or formation's guide points.
 //! * [`TerrainEdit`] / [`TerrainChanged`]: events that edit the terrain, and
-//!   that report when an edit took effect.
+//!   that report when an edit took effect. [`CostOverlay`]: an event that
+//!   adds or removes extra traversal cost on a rectangle.
 
 use crate::{Component, Entity};
 
@@ -103,11 +104,16 @@ pub mod order {
     pub const FORMATION: u32 = 3;
     /// Most guide points a group may have.
     pub const MAX_POINTS: u32 = 64;
+    /// [`OrderPoint::index`] of a formation's facing: the point its front
+    /// faces. Rows then stack behind the line, away from it, instead of
+    /// alternating on both sides.
+    pub const FACING: u32 = u32::MAX;
 }
 
 /// Guide point `index` (0, 1, .. without gaps, at most
 /// [`order::MAX_POINTS`]) of the route or formation of `group`, emitted in
-/// the same tick as the group's orders. A point may be emitted more than
+/// the same tick as the group's orders; or, with index [`order::FACING`],
+/// the point a formation faces. A point may be emitted more than
 /// once (say, by every unit of the group) if the copies agree.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
@@ -165,6 +171,45 @@ pub struct TerrainChanged {
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
+    /// [`changed`] flags.
+    pub flags: u32,
+}
+
+/// [`TerrainChanged::flags`].
+pub mod changed {
+    /// The ground changed (blocked, height or material), so it looks
+    /// different; without it only traversal costs did (cost edits,
+    /// overlays).
+    pub const GROUND: u32 = 1;
+}
+
+/// An event that adds ([`overlay::ADD`]) cost overlay `id`, `cost` tenths
+/// (1..=254) of extra traversal cost on every open cell of the inclusive
+/// cell rectangle `(x0, y0)..=(x1, y1)` (clipped to the map), or removes
+/// ([`overlay::REMOVE`], other fields ignored) it. Overlays on a cell add
+/// up (an open cell costs at most 254); unlike a [`TerrainEdit`] of the cost,
+/// removing one restores what was under it. Danger zones, slow fields,
+/// player-placed waypoints. An overlay lands like a terrain edit, with its
+/// navigation repair, and is reported by a [`TerrainChanged`] without
+/// [`changed::GROUND`]. It applies to every movement class. Adding an id in
+/// use, or removing one not in use, stops the tick with an error.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_0008, event)]
+pub struct CostOverlay {
+    pub id: u64,
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+    pub cost: u32,
+    pub op: u32,
+}
+
+/// [`CostOverlay::op`] values.
+pub mod overlay {
+    pub const ADD: u32 = 0;
+    pub const REMOVE: u32 = 1;
 }
 
 /// [`TerrainEdit::set`] flags.
@@ -172,6 +217,94 @@ pub mod terrain {
     pub const BLOCKED: u32 = 1;
     pub const HEIGHT: u32 = 2;
     pub const COST: u32 = 4;
+}
+
+/// A movement class: where units of the class may go. A game declares its
+/// classes once with [`movement_classes!`](crate::movement_classes); a
+/// unit's [`NavAgent::profile`] is an index into that list. Without the
+/// declaration the map's own classes apply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovementClass {
+    /// At most [`CLASS_NAME_MAX`] bytes, unique.
+    pub name: &'static str,
+    /// Clearance radius in cells: a path is valid only where the whole
+    /// `(2c + 1)²` square around each cell is open. At least
+    /// `ceil(radius / CELL_SIZE - 0.5)`, so the nominal body fits.
+    pub clearance_cells: u32,
+    /// Steepest climb, in decimetres of height per cell.
+    pub max_slope: u32,
+    /// Nominal body radius and speed (world units, per second): what map
+    /// spawners give the class's units. The service moves each unit with
+    /// its own `Body::radius` and `NavAgent::max_speed`.
+    pub radius: f32,
+    pub speed: f32,
+    /// Water depths (decimetres) the class may enter: land units
+    /// `0..=ford`, ships `draft..=ANY_DEPTH`.
+    pub min_depth: u32,
+    pub max_depth: u32,
+    /// Floats over water of any depth (and still crosses land).
+    pub hover: bool,
+}
+
+/// [`MovementClass::max_depth`]: no limit.
+pub const ANY_DEPTH: u32 = u32::MAX;
+pub const CLASS_NAME_MAX: usize = 32;
+/// Name of the data record [`movement_classes!`](crate::movement_classes)
+/// writes.
+pub const CLASSES_DATA: &str = "nav.classes";
+/// Bytes per class in that record: name (32, zero-padded), then
+/// `clearance_cells, max_slope: u32, radius, speed: f32, min_depth,
+/// max_depth, hover, 0: u32`.
+pub const CLASS_BYTES: usize = 64;
+
+/// Length of the record of `n` classes.
+pub const fn classes_record_len(n: usize) -> usize {
+    crate::abi::data_header_len(CLASSES_DATA) + n * CLASS_BYTES
+}
+
+/// The record of `classes` (`B` must be [`classes_record_len`]).
+pub const fn classes_record<const B: usize>(classes: &[MovementClass]) -> [u8; B] {
+    use crate::abi::{put_bytes, put_u32};
+    assert!(B == classes_record_len(classes.len()), "record length");
+    let mut b = [0u8; B];
+    let mut at = crate::abi::put_data_header(&mut b, CLASSES_DATA);
+    let mut i = 0;
+    while i < classes.len() {
+        let c = &classes[i];
+        assert!(!c.name.is_empty() && c.name.len() <= CLASS_NAME_MAX, "a movement class name is 1..=32 bytes");
+        put_bytes(&mut b, at, c.name.as_bytes());
+        put_u32(&mut b, at + 32, c.clearance_cells);
+        put_u32(&mut b, at + 36, c.max_slope);
+        put_u32(&mut b, at + 40, c.radius.to_bits());
+        put_u32(&mut b, at + 44, c.speed.to_bits());
+        put_u32(&mut b, at + 48, c.min_depth);
+        put_u32(&mut b, at + 52, c.max_depth);
+        put_u32(&mut b, at + 56, c.hover as u32);
+        at += CLASS_BYTES;
+        i += 1;
+    }
+    b
+}
+
+/// Declare the game's movement classes (at most one per module), index 0
+/// first:
+///
+/// ```ignore
+/// ae_sdk::movement_classes![
+///     MovementClass { name: "tank", clearance_cells: 2, max_slope: 95, radius: 4.2, speed: 80.0, min_depth: 0, max_depth: 20, hover: false },
+///     MovementClass { name: "boat", clearance_cells: 2, max_slope: 60, radius: 5.0, speed: 72.0, min_depth: 30, max_depth: ANY_DEPTH, hover: false },
+/// ];
+/// ```
+#[macro_export]
+macro_rules! movement_classes {
+    ($($class:expr),+ $(,)?) => {
+        const _: () = {
+            const CLASSES: &[$crate::nav::MovementClass] = &[$($class),+];
+            #[used]
+            #[cfg_attr(target_family = "wasm", unsafe(link_section = "ae.schema"))]
+            static RECORD: [u8; $crate::nav::classes_record_len(CLASSES.len())] = $crate::nav::classes_record(CLASSES);
+        };
+    };
 }
 
 /// [`NavAgent::mode`] values.
@@ -192,4 +325,5 @@ const _: () = {
     assert!(<OrderPoint as crate::Event>::ID == crate::abi::engine::ORDER_POINT);
     assert!(<TerrainEdit as crate::Event>::ID == crate::abi::engine::TERRAIN_EDIT);
     assert!(<TerrainChanged as crate::Event>::ID == crate::abi::engine::TERRAIN_CHANGED);
+    assert!(<CostOverlay as crate::Event>::ID == crate::abi::engine::COST_OVERLAY);
 };

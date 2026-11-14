@@ -102,6 +102,20 @@ pub struct Terrain {
     /// from `height` so dry maps run pathsim's code with no water work.
     #[serde(default)]
     pub water_depth: Vec<i16>,
+    /// Cost overlays: extra traversal cost per cell (tenths) on top of
+    /// `base_cost`; `move_cost` is their sum (`effective_cost`). Both are
+    /// empty until the first overlay edit, so maps without overlays run
+    /// with no overlay work and keep their digests.
+    #[serde(default)]
+    pub overlay: Vec<u8>,
+    #[serde(default)]
+    pub base_cost: Vec<u8>,
+}
+
+/// `move_cost` of a cell under overlays: blocked stays 255, open cells cost
+/// the base plus the overlay, at most 254.
+pub fn effective_cost(base: u8, overlay: u8) -> u8 {
+    if base == 255 { 255 } else { (base as u16 + overlay as u16).min(254) as u8 }
 }
 
 fn no_water() -> i16 { NO_WATER }
@@ -131,10 +145,18 @@ pub struct CellEdit {
 pub struct TerrainPatch {
     pub version: u32,
     pub cells: Vec<CellEdit>,
+    /// `(x, y, overlay)`: set the cost overlay of these cells (applied
+    /// after `cells`).
+    #[serde(default)]
+    pub overlay: Vec<(i32, i32, u8)>,
 }
 
 impl TerrainPatch {
-    pub fn new() -> Self { Self { version: 0, cells: Vec::new() } }
+    pub fn new() -> Self { Self { version: 0, cells: Vec::new(), overlay: Vec::new() } }
+    pub fn is_empty(&self) -> bool { self.cells.is_empty() && self.overlay.is_empty() }
+    /// Whether the patch changes the ground (blocked, height or material),
+    /// not only traversal costs.
+    pub fn changes_ground(&self) -> bool { self.cells.iter().any(|e| e.blocked.is_some() || e.height.is_some() || e.material.is_some()) }
     pub fn push(&mut self, e: CellEdit) { self.cells.push(e); }
     /// Sort and collapse duplicate cells. Later values win, deterministically.
     pub fn finish(&mut self) {
@@ -155,12 +177,12 @@ impl TerrainPatch {
         self.cells = out;
     }
     pub fn dirty_cells(&self) -> Option<(i32, i32, i32, i32)> {
-        if self.cells.is_empty() { return None; }
+        if self.is_empty() { return None; }
         let mut x0 = i32::MAX; let mut y0 = i32::MAX;
         let mut x1 = i32::MIN; let mut y1 = i32::MIN;
-        for c in &self.cells {
-            x0 = x0.min(c.x); y0 = y0.min(c.y);
-            x1 = x1.max(c.x); y1 = y1.max(c.y);
+        for (x, y) in self.cells.iter().map(|c| (c.x, c.y)).chain(self.overlay.iter().map(|o| (o.0, o.1))) {
+            x0 = x0.min(x); y0 = y0.min(y);
+            x1 = x1.max(x); y1 = y1.max(y);
         }
         Some((x0, y0, x1, y1))
     }
@@ -182,7 +204,7 @@ impl Terrain {
             geom: g.clone(), seed: cfg.seed, version: TERRAIN_VERSION_INITIAL,
             blocked: vec![0; n], height: vec![0; n], move_cost: vec![10; n],
             material: vec![Material::Grass as u8; n],
-            water_level: NO_WATER, water_depth: Vec::new(),
+            water_level: NO_WATER, water_depth: Vec::new(), overlay: Vec::new(), base_cost: Vec::new(),
         };
         let surface = cfg.water == WaterMode::Surface;
         if surface { t.water_level = SURFACE_WATER_LEVEL; }
@@ -358,16 +380,30 @@ impl Terrain {
                     self.height[i] = ground.max(self.water_level);
                 }
             }
-            if let Some(c) = e.cost { self.move_cost[i] = c; }
+            // Cost edits set the base cost under any overlays.
+            let layered = !self.overlay.is_empty();
+            let cost = if layered { &mut self.base_cost[i] } else { &mut self.move_cost[i] };
+            if let Some(c) = e.cost { *cost = c; }
             if let Some(m) = e.material { self.material[i] = m; }
             if e.blocked == Some(true) {
                 self.material[i] = Material::Rock as u8;
-                self.move_cost[i] = 255;
+                *cost = 255;
             }
-            if e.blocked == Some(false) && self.move_cost[i] == 255 {
-                self.move_cost[i] = 10;
+            if e.blocked == Some(false) && *cost == 255 {
+                *cost = 10;
                 if self.material[i] == Material::Rock as u8 { self.material[i] = Material::Grass as u8; }
             }
+            if layered { self.move_cost[i] = effective_cost(self.base_cost[i], self.overlay[i]); }
+        }
+        if !patch.overlay.is_empty() && self.overlay.is_empty() {
+            self.base_cost = self.move_cost.clone();
+            self.overlay = vec![0; self.move_cost.len()];
+        }
+        for &(x, y, o) in &patch.overlay {
+            if x < 0 || y < 0 || x >= self.geom.cells_x || y >= self.geom.cells_y { continue; }
+            let i = (y * self.geom.cells_x + x) as usize;
+            self.overlay[i] = o;
+            self.move_cost[i] = effective_cost(self.base_cost[i], o);
         }
         patch
     }
@@ -391,9 +427,11 @@ impl Terrain {
         let hi = (lo + DIGEST_BAND_ROWS * w).min(self.blocked.len());
         let mut h = crate::rng::StateHasher::new();
         let wet = !self.water_depth.is_empty();
+        let layered = !self.overlay.is_empty();
         for i in lo..hi {
             h.u64(((self.blocked[i] as u64) << 40) | ((self.move_cost[i] as u64) << 16) | (self.height[i] as u16 as u64));
             if wet { h.u32(self.water_depth[i] as u16 as u32); }
+            if layered { h.u32((self.overlay[i] as u32) << 8 | self.base_cost[i] as u32); }
         }
         h.finish()
     }
@@ -661,7 +699,7 @@ impl TestTerrain {
         let material = self.cost.iter().map(|_| Material::Grass as u8).collect();
         Terrain {
             geom: self.geom, seed, version: 1, blocked: self.blocked,
-            height: self.height, move_cost: self.cost, material, water_level: NO_WATER, water_depth: Vec::new(),
+            height: self.height, move_cost: self.cost, material, water_level: NO_WATER, water_depth: Vec::new(), overlay: Vec::new(), base_cost: Vec::new(),
         }
     }
 }

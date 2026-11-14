@@ -6,9 +6,11 @@
 //! reads and writes exactly as a module system does, so the scheduler orders
 //! it by the same conflict rules, and its commands and events are keyed by
 //! its schedule position and merged with everyone else's. A host system runs
-//! on the coordinating thread, after the layer's module systems (which
-//! cannot conflict with it), with the whole query at once; it may use its
-//! own threads inside.
+//! on the coordinating thread with the whole query at once, while the crew's
+//! helpers start on the layer's module systems (which cannot conflict with
+//! it); the thread then joins them. It may use its own threads inside.
+//! `RuntimeConfig::overlap_hosts = false` runs it after them instead; results
+//! are the same either way.
 //!
 //! Host state that is not in components (the nav service's bookkeeping)
 //! enters the world digest through [`HostSystem::digest`].
@@ -68,8 +70,10 @@ pub trait HostPlugin: Send + Sync {
     /// components it touches; see [`expect_component`]).
     fn check(&self, name: &str, schema: &Schema) -> Result<()>;
     /// Fresh state for one world: one system per name, in `names` order
-    /// (the subset of [`Self::systems`] the module schedules).
-    fn instantiate(&self, init: &HostInit, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>>;
+    /// (the subset of [`Self::systems`] the module schedules). `schema` is
+    /// the module's, with the data it declares for services
+    /// ([`Schema::data`]).
+    fn instantiate(&self, init: &HostInit, schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>>;
 }
 
 pub trait HostSystem: Send {

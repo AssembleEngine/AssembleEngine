@@ -460,8 +460,11 @@ crossing --nav water --compare`):
   fresh per-world state. A host system declares query terms, created components, emitted and read
   streams, `after` and a cadence, and is ordered by the same conflict rules as module systems; its
   commands and events carry its schedule position and merge with everyone else's. It runs on the
-  coordinating thread after its layer's module systems (which cannot conflict with it), sees its whole
-  query at once, and may use its own threads. State it keeps outside components is a digest part.
+  coordinating thread while the crew's helpers start on its layer's module systems (which cannot
+  conflict with it; its query is read before they start), then that thread joins the jobs left
+  (`Crew::run_beside`; `RuntimeConfig::overlap_hosts = false` runs it after them, same results). It sees
+  its whole query at once and may use its own threads. State it keeps outside components is a digest
+  part. `HostPlugin::instantiate` gets the module's schema, including its data records.
 - Engine components (`ae_sdk::nav`, opt-in cargo feature `nav`, fixed ids in `ae_abi::engine`): `Body
   {x, y, vx, vy, radius}`, `NavAgent {max_speed, profile, mode}`, `Goal {x, y, group}` and the events
   `MoveOrder {entity, x, y, group, kind}` (`order::MOVE`, `STOP`, `ROUTE`, `FORMATION`; constructors
@@ -547,9 +550,64 @@ the digest was re-pinned again; crossing's order tick is now bits 32..40 and the
 40..48. The exit run after both: 8 workers 4.62 ms median (nav system 4.16 ms vs 3.89 ms standalone),
 1 worker 17.65 ms, digests and nav state equal.
 
-Next for M2: movement classes from game data instead of `water_profiles()`, cost overlays, formation
-facing, and running host systems
-beside a layer's module systems instead of after them.
+Movement classes from game data: a module declares named data for engine services in `KIND_DATA`
+schema records (`u32 name_len, u32 0`, name, payload; `Schema::data`). `ae_sdk::movement_classes![..]`
+writes `nav.classes`: per class (64 bytes, built at compile time) a name, clearance in cells, max slope,
+nominal radius and speed (what map spawners use), a water depth range (`ANY_DEPTH`: no limit) and hover.
+`NavPlugin` builds the service's profiles from it (`ae_services::nav::classes`, checked: unique names,
+clearance at least the nominal radius needs and at most 16 cells, depths in range and ordered, slope
+1..32766), or from the map's when a module declares none; the map's plan needs at least as many classes
+as it uses (the scenario plans now take profiles: `water_crossing_plan_with`, `land_crossing_plan_with`).
+`games/crossing` declares the water map's five classes; the test checks they parse to exactly
+`water_profiles()` and that patching one (scout slope 1) changes the world's nav state within 30 ticks.
+The record changes no digest.
+
+Host systems beside module systems: a first version ran them on a scoped thread during the crew batch;
+on the exit run it cost 0.1-0.3 ms a tick (a thread spawn per layer, and `spatial` slower on a cold
+thread: 0.29 vs 0.22 ms), with nothing in crossing's layers to overlap. Running them on the coordinating
+thread while the helpers start, then joining, costs nothing measurable there (8 workers, three runs each:
+4.77-4.84 ms with, 4.72-4.85 ms without) and, with `crowding` moved into `spatial`'s layer (an experiment,
+not kept: the game keeps `after(spatial)`), saves 0.24-0.34 ms a tick (4.37-4.38 vs 4.61-4.72 ms), same
+digest. The crossing test checks equal digests with overlap off. M1's sandbox after the change: 50k
+units, 8 workers, 5.70x mean tick after setup, digests equal. On 8 cores (`taskset -c 0-7`, 8 workers),
+where nav's own pool and the crew's helpers compete, with a busy module system placed in nav's layer (an
+experiment, not kept): overlap still wins, 8.73-8.93 vs 9.17-9.73 ms with a heavy one (nav itself
+slows from 4.6 to 7.3 ms) and 6.37-6.44 vs 6.73-6.98 ms with a light one. So it stays on by default.
+A unit joining the service must fit its class: `min_clearance_cells(Body::radius) <= clearance`.
+
+Cost overlays (`NavService::add_cost_overlay(id, cells, cost)`, `remove_cost_overlay(id)`; in the sim
+the `CostOverlay` event, `op` `ADD` or `REMOVE`): extra traversal cost on a cell rectangle, summed where
+overlays meet, an open cell at most 254; blocked cells stay blocked. Unlike a cost `TerrainEdit` an
+overlay is removed without knowing what was under it: the terrain keeps `base_cost` and `overlay` layers
+(empty until the first overlay, like `water_depth`) and `move_cost` stays the effective cost, so the
+edge-cost hot path is unchanged and maps without overlays keep every golden and pinned hash (`nav` and
+`nav-sim` bench-diff: 51 unchanged, 0 regressed). An overlay change is a terrain patch (an overlay layer
+on `TerrainPatch`) and lands with its nav repair; `TerrainChange::ground` and
+`TerrainChanged::flags` (`changed::GROUND`) say whether the ground changed or only costs, so render can
+skip cost-only changes. Overlays apply to every movement class: flow fields are shared between classes,
+so a per-class overlay would need per-class costs (not done). Checked (`ae_nav/tests/overlay.rs`): add
+then remove restores every cost exactly; 300 units on the 384-cell land map spend 2,169 unit-ticks in a
+cost-200 overlay across their way against 19,203 in the same rectangle without it. In the sim, `zones`
+adds a slow zone at tick 100 and removes it at 130; the churned world's terrain changes equal the
+standalone service's one for one: (version 2, tick 102, ground), (4, 104, ground: the overlay and the
+raised ground in one repair), (5, 132, costs only).
+
+Formation facing: pathsim's curve formations put extra rows on both sides of the line, alternating, with
+no front ("no notion of a front or a facing", pathsim's LIMITATIONS). `NavService::queue_formation_facing
+(payload, toward)` gives one a front: along each part of the curve the first row stands on it and
+further rows stack on the side away from `toward`. Bodies have no heading, so facing is about where
+slots are, not which way units point. Without a facing pathsim's layout stays (the reference equality
+and goldens are unchanged). In the sim: an `OrderPoint` with index `order::FACING`. Checked
+(`ae_nav/tests/formation.rs`): 300 units on a 400-unit line, 140 slots ahead and 134 behind without a
+facing, 0 and 274 with one; `reorder`'s formation faces north-east, and the churned world fails against a
+reference that drops the facing.
+
+These changes (`CostOverlay`, `TerrainChanged::flags`, `Landed::flags`, the `zones` system) re-pinned the
+crossing digest again (nav state unchanged). The exit run after them: 8 workers 4.69 ms median (nav
+system 4.22 ms vs 4.03 ms standalone), 1 worker 17.59 ms, digests and nav state equal.
+
+M2's listed work is done. Left for later: per-class cost overlays, units turning to a facing (needs a
+heading in `Body`), and the second hierarchy level (M10).
 
 ### M0 risk spikes
 

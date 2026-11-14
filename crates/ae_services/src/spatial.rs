@@ -46,7 +46,7 @@ impl HostPlugin for SpatialPlugin {
         expect_component(schema, Body::SCHEMA).map(drop)
     }
 
-    fn instantiate(&self, _: &HostInit, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
+    fn instantiate(&self, _: &HostInit, _: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
         names
             .iter()
             .map(|&n| -> Result<Box<dyn HostSystem>> {

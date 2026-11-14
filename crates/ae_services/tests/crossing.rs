@@ -3,7 +3,8 @@
 //! * The game's schedule places the host systems: layers are
 //!   `nav_spawn | orders | nav | spatial churn | crowding`.
 //! * Equal world digests (which include the nav service's own state) at
-//!   1, 2, 4 and 8 sim workers, with the nav pool sized to match.
+//!   1, 2, 4 and 8 sim workers, with the nav pool sized to match, and with
+//!   host systems run beside or after the layer's module systems.
 //! * The strongest check: the same plan driven through the standalone
 //!   service (`ae_nav::scenario::water_crossing`) reaches the same nav state
 //!   hash and bit-identical bodies. That catches gather/scatter, ordering and
@@ -24,9 +25,10 @@
 
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{Plan, Scenario, water_crossing};
-use ae_nav::service::{CommandKind, CommandPayload, UnitSpec};
+use ae_nav::service::{CommandKind, CommandPayload, TerrainChange, UnitSpec};
 use ae_sdk::nav::{Body, CELL_SIZE, NavAgent, TerrainEdit, mode, terrain};
-use ae_services::nav::{Map, NavPlugin, terrain_patch};
+use ae_nav::nav::{MovementProfile, water_profiles};
+use ae_services::nav::{Map, NavPlugin, classes, terrain_patch};
 use ae_services::spatial::SpatialPlugin;
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
 use anyhow::{Result, ensure};
@@ -51,7 +53,7 @@ fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
 
 /// Final world digest (low 64 bits), identical in dev and release builds and
 /// at every worker count. Regenerate deliberately: run with `--nocapture`.
-const EXPECTED: u64 = 0xf3b9_6c8f_5582_9aec;
+const EXPECTED: u64 = 0x59aa_d156_fb18_f2de;
 
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
@@ -101,7 +103,30 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
 
     let layers: Vec<Vec<&str>> = rt.schedule.layers.iter().map(|l| l.iter().map(|&i| rt.system_name(i)).collect()).collect();
-    assert_eq!(layers, [vec!["nav_spawn"], vec!["orders", "quake"], vec!["reorder"], vec!["nav"], vec!["spatial", "churn", "landed"], vec!["crowding"]]);
+    assert_eq!(layers, [vec!["nav_spawn", "zones"], vec!["orders", "quake"], vec!["reorder"], vec!["nav"], vec!["spatial", "churn", "landed"], vec!["crowding"]]);
+
+    // The game declares its movement classes: the water map's five, so
+    // the standalone service (which uses the map's) applies.
+    let declared = classes(&rt.schema)?.expect("crossing declares movement classes");
+    ensure!(declared == water_profiles(CELL_SIZE), "declared classes {declared:#?}");
+
+    // ..and they drive the service: with the scouts' slope limit cut to 1
+    // (data the module declared, patched before the world is made), the
+    // world's nav state differs from the declared one's after a few ticks.
+    let short = |rt: &mut Runtime| -> Result<u64> {
+        let mut world = rt.world_for(UNITS as u64, 1)?;
+        for _ in 0..30 {
+            rt.tick(&mut world, 1)?;
+        }
+        Ok(rt.host_digest(&world, "nav").unwrap() as u64)
+    };
+    let as_declared = short(&mut rt)?;
+    let original = rt.schema.data["nav.classes"].clone();
+    rt.schema.data.get_mut("nav.classes").unwrap()[36..40].copy_from_slice(&1u32.to_le_bytes());
+    ensure!(nav.profiles(&rt.schema)?[0].max_slope == 1, "patched class not read");
+    let patched = short(&mut rt)?;
+    rt.schema.data.insert("nav.classes".into(), original);
+    ensure!(patched != as_declared, "changing a declared class did not change the nav state");
 
     // The standalone service on the same plan.
     let mut reference = water_crossing(UNITS, MAP_CELLS, 1);
@@ -147,11 +172,16 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
         ensure!(r.digest == base.digest, "{w} workers: digest {:032x}, 1 worker {:032x}", r.digest, base.digest);
         ensure!(r.nav == base.nav && r.modes == base.modes, "{w} workers: nav state differs");
     }
+    // Host systems after the layer's module systems instead of beside them.
+    rt.set_overlap_hosts(false);
+    let (r, _) = run(&mut rt, workers)?;
+    rt.set_overlap_hosts(true);
+    ensure!(r.digest == base.digest && r.nav == base.nav, "host systems after module systems: digest {:032x}", r.digest);
 
     let one = churned(&mut rt, 1)?;
     let many = churned(&mut rt, workers)?;
     ensure!(one.digest == many.digest && one.nav == many.nav, "churned world: 1 and {workers} workers differ");
-    let mut reference = churned_reference(&nav, &one)?;
+    let (mut reference, changes) = churned_reference(&nav, &one, nav.profiles(&rt.schema)?)?;
     ensure!(one.bodies.len() == reference.bodies.len(), "{} bodies in the sim, {} in the reference", one.bodies.len(), reference.bodies.len());
     for (i, b) in one.bodies.iter().enumerate() {
         let r = &reference.bodies;
@@ -175,28 +205,24 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     ensure!(one.modes[mode::IDLE as usize] > 0, "no stopped unit: modes {:?}", one.modes);
     eprintln!("churned world: commands (count, units) by kind {kinds:?}; final modes {:?}", one.modes);
 
-    // One repair runs at a time: the second patch, queued while the first
-    // was being repaired, lands with the next repair. One `TerrainChanged`
-    // per repair, covering its patch, versions in order.
+    // Terrain changes: the sim reports exactly the standalone service's
+    // (version, cells, whether the ground changed), on the same tick. One
+    // repair runs at a time; edits queued meanwhile land with the next one.
+    let expected: Vec<(u32, u64, Cells, u32)> = changes.iter().map(|c| (c.version, c.tick - 1, c.cells, c.ground as u32)).collect();
+    ensure!(one.landed == expected, "reported terrain changes {:?}, standalone {expected:?}", one.landed);
+    ensure!(expected.iter().any(|c| c.3 == 0) && expected.iter().any(|c| c.3 == 1), "expected both ground and cost-only changes: {expected:?}");
     let patches = [quake_patch(&reference, &one.quaked[0], false)?, quake_patch(&reference, &one.quaked[1], true)?];
-    let rects: Vec<Cells> = patches.iter().map(|p| p.dirty_cells().unwrap()).collect();
-    let landed: Vec<Cells> = one.landed.iter().map(|l| l.2).collect();
-    ensure!(landed == rects, "reported rectangles {landed:?}, the patches cover {rects:?}");
-    let last = reference.nav.terrain.version;
-    let versions: Vec<u32> = one.landed.iter().map(|l| l.0).collect();
-    ensure!(versions == [last - 1, last], "reported versions {versions:?}, the terrain is at {last}");
-    ensure!(one.landed[0].1 > QUAKE && one.landed[1].1 > one.landed[0].1, "reported at ticks {:?}", one.landed.iter().map(|l| l.1).collect::<Vec<_>>());
     let stats = reference.nav.stats();
-    ensure!(stats.nav.terrain_rebuilds == 2, "{} terrain repairs", stats.nav.terrain_rebuilds);
     ensure!(stats.nav.terrain_relocated_units > 0, "the quake buried no unit");
+    ensure!(reference.nav.cost_overlays().count() == 0, "the zone should be removed by the end");
     eprintln!(
-        "churned world: {} units replaced at tick {CHURN}, orders at tick {DELAY}, terrain edited at ticks {QUAKE} ({} cells) and {} ({} cells), landed as versions {versions:?} at ticks {} and {}, {} units moved out; equal to the standalone service, and at 1 and {workers} workers",
+        "churned world: {} units replaced at tick {CHURN}, orders at tick {DELAY}, terrain edited at ticks {QUAKE} ({} cells) and {} ({} cells), a cost overlay from tick {QUAKE} to {}; terrain changes (version, tick, cells, ground) {:?}; {} units moved out; equal to the standalone service, and at 1 and {workers} workers",
         one.replaced.len(),
         patches[0].cells.len(),
         QUAKE + 1,
         patches[1].cells.len(),
-        one.landed[0].1,
-        one.landed[1].1,
+        QUAKE + ZONE_TICKS,
+        one.landed,
         stats.nav.terrain_relocated_units
     );
     Ok(())
@@ -219,8 +245,8 @@ struct Churned {
     /// Every body `quake` saw on its two ticks (as of the end of ticks
     /// `QUAKE - 1` and `QUAKE`), by entity.
     quaked: [Vec<(u64, Body)>; 2],
-    /// `(version, tick, cells)` of each terrain version reported.
-    landed: Vec<(u32, u64, Cells)>,
+    /// `(version, tick, cells, flags)` of each terrain change reported.
+    landed: Vec<(u32, u64, Cells, u32)>,
 }
 
 /// `games/crossing`'s `quake` edits (the game is a wasm-only crate) around
@@ -231,6 +257,12 @@ fn quake_edits(x: f32, y: f32, hill: bool) -> Vec<TerrainEdit> {
     let edit = |h: i32, set, blocked, height, cost| TerrainEdit { x0: cx - h, y0: cy - h, x1: cx + h, y1: cy + h, set, blocked, height, cost };
     if hill { vec![edit(4, terrain::HEIGHT, 0, 900, 0)] } else { vec![edit(8, terrain::COST, 0, 0, 40), edit(2, terrain::BLOCKED, 1, 0, 0)] }
 }
+
+/// `games/crossing`'s `zones`: a cost overlay from tick `QUAKE` for
+/// `ZONE_TICKS` ticks.
+const ZONE: Cells = (200, 500, 320, 640);
+const ZONE_COST: u8 = 60;
+const ZONE_TICKS: u64 = 30;
 
 /// `quake` edits around units whose entity index is a multiple of this
 /// (first tick), or `HILL_OFFSET` more than one (second tick).
@@ -265,12 +297,12 @@ fn churned(rt: &mut Runtime, workers: usize) -> Result<Churned> {
     }
     ensure!(replaced.len() > UNITS as usize / 10, "churn replaced only {} units", replaced.len());
     // By version (rows come in entity order, and ids are recycled).
-    let mut landed: Vec<(u32, u64, Cells)> = rt
+    let mut landed: Vec<(u32, u64, Cells, u32)> = rt
         .rows(&world, "Landed")?
         .iter()
         .map(|(_, l)| {
-            let w: [i32; 6] = decode(l);
-            (w[0] as u32, w[1] as u64, (w[2], w[3], w[4], w[5]))
+            let w: [i32; 7] = decode(l);
+            (w[0] as u32, w[1] as u64, (w[2], w[3], w[4], w[5]), w[6] as u32)
         })
         .collect();
     landed.sort_unstable_by_key(|l| l.0);
@@ -299,9 +331,11 @@ fn churned(rt: &mut Runtime, workers: usize) -> Result<Churned> {
 /// nav sees them on tick `CHURN + 1`): removals in one batch, then new units
 /// in ascending sim-entity order, each with the body of the unit it replaces;
 /// the quake's patches before steps `QUAKE + 1` and `QUAKE + 2` (the sim's
-/// nav runs after `quake`, in the same tick).
-fn churned_reference(plugin: &NavPlugin, sim: &Churned) -> Result<Scenario> {
-    let (nav, plan) = plugin.plan(UNITS, 1);
+/// nav runs after `quake`, in the same tick), the zone's overlay after the
+/// first; the terrain changes it reports.
+fn churned_reference(plugin: &NavPlugin, sim: &Churned, profiles: Vec<MovementProfile>) -> Result<(Scenario, Vec<TerrainChange>)> {
+    let mut changes = Vec::new();
+    let (nav, plan) = plugin.plan(UNITS, 1, profiles);
     let mut s = Scenario::from_plan(nav, &Plan { units: plan.units.clone(), orders: Vec::new() });
     // Scenario entity of plan unit k is k + 1.
     let unit_of = |sim_entity: u64| sim.plan_entities.binary_search(&sim_entity).map(|k| k as u64 + 1);
@@ -325,13 +359,24 @@ fn churned_reference(plugin: &NavPlugin, sim: &Churned) -> Result<Scenario> {
                     1 => CommandKind::FollowCurve { guide_points: guides(1) },
                     _ => CommandKind::CurveFormation { guide_points: guides(2) },
                 };
-                s.nav.queue_command_at(CommandPayload { id: id + REGROUP, unit_ids, kind, requested_point: *to, corridor_tolerance_world: 48.0 });
+                let payload = CommandPayload { id: id + REGROUP, unit_ids, kind, requested_point: *to, corridor_tolerance_world: 48.0 };
+                if id % 3 == 2 {
+                    s.nav.queue_formation_facing(payload, WorldPos::new(to.x + 200.0, to.y - 200.0));
+                } else {
+                    s.nav.queue_command_at(payload);
+                }
             }
         }
         if t == QUAKE || t == QUAKE + 1 {
             let hill = t == QUAKE + 1;
             let patch = quake_patch(&s, &sim.quaked[hill as usize], hill)?;
             s.nav.queue_terrain_patch(patch);
+        }
+        if t == QUAKE {
+            ensure!(s.nav.add_cost_overlay(1, ZONE, ZONE_COST));
+        }
+        if t == QUAKE + ZONE_TICKS {
+            ensure!(s.nav.remove_cost_overlay(1));
         }
         if t == CHURN + 1 {
             let order: Vec<u64> = s.nav.entities().collect();
@@ -370,6 +415,7 @@ fn churned_reference(plugin: &NavPlugin, sim: &Churned) -> Result<Scenario> {
             }
         }
         s.step();
+        changes.extend(s.nav.take_terrain_changes());
     }
-    Ok(s)
+    Ok((s, changes))
 }

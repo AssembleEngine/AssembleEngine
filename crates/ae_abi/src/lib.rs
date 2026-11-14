@@ -20,6 +20,7 @@
 //! | [`KIND_COMPONENT`] | `u64 id, u32 size, u32 align, u32 flags, u32 field_count, u32 name_len, u32 0`, name (pad 4), then per field: `u64 id, u32 offset, u32 size, u32 kind, u32 flags, u32 name_len, u32 0`, name (pad 4) |
 //! | [`KIND_SYSTEM`] | `u32 mode, u32 cadence, u32 cadence_n, u32 cadence_phase, u32 terms, u32 emits, u32 reads, u32 after, u32 name_len, u32 0`, name (pad 4), terms `{u64 id, u32 access, u32 0}`, emitted stream ids `u64`, read stream ids `u64`, `after` names as strings |
 //! | [`KIND_ORDER`] | `u32 count, u32 0`, system names as strings |
+//! | [`KIND_DATA`] | `u32 name_len, u32 0`, name (pad 4), payload (the rest of the record): named data for the engine's services, e.g. `nav.classes` |
 //!
 //! # Systems
 //!
@@ -39,6 +40,7 @@ pub const HOST_SYSTEM_PREFIX: &str = "host:";
 pub const KIND_COMPONENT: u32 = 1;
 pub const KIND_SYSTEM: u32 = 2;
 pub const KIND_ORDER: u32 = 3;
+pub const KIND_DATA: u32 = 4;
 
 /// Component flag: the type is an event stream, not a component.
 pub const COMPONENT_EVENT: u32 = 1 << 0;
@@ -142,6 +144,23 @@ pub const fn put_bytes(buf: &mut [u8], at: usize, bytes: &[u8]) {
         buf[at + i] = bytes[i];
         i += 1;
     }
+}
+
+/// Bytes of a [`KIND_DATA`] record before its payload.
+pub const fn data_header_len(name: &str) -> usize {
+    16 + pad4(name.len())
+}
+
+/// Write the header of a [`KIND_DATA`] record that fills `buf`; returns
+/// the payload's offset.
+pub const fn put_data_header(buf: &mut [u8], name: &str) -> usize {
+    assert!(buf.len().is_multiple_of(4), "a data record's length is a multiple of 4");
+    put_u32(buf, 0, KIND_DATA);
+    put_u32(buf, 4, buf.len() as u32);
+    put_u32(buf, 8, name.len() as u32);
+    put_u32(buf, 12, 0);
+    put_bytes(buf, 16, name.as_bytes());
+    data_header_len(name)
 }
 
 pub const fn get_u32(buf: &[u8], at: usize) -> u32 {
@@ -265,10 +284,13 @@ pub mod engine {
     /// Event `TerrainEdit { x0, y0, x1, y1, set, blocked, height, cost }`: a
     /// game's edit of a cell rectangle.
     pub const TERRAIN_EDIT: u64 = 0xAE00_0000_0000_0005;
-    /// Event `TerrainChanged { version, x0, y0, x1, y1 }`: a terrain version
-    /// became authoritative.
+    /// Event `TerrainChanged { version, x0, y0, x1, y1, flags }`: a terrain
+    /// version became authoritative.
     pub const TERRAIN_CHANGED: u64 = 0xAE00_0000_0000_0006;
     /// Event `OrderPoint { group, index, x, y, reserved }`: a guide point of
     /// a route or formation order.
     pub const ORDER_POINT: u64 = 0xAE00_0000_0000_0007;
+    /// Event `CostOverlay { id, x0, y0, x1, y1, cost, op }`: add or remove a
+    /// removable traversal cost overlay.
+    pub const COST_OVERLAY: u64 = 0xAE00_0000_0000_0008;
 }
