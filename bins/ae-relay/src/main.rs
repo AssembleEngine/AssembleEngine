@@ -227,16 +227,21 @@ fn run() -> Result<bool> {
         r.finish(o.ticks)?;
     }
     let wall = started.elapsed().as_secs_f64();
+    // Every checkpoint round must have been compared, or "in sync" means
+    // nothing (a round only completes once every player reported it).
+    let expected = o.ticks.div_ceil(header.checkpoint_every.max(1));
+    let complete = checked == expected;
     println!(
-        "relay: {} ticks in {wall:.1} s ({:.1} Hz), {} players, {commands} commands ({late} taken late), {checked} digest rounds compared, {}; sent {} datagrams, dropped {}; final digests {}",
+        "relay: {} ticks in {wall:.1} s ({:.1} Hz), {} players, {commands} commands ({late} taken late), {checked} of {expected} digest rounds compared{}, {}; sent {} datagrams, dropped {}; final digests {}",
         bundles.len(),
         bundles.len() as f64 / wall,
         peers.len(),
+        if complete { "" } else { " (INCOMPLETE)" },
         if desync == 0 { "in sync".to_string() } else { format!("DESYNC first at tick {desync}") },
         net.sent,
         net.dropped,
         if agree { format!("agree ({:016x})", finals[0].unwrap() as u64) } else { format!("DIFFER {finals:x?}") },
     );
     let _ = micros(epoch);
-    Ok(desync == 0 && agree)
+    Ok(desync == 0 && agree && complete)
 }

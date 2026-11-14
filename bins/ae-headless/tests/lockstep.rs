@@ -63,7 +63,7 @@ fn clients_stay_in_sync_and_a_desync_is_caught() {
 
     let (relay, clients) = game(7651, 240, Some(file), None);
     let r = text(&relay);
-    assert!(relay.status.success() && r.contains("in sync") && r.contains("final digests agree") && r.contains("8 digest rounds compared"), "{r}");
+    assert!(relay.status.success() && r.contains("in sync") && r.contains("final digests agree") && r.contains("8 of 8 digest rounds compared"), "{r}");
     for c in &clients {
         assert!(c.status.success() && text(c).contains("240 ticks"), "{}", text(c));
     }

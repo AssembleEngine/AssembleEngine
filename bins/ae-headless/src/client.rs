@@ -22,6 +22,18 @@ use std::time::{Duration, Instant};
 /// Orders a player sends per order tick, at most (one datagram's worth).
 const MAX_ORDERS: usize = 32;
 
+/// The intended tick of a new batch of inputs: `delay` ticks ahead, but
+/// never a tick a batch was already sent for. The relay keeps the first
+/// version it receives of each `(player, intended tick)` (resends are
+/// identical), so adding to a sent batch would be lost.
+fn schedule(tick: u64, delay: u64, last: Option<u64>) -> u64 {
+    let at = tick + delay;
+    match last {
+        Some(l) if at <= l => l + 1,
+        _ => at,
+    }
+}
+
 pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let relay: SocketAddr = relay.parse().with_context(|| format!("relay address {relay}"))?;
     let wasm = ae_sim::build::game(&o.game)?;
@@ -45,6 +57,7 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let (mut end, mut desync, mut joined) = (0u64, 0u64, false);
     let mut rtt_ms = 100.0f64;
     let mut sent_orders = 0usize;
+    let mut last_intended: Option<u64> = None;
     // Most bundles waiting at once (how far ahead the relay ran).
     let mut most_queued = 0usize;
     let mut last_send = Instant::now() - Duration::from_secs(1);
@@ -75,8 +88,10 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
                 let mine: Vec<Command> = orders(&rt, &world, 16)?.commands.into_iter().filter(|c| c.player == player).take(MAX_ORDERS).collect();
                 if !mine.is_empty() {
                     let delay = ((rtt_ms / 2.0) / (period.as_secs_f64() * 1000.0)).ceil() as u64 + 2;
+                    let at = schedule(world.tick, delay, last_intended);
+                    last_intended = Some(at);
                     sent_orders += mine.len();
-                    pending.entry(world.tick + delay).or_default().extend(mine);
+                    pending.insert(at, mine);
                 }
             }
             if let Some(fault) = &o.inject
@@ -122,4 +137,27 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
         if desync > 0 { format!("; the relay saw a DESYNC at tick {desync}") } else { String::new() }
     );
     Ok(desync == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schedule;
+
+    /// Two batches that would land on one tick (the delay shrank as the
+    /// round trip improved) get distinct ticks, in order.
+    #[test]
+    fn batches_never_share_an_intended_tick() {
+        let first = schedule(100, 6, None);
+        let second = schedule(102, 3, Some(first));
+        assert_eq!((first, second), (106, 107));
+        let third = schedule(110, 2, Some(second));
+        assert_eq!(third, 112, "a later tick is used as is");
+        let mut last = None;
+        let mut seen = std::collections::BTreeSet::new();
+        for (tick, delay) in [(5, 9), (6, 8), (7, 7), (8, 2), (9, 1), (10, 0), (30, 4)] {
+            let at = schedule(tick, delay, last);
+            assert!(seen.insert(at) && last.is_none_or(|l| at > l) && at >= tick + delay);
+            last = Some(at);
+        }
+    }
 }
