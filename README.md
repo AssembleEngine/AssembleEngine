@@ -51,7 +51,8 @@ Terrain edits the sim makes reach the render heightfield (`ae-client --quake 60`
 publishes landed ground changes, and the renderer patches its textures and error pyramid in place.
 Terrain is dressed by material tilesets (reusable surface layers, projected by orientation and
 height-blended; procedural `temperate` and `desert` sets for now, [docs/tilesets.md](docs/tilesets.md)).
-`ae-client --bench all` measures fixed scenes on the GPU for `bench-diff`. Threaded recording is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+`ae-client --bench all` measures fixed scenes on the GPU for `bench-diff`; `--record-threads N` records
+render passes on several threads (one command buffer per pass). Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

@@ -24,7 +24,7 @@ use super::heightmap::{Heightmap, Pyramid};
 use super::tileset::Tileset;
 use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, Wireframe};
 use crate::device::GpuDevice;
-use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
+use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
@@ -602,11 +602,47 @@ impl Recorder<ScenePass> for TerrainApp {
     }
 
     fn record(&mut self, pass: &ScenePass, ctx: &PassContext<'_>) -> Result<()> {
-        let units = || self.unit_renderer.as_ref().context("unit renderer not created");
+        self.scene_recorder().record(pass, ctx)
+    }
+
+    fn shared(&self) -> Option<Box<dyn SharedRecorder<ScenePass> + '_>> {
+        Some(Box::new(self.scene_recorder()))
+    }
+}
+
+impl TerrainApp {
+    /// What recording reads, borrowed for one frame: the same from one
+    /// thread or several.
+    fn scene_recorder(&self) -> SceneRecorder<'_> {
+        SceneRecorder {
+            renderer: self.renderer.as_ref(),
+            units: self.unit_renderer.as_ref(),
+            programs: self.module.as_ref().map(|m| m.programs.as_slice()),
+            sampler: self.sampler,
+            update_lod: self.update_lod,
+            wireframe: self.wireframe,
+        }
+    }
+}
+
+/// [`TerrainApp`]'s recording state, without the module's WASM instance.
+struct SceneRecorder<'a> {
+    renderer: Option<&'a TerrainRenderer>,
+    units: Option<&'a UnitRenderer>,
+    programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
+    sampler: vk::Sampler,
+    update_lod: bool,
+    wireframe: Wireframe,
+}
+
+impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
+    fn record(&self, pass: &ScenePass, ctx: &PassContext<'_>) -> Result<()> {
+        let units = || self.units.context("unit renderer not created");
+        let terrain = || self.renderer.context("terrain renderer not created");
         match &pass.work {
             PassWork::Library(lib) => match lib {
-                LibraryPass::TerrainLod => self.renderer.as_ref().context("terrain renderer not created")?.record_lod(ctx, self.update_lod),
-                LibraryPass::TerrainDraw => self.renderer.as_ref().context("terrain renderer not created")?.record_draw(ctx, self.wireframe),
+                LibraryPass::TerrainLod => terrain()?.record_lod(ctx, self.update_lod),
+                LibraryPass::TerrainDraw => terrain()?.record_draw(ctx, self.wireframe),
                 LibraryPass::UnitsReset => units()?.record_reset(ctx),
                 LibraryPass::UnitsCull => units()?.record_cull(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
@@ -615,8 +651,8 @@ impl Recorder<ScenePass> for TerrainApp {
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
             PassWork::Fullscreen { sampled } => {
-                let state = self.module.as_ref().context("fullscreen pass without a module")?;
-                let (program, _) = state.programs.get(pass.program as usize).and_then(Option::as_ref).context("fullscreen program missing")?;
+                let programs = self.programs.context("fullscreen pass without a module")?;
+                let (program, _) = programs.get(pass.program as usize).and_then(Option::as_ref).context("fullscreen program missing")?;
                 let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
                 program.record(ctx, &images, self.sampler)?;
             }

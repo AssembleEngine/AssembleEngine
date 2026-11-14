@@ -706,8 +706,7 @@ the frame graph:
   `--capture` and in an 8 s windowed `--exercise` run (7 swapchain recreates). GPU per frame at
   1280x720 (RTX 3060 Ti, release, profiling on): LOD pass 0.25–0.33 ms, draw 0.05–0.07 ms, at 700 to
   3,500 leaves for overview, close-up and grazing views; about 2,450 fps windowed over the whole map.
-  These are printed, not recorded: the GPU bench (`ae-client --bench`, JSON for `bench-diff`) is still
-  to be written.
+  These were printed only; the GPU bench below (`ae-client --bench`) now records them.
 
 Units (the 10k-unit instance stream):
 - End-of-tick capture in the sim core: `ae_sim::capture::CaptureSpec` names 4-byte fields by
@@ -984,7 +983,38 @@ GPU bench (`ae-client --bench <scene>[,<scene>...]|all|list [--frames N] [--warm
 - Not done: no GPU runner in CI, so nothing runs it automatically; scenes are built into the
   client (not data); one resolution; the CPU times are too noisy to gate small changes.
 
-Next in M3: threaded recording.
+Threaded recording (`ExecutorConfig::record_threads`, `ae-client --record-threads N`, default 1):
+- `Executor::execute` first works out every pass serially in baked order: skip, barriers (the access
+  state machine is order-dependent), first-use load-to-clear, clear values and attachments. Then,
+  with `record_threads > 1`, a recorder that offers `Recorder::shared` (a `SharedRecorder: Sync`
+  view for one frame) and at least two passes to record, each pass is recorded into its own primary
+  command buffer (one pool per slot and pass, made at bake time) on a rayon pool of that many
+  threads. A head buffer holds the timestamp-query reset; one `vkQueueSubmit2` runs them in baked
+  order. Otherwise everything goes into one buffer on the calling thread, as before. Each pass
+  records the same commands either way (timestamps, label, barriers, rendering scope, viewport and
+  scissor, payload); primaries instead of secondaries avoid rendering inheritance. The rule is
+  fixed, never timing-based.
+- `TerrainApp` records through a borrowed `SceneRecorder` (terrain and unit renderers, fullscreen
+  programs, sampler), without the module's WASM instance. `RenderApp::Pass` must be `Sync`.
+  `DemoRenderer` caches descriptor sets while recording, so it stays serial.
+- Checked: `--capture` with 10k units and under the `post` module, 1 vs 4 threads: byte-identical,
+  0 validation messages, 60 of 60 frames parallel. `depth_and_multiple_targets` (D32 and D32S8)
+  run serial and on 3 threads. New GPU test `parallel_recording_matches_serial`: 24 graphics passes
+  × 3,000 draws, later passes over earlier ones, identical pixels under synchronization validation.
+  Windowed `--exercise --record-threads 4` under validation, 8–10 s (one run with the `post`
+  module): 7 and 9 swapchain recreates (rebakes recreate the per-pass pools), every frame parallel,
+  0 validation messages.
+- Numbers (no validation): the stress graph records in 2.14 ms on 1 thread, 1.62 on 2, 0.78 on 4,
+  0.58 on 8 (3.7×). The real scenes are too light to gain: their passes record in 40–60 µs (the
+  terrain and units are GPU-driven, a few draws per pass), and 4 threads add 15–25 µs of fork-join
+  and submit cost per frame (`--bench all --record-threads 4` vs 1: `cpu_frame` +20–40 %, GPU times
+  unchanged). So the default stays at 1; threads pay off once passes issue thousands of draws.
+- Not done: the parallel unit is a whole pass; one heavy pass cannot be split, and passes are not
+  grouped (a pass per command buffer). The recording pool is the executor's own, not the engine-wide
+  job pool the plan describes.
+
+Left in M3: a golden test of the frame graph `.dot` output (Verification) and a frame graph descriptor
+loadable from a data file (the editor's M3 cost).
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

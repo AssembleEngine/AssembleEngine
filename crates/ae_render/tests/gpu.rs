@@ -45,6 +45,7 @@ fn run_demo(gpu: &Arc<GpuDevice>, extent: vk::Extent2D, bake: BakeOptions, frame
         frames_in_flight: 2,
         profile,
         bake,
+        record_threads: 1,
     };
     let mut executor = Executor::new(gpu.clone(), config).unwrap();
     let (graph, resources) = build_demo_graph(extent, DemoOutput::Readback);
@@ -332,7 +333,8 @@ fn first_use_load_becomes_a_clear() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn depth_and_multiple_targets() {
-    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT);
+    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT, 1);
+    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT, 3);
 }
 
 /// The same with a combined depth-stencil format (stencil attachment bound,
@@ -340,12 +342,15 @@ fn depth_and_multiple_targets() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn depth_stencil_and_multiple_targets() {
-    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT_S8_UINT);
+    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT_S8_UINT, 1);
+    depth_and_multiple_targets_with(vk::Format::D32_SFLOAT_S8_UINT, 3);
 }
 
-fn depth_and_multiple_targets_with(depth_format: vk::Format) {
+/// With `record_threads > 1` the passes are recorded in parallel (one
+/// command buffer each): the same pixels.
+fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usize) {
     use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role};
-    use ae_render::executor::{PassContext, Recorder};
+    use ae_render::executor::{PassContext, Recorder, SharedRecorder};
     use ae_render::pipeline::{self, DepthState, GraphicsDesc};
 
     const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
@@ -373,6 +378,20 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format) {
     }
     impl Recorder<u8> for Draw {
         fn record(&mut self, pass: &u8, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            SharedRecorder::record(self, pass, ctx)
+        }
+
+        fn shared(&self) -> Option<Box<dyn SharedRecorder<u8> + '_>> {
+            Some(Box::new(self))
+        }
+    }
+    impl SharedRecorder<u8> for &Draw {
+        fn record(&self, pass: &u8, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            SharedRecorder::record(*self, pass, ctx)
+        }
+    }
+    impl SharedRecorder<u8> for Draw {
+        fn record(&self, pass: &u8, ctx: &PassContext<'_>) -> anyhow::Result<()> {
             let d = ctx.device;
             match *pass {
                 0..=2 => unsafe {
@@ -436,7 +455,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format) {
         image_binding(&images[1], (1 << 48) + 1),
         Binding::Buffer(BufferBinding { buffer: buffer.buffer, offset: 0, size: 2 * bytes, identity: (1 << 48) + 2 }),
     ];
-    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig { record_threads, ..ExecutorConfig::default() }).unwrap();
     executor.set_graph(graph).unwrap();
     let mut recorder = Draw { mrt, decal, layout, targets: [t0, t1], readback, rects: [vec![red], vec![green, blue], vec![white]] };
     for frame in 0..3 {
@@ -461,6 +480,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format) {
         assert!(half(pixel(1, 2, bottom), [128, 0, 0]), "frame {frame}: second target, no decal {:?}", pixel(1, 2, bottom));
         assert!(half(pixel(1, right, bottom), [0, 128, 0]), "frame {frame}: second target, no decal {:?}", pixel(1, right, bottom));
     }
+    assert_eq!(executor.stats().parallel_frames, if record_threads > 1 { 3 } else { 0 }, "recorded on the threads");
     drop(executor);
     unsafe {
         device.destroy_pipeline(mrt, None);
@@ -502,7 +522,7 @@ fn terrain_renders_offscreen() {
     let extent = vk::Extent2D { width: 320, height: 200 };
     app.create_offscreen(&gpu, extent).unwrap();
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(&gpu, &mut app, target, 24, config).unwrap();
     let leaves = app.stats().lock().unwrap().leaves;
     let pixels = app.readback().unwrap();
@@ -579,7 +599,7 @@ fn units_render_over_terrain() {
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(&gpu, extent).unwrap();
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(&gpu, &mut app, target, 12, config).unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
@@ -658,7 +678,7 @@ fn terrain_edits_reach_the_heightfield() {
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(&gpu, extent).unwrap();
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let step = |run: &mut Headless<_>, app: &mut TerrainApp| {
         run.frames(app, 12).unwrap();
@@ -793,7 +813,7 @@ fn tileset_scene(
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(gpu, extent).unwrap();
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    run_headless(gpu, &mut app, target, 16, ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() }).unwrap();
+    run_headless(gpu, &mut app, target, 16, ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 }).unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -941,7 +961,7 @@ fn cull_on_gpu(
     let extent = vk::Extent2D { width: 320, height: 200 };
     app.create_offscreen(gpu, extent).unwrap();
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(gpu, &mut app, target, 4, config).unwrap();
     let counts = app.last_unit_counts().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
@@ -1083,7 +1103,7 @@ fn scene_pixels(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize) ->
     use ae_render::thread::{TargetInfo, run_headless};
     let mut app = scene_app(gpu, module);
     let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(gpu, &mut app, target, frames, config).unwrap();
     let status = app.module_status().lock().unwrap().clone();
     assert!(status.errors.is_empty(), "{:?}", status.errors);
@@ -1147,7 +1167,7 @@ fn render_modules_reload_while_running() {
     let post = ae_render::module::build("post").expect("build render/post");
     let mut app = scene_app(&gpu, Some(default.clone()));
     let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let status = app.module_status();
     let reload = app.module_reload();
@@ -1258,4 +1278,166 @@ fn render_modules_reload_while_running() {
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     drop(run);
     assert_clean(&gpu);
+}
+
+/// Many graphics passes with many draws each, recorded on one thread and
+/// on four (one command buffer per pass): the same image, every frame on
+/// the threads, and the recording time of each (printed; not asserted,
+/// since it depends on the machine). Later passes overwrite earlier ones,
+/// so a wrong submission order changes pixels.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn parallel_recording_matches_serial() {
+    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder, SharedRecorder};
+    use ae_render::pipeline::{self, GraphicsDesc};
+
+    const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+    const SIZE: u32 = 64;
+    const PASSES: u16 = 24;
+    const DRAWS: usize = 3000;
+    const FRAMES: usize = 6;
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct Rect {
+        rect: [f32; 4],
+        color: [f32; 4],
+        depth: [f32; 4],
+    }
+    struct Stress {
+        pipeline: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        rects: Vec<Vec<Rect>>,
+        target: ResourceId,
+        readback: ResourceId,
+    }
+    impl Recorder<u16> for Stress {
+        fn record(&mut self, pass: &u16, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            SharedRecorder::record(self, pass, ctx)
+        }
+
+        fn shared(&self) -> Option<Box<dyn SharedRecorder<u16> + '_>> {
+            Some(Box::new(self))
+        }
+    }
+    impl SharedRecorder<u16> for &Stress {
+        fn record(&self, pass: &u16, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            SharedRecorder::record(*self, pass, ctx)
+        }
+    }
+    impl SharedRecorder<u16> for Stress {
+        fn record(&self, pass: &u16, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            let d = ctx.device;
+            if let Some(rects) = self.rects.get(*pass as usize) {
+                unsafe {
+                    d.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                    for r in rects {
+                        d.cmd_push_constants(ctx.cmd, self.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pipeline::push_bytes(r));
+                        d.cmd_draw(ctx.cmd, 6, 1, 0, 0);
+                    }
+                }
+            } else if *pass == PASSES {
+                let (image, buffer) = (ctx.image(self.target)?, ctx.buffer(self.readback)?);
+                let region = vk::BufferImageCopy::default()
+                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                    .image_extent(vk::Extent3D { width: SIZE, height: SIZE, depth: 1 });
+                unsafe { d.cmd_copy_image_to_buffer(ctx.cmd, image.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, buffer.buffer, &[region]) };
+            }
+            Ok(())
+        }
+    }
+
+    // Deterministic rects: small squares, later passes on top.
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let rects: Vec<Vec<Rect>> = (0..PASSES)
+        .map(|_| {
+            (0..DRAWS)
+                .map(|_| {
+                    let (x, y, w) = (next() * 2.0 - 1.0, next() * 2.0 - 1.0, 0.02 + next() * 0.2);
+                    Rect { rect: [x, y, x + w, y + w], color: [next(), next(), next(), 1.0], depth: [0.5, 0.0, 0.0, 0.0] }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Pixels of the last frame and the median recording time.
+    let run = |gpu: &Arc<GpuDevice>, threads: usize| -> (Vec<u8>, f32) {
+        let device = &gpu.device;
+        let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+        let layout = pipeline::pipeline_layout(device, &[], std::mem::size_of::<Rect>() as u32, stages).unwrap();
+        let desc = GraphicsDesc {
+            vertex: include_bytes!(concat!(env!("OUT_DIR"), "/test_rect.vert.spv")),
+            fragment: include_bytes!(concat!(env!("OUT_DIR"), "/test_flat.frag.spv")),
+            layout,
+            color_formats: &[FORMAT],
+            depth: None,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            blend: false,
+        };
+        let pipe = pipeline::graphics_pipeline(device, &desc).unwrap();
+        let color = ImageDesc::color_2d(FORMAT, SIZE, SIZE, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+        let bytes = (SIZE * SIZE * 4) as u64;
+        let buffer_desc = BufferDesc { size: bytes, usage: vk::BufferUsageFlags::TRANSFER_DST };
+        let mut image = OwnedImage::new(gpu, color, "stress target").unwrap();
+        let mut buffer = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "stress readback").unwrap();
+        let extent = vk::Extent2D { width: SIZE, height: SIZE };
+        let bindings = [
+            Binding::Image(ImageBinding { image: image.image, view: image.view, format: FORMAT, extent, range: image.range(), identity: 1 << 48 }),
+            Binding::Buffer(BufferBinding { buffer: buffer.buffer, offset: 0, size: bytes, identity: (1 << 48) + 1 }),
+        ];
+        let mut graph = FrameGraph::<u16>::new();
+        let target = graph.image("target", color, ResourceClass::External);
+        let readback = graph.buffer("readback", buffer_desc, ResourceClass::External);
+        for p in 0..PASSES {
+            graph.pass(&format!("draw {p}"), PassKind::Graphics, p).color(target, if p == 0 { LoadOp::Clear } else { LoadOp::Load }).id();
+        }
+        graph.pass("copy", PassKind::Transfer, PASSES).access(target, Role::TransferSrc).discard(readback, Role::TransferDst).id();
+        graph.pass("host read", PassKind::Transfer, PASSES + 1).access(readback, Role::HostRead).root().id();
+        let mut executor = Executor::new(gpu.clone(), ExecutorConfig { record_threads: threads, ..ExecutorConfig::default() }).unwrap();
+        executor.set_graph(graph).unwrap();
+        let mut recorder = Stress { pipeline: pipe, layout, rects: rects.clone(), target, readback };
+        let mut record_ms = Vec::new();
+        for _ in 0..FRAMES {
+            let token = executor.begin_frame().unwrap();
+            executor.execute(token, &mut recorder, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+            executor.wait(token).unwrap();
+            record_ms.push(executor.stats().record_ms);
+        }
+        let pixels = buffer.mapped().unwrap().to_vec();
+        assert_eq!(executor.stats().parallel_frames, if threads > 1 { FRAMES as u64 } else { 0 }, "{threads} threads");
+        drop(executor);
+        unsafe {
+            device.destroy_pipeline(pipe, None);
+            device.destroy_pipeline_layout(layout, None);
+        }
+        image.destroy(gpu);
+        buffer.destroy(gpu);
+        record_ms.sort_by(f32::total_cmp);
+        (pixels, record_ms[FRAMES / 2])
+    };
+
+    // Correctness under validation (with synchronization validation).
+    let gpu = gpu();
+    let (serial, _) = run(&gpu, 1);
+    let (parallel, _) = run(&gpu, 4);
+    let distinct = serial.chunks(4).collect::<std::collections::BTreeSet<_>>().len();
+    assert!(distinct > 50, "the passes drew something ({distinct} colours)");
+    assert!(serial == parallel, "parallel recording changed {} bytes", serial.iter().zip(&parallel).filter(|(a, b)| a != b).count());
+    assert_clean(&gpu);
+    drop(gpu);
+
+    // Recording time without the validation layer (it dominates otherwise).
+    let instance = Arc::new(GpuInstance::new(&[], Some(false)).expect("Vulkan instance"));
+    let plain = Arc::new(GpuDevice::new(instance, None).expect("Vulkan device"));
+    for threads in [1, 2, 4, 8] {
+        let (pixels, ms) = run(&plain, threads);
+        assert!(pixels == serial, "{threads} threads without validation: other pixels");
+        println!("{threads} recording thread(s): {PASSES} passes x {DRAWS} draws recorded in {ms:.2} ms (median of {FRAMES} frames, no validation)");
+    }
 }

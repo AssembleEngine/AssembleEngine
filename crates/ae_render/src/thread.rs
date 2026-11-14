@@ -28,7 +28,7 @@ pub struct TargetInfo {
 }
 
 pub trait RenderApp: Send + 'static {
-    type Pass: Send + 'static;
+    type Pass: Send + Sync + 'static;
 
     /// (Re)create format-dependent GPU objects (pipelines). Called once and
     /// whenever the swapchain format changes.
@@ -73,6 +73,8 @@ pub struct GpuRenderConfig {
     pub max_fps: u32,
     pub profile: bool,
     pub verbose: bool,
+    /// `ExecutorConfig::record_threads`.
+    pub record_threads: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -209,6 +211,7 @@ fn render_main<A: RenderApp>(
         ExecutorConfig {
             frames_in_flight: config.frames_in_flight,
             profile: config.profile,
+            record_threads: config.record_threads,
             ..ExecutorConfig::default()
         },
     )?;
@@ -379,7 +382,7 @@ pub struct Headless<P> {
     last: Option<crate::executor::FrameToken>,
 }
 
-impl<P> Headless<P> {
+impl<P: Sync> Headless<P> {
     /// Create the executor and the app's GPU objects.
     pub fn new<A: RenderApp<Pass = P>>(gpu: &Arc<GpuDevice>, app: &mut A, target: TargetInfo, config: ExecutorConfig) -> Result<Self> {
         let executor = Executor::new(gpu.clone(), config)?;

@@ -136,6 +136,7 @@ dependencies = [
  "ash",
  "glam",
  "gpu-allocator",
+ "rayon",
  "rspirv",
  "sdl3-sys",
  "wasmtime",

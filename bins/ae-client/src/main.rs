@@ -42,6 +42,9 @@
 //! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
 //! (see `bench.rs`; `--bench list` names them).
 //!
+//! `--record-threads N` records the frame's passes on N threads, one
+//! command buffer per pass (default 1: all on the render thread).
+//!
 //! `--seconds` closes the window after S seconds; `--exercise` resizes,
 //! minimizes and restores on a schedule. Validation follows
 //! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
@@ -102,15 +105,17 @@ struct Options {
     tileset_size: u32,
     /// `--bench`: scenes to measure instead of opening a window.
     bench: Option<bench::BenchOptions>,
+    /// Threads recording render passes (1: the render thread alone).
+    record_threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1 }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -160,6 +165,7 @@ fn parse() -> Result<Options> {
             "--label" => o.bench.get_or_insert_with(Default::default).label = Some(value("--label", &mut args)?),
             "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
+            "--record-threads" => o.record_threads = value("--record-threads", &mut args)?.parse::<usize>().context("--record-threads")?.max(1),
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
             "-h" | "--help" => {
@@ -420,7 +426,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
     let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
-    let executor = run_headless(&gpu, &mut app, target, 60, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, ..ExecutorConfig::default() })?;
+    let executor = run_headless(&gpu, &mut app, target, 60, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, record_threads: o.record_threads, ..ExecutorConfig::default() })?;
     let pixels = app.readback().context("no readback")?;
     let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
     ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
@@ -439,11 +445,12 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
     let gpu_ms: Vec<String> = executor.pass_names.iter().zip(&executor.pass_gpu_ms).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
     println!(
-        "wrote {path}: {} leaves, {} drawn{}; GPU ms per pass: {}{sim_note}; {}",
+        "wrote {path}: {} leaves, {} drawn{}; GPU ms per pass: {}{sim_note}{}; {}",
         stats.leaves,
         stats.drawn,
         counts.map(|(rows, visible)| format!(", {visible} of {rows} units visible")).unwrap_or_default(),
         gpu_ms.join(", "),
+        if o.record_threads > 1 { format!("; {} of {} frames recorded on {} threads", executor.parallel_frames, executor.frames, o.record_threads) } else { String::new() },
         validation_text(instance.validation, errors, warnings)
     );
     Ok(if errors + warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
@@ -451,7 +458,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
 
 fn run(o: Options) -> Result<ExitCode> {
     if let Some(b) = &o.bench {
-        return bench::run(b);
+        return bench::run(&bench::BenchOptions { record_threads: o.record_threads, ..b.clone() });
     }
     let (source, nav) = match o.map {
         MapKind::Demo => (None, None),
@@ -464,7 +471,7 @@ fn run(o: Options) -> Result<ExitCode> {
         return capture(source.context("--capture needs a terrain map")?, nav, &o, path);
     }
     let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
-    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false };
+    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false, record_threads: o.record_threads };
     type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
@@ -586,6 +593,9 @@ fn run(o: Options) -> Result<ExitCode> {
                 s.units, s.tick, s.tick_ms, s.capture_ms, s.late
             );
         }
+    }
+    if o.record_threads > 1 {
+        println!("{} of {} frames recorded on {} threads", stats.executor.parallel_frames, stats.executor.frames, o.record_threads);
     }
     println!(
         "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} acquire timeouts, {}",

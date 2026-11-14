@@ -12,6 +12,7 @@ ae_render_abi.workspace = true
 wasmtime.workspace = true
 rspirv = "0.13"
 anyhow.workspace = true
+rayon.workspace = true
 ash.workspace = true
 glam = "0.30"
 gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }

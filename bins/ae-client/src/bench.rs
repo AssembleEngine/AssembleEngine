@@ -37,6 +37,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[derive(Clone)]
 pub struct BenchOptions {
     pub target: String,
     pub frames: usize,
@@ -44,11 +45,13 @@ pub struct BenchOptions {
     pub label: Option<String>,
     pub out: PathBuf,
     pub save: bool,
+    /// `--record-threads`.
+    pub record_threads: usize,
 }
 
 impl Default for BenchOptions {
     fn default() -> Self {
-        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true }
+        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1 }
     }
 }
 
@@ -209,7 +212,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(gpu, extent)?;
     let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: true, ..ExecutorConfig::default() };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: true, record_threads: b.record_threads, ..ExecutorConfig::default() };
     let mut headless = Headless::new(gpu, &mut app, target, config)?;
     let view = app.view();
     let stats = app.stats();
