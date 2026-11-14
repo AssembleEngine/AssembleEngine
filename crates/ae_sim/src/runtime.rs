@@ -125,6 +125,10 @@ pub struct TickStats {
     pub fuel: Vec<u64>,
     /// Wall time per host system (runtime order; zero for module systems).
     pub host_system_ns: Vec<u64>,
+    /// Commands of the tick's bundle appended to their streams, and dropped
+    /// (unknown or non-command stream, wrong size).
+    pub commands_in: u64,
+    pub commands_dropped: u64,
 }
 
 pub struct World {
@@ -386,9 +390,37 @@ impl Runtime {
 
     /// Run one tick on `workers` workers.
     pub fn tick(&mut self, w: &mut World, workers: usize) -> Result<TickStats> {
+        let tick = w.tick;
+        self.tick_with(w, workers, &crate::input::TickBundle::new(tick))
+    }
+
+    /// Whether players may send commands on `stream`.
+    pub fn is_command_stream(&self, stream: u64) -> bool {
+        self.schema.component(stream).is_some_and(|c| c.event && c.command)
+    }
+
+    /// One tick with the players' commands for it (`bundle.tick` must be the
+    /// world's tick): valid commands are appended to their event streams
+    /// before the first layer, in bundle order; invalid ones are dropped and
+    /// counted, identically on every peer.
+    pub fn tick_with(&mut self, w: &mut World, workers: usize, bundle: &crate::input::TickBundle) -> Result<TickStats> {
         ae_profile::zone!("sim_tick");
         let tick = w.tick;
+        ensure!(bundle.tick == tick, "a bundle for tick {} at tick {tick}", bundle.tick);
         let mut stats = TickStats { fuel: vec![0; self.systems.len()], host_system_ns: vec![0; self.systems.len()], ..Default::default() };
+        if !bundle.commands.is_empty() {
+            let mut accepted = Vec::with_capacity(bundle.commands.len());
+            for (seq, c) in bundle.commands.iter().enumerate() {
+                let ok = self.schema.component(c.stream).is_some_and(|d| d.event && d.command && d.size as usize == c.bytes.len());
+                if ok {
+                    accepted.push((crate::command::CommandKey { system: u32::MAX, range: c.player, seq: seq as u32 }, c.stream, c.bytes.clone()));
+                } else {
+                    stats.commands_dropped += 1;
+                }
+            }
+            stats.commands_in = accepted.len() as u64;
+            w.events.append(&accepted)?;
+        }
         if tick == 1 {
             for (i, s) in self.systems.iter().enumerate() {
                 if s.decl.cadence == Cadence::Once {

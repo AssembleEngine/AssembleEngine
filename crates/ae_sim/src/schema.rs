@@ -38,6 +38,8 @@ pub struct ComponentDecl {
     pub align: u32,
     /// An event stream rather than a component.
     pub event: bool,
+    /// An event stream players may send commands on.
+    pub command: bool,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -177,7 +179,7 @@ fn component(rec: &[u8]) -> Result<ComponentDecl> {
     let mut spans: Vec<(u32, u32)> = fields.iter().map(|f| (f.offset, f.offset + f.size)).collect();
     spans.sort_unstable();
     ensure!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{name}: fields overlap");
-    Ok(ComponentDecl { id, name, size, align, event: flags & abi::COMPONENT_EVENT != 0, fields })
+    Ok(ComponentDecl { id, name, size, align, event: flags & abi::COMPONENT_EVENT != 0, command: flags & abi::COMPONENT_COMMAND != 0, fields })
 }
 
 fn system(rec: &[u8]) -> Result<SystemRecord> {

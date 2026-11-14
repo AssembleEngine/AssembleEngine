@@ -44,6 +44,9 @@ pub const KIND_DATA: u32 = 4;
 
 /// Component flag: the type is an event stream, not a component.
 pub const COMPONENT_EVENT: u32 = 1 << 0;
+/// Component flag (events only): players may send events of this stream as
+/// commands (`ae_sim::input`); other streams only systems emit.
+pub const COMPONENT_COMMAND: u32 = 1 << 1;
 
 /// Field flags.
 pub const FIELD_HASHED: u32 = 1 << 0;

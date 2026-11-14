@@ -83,6 +83,8 @@ fn parse_id(meta: &syn::meta::ParseNestedMeta) -> syn::Result<u64> {
 /// * `#[component(id = N)]`: stable id (default: FNV-1a of the type name).
 /// * `#[component(event)]`: the type is an event stream (implements
 ///   `ae_sdk::Event` instead of `ae_sdk::Component`).
+/// * `#[component(event, command)]`: players may also send events of this
+///   stream as commands (the runtime's tick inputs).
 /// * `#[field(id = N)]`: stable field id (default: FNV-1a of the field name).
 /// * `#[field(unhashed)]`, `#[field(unsynced)]`, `#[field(unsaved)]`: clear
 ///   the default flags.
@@ -116,17 +118,23 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
     let name = ty.to_string();
     let mut id = abi::name_id(&name);
     let mut event = false;
+    let mut command = false;
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("component")) {
         attr.parse_nested_meta(|m| {
             if m.path.is_ident("id") {
                 id = parse_id(&m)?;
             } else if m.path.is_ident("event") {
                 event = true;
+            } else if m.path.is_ident("command") {
+                command = true;
             } else {
-                return Err(m.error("expected `id = N` or `event`"));
+                return Err(m.error("expected `id = N`, `event` or `command`"));
             }
             Ok(())
         })?;
+    }
+    if command && !event {
+        return Err(Error::new_spanned(ty, "`command` needs `event`: commands are events players send"));
     }
     let Data::Struct(data) = &input.data else { return Err(Error::new_spanned(ty, "components must be structs")) };
     let Fields::Named(fields) = &data.fields else { return Err(Error::new_spanned(ty, "components need named fields")) };
@@ -138,7 +146,7 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
     r.u64(id);
     r.patch_u32(quote! { ::core::mem::size_of::<#ty>() });
     r.patch_u32(quote! { ::core::mem::align_of::<#ty>() });
-    r.u32(if event { abi::COMPONENT_EVENT } else { 0 });
+    r.u32(if event { abi::COMPONENT_EVENT } else { 0 } | if command { abi::COMPONENT_COMMAND } else { 0 });
     r.u32(fields.named.len() as u32);
     r.u32(name.len() as u32);
     r.u32(0);

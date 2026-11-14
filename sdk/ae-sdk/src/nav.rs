@@ -98,7 +98,7 @@ pub struct Goal {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
-#[component(id = 0xAE00_0000_0000_0004, event)]
+#[component(id = 0xAE00_0000_0000_0004, event, command)]
 pub struct MoveOrder {
     pub entity: Entity,
     /// Where the group goes (a route's end, the formation's anchor when it
@@ -157,7 +157,7 @@ pub mod order {
 /// once (say, by every unit of the group) if the copies agree.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
-#[component(id = 0xAE00_0000_0000_0007, event)]
+#[component(id = 0xAE00_0000_0000_0007, event, command)]
 pub struct OrderPoint {
     pub group: u64,
     pub index: u32,

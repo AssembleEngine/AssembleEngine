@@ -1179,6 +1179,31 @@ add 0.84 ms, so the full copy-layer step for two observers is 2.4 ms.
 
 M4 is complete with the caveats above. Next is M5 (lockstep and replay).
 
+### M5 progress
+
+One sim per process: a second `Runtime` in the same process fails ("column arena already installed",
+flecs' column allocator is process-wide), checked with two identical configs at once. So
+multi-client lockstep runs one process per client from the start (loopback UDP); in-process tests
+can cover the relay and protocol logic only.
+
+Player commands (`ae_sim::input`):
+- `TickBundle { tick, commands }`, a command being `{ player, stream, bytes }`: one event of a
+  stream the game marks as a command stream (`#[component(event, command)]`, schema flag
+  `COMPONENT_COMMAND`; the SDK marks `MoveOrder` and `OrderPoint`). The one input type: replays and
+  the relay will carry the same bundles. Binary encoding with a round-trip test.
+- `Runtime::tick_with(world, workers, &bundle)` appends the valid commands to their streams before
+  the first layer, in bundle order (whoever builds the bundle fixes the order; peers never sort), so
+  readers see them that tick; it drops commands on unknown or non-command streams or of the wrong
+  size, identically everywhere, and counts both (`TickStats::commands_in/dropped`). `tick` is
+  `tick_with` an empty bundle. Commands name 64-bit sim ids, never view ids.
+- Test `ae_services/tests/input.rs` (crossing with the game's own orders held back): `MoveOrder`
+  commands for 40 units at tick 10 make only ordered units travel far (39 of 40 did; others are
+  pushed aside); the same bundles in a fresh run give the same digest; three invalid commands are
+  dropped and the world is as without them; an order for a nonexistent entity is ignored the same
+  way every run. Crossing's pinned digest is unchanged (the command flag is not hashed).
+- Not done: ownership (a player ordering another's unit) is not checked; that belongs to the relay
+  or to game systems reading `Team`.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

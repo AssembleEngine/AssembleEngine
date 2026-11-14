@@ -7,6 +7,8 @@
 //!   by key and applied serially, so entity ids and table layout come out the
 //!   same at any worker count.
 //! * [`imports`]: the host functions sim modules call to emit commands.
+//! * [`input`]: player commands, one [`input::TickBundle`] per tick, the
+//!   only way anything outside the sim changes it.
 //! * [`capture`]: end-of-tick copies of chosen fields for consumers outside
 //!   the sim (rendering).
 
@@ -18,6 +20,7 @@ pub mod digest;
 pub mod events;
 pub mod host;
 pub mod imports;
+pub mod input;
 pub mod runtime;
 pub mod schedule;
 pub mod schema;
