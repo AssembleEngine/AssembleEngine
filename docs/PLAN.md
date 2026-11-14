@@ -1204,6 +1204,43 @@ Player commands (`ae_sim::input`):
 - Not done: ownership (a player ordering another's unit) is not checked; that belongs to the relay
   or to game systems reading `Team`.
 
+Replays (`ae_replay`, `ae-headless --record / --replay --verify`):
+- A replay is a header (engine version, xxh3-128 of the game module and of its schema section, the
+  game parameter, the host configuration `map`, `map_cells`, `teams`, the checkpoint interval), the
+  tick bundles that have commands, checkpoints (digest total and its parts per component and host
+  service), and an end record. `Header::check` names the first difference; a file without its end
+  record is refused.
+- `--record FILE` runs one worker count, with `--script orders` (two players; every 40 ticks each
+  orders about 1 unit in 16, chosen by a hash of entity and tick, to a point up to 800 m away; built
+  from the world alone) and a checkpoint every `--checkpoint-every` ticks (default 30; a digest costs
+  0.9 ms at 10k units against a 4.2 ms tick, `AE_DIGEST_COST=1` measures it). `--replay FILE
+  --verify` builds the world the header names, feeds it the file's bundles only and compares every
+  checkpoint; a mismatch prints the tick and the differing parts and exits 1.
+- 4,000 units on 1,024 cells, 600 ticks, 7,424 commands: 364 KB; replayed at 1 and 8 workers, all 20
+  checkpoints match; another module is refused ("the game module differs").
+- Sequential runtimes in one process: the column arena was keyed by the address of the runtime's
+  memory, so a second runtime only worked when its memory landed at the same address (tests had
+  been lucky). A runtime now releases its arena when it drops (`ae_ecs::arena::release`), and the
+  next one installs a fresh arena. Still one live sim per process.
+
+Desync localisation (`--replay FILE --bisect --inject TICK:Component.field:ROW`):
+- `Runtime::poke` overwrites a 4-byte field of one entity (fault injection only). The bisect runs
+  three times from tick 0, since there are no snapshots: the faulty run recording every tick's
+  digest; the clean run up to the first tick whose digest differs, dumping every component row
+  there; the faulty run again to that tick, dumping and diffing rows by entity and field (values
+  shown by field kind). A divergence that shows only in a host service's part is reported as inside
+  that service.
+- Water map, 4,000 units, a bit of `Body.x` flipped on one unit after tick 200: "first divergence
+  after tick 201 ... parts that differ: (host nav), Body", one row, that entity's `Body.x`, in 4.6 s.
+  Digests compare states after ticks, so the fault shows after the next tick, by when the nav service
+  may have moved the unit and its neighbours by it.
+- Test `bins/ae-headless/tests/replay.rs` drives the binary: record (600 units, 120 ticks, scripted
+  orders), verify at 1 and 2 workers, refuse the sandbox module, and bisect a flipped `Body.y`
+  (divergence after tick 61, at the injected entity, at most 3 entities).
+- Not done: bisect compares two runs on one machine; between machines it would need each side's
+  per-tick digests and rows (the relay's job); no Windows or aarch64 runs (no such machines here),
+  so "replay digests equal on Linux and Windows" is not checked.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

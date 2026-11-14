@@ -18,9 +18,20 @@
 //! every tick (`ae_services::view`) and prints the median capture +
 //! coverage time and view build time (all K together and per observer).
 //!
+//! `--record FILE` writes a replay of one run (with `--script orders`,
+//! synthetic player commands; a checkpoint digest every
+//! `--checkpoint-every` ticks, default 30); `--replay FILE --verify` plays
+//! it back from the file alone and checks every checkpoint (see
+//! `replay.rs`). `--bisect --inject TICK:Component.field:ROW` flips a bit
+//! of one entity's field in one run and reports where that run first
+//! differs from a clean one: tick, digest parts, entities and fields.
+//! `AE_DIGEST_COST=1` times the world digest.
+//!
 //! `--compare` also runs the same plan through the standalone nav service
 //! (`ae_nav::scenario`) at each worker count: its state hash must equal the
 //! sim's nav digest, and both tick times are printed.
+
+mod replay;
 
 use ae_nav::scenario::Scenario;
 use ae_services::nav::{Map, NavPlugin};
@@ -33,7 +44,10 @@ use anyhow::{Context, Result, bail};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]";
+const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]
+       ae-headless --game NAME --nav water ... --record FILE.aerep [--script orders] [--checkpoint-every N]
+       ae-headless --game NAME --replay FILE.aerep [--verify] [--workers N]
+       ae-headless --game NAME --replay FILE.aerep --bisect --inject TICK:Component.field:ROW";
 
 struct Opts {
     game: String,
@@ -53,10 +67,18 @@ struct Opts {
     compare: bool,
     /// Run host systems beside the layer's module systems.
     overlap: bool,
+    record: Option<String>,
+    replay: Option<String>,
+    verify: bool,
+    /// `--script orders`: synthetic player commands while recording.
+    script: bool,
+    checkpoint_every: u64,
+    bisect: bool,
+    inject: Option<replay::Inject>,
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0 };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -86,6 +108,16 @@ fn parse() -> Result<Opts> {
                     v => bail!("--overlap on|off, not {v}"),
                 }
             }
+            "--record" => o.record = Some(value()?),
+            "--replay" => o.replay = Some(value()?),
+            "--verify" => o.verify = true,
+            "--bisect" => o.bisect = true,
+            "--inject" => o.inject = Some(replay::Inject::parse(&value()?)?),
+            "--checkpoint-every" => o.checkpoint_every = value()?.parse()?,
+            "--script" => match value()?.as_str() {
+                "orders" => o.script = true,
+                s => bail!("unknown script {s} (orders)"),
+            },
             "--digest" => o.digest = true,
             "--fuel" => o.fuel = true,
             _ => bail!("unknown argument {a}\n{USAGE}"),
@@ -118,6 +150,16 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool> {
     let o = parse()?;
+    if let Some(path) = &o.record {
+        return replay::record(&o, path);
+    }
+    if let Some(path) = &o.replay {
+        if o.bisect {
+            let inject = o.inject.as_ref().context("--bisect compares a run with --inject TICK:Component.field:ROW against a clean one")?;
+            return replay::bisect(&o, path, inject);
+        }
+        return replay::replay(&o, path, o.verify);
+    }
     ae_profile::start();
     let wasm = ae_sim::build::game(&o.game)?;
     let max = *o.workers.iter().max().unwrap();
@@ -195,6 +237,13 @@ fn run() -> Result<bool> {
             }
         }
         let wall_ms = started.elapsed().as_secs_f64() * 1e3 - view_ms;
+        if std::env::var_os("AE_DIGEST_COST").is_some() {
+            let t = Instant::now();
+            for _ in 0..10 {
+                std::hint::black_box(rt.digest(&world)?);
+            }
+            println!("  digest: {:.3} ms", t.elapsed().as_secs_f64() * 1e3 / 10.0);
+        }
         if let Some((_, observers, capture_ms, build_ms, rows)) = view.as_mut() {
             let median = |v: &mut Vec<f64>| {
                 v.sort_by(f64::total_cmp);

@@ -40,7 +40,10 @@ fn decode<T: Copy>(bytes: &[u8]) -> T {
 /// Final digest, the units that travelled far, commands accepted and dropped.
 type Outcome = (u128, Vec<u64>, u64, u64);
 
-fn run(script: &dyn Fn(u64, &[(u64, Body)]) -> TickBundle) -> Result<Outcome> {
+/// Each tick's bundle from the tick and the units' bodies.
+type Script<'a> = &'a dyn Fn(u64, &[(u64, Body)]) -> TickBundle;
+
+fn run(script: Script<'_>) -> Result<Outcome> {
     let wasm = ae_sim::build::game("crossing")?;
     let nav = NavPlugin::new(Map::WaterCrossing, 256);
     let spatial = SpatialPlugin::square(nav.extent(), 64.0);

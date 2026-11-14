@@ -31,8 +31,11 @@ dependencies = [
 name = "ae-headless"
 version = "0.0.1"
 dependencies = [
+ "ae-sdk",
+ "ae_abi",
  "ae_nav",
  "ae_profile",
+ "ae_replay",
  "ae_services",
  "ae_sim",
  "ae_view",
@@ -152,6 +155,15 @@ dependencies = [
 [[package]]
 name = "ae_render_abi"
 version = "0.0.1"
+
+[[package]]
+name = "ae_replay"
+version = "0.0.1"
+dependencies = [
+ "ae_sim",
+ "anyhow",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "ae_sensors"

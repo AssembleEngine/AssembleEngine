@@ -16,3 +16,6 @@ ae_wasm.workspace = true
 ae_profile.workspace = true
 anyhow.workspace = true
 ae_view.workspace = true
+ae_replay.workspace = true
+ae_abi.workspace = true
+ae-sdk = { workspace = true, features = ["nav"] }

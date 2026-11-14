@@ -1,0 +1,334 @@
+//! Record and replay (`--record FILE`, `--replay FILE [--verify]`).
+//!
+//! Recording runs one worker count and writes a replay ([`ae_replay`]):
+//! the header (module and schema hashes, parameter, map configuration),
+//! every tick's command bundle (from `--script orders`, or none), and a
+//! checkpoint digest every `--checkpoint-every` ticks and at the end.
+//!
+//! Replaying builds the world the header names (parameter, map, size and
+//! teams from the file; `--game` must be the same module), feeds it the
+//! file's bundles only, and with `--verify` compares the digest at every
+//! checkpoint: the first mismatch is reported with the digest parts that
+//! differ, and the exit status is 1.
+
+use super::Opts;
+use ae_abi::engine::MOVE_ORDER;
+use ae_replay::{Checkpoint, Header, Recorder, Replay};
+use ae_sdk::Entity;
+use ae_sdk::nav::{Body, MoveOrder};
+use ae_services::nav::{Map, NavPlugin};
+use ae_services::spatial::SpatialPlugin;
+use ae_sim::host::HostPlugin;
+use ae_sim::input::{Command, TickBundle};
+use ae_sim::runtime::{Runtime, RuntimeConfig, World};
+use anyhow::{Context, Result, bail, ensure};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+
+fn map_name(m: Map) -> &'static str {
+    match m {
+        Map::WaterCrossing => "water",
+        Map::LandCrossing => "land",
+    }
+}
+
+fn map_of(name: &str) -> Result<Map> {
+    Ok(match name {
+        "water" => Map::WaterCrossing,
+        "land" => Map::LandCrossing,
+        other => bail!("unknown map {other}"),
+    })
+}
+
+/// The world's header, from the module and the run's configuration.
+fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_every: u64) -> Result<Header> {
+    let schema = ae_sim::schema::custom_sections(wasm, ae_abi::SCHEMA_SECTION)?;
+    let mut config = BTreeMap::new();
+    if let Some((map, cells, teams)) = nav {
+        config.insert("map".into(), map_name(map).into());
+        config.insert("map_cells".into(), cells.to_string());
+        config.insert("teams".into(), teams.to_string());
+    }
+    Ok(Header { engine: env!("CARGO_PKG_VERSION").into(), module_hash: ae_replay::hash(wasm), schema_hash: ae_replay::hash(&schema), param, config, checkpoint_every })
+}
+
+fn runtime(wasm: &[u8], nav: Option<(Map, i32, u32)>, workers: usize, range_rows: usize) -> Result<Runtime> {
+    let cfg = RuntimeConfig { max_workers: workers, range_rows, ..RuntimeConfig::default() };
+    let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
+    if let Some((map, cells, teams)) = nav {
+        let plugin = NavPlugin { teams, ..NavPlugin::new(map, cells) };
+        plugins.push(Arc::new(plugin.clone()));
+        plugins.push(Arc::new(SpatialPlugin::square(plugin.extent(), 64.0)));
+    }
+    Runtime::with_hosts(wasm, cfg, plugins)
+}
+
+fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// `--script orders`: two players; every 40 ticks (from tick 5) each
+/// orders about one unit in 16 (by a hash of entity and tick) to a point up
+/// to 800 m away, as one group. Deterministic from the world alone.
+fn orders(rt: &Runtime, world: &World) -> Result<TickBundle> {
+    let tick = world.tick;
+    let mut b = TickBundle::new(tick);
+    if tick % 40 != 5 {
+        return Ok(b);
+    }
+    for (e, bytes) in rt.rows(world, "Body")? {
+        let h = mix(e ^ tick.rotate_left(17));
+        let player = (h % 16) as u32;
+        if player >= 2 {
+            continue;
+        }
+        let body: Body = unsafe { bytes.as_ptr().cast::<Body>().read_unaligned() };
+        let (dx, dy) = (((h >> 8) % 1600) as f32 - 800.0, ((h >> 24) % 1600) as f32 - 800.0);
+        let group = 1 << 40 | tick << 8 | player as u64;
+        let order = MoveOrder::move_to(Entity(e), body.x + dx, body.y + dy, group);
+        let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
+        b.commands.push(Command { player, stream: MOVE_ORDER, bytes });
+    }
+    // Canonical order: by player, then as gathered (entity order).
+    b.commands.sort_by_key(|c| c.player);
+    Ok(b)
+}
+
+pub fn record(o: &Opts, path: &str) -> Result<bool> {
+    ensure!(o.workers.len() == 1, "--record runs one worker count");
+    let wasm = ae_sim::build::game(&o.game)?;
+    let nav = o.nav.map(|m| (m, o.map_cells, o.teams));
+    let param = o.units | (o.param_hi as u64) << 32;
+    let every = o.checkpoint_every.max(1);
+    let header = header(&wasm, param, nav, every)?;
+    let mut rt = runtime(&wasm, nav, o.workers[0], o.range_rows)?;
+    let mut world = rt.world_for(param, o.workers[0])?;
+    let file = std::fs::File::create(path).with_context(|| format!("create {path}"))?;
+    let mut rec = Recorder::new(std::io::BufWriter::new(file), &header)?;
+    let (mut commands, mut checkpoints) = (0usize, 0usize);
+    let started = Instant::now();
+    for _ in 0..o.ticks {
+        let bundle = if o.script { orders(&rt, &world)? } else { TickBundle::new(world.tick) };
+        commands += bundle.commands.len();
+        rec.bundle(&bundle)?;
+        rt.tick_with(&mut world, o.workers[0], &bundle)?;
+        if world.tick % every == 0 || world.tick == o.ticks {
+            rec.checkpoint(&Checkpoint::of(world.tick, &rt.digest(&world)?))?;
+            checkpoints += 1;
+        }
+    }
+    rec.finish(world.tick)?;
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "recorded {path}: {} ticks, {commands} commands, {checkpoints} checkpoints, {size} bytes, {:.2} s; final digest {:016x}",
+        world.tick,
+        started.elapsed().as_secs_f64(),
+        rt.digest(&world)?.short()
+    );
+    Ok(true)
+}
+
+pub fn replay(o: &Opts, path: &str, verify: bool) -> Result<bool> {
+    let replay = Replay::load(Path::new(path))?;
+    let h = replay.header()?.clone();
+    let wasm = ae_sim::build::game(&o.game)?;
+    let nav = match h.config.get("map") {
+        Some(m) => Some((map_of(m)?, h.config["map_cells"].parse()?, h.config.get("teams").map_or(Ok(0), |t| t.parse())?)),
+        None => None,
+    };
+    header(&wasm, h.param, nav, h.checkpoint_every)?.check(&h).context("this replay does not match the world")?;
+    let workers = o.workers[0];
+    let mut rt = runtime(&wasm, nav, workers, o.range_rows)?;
+    let mut world = rt.world_for(h.param, workers)?;
+    let mut checkpoints = replay.checkpoints.iter().peekable();
+    let started = Instant::now();
+    let (mut checked, mut commands) = (0, 0u64);
+    while world.tick < replay.end {
+        let bundle = replay.bundle(world.tick);
+        let s = rt.tick_with(&mut world, workers, &bundle)?;
+        commands += s.commands_in;
+        while let Some(c) = checkpoints.next_if(|c| c.tick <= world.tick) {
+            if c.tick != world.tick || !verify {
+                continue;
+            }
+            let here = Checkpoint::of(world.tick, &rt.digest(&world)?);
+            if here.total != c.total {
+                println!("DESYNC at checkpoint tick {}: digest {:016x}, the replay has {:016x}; parts that differ: {}", c.tick, here.total as u64, c.total as u64, here.differing(c).join(", "));
+                return Ok(false);
+            }
+            checked += 1;
+        }
+    }
+    println!(
+        "replayed {path}: {} ticks, {commands} commands, {:.2} s at {workers} worker(s); {}; final digest {:016x}",
+        world.tick,
+        started.elapsed().as_secs_f64(),
+        if verify { format!("{checked} checkpoints match") } else { "not verified".into() },
+        rt.digest(&world)?.short()
+    );
+    Ok(true)
+}
+
+/// A fault to inject: flip the lowest bit of `component.field` of the
+/// `row`th entity (by id) holding the component, when the world has run
+/// `tick` ticks (before the next one).
+#[derive(Clone, Debug)]
+pub struct Inject {
+    pub tick: u64,
+    pub component: String,
+    pub field: String,
+    pub row: usize,
+}
+
+impl Inject {
+    /// `TICK:Component.field:ROW`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let parts: Vec<&str> = text.split(':').collect();
+        let [tick, cf, row] = parts.as_slice() else { bail!("--inject TICK:Component.field:ROW") };
+        let (component, field) = cf.split_once('.').context("--inject TICK:Component.field:ROW")?;
+        Ok(Self { tick: tick.parse()?, component: component.into(), field: field.into(), row: row.parse()? })
+    }
+
+    /// Apply it if the world is at its tick; the entity it hit.
+    fn apply(&self, rt: &Runtime, w: &mut World) -> Result<Option<u64>> {
+        if w.tick != self.tick {
+            return Ok(None);
+        }
+        let rows = rt.rows(w, &self.component)?;
+        let (entity, bytes) = rows.get(self.row).with_context(|| format!("no row {} of `{}`", self.row, self.component))?;
+        let c = rt.schema.components.iter().find(|c| c.name == self.component).unwrap();
+        let f = c.fields.iter().find(|f| f.name == self.field).with_context(|| format!("no field `{}`", self.field))?;
+        let old = u32::from_le_bytes(bytes[f.offset as usize..f.offset as usize + 4].try_into().unwrap());
+        rt.poke(w, *entity, &self.component, &self.field, old ^ 1)?;
+        Ok(Some(*entity))
+    }
+}
+
+/// Every component's rows at one tick, by component name.
+type Rows = BTreeMap<String, Vec<(u64, Vec<u8>)>>;
+
+fn dump(rt: &Runtime, w: &World) -> Result<Rows> {
+    let mut out = BTreeMap::new();
+    for c in rt.schema.components.iter().filter(|c| !c.event) {
+        out.insert(c.name.clone(), rt.rows(w, &c.name)?);
+    }
+    Ok(out)
+}
+
+fn show(kind: u32, bits: u32) -> String {
+    if kind == ae_abi::FIELD_F32 { format!("{} ({bits:#010x})", f32::from_bits(bits)) } else { format!("{bits} ({bits:#010x})") }
+}
+
+/// `--replay FILE --bisect --inject ...`: find where a run with the fault
+/// first differs from a clean run of the same replay, down to the tick,
+/// the digest parts, and the entities and fields. Three runs from tick 0
+/// (there are no snapshots, and one sim per process): the faulty run
+/// recording every tick's digest; the clean run up to the first tick whose
+/// digest differs, dumping every row there; the faulty run again to that
+/// tick, dumping and comparing. A divergence that shows only in a host
+/// service's part (its internal state) is reported as such.
+pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
+    let replay = Replay::load(Path::new(path))?;
+    let h = replay.header()?.clone();
+    let wasm = ae_sim::build::game(&o.game)?;
+    let nav = match h.config.get("map") {
+        Some(m) => Some((map_of(m)?, h.config["map_cells"].parse()?, h.config.get("teams").map_or(Ok(0), |t| t.parse())?)),
+        None => None,
+    };
+    header(&wasm, h.param, nav, h.checkpoint_every)?.check(&h).context("this replay does not match the world")?;
+    let workers = o.workers[0];
+    // Run to `until`, calling `each` after every tick (stop when it says).
+    let play = |fault: bool, until: u64, each: &mut dyn FnMut(&Runtime, &World) -> Result<bool>| -> Result<Option<u64>> {
+        let mut rt = runtime(&wasm, nav, workers, o.range_rows)?;
+        let mut world = rt.world_for(h.param, workers)?;
+        let mut hit = None;
+        while world.tick < until {
+            if fault && let Some(e) = inject.apply(&rt, &mut world)? {
+                hit = Some(e);
+            }
+            let bundle = replay.bundle(world.tick);
+            rt.tick_with(&mut world, workers, &bundle)?;
+            if each(&rt, &world)? {
+                break;
+            }
+        }
+        Ok(hit)
+    };
+    let started = Instant::now();
+    // 1. The faulty run: every tick's digest.
+    let mut faulty: Vec<u128> = vec![0];
+    let hit = play(true, replay.end, &mut |rt, w| {
+        faulty.push(rt.digest(w)?.total);
+        Ok(false)
+    })?;
+    let hit = hit.context("the fault's tick was never reached")?;
+    // 2. The clean run, to the first tick whose digest differs.
+    let mut first = None;
+    let mut clean_rows = Rows::new();
+    let mut clean_parts = None;
+    play(false, replay.end, &mut |rt, w| {
+        let d = rt.digest(w)?;
+        if d.total != faulty[w.tick as usize] {
+            first = Some(w.tick);
+            clean_rows = dump(rt, w)?;
+            clean_parts = Some(Checkpoint::of(w.tick, &d));
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    let Some(t) = first else {
+        println!("no divergence: the fault at tick {} (entity {hit:#x}) left every tick's digest unchanged", inject.tick);
+        return Ok(true);
+    };
+    // 3. The faulty run again, to that tick.
+    let mut faulty_rows = Rows::new();
+    let mut faulty_parts = None;
+    play(true, t, &mut |rt, w| {
+        if w.tick == t {
+            faulty_rows = dump(rt, w)?;
+            faulty_parts = Some(Checkpoint::of(w.tick, &rt.digest(w)?));
+        }
+        Ok(false)
+    })?;
+    let parts = clean_parts.unwrap().differing(&faulty_parts.unwrap());
+    println!("first divergence after tick {t} (the fault was applied after tick {}); digest parts that differ: {}", inject.tick, parts.join(", "));
+    // Rows that differ, field by field.
+    let schema = {
+        let rt = runtime(&wasm, nav, workers, o.range_rows)?;
+        rt.schema.clone()
+    };
+    let mut lines = 0;
+    for (name, clean) in &clean_rows {
+        let other: BTreeMap<u64, &Vec<u8>> = faulty_rows.get(name).map(|v| v.iter().map(|(e, b)| (*e, b)).collect()).unwrap_or_default();
+        let c = schema.components.iter().find(|c| &c.name == name).unwrap();
+        for (e, a) in clean {
+            let Some(b) = other.get(e) else {
+                println!("  {name}: entity {e:#x} missing in the faulty run");
+                lines += 1;
+                continue;
+            };
+            for f in &c.fields {
+                let (o0, o1) = (f.offset as usize, (f.offset + f.size) as usize);
+                if a[o0..o1] != b[o0..o1] {
+                    if f.size == 4 {
+                        let (x, y) = (u32::from_le_bytes(a[o0..o1].try_into().unwrap()), u32::from_le_bytes(b[o0..o1].try_into().unwrap()));
+                        println!("  {name}.{} of entity {e:#x}: clean {}, faulty {}", f.name, show(f.kind, x), show(f.kind, y));
+                    } else {
+                        println!("  {name}.{} of entity {e:#x}: {:?} vs {:?}", f.name, &a[o0..o1], &b[o0..o1]);
+                    }
+                    lines += 1;
+                }
+            }
+        }
+    }
+    if lines == 0 {
+        println!("  no component row differs: the divergence is inside host service state ({})", parts.join(", "));
+    }
+    println!("injected: {}.{} of entity {hit:#x} after tick {}; bisect took {:.2} s", inject.component, inject.field, inject.tick, started.elapsed().as_secs_f64());
+    Ok(false)
+}

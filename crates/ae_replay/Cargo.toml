@@ -1,0 +1,11 @@
+[package]
+name = "ae_replay"
+description = "Replay files: a header naming everything that shapes the world, the per-tick command bundles, and checkpoint digests to verify against."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_sim.workspace = true
+anyhow.workspace = true
+xxhash-rust.workspace = true

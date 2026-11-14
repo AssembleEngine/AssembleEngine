@@ -104,6 +104,16 @@ pub struct Runtime {
     events_len: usize,
     /// Profiler zone name per layer.
     layer_labels: Vec<String>,
+    /// Where this runtime's column arena starts (released on drop, so a
+    /// later runtime in the process can install its own).
+    arena_base: usize,
+}
+
+impl Drop for Runtime {
+    /// Worlds must be dropped first (their columns live in this memory).
+    fn drop(&mut self) {
+        ae_ecs::arena::release(self.arena_base as *mut u8);
+    }
 }
 
 /// Timing and counters of one tick.
@@ -250,6 +260,7 @@ impl Runtime {
         let ctx_memory = memory.clone();
         let shared = memory.clone();
         let mut events_at = 0;
+        let mut arena_base = 0usize;
         let mut set = InstanceSetBuilder {
             module: &module,
             count: cfg.max_workers,
@@ -261,6 +272,7 @@ impl Runtime {
             let offset = claim_pages(memory, cfg.arena_pages)?;
             let base = GuestMemory::of(memory).ptr(offset);
             unsafe { ae_ecs::arena::install(base, (cfg.arena_pages * PAGE_BYTES) as usize).map_err(|e| anyhow!(e))? };
+            arena_base = base as usize;
             events_at = claim_pages(memory, cfg.event_pages)?;
             Ok(())
         })?;
@@ -279,7 +291,7 @@ impl Runtime {
         }
         let crew = Crew::new(workers)?;
         let layer_labels = schedule.layers.iter().enumerate().map(|(k, l)| format!("layer {k}: {}", l.iter().map(|&i| &*systems[i].name).collect::<Vec<_>>().join(" "))).collect();
-        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels })
+        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels, arena_base })
     }
 
     /// Current size of the shared guest memory, in bytes (column arena,
@@ -671,6 +683,35 @@ impl Runtime {
         }
         out.sort_by_key(|(e, _)| *e);
         Ok(out)
+    }
+
+    /// Overwrite 4-byte field `component.field` of `entity` with `bits`
+    /// (between ticks). For fault injection (desync tests and tools): the
+    /// world no longer follows from its commands. Whether the entity had
+    /// the component.
+    pub fn poke(&self, w: &mut World, entity: u64, component: &str, field: &str, bits: u32) -> Result<bool> {
+        let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
+        let c = &self.schema.components[i];
+        let f = c.fields.iter().find(|f| f.name == field).with_context(|| format!("`{component}` has no field `{field}`"))?;
+        ensure!(f.size == 4, "`{component}.{field}` is {} bytes; poke writes 4", f.size);
+        let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
+        let (size, offset) = (c.size as usize, f.offset as usize);
+        let terms = [Term { component: id, access: Access::Write }];
+        let mut found = false;
+        unsafe {
+            let q = fb::create_query_uncached(w.world, &terms)?;
+            let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
+                let ids = std::slice::from_raw_parts(chunk.entities, chunk.count);
+                if let Some(r) = ids.iter().position(|&e| e == entity) {
+                    chunk.fields[0].add(r * size + offset).cast::<u32>().write_unaligned(bits);
+                    found = true;
+                }
+                Ok(())
+            });
+            fb::fini_query(q);
+            r?;
+        }
+        Ok(found)
     }
 
     /// Copy the fields of `spec` from every entity that has all its

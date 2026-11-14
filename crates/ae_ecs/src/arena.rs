@@ -126,8 +126,12 @@ unsafe extern "C-unwind" fn column_realloc(ptr: *mut c_void, size: i32) -> *mut 
 }
 
 unsafe extern "C-unwind" fn column_free(ptr: *mut c_void) {
-    if !ptr.is_null() {
-        with_arena(|a| a.free(ptr));
+    if ptr.is_null() {
+        return;
+    }
+    // After `release` (its memory is gone with its runtime) frees are moot.
+    if let Some(a) = ARENA.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        a.free(ptr);
     }
 }
 
@@ -153,6 +157,16 @@ pub unsafe fn install(base: *mut u8, len: usize) -> Result<(), String> {
     drop(guard);
     unsafe { crate::flecs_backend::install_column_allocator(column_malloc, column_realloc, column_free) };
     Ok(())
+}
+
+/// Forget the arena installed at `base` (its owner, the sim runtime, is
+/// going away with the memory), so another runtime can install its own.
+/// Every flecs world using it must be gone. A different base is left alone.
+pub fn release(base: *mut u8) {
+    let mut guard = ARENA.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.as_ref().is_some_and(|a| a.base == base as usize) {
+        *guard = None;
+    }
 }
 
 /// The installed range, if any.
