@@ -1098,8 +1098,35 @@ client change.
   observer of which 1,630 blips: one observer 0.52 ms, a tick for two observers (preparation and both
   builds) 1.08 ms, under the 2 ms exit budget; with a ghosting table 1.13 ms. 50k units and 8
   allyteams: 3.3 ms for two observers.
-- Not done: the schema does not carry view classes yet, the crossing game has no teams or sensors,
-  and the client still draws from the raw capture; the fog pass does not exist.
+
+View classes in the schema, teams and sensors in the sim:
+- Field flags bits 8..12 carry the view class (`ae_abi::FIELD_VIEW_*`; 0 is never, so a field nobody
+  classified stays hidden; the host decoder already accepted unknown flag bits).
+  `#[field(view = "los")]` (`never`, `always`, `owner`, `los`, `radar`, `ghost`) sets it;
+  `FieldDecl::view()` reads it. The SDK's engine components are classified: `Body.x/y` radar,
+  `vx/vy/radius` line of sight; `NavAgent.max_speed/profile` line of sight, `mode` owner;
+  `Goal.x/y` owner, `group` never.
+- New engine components `ae_sdk::nav::Team { ally }` (always) and `Sensor { los, radar }` (line of
+  sight), ids `0xAE00…09` and `…0A`. They reach a game's schema without the game naming them (as
+  `ae-sim`'s new `schema_dump` example shows for the crossing game).
+- `NavPlugin::teams` (default 0: unchanged worlds): `nav_spawn` adds a `Team` and a `Sensor` to every
+  map unit. Allyteams are equal shares of the units ranked by spawn x (the crossing plan spawns one
+  dense block; a split by map stripes gave 150 vs 2,850), line of sight by class (`CLASS_LOS`, 300
+  to 650 m), a 2,200 m radar on every 25th unit.
+- The pinned crossing digest moved (`0x59aa…f2de` to `0x2869…d4be`; dev and release agree, all worker
+  counts agree): declaring two more components shifts flecs entity ids. With the two components
+  removed, the view-class bits alone left it unchanged. Every SDK component added later will move
+  game digests the same way; giving game entities a fixed id range would end that.
+- `ae_services::view::ViewPipeline`: captures every 4-byte field of `Body`, `Team`, `Sensor` (and
+  named extra components) that has a view class, plus the sensor inputs, stamps coverage at 32 m
+  cells and builds observers' tables.
+- Test `ae_services/tests/view.rs`: crossing, 3,000 units on 512 cells, 2 teams, two observers
+  every 15 ticks. Own rows are exactly the allyteam's units (all fields, `mode` included); `Seen`
+  rows are enemy units in line of sight with no owner fields; blips show no line-of-sight or owner
+  fields; no view word lies in the entity index range; the observers' worlds differ (observer 0:
+  1,500 own, 1,350 seen, ~105 blips; observer 1 sees all 1,500 enemies). Viewing leaves the digest
+  unchanged, and with teams 1 and 2 workers agree. Two views build in 0.4–0.9 ms here (3,000 rows).
+- Not done: the client still draws from the raw capture; the fog pass does not exist.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

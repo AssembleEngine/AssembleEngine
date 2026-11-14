@@ -51,6 +51,31 @@ pub const FIELD_SYNCED: u32 = 1 << 1;
 pub const FIELD_SAVED: u32 = 1 << 2;
 pub const FIELD_DEFAULT: u32 = FIELD_HASHED | FIELD_SYNCED | FIELD_SAVED;
 
+/// Field flags bits 8..12: the field's view class, what an observer may see
+/// of it through the copy layer (`ae_view`). 0 is `VIEW_NEVER`, so a field
+/// nobody classified never reaches a view.
+pub const FIELD_VIEW_SHIFT: u32 = 8;
+pub const FIELD_VIEW_MASK: u32 = 0xF << FIELD_VIEW_SHIFT;
+pub const VIEW_NEVER: u32 = 0;
+pub const VIEW_ALWAYS: u32 = 1;
+pub const VIEW_OWNER_ONLY: u32 = 2;
+pub const VIEW_LOS: u32 = 3;
+pub const VIEW_RADAR_DEGRADED: u32 = 4;
+pub const VIEW_GHOST: u32 = 5;
+
+/// A view class by its attribute name (`#[field(view = "...")]`).
+pub fn view_class(name: &str) -> Option<u32> {
+    Some(match name {
+        "never" => VIEW_NEVER,
+        "always" => VIEW_ALWAYS,
+        "owner" => VIEW_OWNER_ONLY,
+        "los" => VIEW_LOS,
+        "radar" => VIEW_RADAR_DEGRADED,
+        "ghost" => VIEW_GHOST,
+        _ => return None,
+    })
+}
+
 /// Field value kinds. `KIND_ARRAY` is or-ed onto the element kind.
 pub const FIELD_BYTES: u32 = 0;
 pub const FIELD_U8: u32 = 1;
@@ -293,4 +318,8 @@ pub mod engine {
     /// Event `CostOverlay { id, x0, y0, x1, y1, cost, op }`: add or remove a
     /// removable traversal cost overlay.
     pub const COST_OVERLAY: u64 = 0xAE00_0000_0000_0008;
+    /// `Team { ally: u32 }`: the allyteam that owns the entity.
+    pub const TEAM: u64 = 0xAE00_0000_0000_0009;
+    /// `Sensor { los, radar: f32 }`: line-of-sight and radar radii.
+    pub const SENSOR: u64 = 0xAE00_0000_0000_000A;
 }

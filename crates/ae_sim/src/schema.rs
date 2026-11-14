@@ -20,6 +20,11 @@ pub struct FieldDecl {
 }
 
 impl FieldDecl {
+    /// The view class bits (`abi::VIEW_*`; 0, never, when unclassified).
+    pub fn view(&self) -> u32 {
+        (self.flags & abi::FIELD_VIEW_MASK) >> abi::FIELD_VIEW_SHIFT
+    }
+
     pub fn hashed(&self) -> bool {
         self.flags & abi::FIELD_HASHED != 0
     }

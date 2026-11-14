@@ -11,6 +11,8 @@ ae_ecs.workspace = true
 ae_nav.workspace = true
 ae_profile.workspace = true
 ae_sim.workspace = true
+ae_sensors.workspace = true
 ae_spatial.workspace = true
+ae_view.workspace = true
 ae-sdk = { workspace = true, features = ["nav"] }
 anyhow.workspace = true

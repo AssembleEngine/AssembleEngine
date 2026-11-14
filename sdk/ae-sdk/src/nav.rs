@@ -9,6 +9,15 @@
 //!   spatial index is built from every body's position.
 //! * [`NavAgent`]: a unit the nav service moves. `mode` is written back each
 //!   tick ([`mode`] values).
+//! * [`Team`] and [`Sensor`]: who owns a unit and what it sees (line of
+//!   sight and radar radii), read by the copy layer (`ae_view`) to build
+//!   each observer's view. `nav_spawn` gives them to the map's units when
+//!   the nav plugin has teams.
+//!
+//! Fields carry their view class (`#[field(view = ...)]`): positions show
+//! on radar (wobbled), motion and kind in line of sight, orders and goals
+//! to the owner only.
+//!
 //! * [`Goal`]: where the map or scenario wants the unit to go. The engine
 //!   never acts on it; game systems decide when to order the unit there.
 //! * [`MoveOrder`]: an event that orders one unit (move, stop, route or
@@ -26,10 +35,15 @@ use crate::{Component, Entity};
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 #[component(id = 0xAE00_0000_0000_0001)]
 pub struct Body {
+    #[field(view = "radar")]
     pub x: f32,
+    #[field(view = "radar")]
     pub y: f32,
+    #[field(view = "los")]
     pub vx: f32,
+    #[field(view = "los")]
     pub vy: f32,
+    #[field(view = "los")]
     pub radius: f32,
 }
 
@@ -39,18 +53,44 @@ pub struct Body {
 pub struct NavAgent {
     /// Top speed, world units per second. Read when the unit joins the
     /// service.
+    #[field(view = "los")]
     pub max_speed: f32,
     /// Movement profile (class) index of the map's profiles.
+    #[field(view = "los")]
     pub profile: u32,
     /// [`mode`] after the last nav tick.
+    #[field(view = "owner")]
     pub mode: u32,
+}
+
+/// The allyteam that owns an entity (observers of it see `Own` rows).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_0009)]
+pub struct Team {
+    #[field(view = "always")]
+    pub ally: u32,
+}
+
+/// What an entity sees: line-of-sight and radar radii, world units (0:
+/// none).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_000A)]
+pub struct Sensor {
+    #[field(view = "los")]
+    pub los: f32,
+    #[field(view = "los")]
+    pub radar: f32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 #[component(id = 0xAE00_0000_0000_0003)]
 pub struct Goal {
+    #[field(view = "owner")]
     pub x: f32,
+    #[field(view = "owner")]
     pub y: f32,
     /// Group to order the unit with (0: none).
     pub group: u64,

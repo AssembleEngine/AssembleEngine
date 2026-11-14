@@ -53,7 +53,7 @@ fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
 
 /// Final world digest (low 64 bits), identical in dev and release builds and
 /// at every worker count. Regenerate deliberately: run with `--nocapture`.
-const EXPECTED: u64 = 0x59aa_d156_fb18_f2de;
+const EXPECTED: u64 = 0x2869_18c1_cede_d4be;
 
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());

@@ -87,6 +87,9 @@ fn parse_id(meta: &syn::meta::ParseNestedMeta) -> syn::Result<u64> {
 /// * `#[field(unhashed)]`, `#[field(unsynced)]`, `#[field(unsaved)]`: clear
 ///   the default flags.
 /// * `#[field(bytes)]`: opaque bytes instead of a typed value.
+/// * `#[field(view = "los")]`: the field's view class (`never`, the
+///   default, `always`, `owner`, `los`, `radar`, `ghost`): what observers
+///   may see of it through the copy layer.
 #[proc_macro_derive(Component, attributes(component, field))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -160,8 +163,12 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
                     flags &= !abi::FIELD_SAVED;
                 } else if m.path.is_ident("bytes") {
                     bytes = true;
+                } else if m.path.is_ident("view") {
+                    let lit: syn::LitStr = m.value()?.parse()?;
+                    let class = abi::view_class(&lit.value()).ok_or_else(|| m.error("view classes: never, always, owner, los, radar, ghost"))?;
+                    flags = (flags & !abi::FIELD_VIEW_MASK) | class << abi::FIELD_VIEW_SHIFT;
                 } else {
-                    return Err(m.error("expected `id = N`, `unhashed`, `unsynced`, `unsaved` or `bytes`"));
+                    return Err(m.error("expected `id = N`, `unhashed`, `unsynced`, `unsaved`, `bytes` or `view = \"...\"`"));
                 }
                 Ok(())
             })?;

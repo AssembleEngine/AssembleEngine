@@ -8,6 +8,9 @@
 //!   `NavAgent`, taking `MoveOrder` events as group commands.
 //! * [`spatial::SpatialPlugin`]: `spatial` rebuilds the spatial index from
 //!   every `Body`, for module systems' `ae_sdk::spatial_radius` queries.
+//! * [`view::ViewPipeline`]: the copy layer over the sim: captures the
+//!   viewed fields, stamps sensor coverage, builds observers' view tables.
 
 pub mod nav;
 pub mod spatial;
+pub mod view;

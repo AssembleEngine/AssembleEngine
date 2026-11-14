@@ -2,7 +2,8 @@
 //!
 //! * `nav_spawn` (tick 0): spawns the map's units, each with a `Body`, a
 //!   `NavAgent` and a `Goal` (the map's destination for it; the engine does
-//!   not act on goals, the game's systems decide when to order units).
+//!   not act on goals, the game's systems decide when to order units), and
+//!   with [`NavPlugin::teams`] set, a `Team` and a `Sensor`.
 //! * `nav` (every tick): one `NavService` step over every entity with a
 //!   `Body` and a `NavAgent`.
 //!
@@ -31,7 +32,7 @@
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, TERRAIN_CHANGED, TERRAIN_EDIT};
+use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, SENSOR, TEAM, TERRAIN_CHANGED, TERRAIN_EDIT};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{self, Plan};
@@ -39,7 +40,7 @@ use ae_nav::nav::{MovementProfile, min_clearance_cells, profiles_for, water_prof
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
 use ae_nav::terrain::Medium;
 use ae_nav::terrain::{CellEdit, SharedTerrain, TerrainPatch};
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, order, terrain};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MoveOrder, NavAgent, OrderPoint, Sensor, Team, TerrainChanged, TerrainEdit, order, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -67,7 +68,18 @@ pub struct NavPlugin {
     /// publishes nothing. Read-only sharing of the service's terrain, so
     /// it never affects the sim.
     pub ground: Option<Arc<GroundFeed>>,
+    /// Allyteams the map's units are split into (0: none, and no `Team` or
+    /// `Sensor` components): see [`NavPlugin::allies`] and
+    /// [`NavPlugin::sensor_of`].
+    pub teams: u32,
 }
+
+/// Line-of-sight radius per movement class of the crossing maps (scout,
+/// heavy, ship, hovercraft, amphibious), world units.
+pub const CLASS_LOS: [f32; 5] = [650.0, 300.0, 500.0, 450.0, 350.0];
+/// One unit in this many carries a radar of [`RADAR_RANGE`].
+pub const RADAR_EVERY: usize = 25;
+pub const RADAR_RANGE: f32 = 2200.0;
 
 /// The terrain as of the latest landed ground change, and the cells that
 /// changed since the reader last took it.
@@ -112,7 +124,30 @@ impl GroundFeed {
 
 impl NavPlugin {
     pub fn new(map: Map, map_cells: i32) -> Self {
-        Self { map, map_cells, ground: None }
+        Self { map, map_cells, ground: None, teams: 0 }
+    }
+
+    /// The allyteam of each of the map's units from their spawn x: units
+    /// ranked by x (ties by plan order) and cut into `teams` equal shares,
+    /// so the armies start side by side with a front between them.
+    pub fn allies(&self, xs: &[f32]) -> Vec<u32> {
+        let teams = self.teams.max(1) as usize;
+        let mut order: Vec<usize> = (0..xs.len()).collect();
+        order.sort_by(|&a, &b| xs[a].total_cmp(&xs[b]).then(a.cmp(&b)));
+        let mut allies = vec![0; xs.len()];
+        for (rank, &i) in order.iter().enumerate() {
+            allies[i] = (rank * teams / xs.len().max(1)) as u32;
+        }
+        allies
+    }
+
+    /// The sensors of the map's unit `index` (plan order) of movement class
+    /// `profile`: line of sight by class ([`CLASS_LOS`]), and every
+    /// [`RADAR_EVERY`]th unit a radar.
+    pub fn sensor_of(&self, index: usize, profile: u8) -> Sensor {
+        let los = CLASS_LOS.get(profile as usize).copied().unwrap_or(400.0);
+        let radar = if index.is_multiple_of(RADAR_EVERY) { RADAR_RANGE } else { 0.0 };
+        Sensor { los, radar }
     }
 
     /// The unit count in a game parameter: its low 24 bits (the game owns
@@ -159,6 +194,9 @@ impl HostPlugin for NavPlugin {
     fn systems(&self) -> Vec<HostDecl> {
         let mut spawn = HostDecl::new("nav_spawn");
         spawn.creates = vec![BODY, NAV_AGENT, GOAL];
+        if self.teams > 0 {
+            spawn.creates.extend([TEAM, SENSOR]);
+        }
         spawn.cadence = Cadence::Once;
         let mut nav = HostDecl::new("nav");
         nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
@@ -171,7 +209,14 @@ impl HostPlugin for NavPlugin {
         expect_component(schema, Body::SCHEMA)?;
         expect_component(schema, NavAgent::SCHEMA)?;
         match name {
-            "nav_spawn" => expect_component(schema, Goal::SCHEMA).map(drop),
+            "nav_spawn" => {
+                expect_component(schema, Goal::SCHEMA)?;
+                if self.teams > 0 {
+                    expect_component(schema, Team::SCHEMA)?;
+                    expect_component(schema, Sensor::SCHEMA)?;
+                }
+                Ok(())
+            }
             _ => {
                 ensure!(CELL_SIZE == ae_nav::service::NavConfig::default().cell_size, "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size");
                 for record in [<MoveOrder as Event>::SCHEMA, <OrderPoint as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA, <CostOverlay as Event>::SCHEMA] {
@@ -191,7 +236,7 @@ impl HostPlugin for NavPlugin {
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 Ok(match name {
-                    "nav_spawn" => Box::new(Spawner { plan: plan.take().context("nav_spawn listed twice")? }),
+                    "nav_spawn" => Box::new(Spawner { plan: plan.take().context("nav_spawn listed twice")?, plugin: self.clone() }),
                     "nav" => Box::new(Nav::new(service.take().context("nav listed twice")?, self.ground.clone())),
                     other => bail!("no host system `{other}` in the nav plugin"),
                 })
@@ -202,17 +247,24 @@ impl HostPlugin for NavPlugin {
 
 struct Spawner {
     plan: Plan,
+    plugin: NavPlugin,
 }
 
 impl HostSystem for Spawner {
     fn run(&mut self, ctx: &mut HostCtx<'_>) -> Result<()> {
         let orders = self.plan.order_of();
-        for (spec, order) in self.plan.units.iter().zip(orders) {
+        let allies = if self.plugin.teams > 0 { self.plugin.allies(&self.plan.units.iter().map(|u| u.pos.x).collect::<Vec<_>>()) } else { Vec::new() };
+        for (index, (spec, order)) in self.plan.units.iter().zip(orders).enumerate() {
             let body = Body { x: spec.pos.x, y: spec.pos.y, vx: 0.0, vy: 0.0, radius: spec.radius };
             let agent = NavAgent { max_speed: spec.max_speed, profile: spec.profile_id as u32, mode: 0 };
             let (group, to) = order.unwrap_or((0, spec.pos));
             let goal = Goal { x: to.x, y: to.y, group };
-            ctx.spawn(&[(BODY, bytes_of(&body)), (NAV_AGENT, bytes_of(&agent)), (GOAL, bytes_of(&goal))])?;
+            if self.plugin.teams > 0 {
+                let (team, sensor) = (Team { ally: allies[index] }, self.plugin.sensor_of(index, spec.profile_id));
+                ctx.spawn(&[(BODY, bytes_of(&body)), (NAV_AGENT, bytes_of(&agent)), (GOAL, bytes_of(&goal)), (TEAM, bytes_of(&team)), (SENSOR, bytes_of(&sensor))])?;
+            } else {
+                ctx.spawn(&[(BODY, bytes_of(&body)), (NAV_AGENT, bytes_of(&agent)), (GOAL, bytes_of(&goal))])?;
+            }
         }
         Ok(())
     }

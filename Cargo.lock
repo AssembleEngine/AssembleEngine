@@ -166,8 +166,10 @@ dependencies = [
  "ae_ecs",
  "ae_nav",
  "ae_profile",
+ "ae_sensors",
  "ae_sim",
  "ae_spatial",
+ "ae_view",
  "anyhow",
 ]
 
