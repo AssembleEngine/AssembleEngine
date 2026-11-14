@@ -136,19 +136,48 @@ Interpolation: previous + latest transforms uploaded per instance, lerped in the
 - Draw sources are data: `InstanceStream{view table, field→attribute map, mesh/material set}`; compute pass
   does culling + LOD → indirect draws. Multi-threaded recording per pass group.
 - Engine pass libraries the module instantiates, wires, or replaces: `terrain_cbt` (map-rendering `leb.rs` +
-  RedAlert `cbt.glsl`), `water_ra` (RedAlert `src/draw.cpp:189-610` pass order + shaders), cascaded shadows,
-  fog of war (sensor grid → texture), decals, GPU particles, post, UI.
+  RedAlert `cbt.glsl`; surface appearance from the material tilesets below), `water_ra` (RedAlert
+  `src/draw.cpp:189-610` pass order + shaders), cascaded shadows, fog of war (sensor grid → texture),
+  decals, GPU particles, post, UI.
 - Models: glTF converted offline; piece animation = sim WASM writing `PieceTransform` columns.
 - UI: RmlUi behind a C FFI crate, rendered in a frame graph pass; untrusted widget modules drive documents
   and data models through a validated API and read only view tables.
+
+#### Terrain appearance — reusable material tilesets (MrBob's proposal)
+
+Terrain layout and terrain appearance are separate inputs. A map supplies only its heightmap and
+gameplay data (resource locations, features, …); artists do not author a unique colour and normal
+texture set for every map.
+
+- **Material tilesets** are reusable per environment — a desert set might contain sand, rock and other
+  surface layers. Each layer has a tileable albedo texture and a matching normal map. Maps reuse the
+  same collection; a custom look replaces the textures, not the shader.
+- **Projection follows surface orientation**: planar tiling on upward-facing ground, duoplanar
+  projection on steep slopes and cliffs, and duoplanar or triplanar where the material setup calls
+  for it.
+- **Two-level blending**: geometry normals give the broad transitions between flatter ground and
+  cliffs; the tileset normal maps' pixel normals break those transitions up with fine detail. This is
+  the central point: boundaries between materials become irregular and detailed instead of a smooth
+  line determined only by terrain slope.
+- **The shader assembles the appearance**: material masks are generated procedurally from surface
+  orientation and normal-map detail, then used to blend the tileable layers. The same setup therefore
+  works across different heightmaps without repainting terrain appearance per map.
+- **Map data**: `.aemap` keeps gameplay type/material masks (passability, terrain type, resource
+  placement); per-map colour and normal textures are not required.
+- **M3 validation**: demonstrate the shader on an existing heightmap and document the shader source or
+  the blending logic, the tileset structure with texture counts/sizes/formats, the engine inputs and
+  controls, and how tilesets are shared and replaced. The intended result is less duplicated artwork
+  and texture data, more consistent environments, and a split workflow: map creators own layout,
+  material artists own reusable surface libraries.
 
 ### Content, session, networking
 
 - `ae_vfs`: layered directories + archives, manifest (`name`, `version`, `depends`, `kind`), per-file hashes →
   synced content root (widgets/skins excluded).
 - `ae_catalog`: data files → schema-validated prefabs (`DefId`); explicit `extends`; economy/armour are just game components.
-- `.aemap`: one archive (height, type/material masks, water field, start positions, metadata); `ae_map` bakes
-  nav grids, render error pyramid, shore travel-time field from it.
+- `.aemap`: one archive (height, gameplay type/material masks, water field, start positions, metadata).
+  Terrain colour and normal detail come from shared material tilesets, not per-map textures. `ae_map`
+  bakes nav grids, render error pyramid, shore travel-time field from it.
 - Hot reload: render module, shaders, widgets always; catalogue at tick boundary (dev/single-player);
   sim module when schema-compatible.
 - `ae_net`: relay-paced lockstep (`TickBundle{tick, commands}`), adaptive input delay, QUIC (`quinn`),
@@ -250,7 +279,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M0** Workspace + spikes | `git init`, workspace skeleton, flecs vendor + patch building, frame graph crate, `ae_nav` without macroquad, `ae_profile` (Tracy feature) + `ae_bench` + `bench-diff`, risk spikes (below) | `cargo test --workspace` green incl. lifted 22 frame-graph tests; spike reports with numbers; first benches (frame graph bake, nav) recorded and diffable |
 | **M1** Parallel sim core | seam, column arena, worker instances, layered scheduler, command merge, events, cadences, schema section, SDK derive, digest, `ae-headless` | sandbox game at 10k/50k entities: identical digests at 1/2/4/8/16 workers and debug vs release; ≥5× on 8 cores. `ae-headless --game sandbox --units 50000 --ticks 3000 --workers N --digest` |
 | **M2** Native services | `ae_nav` via columns, movement classes incl. water/hover/amphibious, `ae_spatial`, terrain patches | 10k units cross a map with water near pathsim's tick budget; golden-hash tests; `ae-tool navbench --scaling` |
-| **M3** Render module + terrain | depth/MRT, declaration ABI, reflection, instance streams + GPU culling, `terrain_cbt`, threaded recording | `ae-client` shows terrain + 10k units from M2; topology hot-reload without restart; validation layers clean |
+| **M3** Render module + terrain | depth/MRT, declaration ABI, reflection, instance streams + GPU culling, `terrain_cbt` with reusable material tilesets (orientation + pixel-normal blending), threaded recording | `ae-client` shows terrain + 10k units from M2; terrain tileset demonstrated on an existing heightmap and documented; topology hot-reload without restart; validation layers clean |
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
