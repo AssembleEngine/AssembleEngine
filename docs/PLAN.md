@@ -1303,6 +1303,25 @@ Spawning defs (`ae_sdk` feature `catalog`, `ae_services::catalog`):
   view of each allyteam has exactly its 7 units as `Own` rows (the M4 gap for game-spawned units is
   closed); 1 and 2 workers agree.
 
+Skirmish rules (all in the game crate; content in `games/skirmish/content/defs/units.json`):
+- Components `Health`, `Armor`, `Weapon`, `Factory` (its own economy: income, cost, build time, the def
+  it `builds`), `Orders`, `Match`; event streams `Presence`, `DamageRequest`, `Damage`, `FactoryCount`.
+- Systems: `produce` (metal, then a unit of `builds` beside the factory), `rally` (new units ordered
+  to the enemy base), `scan` → `fire` (nearest enemy in range off cooldown) → `armor` (each request
+  less armor, at least 1) → `apply` (health; despawn at 0), `census` → `judge` (no factories left:
+  the other allyteam wins; both in one tick: a draw). Damage is a chain of streams, each read in
+  event order, so the outcome never depends on how many workers emitted.
+- The catalogue takes a def name for a 64-bit field (`"builds": "tank"` is the tank's id);
+  `ae-tool catalog-fmt FILE...` rewrites catalogue files canonically, and the test checks the
+  game's content file is canonical.
+- An even match stalls: the armies meet in a corridor of the land map 1.1–1.4 km from the enemy
+  factories, only the fronts fight (first at 144 m, just outside the 140 m range I started with;
+  200 m now), and both factories keep feeding them. With a handicap (parameter bits 48..56: 30 more
+  starting tanks for allyteam 0) allyteam 0 breaks through and wins at tick 2,497, with the same
+  tick and digest at 1 and 2 workers (test `skirmish.rs`).
+- Not done: units do not retarget after the rally point (no attack-move), no unit AI; the content
+  hash is not yet in the replay header; no human or bot input.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

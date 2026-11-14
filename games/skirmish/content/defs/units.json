@@ -4,8 +4,18 @@
     "factory": {
       "extends": "structure",
       "components": {
+        "Armor": {
+          "value": 10
+        },
         "Body": {
           "radius": 20.0
+        },
+        "Factory": {
+          "build_ticks": 60,
+          "builds": "tank",
+          "cost": 600,
+          "income": 10,
+          "metal": 0
         },
         "Health": {
           "hp": 2000,
@@ -33,14 +43,25 @@
     "tank": {
       "extends": "unit",
       "components": {
+        "Armor": {
+          "value": 5
+        },
         "Health": {
           "hp": 300,
           "max": 300
         },
         "NavAgent": {
-          "max_speed": 9.0,
+          "max_speed": 30.0,
           "mode": 0,
           "profile": 1
+        },
+        "Orders": {
+          "given": 0
+        },
+        "Weapon": {
+          "damage": 40,
+          "range": 200.0,
+          "reload": 15
         }
       }
     },

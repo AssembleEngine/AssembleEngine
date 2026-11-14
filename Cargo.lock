@@ -84,6 +84,7 @@ name = "ae-tool"
 version = "0.0.1"
 dependencies = [
  "ae_bench",
+ "ae_catalog",
  "ae_profile",
  "anyhow",
 ]

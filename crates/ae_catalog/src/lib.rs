@@ -19,11 +19,13 @@
 //! its kind: numbers for floats, integers in range for integer kinds,
 //! `true`/`false` for booleans; entity, byte and array fields cannot be set
 //! from data) and turns it into the bytes of each component, unset fields
-//! zero. A def's id is a hash of its name ([`ae_abi::name_id`], like
+//! zero; a 64-bit unsigned field may be given a def's name for its id. A
+//! def's id is a hash of its name ([`ae_abi::name_id`], like
 //! component ids), so adding a def never renumbers the others.
 //!
-//! [`CatalogFile::write`] writes the canonical text (keys sorted, two-space
-//! indent): parsing it and writing again gives the same bytes, so files
+//! [`CatalogFile::write`] writes the canonical text (defs, components and
+//! fields sorted by name, a def's keys in a fixed order, two-space indent;
+//! `ae-tool catalog-fmt` applies it): parsing it and writing again gives the same bytes, so files
 //! can round-trip through tools.
 
 use ae_sim::schema::{ComponentDecl, FieldDecl, Schema};
@@ -60,7 +62,8 @@ impl CatalogFile {
         Ok(f)
     }
 
-    /// The canonical text: sorted keys, two-space indent, trailing newline.
+    /// The canonical text: names sorted, a def's keys in a fixed order,
+    /// two-space indent, trailing newline.
     pub fn write(&self) -> String {
         serde_json::to_string_pretty(self).expect("a catalogue serialises") + "\n"
     }
@@ -214,6 +217,8 @@ fn encode(field: &FieldDecl, v: &serde_json::Value) -> Result<Vec<u8>> {
         FIELD_I16 => (int(i16::MIN as i128, i16::MAX as i128)? as i16).to_le_bytes().to_vec(),
         FIELD_U32 => (int(0, u32::MAX as i128)? as u32).to_le_bytes().to_vec(),
         FIELD_I32 => (int(i32::MIN as i128, i32::MAX as i128)? as i32).to_le_bytes().to_vec(),
+        // A def name stands for its id (`"builds": "tank"`).
+        FIELD_U64 if v.is_string() => def_id(v.as_str().unwrap()).to_le_bytes().to_vec(),
         FIELD_U64 => (int(0, u64::MAX as i128)? as u64).to_le_bytes().to_vec(),
         FIELD_I64 => (int(i64::MIN as i128, i64::MAX as i128)? as i64).to_le_bytes().to_vec(),
         FIELD_BOOL => {

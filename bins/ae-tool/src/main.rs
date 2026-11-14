@@ -5,6 +5,7 @@
 //! ae-tool bench <suite>|all [--small] [--quick] [--threads N] [--label NAME] [--out DIR] [--no-save]
 //! ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
 //! ae-tool navbench [--scaling ...]   # runs ae_nav's navbench binary
+//! ae-tool catalog-fmt FILE...          # rewrite catalogue files in canonical form
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -21,7 +22,8 @@ const USAGE: &str = "usage:
   ae-tool bench list
   ae-tool bench <suite>|all [--small] [--quick] [--threads N] [--label NAME] [--out DIR] [--no-save]
   ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
-  ae-tool navbench [navbench arguments, e.g. --scaling]";
+  ae-tool navbench [navbench arguments, e.g. --scaling]
+  ae-tool catalog-fmt FILE...";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
 /// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
@@ -36,12 +38,31 @@ fn navbench(args: &[String]) -> Result<ExitCode> {
     Ok(ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8))
 }
 
+/// Rewrite catalogue files in canonical form (`ae_catalog::CatalogFile::write`).
+fn catalog_fmt(files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        bail!("catalog-fmt needs at least one file");
+    }
+    for f in files {
+        let text = std::fs::read_to_string(f).with_context(|| format!("read {f}"))?;
+        let canonical = ae_catalog::CatalogFile::parse(&text).with_context(|| f.clone())?.write();
+        if canonical != text {
+            std::fs::write(f, &canonical).with_context(|| format!("write {f}"))?;
+            println!("{f}: rewritten");
+        } else {
+            println!("{f}: already canonical");
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("bench") => bench(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("bench-diff") => bench_diff(&args[1..]),
         Some("navbench") => navbench(&args[1..]),
+        Some("catalog-fmt") => catalog_fmt(&args[1..]).map(|()| ExitCode::SUCCESS),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

@@ -8,6 +8,10 @@
 //! * They are views' `Own` rows for their allyteam (the gap M4 left for
 //!   game-spawned units is closed); the other base is far out of sight.
 //! * The world is the same at 1 and 2 workers.
+//! * A match with a handicap (30 more tanks for allyteam 0) ends with
+//!   allyteam 0 the winner, at the same tick and digest at 1 and 2 workers.
+//!   (An even match stalls: the armies meet in a corridor and only their
+//!   fronts fight, while both factories keep building.)
 //!
 //! One runtime at a time: the column arena is process-wide.
 
@@ -42,6 +46,10 @@ fn defs_spawn_with_their_values_and_team() -> Result<()> {
     let mut vfs = ae_vfs::Vfs::new();
     vfs.mount_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/skirmish/content"))?;
     let catalog = Arc::new(Catalog::load(&vfs, "defs", &schema)?);
+    let text = vfs.read_string("defs/units.json")?;
+    ensure!(ae_catalog::CatalogFile::parse(&text)?.write() == text, "the content file is in canonical form");
+    let factory_def = catalog.get("factory").unwrap().component("Factory").unwrap();
+    ensure!(factory_def.bytes[..8] == def_id("tank").to_le_bytes(), "`\"builds\": \"tank\"` is the tank def's id");
     ensure!(catalog.defs.len() == 2, "factory and tank (the rest are abstract): {:?}", catalog.defs.values().map(|d| &d.name).collect::<Vec<_>>());
     let nav = NavPlugin::new(Map::LandCrossing, (EXTENT / 8) as i32);
     let param = EXTENT << 24 | TANKS << 40;
@@ -83,6 +91,27 @@ fn defs_spawn_with_their_values_and_team() -> Result<()> {
     }
     let (d1, ..) = run(1)?;
     ensure!(d1 == d2, "1 and 2 workers differ");
+
+    // A whole match with a handicap (allyteam 0 starts with 30 more tanks):
+    // its army breaks through and destroys the other factory; the judge
+    // names it the winner. The same at 1 and 2 workers.
+    let decisive = |workers: usize| -> Result<(u32, u64, u128)> {
+        let cfg = RuntimeConfig { max_workers: 2, ..RuntimeConfig::default() };
+        let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav.clone()), Arc::new(SpatialPlugin::square(nav.extent(), 64.0)), Arc::new(CatalogPlugin::new(catalog.clone()))])?;
+        let mut world = rt.world_for(param | 30 << 48, workers)?;
+        for _ in 0..6000 {
+            rt.tick(&mut world, workers)?;
+            let m: [u32; 4] = decode(&rt.rows(&world, "Match")?[0].1);
+            if m[0] != u32::MAX && world.tick > m[2] as u64 + 30 {
+                return Ok((m[0], m[2] as u64, rt.digest(&world)?.total));
+            }
+        }
+        Ok((u32::MAX, 0, rt.digest(&world)?.total))
+    };
+    let (winner, at, d) = decisive(2)?;
+    ensure!(winner == 0, "allyteam 0 (with 30 more tanks) wins: winner {winner:#x} at tick {at}");
+    ensure!(decisive(1)? == (winner, at, d), "the match differs at 1 worker");
+    println!("handicap match: allyteam {winner} won at tick {at}");
     println!("{} spawned per allyteam, own rows in both views; digest {:016x}", 1 + TANKS, d2 as u64);
     Ok(())
 }
