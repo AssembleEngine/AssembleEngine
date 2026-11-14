@@ -599,12 +599,13 @@ fn run(o: Options) -> Result<ExitCode> {
         println!("{} of {} frames recorded on {} threads", stats.executor.parallel_frames, stats.executor.frames, o.record_threads);
     }
     println!(
-        "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} acquire timeouts, {}",
+        "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} graph bakes, {} acquire timeouts, {}",
         stats.frames,
         started.elapsed().as_secs_f32(),
         stats.device,
         stats.present_mode,
         stats.swapchain_recreates,
+        stats.executor.bakes,
         stats.acquire_timeouts,
         validation_text(stats.validation, stats.validation_errors, stats.validation_warnings)
     );

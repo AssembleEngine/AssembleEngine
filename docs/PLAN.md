@@ -1040,7 +1040,9 @@ Frame graphs from data files (the editor's M3 cost, "descriptor loadable from a 
 - `--capture` with `post` and with `render/post.graph.json` (2,000 units): byte-identical, 0 validation
   messages. Windowed, under validation: editing a uniform in the file reloaded it (2 loads); a
   misspelt program name was rejected ("pass `vignette`: no program `vignet`") and the running graph
-  stayed.
+  stayed. Removing the `vignette` pass from the file mid-run (a topology change): 2 loads, 2 graph
+  bakes (1 in the same run without the edit), 0 validation messages. The client's exit line now
+  prints the bake count.
 - Not done: uniforms are constants (no time or camera inputs; that still needs a WASM module); no
   text form for compute programs (only library compute passes); no `ae-tool` command to convert a
   module's declaration into a file.
@@ -1048,7 +1050,7 @@ Frame graphs from data files (the editor's M3 cost, "descriptor loadable from a 
 M3 is complete: every scope item has landed (depth/MRT, declaration ABI, reflection, instance streams
 and GPU culling, `terrain_cbt` with material tilesets, threaded recording, the GPU bench, golden
 `.dot`, graph files). The exit run (`ae-client` with 10k units, topology hot reload, validation
-clean) is covered by the runs above. What each part leaves open is in its "Not done" line. Next is
+clean) is covered by the runs above (topology: the graph-file pass removal). What each part leaves open is in its "Not done" line. Next is
 M4 (copy layer and fog).
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
