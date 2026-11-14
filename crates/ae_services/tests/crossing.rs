@@ -96,11 +96,11 @@ fn run(rt: &mut Runtime, workers: usize) -> Result<(Outcome, World)> {
 #[test]
 fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     let wasm = ae_sim::build::game("crossing")?;
-    let nav = NavPlugin { map: Map::WaterCrossing, map_cells: MAP_CELLS };
+    let nav = NavPlugin::new(Map::WaterCrossing, MAP_CELLS);
     let spatial = SpatialPlugin::square(nav.extent(), 64.0);
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
     let cfg = RuntimeConfig { max_workers: workers, range_rows: 128, parallel_min_rows: 256, ..RuntimeConfig::default() };
-    let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
+    let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav.clone()), Arc::new(spatial)])?;
 
     let layers: Vec<Vec<&str>> = rt.schedule.layers.iter().map(|l| l.iter().map(|&i| rt.system_name(i)).collect()).collect();
     assert_eq!(layers, [vec!["nav_spawn", "zones"], vec!["orders", "quake"], vec!["reorder"], vec!["nav"], vec!["spatial", "churn", "landed"], vec!["crowding"]]);

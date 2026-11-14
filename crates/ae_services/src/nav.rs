@@ -38,7 +38,7 @@ use ae_nav::scenario::{self, Plan};
 use ae_nav::nav::{MovementProfile, min_clearance_cells, profiles_for, water_profiles};
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
 use ae_nav::terrain::Medium;
-use ae_nav::terrain::{CellEdit, TerrainPatch};
+use ae_nav::terrain::{CellEdit, SharedTerrain, TerrainPatch};
 use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, order, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
@@ -46,6 +46,7 @@ use ae_sim::schedule::Cadence;
 use ae_sim::schema::Schema;
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 /// Which map and units a world starts with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,14 +58,63 @@ pub enum Map {
     LandCrossing,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct NavPlugin {
     pub map: Map,
     /// Map side in cells (8 world units each); 2560 is pathsim's full map.
     pub map_cells: i32,
+    /// Where landed ground changes are published (render, tools); `None`
+    /// publishes nothing. Read-only sharing of the service's terrain, so
+    /// it never affects the sim.
+    pub ground: Option<Arc<GroundFeed>>,
+}
+
+/// The terrain as of the latest landed ground change, and the cells that
+/// changed since the reader last took it.
+#[derive(Clone, Debug)]
+pub struct GroundUpdate {
+    /// Terrain version (versions count patches, so they skip).
+    pub version: u32,
+    /// Inclusive cell rectangle `(x0, y0, x1, y1)` covering every cell
+    /// whose ground (height, water depth, blocked, material) changed since
+    /// the previous [`GroundFeed::take`].
+    pub cells: (i32, i32, i32, i32),
+    /// The whole authoritative terrain after the change (shared, immutable).
+    pub terrain: SharedTerrain,
+}
+
+/// Landed ground changes, newest wins: the nav system publishes after each
+/// step that landed one; a reader takes the latest terrain with the union
+/// of the rectangles it has not seen, so a reader that falls behind still
+/// refreshes everything that changed. Cost-only changes (cost edits,
+/// overlays) are not published: they do not change how the ground looks.
+#[derive(Debug, Default)]
+pub struct GroundFeed {
+    pending: Mutex<Option<GroundUpdate>>,
+}
+
+impl GroundFeed {
+    pub fn publish(&self, version: u32, cells: (i32, i32, i32, i32), terrain: SharedTerrain) {
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let cells = match pending.as_ref() {
+            Some(old) => (old.cells.0.min(cells.0), old.cells.1.min(cells.1), old.cells.2.max(cells.2), old.cells.3.max(cells.3)),
+            None => cells,
+        };
+        *pending = Some(GroundUpdate { version, cells, terrain });
+    }
+
+    /// The latest change and everything that changed before it since the
+    /// last call, or `None` if nothing did.
+    pub fn take(&self) -> Option<GroundUpdate> {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
 }
 
 impl NavPlugin {
+    pub fn new(map: Map, map_cells: i32) -> Self {
+        Self { map, map_cells, ground: None }
+    }
+
     /// The unit count in a game parameter: its low 24 bits (the game owns
     /// the rest).
     pub fn units(param: u64) -> u32 {
@@ -142,7 +192,7 @@ impl HostPlugin for NavPlugin {
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 Ok(match name {
                     "nav_spawn" => Box::new(Spawner { plan: plan.take().context("nav_spawn listed twice")? }),
-                    "nav" => Box::new(Nav::new(service.take().context("nav listed twice")?)),
+                    "nav" => Box::new(Nav::new(service.take().context("nav listed twice")?, self.ground.clone())),
                     other => bail!("no host system `{other}` in the nav plugin"),
                 })
             })
@@ -196,14 +246,15 @@ struct Nav {
     service: NavService,
     used_groups: BTreeSet<u64>,
     scratch: Scratch,
+    ground: Option<Arc<GroundFeed>>,
 }
 
 // Raw row pointers live only inside one `run`.
 unsafe impl Send for Scratch {}
 
 impl Nav {
-    fn new(service: NavService) -> Self {
-        Self { service, used_groups: BTreeSet::new(), scratch: Scratch::default() }
+    fn new(service: NavService, ground: Option<Arc<GroundFeed>>) -> Self {
+        Self { service, used_groups: BTreeSet::new(), scratch: Scratch::default(), ground }
     }
 }
 
@@ -349,6 +400,12 @@ impl HostSystem for Nav {
             let (x0, y0, x1, y1) = c.cells;
             let flags = if c.ground { changed::GROUND } else { 0 };
             ctx.emit(TERRAIN_CHANGED, bytes_of(&TerrainChanged { version: c.version, x0, y0, x1, y1, flags }))?;
+            if let (true, Some(feed)) = (c.ground, &self.ground) {
+                // The service's terrain is the newest landed version (this
+                // change's, or a later one in the same step: the feed
+                // keeps the union of the rectangles either way).
+                feed.publish(nav.terrain.version, c.cells, Arc::clone(&nav.terrain));
+            }
         }
         Ok(())
     }

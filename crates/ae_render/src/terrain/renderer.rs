@@ -167,6 +167,26 @@ pub struct TerrainRenderer {
     samplers: [vk::Sampler; 2],
 }
 
+/// Texels to rewrite after the terrain changed (see
+/// [`super::edit::TerrainEditor`]): regions of the height texture, the
+/// pyramid and error mips, and the material texture. Applied all at once,
+/// so a frame never sees new heights with old pyramid bounds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TerrainUpdate {
+    /// Terrain version this brings the textures to (for reports).
+    pub version: u32,
+    pub heights: Vec<upload::Region>,
+    pub pyramid: Vec<upload::Region>,
+    pub errors: Vec<upload::Region>,
+    pub materials: Vec<upload::Region>,
+}
+
+impl TerrainUpdate {
+    pub fn bytes(&self) -> usize {
+        [&self.heights, &self.pyramid, &self.errors, &self.materials].iter().flat_map(|r| r.iter()).map(|r| r.bytes.len()).sum()
+    }
+}
+
 fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     pipeline::push_bytes(value)
 }
@@ -354,6 +374,13 @@ impl TerrainRenderer {
             material_img,
             samplers,
         })
+    }
+
+    /// Rewrite the textures `update` covers. The device must be idle (no
+    /// frame in flight samples them); waits for the copy.
+    pub fn apply(&mut self, gpu: &GpuDevice, update: &TerrainUpdate) -> Result<()> {
+        let materials: &[upload::Region] = if self.info.has_materials { &update.materials } else { &[] };
+        upload::update_images(gpu, &[(&self.height_img, &update.heights), (&self.pyramid_img, &update.pyramid), (&self.error_img, &update.errors), (&self.material_img, materials)])
     }
 
     /// The height texture (one corner per texel, normalised: world height =

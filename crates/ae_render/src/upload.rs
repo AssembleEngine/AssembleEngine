@@ -125,3 +125,75 @@ pub fn image(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, mips:
     }
     Ok(target)
 }
+
+/// A rectangle of one mip of an image to rewrite: `bytes` holds `width` x
+/// `height` texels, tightly packed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Region {
+    pub mip: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Rewrite `regions` of sampled images made by [`image`] (in
+/// `SHADER_READ_ONLY_OPTIMAL`, which they are left in again), keeping every
+/// texel outside them. The caller makes sure no submitted work still uses
+/// the images (a device wait-idle); the copy itself is waited for.
+pub fn update_images(gpu: &GpuDevice, updates: &[(&OwnedImage, &[Region])]) -> Result<()> {
+    // Each region starts at a multiple of 16 bytes: a copy's buffer offset
+    // must be a multiple of its image's texel size (1 to 16 bytes here).
+    const ALIGN: usize = 16;
+    let mut bytes = Vec::new();
+    let mut offsets = Vec::new();
+    for r in updates.iter().flat_map(|(_, regions)| regions.iter()) {
+        bytes.resize(bytes.len().next_multiple_of(ALIGN), 0);
+        offsets.push(bytes.len() as u64);
+        bytes.extend_from_slice(&r.bytes);
+    }
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut source = staging(gpu, &bytes, "staging")?;
+    let barrier = |image: &OwnedImage, old: vk::ImageLayout, new: vk::ImageLayout, src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+        vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src.0)
+            .src_access_mask(src.1)
+            .dst_stage_mask(dst.0)
+            .dst_access_mask(dst.1)
+            .old_layout(old)
+            .new_layout(new)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image.image)
+            .subresource_range(image.range())
+    };
+    let read = (vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::SHADER_SAMPLED_READ);
+    let copy = (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE);
+    let copied = one_shot(gpu, |cmd| unsafe {
+        let to_dst: Vec<_> = updates.iter().filter(|(_, r)| !r.is_empty()).map(|(image, _)| barrier(image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, read, copy)).collect();
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
+        let mut offsets = offsets.iter();
+        for (image, regions) in updates {
+            let copies: Vec<vk::BufferImageCopy> = regions
+                .iter()
+                .map(|r| {
+                    vk::BufferImageCopy::default()
+                        .buffer_offset(*offsets.next().expect("an offset per region"))
+                        .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: r.mip, base_array_layer: 0, layer_count: 1 })
+                        .image_offset(vk::Offset3D { x: r.x as i32, y: r.y as i32, z: 0 })
+                        .image_extent(vk::Extent3D { width: r.width, height: r.height, depth: 1 })
+                })
+                .collect();
+            if !copies.is_empty() {
+                gpu.device.cmd_copy_buffer_to_image(cmd, source.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &copies);
+            }
+        }
+        let to_read: Vec<_> = updates.iter().filter(|(_, r)| !r.is_empty()).map(|(image, _)| barrier(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, copy, read)).collect();
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
+    });
+    source.destroy(gpu);
+    copied
+}

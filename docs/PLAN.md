@@ -453,7 +453,7 @@ Deviations from the plan, deliberate:
   against pathsim (asserted in `service_vs_reference`; 0 in `nav-sim` land), 55 in the 10k water run.
   pathsim's crowd and chokepoint navbench scenarios have not been driven through the service yet.
 - Terrain stays in `ae_nav::terrain`; the planned `ae_terrain` crate split waits for map files (M6) and
-  the render heightfield (M3).
+  the render heightfield (M3; done, see "Terrain edits on screen").
 
 In the sim (`cargo test --release -p ae_services --test crossing -- --nocapture`; `ae-headless --game
 crossing --nav water --compare`):
@@ -769,8 +769,8 @@ Units (the 10k-unit instance stream):
   (fields drop in order, and the world's columns live in the runtime's memory); `World::drop` after
   the runtime crashed in flecs.
 - Not done: the cull only tests the frustum (no occlusion, no LOD meshes); one draw for all
-  classes; terrain edits (`TerrainChanged`) still do not reach the render heightfield, so units can
-  stand above or inside edited ground. `ae-client` now builds `games/crossing` on first use
+  classes. (Terrain edits now reach the render heightfield: see "Terrain edits on screen" below.)
+  `ae-client` now builds `games/crossing` on first use
   (cargo and the `wasm32-wasip1-threads` target, as `ae-headless`); a sim failure is printed when
   it happens and shown in the title, and `--units 0` runs without the sim.
 
@@ -856,9 +856,63 @@ Render modules (the M3 exit item "topology hot-reload without restart"):
   module cannot yet declare compute programs; no epoch/fuel watchdog on the module (an infinite loop
   in `frame` hangs the render thread; trusted, like the sim module).
 
+Terrain edits on screen (`TerrainChanged` reaching the render heightfield):
+- Sim side (`ae_services::nav`): `NavPlugin::ground` (new field, so `NavPlugin` is `Clone` instead
+  of `Copy`; `NavPlugin::new(map, cells)` leaves it `None`) is an optional `GroundFeed`. When a
+  repair that changed the ground lands, the `nav` system publishes the service's terrain (the
+  immutable `Arc<Terrain>` it already holds, nothing copied) with the change's cell rectangle;
+  the feed keeps the newest terrain and the union of rectangles not yet taken, so a reader that
+  falls behind still refreshes everything. Cost-only changes are not published.
+  `tests/capture.rs` now runs the plain world without the feed and the captured one with it: same
+  digest; the published terrain (version 4) differs from the start map in 551 cells, all inside the
+  published rectangle.
+- That rectangle is one box around every patch in a repair: the crossing game's quake scatters ~100
+  small squares, so the box is ~1,040 x 1,890 cells, which uploaded whole is 15 MB and a 25–32 ms
+  render-thread stall. So `ae-client` compares the new terrain with the one on screen inside the box,
+  in 32-cell tiles (ground height and material; `ground::changed_rects`, unit-tested), and edits
+  only the changed cells of each tile: 44–50 tiles, 0.2–0.3 MB.
+- Render side: `Pyramid::update` recomputes every pyramid block that reads a changed corner (a
+  block's error needs all its samples, so the top levels rescan most of the map; several
+  rectangles share their blocks), bit-identical to `build_pyramid` (unit test over edge, corner,
+  boundary-straddling and out-of-range edits, single and batched; it fails if the boundary block or
+  the uncached E_0 is left out). `terrain::edit::TerrainEditor` keeps CPU copies of heights, pyramid
+  and materials and turns changed cells into `TerrainUpdate` regions (corners average the cells
+  around them as at load, `Heightmap::from_cells`, normalised with the load-time scale, so an edit
+  may leave [0, 1]; the textures are float). Unit test: after edits the copy equals a map built from
+  scratch from the edited cells. `TerrainApp::terrain_edits` takes updates; the render thread
+  applies them at the start of the next frame: device wait-idle (every frame in flight samples the
+  textures), then `upload::update_images` (`SHADER_READ_ONLY` → `TRANSFER_DST` → back, so texels
+  outside the regions are kept; each region at a 16-byte staging offset). Heights, pyramid, errors
+  and materials change in the same frame.
+- `ae-client --quake TICK` sets the crossing game's quake tick; a thread runs the editor (the
+  pyramid update is ~67 ms on the 2560² map, so neither the sim nor the render thread does it).
+  `--capture` applies the landed edits before rendering. The title shows the terrain version.
+- Checked: GPU test `terrain_edits_reach_the_heightfield` (flat map, a 13-cell square raised by
+  40 m and turned to rock while rendering through one executor: the unit standing in it moves
+  15 px up the screen to the new ground and nothing red stays at the old height, the square's
+  colour changes, and 0 of 71,872 pixels outside the square's screen box (one cell of margin for
+  normals) change; then three small rectangles of unaligned sizes in one update; 0 validation
+  messages; that second update is pushed while frames are in flight, so the wait-idle path runs
+  under synchronization validation). The unaligned case was found by validation in `--capture` (a copy's buffer offset must
+  be a multiple of the texel size) and the test fails with the alignment removed; a region offset
+  off by one fails it too. Not caught: uploading from `UNDEFINED` instead of `SHADER_READ_ONLY`
+  passes on this driver (NVIDIA keeps the old texels; validation does not flag it), so that path
+  rests on review. Water map, 10k units, `--quake 10 --ticks 120 --capture`: 50 tiles, 309 KB,
+  edit 67 ms on the CPU, applied in 1.1–2.3 ms (9 ms with validation); with validation 0 messages.
+  Windowed, `--quake 60 --exercise`, 14 s with validation: both landings (rock at version 2,
+  raised ground at version 4) applied, 13 swapchain recreates, 0 validation messages. Late sim
+  ticks over 12 s windowed runs: 1 without the quake, 4 with it (two runs each), and still 4 with
+  the editor switched off (a temporary switch, removed): the 3 extra are the sim's own quake work
+  (nav repairs, moving buried units), not the edit thread.
+- Not done: the camera's ground height (`TerrainSource::height_at`) still reads the load-time
+  heightmap, so the orbit target does not follow edited ground. Applying an edit idles the device
+  (fine for edits a few times a second; per-frame terrain deformation would need the copies inside
+  the graph). The CBT re-refines over the following frames; nothing forces the edited area to split
+  at once.
+
 Next in M3: material tilesets (procedural placeholder textures until a texture source is chosen)
-replacing the material palette, `TerrainChanged` patches reaching the render heightfield, the GPU
-bench (`ae-client --bench`, JSON for `bench-diff`), and threaded recording.
+replacing the material palette, the GPU bench (`ae-client --bench`, JSON for `bench-diff`), and
+threaded recording.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

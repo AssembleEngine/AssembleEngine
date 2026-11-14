@@ -47,6 +47,8 @@ end-of-tick capture of `Body`/`NavAgent` feeds an instance stream, and the GPU c
 waiting for the sim. The frame graph can come from a render module (WASM): it wires engine library
 passes (terrain, units) and its own fullscreen shaders (reflected and checked against the declared
 passes), and is swapped while running when its sources change (`ae-client --render-module post`).
+Terrain edits the sim makes reach the render heightfield (`ae-client --quake 60`): the nav service
+publishes landed ground changes, and the renderer patches its textures and error pyramid in place.
 Material tilesets are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
@@ -134,8 +136,9 @@ cargo run --release -p ae-client                                         # water
 cargo run --release -p ae-client -- --map land --capture land.ppm        # 300 sim ticks, then an offscreen frame + GPU ms per pass
 cargo run --release -p ae-client -- --units 0                            # terrain only
 cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (V: vignette)
+cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo test -p ae_render --test module                                    # render modules without a GPU
-cargo test --release -p ae_services --test capture                       # capturing every tick leaves the digest unchanged
+cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
 ```
 

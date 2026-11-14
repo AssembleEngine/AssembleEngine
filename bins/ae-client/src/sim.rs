@@ -8,7 +8,7 @@
 //! layer, which will publish filtered view tables instead.
 
 use ae_nav::math::TICK_SECONDS;
-use ae_services::nav::{Map, NavPlugin};
+use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
 use ae_sim::capture::{Capture, CaptureSpec};
@@ -34,11 +34,19 @@ pub struct SimOptions {
     pub map_cells: i32,
     pub units: u32,
     pub workers: usize,
+    /// The crossing game's `quake` tick (1..=255; 0: none): rock squares,
+    /// then raised squares a tick later, landing with the nav repairs.
+    pub quake: u8,
 }
 
 impl SimOptions {
     fn plugin(&self) -> NavPlugin {
-        NavPlugin { map: self.map, map_cells: self.map_cells }
+        NavPlugin::new(self.map, self.map_cells)
+    }
+
+    /// The game parameter: unit count, quake tick (orders at tick 0).
+    fn param(&self) -> u64 {
+        self.units as u64 | (self.quake as u64) << 24
     }
 
     /// One look per movement class of the map (the crossing game declares
@@ -62,13 +70,14 @@ pub struct Sim {
 }
 
 impl Sim {
-    pub fn new(o: &SimOptions) -> Result<Self> {
+    /// The world; landed ground changes go to `ground`, if given.
+    pub fn new(o: &SimOptions, ground: Option<Arc<GroundFeed>>) -> Result<Self> {
         let wasm = ae_sim::build::game("crossing").context("building games/crossing")?;
-        let nav = o.plugin();
+        let nav = NavPlugin { ground, ..o.plugin() };
         let spatial = SpatialPlugin::square(nav.extent(), 64.0);
         let cfg = RuntimeConfig { max_workers: o.workers, ..RuntimeConfig::default() };
         let rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
-        let world = rt.world_for(o.units as u64, o.workers)?;
+        let world = rt.world_for(o.param(), o.workers)?;
         let spec = CaptureSpec::new(&rt.schema, &FIELDS)?;
         Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default() })
     }
@@ -157,15 +166,16 @@ pub struct SimThread {
 }
 
 impl SimThread {
-    /// Build the world and tick it at the nav rate, publishing to `feed`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>) -> Self {
+    /// Build the world and tick it at the nav rate, publishing units to
+    /// `feed` and landed ground changes to `ground`.
+    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
         let handle = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let result = run(o, feed, &stop2, &stats2);
+                let result = run(o, feed, ground, &stop2, &stats2);
                 if let Err(error) = &result {
                     eprintln!("sim failed: {error:#} (--units 0 runs without the sim)");
                     stats2.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
@@ -189,9 +199,9 @@ impl SimThread {
     }
 }
 
-fn run(o: SimOptions, feed: Arc<UnitFeed>, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
     let started = Instant::now();
-    let mut sim = Sim::new(&o)?;
+    let mut sim = Sim::new(&o, Some(ground))?;
     eprintln!("sim: crossing game, {} units, {} workers, world built in {:.2} s", o.units, o.workers, started.elapsed().as_secs_f32());
     let period = Duration::from_secs_f32(TICK_SECONDS);
     let mut next = Instant::now();

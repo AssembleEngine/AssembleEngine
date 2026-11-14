@@ -44,14 +44,16 @@
 //! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
 //! the layer reported anything.
 
+mod ground;
 mod sim;
 mod watch;
 
 use ae_nav::terrain::{NO_WATER, Terrain};
-use ae_services::nav::Map;
+use ae_services::nav::{GroundFeed, Map};
 use ae_render::demo::DemoApp;
 use ae_render::swapchain::PresentPolicy;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, lod_view};
+use ae_render::terrain::edit::TerrainEditor;
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
 use ae_render::thread::{GpuRenderConfig, GpuRenderThread};
@@ -87,12 +89,13 @@ struct Options {
     /// Sim ticks before a capture.
     ticks: u64,
     render_module: Option<String>,
+    quake: u8,
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--capture FILE.ppm]";
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--capture FILE.ppm]";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None };
+    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0 };
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -121,6 +124,7 @@ fn parse() -> Result<Options> {
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
             "--ticks" => o.ticks = value("--ticks", &mut args)?.parse().context("--ticks")?,
             "--render-module" => o.render_module = Some(value("--render-module", &mut args)?),
+            "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
             "-h" | "--help" => {
@@ -146,7 +150,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Land => Map::LandCrossing,
         MapKind::Generated | MapKind::Demo => return None,
     };
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers })
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
@@ -156,39 +160,18 @@ fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
 /// Corner heightmap of the nav terrain's ground (bed under water), with
 /// world heights in metres × `relief`; and the water surface height.
 fn nav_heightmap(terrain: &Terrain, relief: f32) -> (Heightmap, f32, f32, Option<f32>) {
-    let (cx, cy) = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
-    let ground = |x: usize, y: usize| {
-        let i = y * cx + x;
-        let depth = terrain.water_depth.get(i).copied().unwrap_or(0);
-        (terrain.height[i] as f32 - depth as f32) * 0.1 * relief
-    };
-    // A corner is the mean of the (up to four) cells around it.
-    let (width, height) = (cx + 1, cy + 1);
-    let mut data = Vec::with_capacity(width * height);
-    for y in 0..height {
-        for x in 0..width {
-            let (mut sum, mut n) = (0.0, 0.0);
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                if x >= dx && y >= dy && x - dx < cx && y - dy < cy {
-                    sum += ground(x - dx, y - dy);
-                    n += 1.0;
-                }
-            }
-            data.push(sum / n);
-        }
-    }
-    let (lo, hi) = data.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-    let scale = (hi - lo).max(1e-3);
-    for v in &mut data {
-        *v = (*v - lo) / scale;
-    }
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let (heightmap, scale, offset) = Heightmap::from_cells(cells, ground::cell_ground(terrain, relief), None);
     let water = (terrain.water_level != NO_WATER).then_some(terrain.water_level as f32 * 0.1 * relief);
-    (Heightmap { width, height, data }, scale, lo, water)
+    (heightmap, scale, offset, water)
 }
 
-fn terrain_source(o: &Options) -> Result<TerrainSource> {
+/// The map's terrain for render, and the nav terrain it shows (the
+/// crossing maps).
+fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> {
     let started = Instant::now();
     let mut materials = None;
+    let mut nav = None;
     let (heightmap, scale, offset, water, cell_size) = match o.map {
         MapKind::Water | MapKind::Land => {
             let terrain = if o.map == MapKind::Water {
@@ -199,6 +182,7 @@ fn terrain_source(o: &Options) -> Result<TerrainSource> {
             let cell = terrain.geom.cell_size;
             materials = Some(terrain.material.clone());
             let (heightmap, scale, offset, water) = nav_heightmap(&terrain, o.relief);
+            nav = Some(Arc::new(terrain));
             (heightmap, scale, offset, water, cell)
         }
         MapKind::Generated => {
@@ -220,7 +204,7 @@ fn terrain_source(o: &Options) -> Result<TerrainSource> {
         water.map(|w| format!(", water at {w:.0} m")).unwrap_or_default(),
         (started.elapsed() - generated).as_secs_f32()
     );
-    Ok(TerrainSource { heightmap, pyramid, info, materials })
+    Ok((TerrainSource { heightmap, pyramid, info, materials }, nav))
 }
 
 /// Resize, minimize, restore on a fixed schedule (seconds after start).
@@ -301,25 +285,42 @@ fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>) {
     }
 }
 
-fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCode> {
+fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, path: &str) -> Result<ExitCode> {
     use ae_render::device::{GpuDevice, GpuInstance};
     use ae_render::executor::ExecutorConfig;
     use ae_render::thread::{RenderApp, TargetInfo, run_headless};
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
-    let mut app = TerrainApp::new(source, TerrainOutput::Readback);
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
     if let Some(name) = &o.render_module {
         app = app.with_module(ae_render::module::build(name)?);
     }
     let mut sim_note = String::new();
     if let Some(s) = sim_options(o) {
         let started = Instant::now();
-        let mut sim = sim::Sim::new(&s)?;
+        let ground = Arc::new(GroundFeed::default());
+        let mut sim = sim::Sim::new(&s, Some(ground.clone()))?;
         let built = started.elapsed();
         for _ in 0..o.ticks {
             sim.tick()?;
         }
         let ticked = started.elapsed() - built;
+        if let (Some(update), Some(mut shown)) = (ground.take(), nav) {
+            let t = Instant::now();
+            let mut editor = TerrainEditor::new(&source);
+            let made = Instant::now();
+            if let Some((u, tiles)) = ground::edit(&mut editor, &mut shown, &update, o.relief) {
+                eprintln!(
+                    "terrain version {}: {tiles} changed tiles in cells {:?}, {} bytes to upload, made in {:.1} ms (+ {:.1} ms copying the source)",
+                    u.version,
+                    update.cells,
+                    u.bytes(),
+                    made.elapsed().as_secs_f32() * 1e3,
+                    (made - t).as_secs_f32() * 1e3
+                );
+                app.terrain_edits().lock().unwrap().pending.push(u);
+            }
+        }
         let t = Instant::now();
         let stream = sim.stream(0.0)?;
         let streamed = t.elapsed();
@@ -356,6 +357,13 @@ fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCo
     std::fs::write(path, ppm).with_context(|| format!("writing {path}"))?;
     let stats = *app.stats().lock().unwrap();
     let counts = app.last_unit_counts();
+    {
+        let e = app.terrain_edits();
+        let e = e.lock().unwrap();
+        if e.applied > 0 {
+            eprintln!("terrain edits: {} applied (version {}), {} bytes uploaded in {:.2} ms", e.applied, e.version, e.last_bytes, e.last_ms);
+        }
+    }
     RenderApp::destroy(&mut app, &gpu);
     drop(gpu);
     let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
@@ -372,18 +380,23 @@ fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCo
 }
 
 fn run(o: Options) -> Result<ExitCode> {
-    let source = match o.map {
-        MapKind::Demo => None,
-        _ => Some(Arc::new(terrain_source(&o)?)),
+    let (source, nav) = match o.map {
+        MapKind::Demo => (None, None),
+        _ => {
+            let (source, nav) = terrain_source(&o)?;
+            (Some(Arc::new(source)), nav)
+        }
     };
     if let Some(path) = &o.capture {
-        return capture(source.context("--capture needs a terrain map")?, &o, path);
+        return capture(source.context("--capture needs a terrain map")?, nav, &o, path);
     }
     let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
     let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false };
     type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
+    let mut ground_thread = None;
+    let mut edits = None;
     let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
@@ -392,7 +405,11 @@ fn run(o: Options) -> Result<ExitCode> {
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));
-                sim_thread = Some(sim::SimThread::start(s, feed));
+                let ground = Arc::new(GroundFeed::default());
+                let shown = nav.clone().context("units need a crossing map")?;
+                ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
+                edits = Some(app.terrain_edits());
+                sim_thread = Some(sim::SimThread::start(s, feed, ground));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
@@ -455,7 +472,8 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
                 None => String::new(),
             };
-            let detail = detail + &sim;
+            let terrain_version = edits.as_ref().map(|e| e.lock().unwrap_or_else(|p| p.into_inner()).version).filter(|&v| v > 0);
+            let detail = detail + &sim + &terrain_version.map(|v| format!(" | terrain v{v}")).unwrap_or_default();
             let detail = match &module {
                 Some((_, status)) => {
                     let s = status.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -473,6 +491,13 @@ fn run(o: Options) -> Result<ExitCode> {
         std::thread::sleep(Duration::from_millis(2));
     }
     let stats = thread.stop();
+    drop(ground_thread);
+    if let Some(e) = &edits {
+        let e = e.lock().unwrap_or_else(|p| p.into_inner());
+        if e.applied > 0 {
+            println!("terrain edits: {} applied (version {}), last {} bytes uploaded in {:.2} ms", e.applied, e.version, e.last_bytes, e.last_ms);
+        }
+    }
     if let Some((_, status)) = &module {
         let s = status.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for error in &s.errors[module_errors.min(s.errors.len())..] {

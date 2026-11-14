@@ -21,7 +21,7 @@
 
 use super::camera::Camera;
 use super::heightmap::{Heightmap, Pyramid};
-use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, Wireframe};
+use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, Wireframe};
 use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -68,6 +68,20 @@ impl TerrainSource {
         let target = Vec2::new(w * 0.5, h * 0.5);
         Camera { target, ground: self.height_at(target), distance: w.max(h) * 0.6, yaw: 0.0, pitch: 0.75, fov_y: 0.8 }
     }
+}
+
+/// Terrain edits handed to the render thread ([`TerrainApp::terrain_edits`]),
+/// applied in order at the start of the next frame, and what has been
+/// applied so far.
+#[derive(Debug, Default)]
+pub struct TerrainEdits {
+    pub pending: Vec<TerrainUpdate>,
+    /// Updates applied, and the terrain version of the last one.
+    pub applied: u32,
+    pub version: u32,
+    /// Bytes uploaded by the last frame that applied any.
+    pub last_bytes: usize,
+    pub last_ms: f32,
 }
 
 /// What the main thread controls.
@@ -183,6 +197,7 @@ pub struct TerrainApp {
     sampler: vk::Sampler,
     pending_module: Arc<Mutex<Option<Vec<u8>>>>,
     module_status: Arc<Mutex<ModuleStatus>>,
+    edits: Arc<Mutex<TerrainEdits>>,
     extent: vk::Extent2D,
     update_lod: bool,
     wireframe: Wireframe,
@@ -210,6 +225,7 @@ impl TerrainApp {
             sampler: vk::Sampler::null(),
             pending_module: Arc::default(),
             module_status: Arc::default(),
+            edits: Arc::default(),
             extent: vk::Extent2D { width: 1, height: 1 },
             update_lod: true,
             wireframe: Wireframe::Off,
@@ -232,6 +248,37 @@ impl TerrainApp {
     /// Put a module here to replace the running one at the next frame.
     pub fn module_reload(&self) -> Arc<Mutex<Option<Vec<u8>>>> {
         self.pending_module.clone()
+    }
+
+    /// Push [`TerrainUpdate`]s here (made by a
+    /// [`super::edit::TerrainEditor`] over the same source) to apply them
+    /// at the next frame. Applying one waits for the device to go idle, as
+    /// the textures are shared by every frame in flight: fine for edits
+    /// that land a few times a second at most.
+    pub fn terrain_edits(&self) -> Arc<Mutex<TerrainEdits>> {
+        self.edits.clone()
+    }
+
+    /// Apply pending terrain edits (device idle first: every slot's frame
+    /// may sample the textures).
+    fn apply_edits(&mut self) -> Result<()> {
+        let pending = std::mem::take(&mut self.edits.lock().unwrap_or_else(|p| p.into_inner()).pending);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let gpu = self.gpu.clone().context("no device")?;
+        unsafe { gpu.device.device_wait_idle() }.context("wait for the device before a terrain edit")?;
+        let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
+        for update in &pending {
+            renderer.apply(&gpu, update).context("terrain edit upload")?;
+        }
+        let mut edits = self.edits.lock().unwrap_or_else(|p| p.into_inner());
+        edits.applied += pending.len() as u32;
+        edits.version = pending.last().map_or(edits.version, |u| u.version);
+        edits.last_bytes = pending.iter().map(TerrainUpdate::bytes).sum();
+        edits.last_ms = started.elapsed().as_secs_f32() * 1e3;
+        Ok(())
     }
 
     pub fn module_status(&self) -> Arc<Mutex<ModuleStatus>> {
@@ -392,6 +439,7 @@ impl RenderApp for TerrainApp {
     }
 
     fn prepare(&mut self, slot: usize) -> Result<()> {
+        self.apply_edits()?;
         let view = *self.view.lock().unwrap_or_else(|p| p.into_inner());
         let params = self.params(&view);
         self.update_lod = params.update_lod;

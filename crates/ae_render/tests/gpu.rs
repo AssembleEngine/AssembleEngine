@@ -608,6 +608,151 @@ fn units_render_over_terrain() {
     assert_clean(&gpu);
 }
 
+/// Terrain edits reach the GPU while rendering: a raised, re-materialled
+/// square uploaded as texture regions (`TerrainEditor` →
+/// `TerrainApp::terrain_edits`) lifts the unit standing in it to the new
+/// ground and changes the terrain there, and leaves the rest of the
+/// picture as it was (a region update that wrote the wrong texels would
+/// not; one that discarded the old contents would not either on a driver
+/// that discards, which this test's NVIDIA driver does not). A second
+/// update is pushed while frames are in flight.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn terrain_edits_reach_the_heightfield() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::edit::TerrainEditor;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    // 128 x 128 cells of flat grass at 50.
+    let cells = (128usize, 128usize);
+    let (heightmap, scale, offset) = Heightmap::from_cells(cells, |_, _| 50.0, Some((100.0, 0.0)));
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: Some(vec![0; cells.0 * cells.1]) });
+
+    // A red unit in the middle of the square to raise, a blue one outside.
+    let mut columns: [Vec<u32>; 8] = Default::default();
+    for (x, y, class) in [(512.0f32, 512.0f32, 0u32), (360.0, 600.0, 1)] {
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+    let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: false }];
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0 });
+    let camera = {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(512.0, 512.0);
+        view.camera.pitch = 0.7;
+        view.camera.distance = 600.0;
+        view.fog = false;
+        view.camera
+    };
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+    let step = |run: &mut Headless<_>, app: &mut TerrainApp| {
+        run.frames(app, 12).unwrap();
+        run.wait().unwrap();
+        app.readback().unwrap()
+    };
+    let before = step(&mut run, &mut app);
+
+    // Cells 58..=70 (world 464..568) become rock at 90.
+    let raised = (58usize, 58usize, 70usize, 70usize);
+    let inside = |x: usize, y: usize| (raised.0..=raised.2).contains(&x) && (raised.1..=raised.3).contains(&y);
+    let mut editor = TerrainEditor::new(&source);
+    let update = editor.edit(3, &[(58, 58, 70, 70)], |x, y| if inside(x, y) { 90.0 } else { 50.0 }, |_, _| 3).unwrap();
+    eprintln!("terrain update: {} bytes in {} pyramid and {} error regions", update.bytes(), update.pyramid.len(), update.errors.len());
+    let edits = app.terrain_edits();
+    edits.lock().unwrap().pending.push(update);
+    let after = step(&mut run, &mut app);
+    {
+        let e = edits.lock().unwrap();
+        assert_eq!((e.applied, e.version, e.pending.len()), (1, 3, 0), "applied at the next frame");
+    }
+    if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
+        for (name, pixels) in [("before", &before), ("after", &after)] {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(format!("{dir}/edit-{name}.ppm"), ppm).unwrap();
+        }
+    }
+
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let project = |x: f32, y: f32, h: f32| -> (f32, f32) {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+    };
+    let rgb = |pixels: &[u8], (u, v): (f32, f32)| -> [i32; 3] {
+        let i = (v as usize * extent.width as usize + u as usize) * 4;
+        [pixels[i] as i32, pixels[i + 1] as i32, pixels[i + 2] as i32]
+    };
+    let red = |[r, g, b]: [i32; 3]| r > 2 * g && r > 2 * b;
+    let blue = |[r, g, b]: [i32; 3]| b > 2 * r && b > 2 * g;
+    let (low, high) = (project(512.0, 512.0, 50.0), project(512.0, 512.0, 90.0));
+    eprintln!("red unit projects to {low:?} on the old ground, {high:?} on the new");
+    assert!((low.1 - high.1).abs() > 8.0, "the camera sees the lift");
+    assert!(red(rgb(&before, low)), "before: the red unit on the old ground {:?}", rgb(&before, low));
+    assert!(red(rgb(&after, high)), "after: the red unit on the raised ground {:?}", rgb(&after, high));
+    assert!(!red(rgb(&after, low)), "after: nothing red at the old ground height {:?}", rgb(&after, low));
+    assert!(blue(rgb(&before, project(360.0, 600.0, 50.0))) && blue(rgb(&after, project(360.0, 600.0, 50.0))), "the blue unit stays");
+    // The raised top looks different (rock, lit as the top of a block).
+    let top = project(480.0, 540.0, 90.0);
+    let diff = rgb(&before, top).iter().zip(rgb(&after, top)).map(|(a, b)| (a - b).abs()).sum::<i32>();
+    assert!(diff > 30, "the raised square changed colour: {:?} -> {:?}", rgb(&before, top), rgb(&after, top));
+
+    // Outside the raised block's screen box (with a margin), nothing moved.
+    // The box is a cell wider than the changed corners (world 464..=568)
+    // on each side: shading takes normals from neighbouring height texels.
+    let mut box_ = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in [(456.0, 456.0), (576.0, 456.0), (456.0, 576.0), (576.0, 576.0)] {
+        for h in [50.0, 90.0] {
+            let (u, v) = project(x, y, h);
+            box_ = (box_.0.min(u), box_.1.min(v), box_.2.max(u), box_.3.max(v));
+        }
+    }
+    let margin = 6.0;
+    let (mut outside, mut moved) = (0, 0);
+    for v in 0..extent.height {
+        for u in 0..extent.width {
+            let (uf, vf) = (u as f32, v as f32);
+            if uf > box_.0 - margin && uf < box_.2 + margin && vf > box_.1 - margin && vf < box_.3 + margin {
+                continue;
+            }
+            outside += 1;
+            let a = rgb(&before, (uf, vf));
+            let b = rgb(&after, (uf, vf));
+            moved += a.iter().zip(b).any(|(a, b)| (a - b).abs() > 2) as usize;
+        }
+    }
+    eprintln!("raised block on screen {box_:?}; {moved} of {outside} pixels outside it changed");
+    assert!(outside > 40_000 && moved == 0, "{moved} of {outside} pixels outside the edit changed");
+
+    // Several small rectangles in one update, of sizes that leave the
+    // regions after them unaligned unless the upload aligns them (a 2 x 1
+    // cell rectangle is 3 x 2 corners, 24 bytes of heights).
+    let update = editor.edit(4, &[(20, 20, 21, 20), (100, 7, 100, 7), (3, 90, 5, 90)], |x, y| if inside(x, y) { 90.0 } else { 50.0 + (x % 3) as f32 }, |_, _| 2).unwrap();
+    assert_eq!(update.heights[0].bytes.len(), 24);
+    run.frames(&mut app, 6).unwrap();
+    edits.lock().unwrap().pending.push(update);
+    run.frames(&mut app, 6).unwrap();
+    run.wait().unwrap();
+    assert_eq!(edits.lock().unwrap().applied, 2);
+    run.finish().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}
+
 /// A flat map (ground at 50, 1024 world units square), units from `rows`
 /// `(x, y, radius, class)`, rendered offscreen for a few frames from
 /// `camera`; returns `(rows uploaded, units the GPU cull kept)` and the

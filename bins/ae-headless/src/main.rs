@@ -121,8 +121,8 @@ fn run() -> Result<bool> {
     };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
     if let Some(map) = o.nav {
-        let nav = NavPlugin { map, map_cells: o.map_cells };
-        plugins.push(Arc::new(nav));
+        let nav = NavPlugin::new(map, o.map_cells);
+        plugins.push(Arc::new(nav.clone()));
         plugins.push(Arc::new(SpatialPlugin::square(nav.extent(), 64.0)));
     }
     let mut rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
@@ -256,7 +256,7 @@ fn run() -> Result<bool> {
 /// The same plan through the standalone nav service at `w` threads: whether
 /// its final state hash equals the sim's nav digest, and its tick times (ms).
 fn compare(o: &Opts, w: usize, sim_nav: Option<u64>, schema: &ae_sim::schema::Schema) -> Result<(bool, Vec<f64>)> {
-    let plugin = NavPlugin { map: o.nav.unwrap(), map_cells: o.map_cells };
+    let plugin = NavPlugin::new(o.nav.unwrap(), o.map_cells);
     let (nav, plan) = plugin.plan(o.units as u32, w, plugin.profiles(schema)?);
     let mut s = Scenario::from_plan(nav, &plan);
     let mut ms = Vec::with_capacity(o.ticks as usize);

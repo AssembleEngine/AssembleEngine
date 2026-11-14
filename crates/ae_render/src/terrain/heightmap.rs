@@ -92,6 +92,42 @@ impl Heightmap {
         Ok(Heightmap { width, height, data })
     }
 
+    /// The corner heightmap of a map of `cells` cells whose cell heights
+    /// `ground` gives (each corner the mean of the cells around it,
+    /// [`Self::corner`]), normalised with `scale_offset`, or with its own
+    /// range when `None`; returns it with the scale and offset (world =
+    /// sample × scale + offset).
+    pub fn from_cells(cells: (usize, usize), ground: impl Fn(usize, usize) -> f32, scale_offset: Option<(f32, f32)>) -> (Self, f32, f32) {
+        let (width, height) = (cells.0 + 1, cells.1 + 1);
+        let mut data = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                data.push(Self::corner(cells, &ground, x, y));
+            }
+        }
+        let (scale, offset) = scale_offset.unwrap_or_else(|| {
+            let (lo, hi) = data.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            ((hi - lo).max(1e-3), lo)
+        });
+        for v in &mut data {
+            *v = (*v - offset) / scale;
+        }
+        (Self { width, height, data }, scale, offset)
+    }
+
+    /// Height of corner `(x, y)` of a map of `cells` cells whose cell
+    /// heights `ground` gives: the mean of the (up to four) cells around it.
+    pub fn corner(cells: (usize, usize), ground: impl Fn(usize, usize) -> f32, x: usize, y: usize) -> f32 {
+        let (mut sum, mut n) = (0.0, 0.0);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            if x >= dx && y >= dy && x - dx < cells.0 && y - dy < cells.1 {
+                sum += ground(x - dx, y - dy);
+                n += 1.0;
+            }
+        }
+        sum / n
+    }
+
     pub fn save_pgm(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -286,9 +322,142 @@ pub struct Pyramid {
     pub errors: Vec<Vec<f32>>,
 }
 
+/// An inclusive rectangle `(x0, y0, x1, y1)` of samples, texels or cells.
+pub type Rect = (usize, usize, usize, usize);
+
+/// The texels [`Pyramid::update`] rewrote: per entry of `levels` and of
+/// `errors`, inclusive texel rectangles (they may overlap; empty:
+/// unchanged).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PyramidChange {
+    pub levels: Vec<Vec<Rect>>,
+    pub errors: Vec<Vec<Rect>>,
+}
+
+/// Blocks `b` (of `n`, `s` cells a side, on an axis of `cells` cells)
+/// whose stats read a corner in `d0..=d1`: block `b` reads corners
+/// `b·s ..= b·s + s`, clamped to the map (corners beyond it are copies of
+/// the edge).
+fn blocks_reading(d0: usize, d1: usize, cells: usize, n: usize, s: usize) -> Option<(usize, usize)> {
+    let reads = |b: usize| (b * s).min(cells) <= d1 && (b * s + s).min(cells) >= d0;
+    let first = (0..n).find(|&b| reads(b))?;
+    let last = (first..n).take_while(|&b| reads(b)).last()?;
+    Some((first, last))
+}
+
+impl Pyramid {
+    /// Recompute every block that reads a corner in any of `corners`
+    /// (inclusive rectangles, in samples) after the heightmap changed
+    /// there; the result equals [`build_pyramid`] of the new heightmap.
+    /// The error of a block needs every sample in it, so the cost is about
+    /// one pass over the map per level whose blocks the rectangles all
+    /// reach (the top ones cover it), not over the rectangles; a block
+    /// several rectangles reach is computed once.
+    pub fn update(&mut self, hm: &Heightmap, height_scale: f32, height_offset: f32, corners: &[Rect]) -> PyramidChange {
+        let cells = hm.cells();
+        let k = self.root_cells.trailing_zeros();
+        let h = |x: usize, y: usize| hm.at(x as isize, y as isize) * height_scale + height_offset;
+        let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
+        let mut change = PyramidChange { levels: vec![Vec::new(); self.levels.len()], errors: vec![Vec::new(); self.errors.len()] };
+        for l in 1..=k {
+            let (n, s) = (self.root_cells >> l, 1usize << l);
+            let mut rects = Vec::new();
+            let mut blocks: Vec<(usize, usize)> = Vec::new();
+            for &(x0, y0, x1, y1) in corners {
+                let (Some((bx0, bx1)), Some((by0, by1))) = (blocks_reading(x0, x1, cells.0, n, s), blocks_reading(y0, y1, cells.1, n, s)) else { continue };
+                rects.push((bx0, by0, bx1, by1));
+                blocks.extend((by0..=by1).flat_map(|by| (bx0..=bx1).map(move |bx| (by, bx))));
+            }
+            blocks.sort_unstable();
+            blocks.dedup();
+            let mut stats = vec![[0.0f32; 3]; blocks.len()];
+            let per = blocks.len().div_ceil(threads).max(1);
+            let h = &h;
+            std::thread::scope(|sc| {
+                for (out, part) in stats.chunks_mut(per).zip(blocks.chunks(per)) {
+                    sc.spawn(move || {
+                        for (o, &(by, bx)) in out.iter_mut().zip(part) {
+                            *o = block_stats(h, cells, l, bx, by);
+                        }
+                    });
+                }
+            });
+            for (&(by, bx), st) in blocks.iter().zip(&stats) {
+                self.errors[l as usize - 1][by * n + bx] = st[2];
+            }
+            if l >= PYRAMID_BASE_LEVEL {
+                // E_{l-2} of the sub-blocks is current: their levels ran
+                // first (E_0 is not stored, so it is recomputed).
+                let level = (l - PYRAMID_BASE_LEVEL) as usize;
+                for (&(by, bx), &st) in blocks.iter().zip(&stats) {
+                    let fine = |x: usize, y: usize| if l == 2 { block_stats(h, cells, 0, x, y)[2] } else { self.errors[l as usize - 3][y * n * 4 + x] };
+                    self.levels[level][by * n + bx] = level_entry(st, fine, n, by * n + bx);
+                }
+                change.levels[level] = rects.clone();
+            }
+            change.errors[l as usize - 1] = rects;
+        }
+        change
+    }
+}
+
+/// `(min, max, E_l)` of the level-`l` block `(bx, by)` (2^l cells a side)
+/// of a map of `cells` cells, with world heights from `h` (which clamps
+/// beyond the map). The one definition both the full build and the
+/// incremental update use, so they agree bit for bit.
+fn block_stats(h: &impl Fn(usize, usize) -> f32, cells: (usize, usize), l: u32, bx: usize, by: usize) -> [f32; 3] {
+    let (cx, cy) = cells;
+    let s = 1usize << l;
+    let (x0, y0) = (bx * s, by * s);
+    let c = [h(x0, y0), h(x0 + s, y0), h(x0, y0 + s), h(x0 + s, y0 + s)];
+    let (mut lo, mut hi, mut err) = (f32::MAX, f32::MIN, 0.0f32);
+    // nodes beyond the map are clamped copies: skip them
+    let xe = (x0 + s).min(cx.max(x0));
+    let ye = (y0 + s).min(cy.max(y0));
+    for y in y0..=ye {
+        let ty = (y - y0) as f32 / s as f32;
+        for x in x0..=xe {
+            let tx = (x - x0) as f32 / s as f32;
+            let v = h(x, y);
+            // The mesh is triangles, not bilinear patches: measure against
+            // both diagonal splits of the block (whichever LEB uses), which
+            // across sharp features deviates up to ~2x more than bilinear.
+            let [c00, c10, c01, c11] = c;
+            let diag_a = if tx >= ty {
+                c00 + (c10 - c00) * tx + (c11 - c10) * ty
+            } else {
+                c00 + (c11 - c01) * tx + (c01 - c00) * ty
+            };
+            let diag_b = if tx + ty <= 1.0 {
+                c00 + (c10 - c00) * tx + (c01 - c00) * ty
+            } else {
+                c11 + (c11 - c01) * (tx - 1.0) + (c11 - c10) * (ty - 1.0)
+            };
+            err = err.max((v - diag_a).abs()).max((v - diag_b).abs());
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    [lo, hi, err]
+}
+
+/// Level-`l` pyramid entry of block `i` (row-major, `n` a side): its own
+/// stats and the largest `E_{l-2}` among its 4x4 sub-blocks.
+fn level_entry(stats: [f32; 3], fine_error: impl Fn(usize, usize) -> f32, n: usize, i: usize) -> [f32; 4] {
+    let (bx, by) = (i % n, i / n);
+    let mut e2 = 0.0f32;
+    for y in 0..4 {
+        for x in 0..4 {
+            e2 = e2.max(fine_error(bx * 4 + x, by * 4 + y));
+        }
+    }
+    let [lo, hi, e] = stats;
+    [lo, hi, e, e2]
+}
+
 pub fn build_pyramid(hm: &Heightmap, height_scale: f32, height_offset: f32) -> Pyramid {
-    let (cx, cy) = hm.cells();
-    let root_cells = cx.max(cy).next_power_of_two().max(1 << (PYRAMID_BASE_LEVEL + 2));
+    let cells = hm.cells();
+    let root_cells = cells.0.max(cells.1).next_power_of_two().max(1 << (PYRAMID_BASE_LEVEL + 2));
     let k = root_cells.trailing_zeros();
     let h = |x: usize, y: usize| hm.at(x as isize, y as isize) * height_scale + height_offset;
     let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
@@ -297,45 +466,14 @@ pub fn build_pyramid(hm: &Heightmap, height_scale: f32, height_offset: f32) -> P
     let mut stats: Vec<Vec<[f32; 3]>> = Vec::new();
     for l in 0..=k {
         let n = root_cells >> l;
-        let s = 1usize << l;
         let mut out = vec![[0.0f32; 3]; n * n];
         let rows_per = n.div_ceil(threads);
+        let h = &h;
         std::thread::scope(|sc| {
             for (ci, chunk) in out.chunks_mut(rows_per * n).enumerate() {
                 sc.spawn(move || {
                     for (i, o) in chunk.iter_mut().enumerate() {
-                        let (bx, by) = (i % n, ci * rows_per + i / n);
-                        let (x0, y0) = (bx * s, by * s);
-                        let c = [h(x0, y0), h(x0 + s, y0), h(x0, y0 + s), h(x0 + s, y0 + s)];
-                        let (mut lo, mut hi, mut err) = (f32::MAX, f32::MIN, 0.0f32);
-                        // nodes beyond the map are clamped copies: skip them
-                        let xe = (x0 + s).min(cx.max(x0));
-                        let ye = (y0 + s).min(cy.max(y0));
-                        for y in y0..=ye {
-                            let ty = (y - y0) as f32 / s as f32;
-                            for x in x0..=xe {
-                                let tx = (x - x0) as f32 / s as f32;
-                                let v = h(x, y);
-                                // The mesh is triangles, not bilinear patches: measure against
-                                // both diagonal splits of the block (whichever LEB uses), which
-                                // across sharp features deviates up to ~2x more than bilinear.
-                                let [c00, c10, c01, c11] = c;
-                                let diag_a = if tx >= ty {
-                                    c00 + (c10 - c00) * tx + (c11 - c10) * ty
-                                } else {
-                                    c00 + (c11 - c01) * tx + (c01 - c00) * ty
-                                };
-                                let diag_b = if tx + ty <= 1.0 {
-                                    c00 + (c10 - c00) * tx + (c01 - c00) * ty
-                                } else {
-                                    c11 + (c11 - c01) * (tx - 1.0) + (c11 - c10) * (ty - 1.0)
-                                };
-                                err = err.max((v - diag_a).abs()).max((v - diag_b).abs());
-                                lo = lo.min(v);
-                                hi = hi.max(v);
-                            }
-                        }
-                        *o = [lo, hi, err];
+                        *o = block_stats(h, cells, l, i % n, ci * rows_per + i / n);
                     }
                 });
             }
@@ -347,22 +485,92 @@ pub fn build_pyramid(hm: &Heightmap, height_scale: f32, height_offset: f32) -> P
         .map(|l| {
             let n = root_cells >> l;
             let fine = &stats[(l - 2) as usize];
-            let fn_ = n * 4;
-            (0..n * n)
-                .map(|i| {
-                    let (bx, by) = (i % n, i / n);
-                    let mut e2 = 0.0f32;
-                    for y in 0..4 {
-                        for x in 0..4 {
-                            e2 = e2.max(fine[(by * 4 + y) * fn_ + bx * 4 + x][2]);
-                        }
-                    }
-                    let [lo, hi, e] = stats[l as usize][i];
-                    [lo, hi, e, e2]
-                })
-                .collect()
+            (0..n * n).map(|i| level_entry(stats[l as usize][i], |x, y| fine[y * n * 4 + x][2], n, i)).collect()
         })
         .collect();
     let errors = stats[1..].iter().map(|l| l.iter().map(|s| s[2]).collect()).collect();
     Pyramid { root_cells, levels, errors }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(p: &Pyramid) -> (Vec<Vec<[u32; 4]>>, Vec<Vec<u32>>) {
+        (p.levels.iter().map(|l| l.iter().map(|v| v.map(f32::to_bits)).collect()).collect(), p.errors.iter().map(|l| l.iter().map(|v| v.to_bits()).collect()).collect())
+    }
+
+    fn inside(rects: &[Rect], n: usize, i: usize) -> bool {
+        rects.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&(i % n)) && (y0..=y1).contains(&(i / n)))
+    }
+
+    /// Updating the pyramid after edits gives exactly the pyramid built
+    /// from scratch, and every texel that changed is in the reported
+    /// rectangles: edits at the map's edges and corners, across block
+    /// boundaries, one corner, and heights outside the original [0, 1].
+    #[test]
+    fn pyramid_updates_equal_a_rebuild() {
+        // 100 x 70 cells: not square, not a power of two (the pyramid pads
+        // to 128 and clamps beyond the map).
+        let mut hm = generate(101, 71, 3);
+        let (scale, offset) = (420.0, -35.0);
+        let mut pyramid = build_pyramid(&hm, scale, offset);
+        // Each update takes one or more rectangles (several at once share
+        // the blocks they both reach).
+        let edits: [&[(Rect, f32)]; 6] = [
+            &[((10, 10, 20, 14), 1.6)],
+            &[((0, 0, 3, 2), -0.4), ((95, 60, 100, 70), 0.9)],
+            &[((31, 31, 33, 33), 0.0), ((34, 31, 36, 33), 0.5), ((64, 0, 64, 70), 2.5)],
+            &[((50, 40, 50, 40), -1.0)],
+            &[((0, 66, 100, 70), 0.25)],
+            &[((5, 5, 6, 6), 3.0), ((90, 5, 91, 6), -3.0), ((5, 60, 6, 61), 1.0), ((90, 60, 91, 61), 0.1)],
+        ];
+        for (n, edit) in edits.into_iter().enumerate() {
+            for &((x0, y0, x1, y1), value) in edit {
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        hm.data[y * hm.width + x] = value + 0.001 * (x * 7 + y * 3) as f32;
+                    }
+                }
+            }
+            let rects: Vec<Rect> = edit.iter().map(|e| e.0).collect();
+            let before = bits(&pyramid);
+            let change = pyramid.update(&hm, scale, offset, &rects);
+            let after = bits(&pyramid);
+            let rebuilt = build_pyramid(&hm, scale, offset);
+            assert_eq!(after, bits(&rebuilt), "edit {n}: the update equals the rebuild");
+            let mut changed = 0;
+            for (l, (old, new)) in before.0.iter().zip(&after.0).enumerate() {
+                let side = (old.len() as f64).sqrt() as usize;
+                for (i, (a, b)) in old.iter().zip(new).enumerate() {
+                    if a != b {
+                        changed += 1;
+                        assert!(inside(&change.levels[l], side, i), "edit {n}: level {l} texel {i} changed outside {:?}", change.levels[l]);
+                    }
+                }
+            }
+            for (l, (old, new)) in before.1.iter().zip(&after.1).enumerate() {
+                let side = (old.len() as f64).sqrt() as usize;
+                for (i, (a, b)) in old.iter().zip(new).enumerate() {
+                    if a != b {
+                        assert!(inside(&change.errors[l], side, i), "edit {n}: error level {l} texel {i} changed outside {:?}", change.errors[l]);
+                    }
+                }
+            }
+            assert!(changed > 0, "edit {n} changed something");
+            // The top level is a single block; it always reads the edit.
+            assert!(change.levels.last().unwrap().iter().all(|&r| r == (0, 0, 0, 0)) && !change.levels.last().unwrap().is_empty());
+            assert_eq!(change.levels[0].len(), rects.len(), "one region per rectangle at the finest level");
+        }
+    }
+
+    #[test]
+    fn corners_average_the_cells_around_them() {
+        let cells = (3, 2);
+        let ground = |x: usize, y: usize| (y * 3 + x) as f32;
+        assert_eq!(Heightmap::corner(cells, ground, 0, 0), 0.0);
+        assert_eq!(Heightmap::corner(cells, ground, 1, 1), (0.0 + 1.0 + 3.0 + 4.0) / 4.0);
+        assert_eq!(Heightmap::corner(cells, ground, 3, 2), 5.0);
+        assert_eq!(Heightmap::corner(cells, ground, 3, 1), (2.0 + 5.0) / 2.0);
+    }
 }
