@@ -10,6 +10,10 @@
 //! * The observers see different worlds, and no word of any table lies in
 //!   the range of entity indices (the viewed fields are small enums and
 //!   normal floats, so one there would be a leaked id).
+//! * With churn, flecs recycles indices with a new generation (so a
+//!   replacement never has the 64-bit id, or the view id, of the unit it
+//!   replaces); the game's replacements carry no `Team`/`Sensor` and leave
+//!   every view.
 //!
 //! The column arena is process-wide, so this file holds one test.
 
@@ -104,5 +108,37 @@ fn observers_see_their_own_and_what_their_sensors_reach() -> Result<()> {
         println!("{n}");
     }
     ensure!(totals[1] > 0 && totals[2] > 0, "rows own/seen/blip/ghost over the run: {totals:?}");
+
+    // Churn (the game replaces every unit whose entity index is a multiple
+    // of 7 at tick 20): flecs recycles their indices with a new generation,
+    // so a replacement's 64-bit id differs from the unit it replaces (view
+    // ids, given per 64-bit id, are fresh for it). The game spawns the
+    // replacements without `Team` and `Sensor`, so they leave every view.
+    const CHURN: u64 = 20;
+    // One worker, like the last run above: the process-wide column arena
+    // keeps the size it was installed with.
+    let cfg = RuntimeConfig { max_workers: 1, range_rows: 128, parallel_min_rows: 256, ..RuntimeConfig::default() };
+    let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav.clone()), Arc::new(spatial)])?;
+    let mut world = rt.world_for(UNITS | CHURN << 48, 1)?;
+    let mut pipeline = ViewPipeline::new(&rt.schema, &["NavAgent"], 2, nav.extent())?;
+    let ids = |rt: &Runtime, world: &ae_sim::runtime::World| -> Result<BTreeSet<u64>> { Ok(rt.rows(world, "Body")?.into_iter().map(|(e, _)| e).collect()) };
+    let mut before = BTreeSet::new();
+    for _ in 0..CHURN + 1 {
+        if world.tick + 1 == CHURN {
+            before = ids(&rt, &world)?;
+        }
+        rt.tick(&mut world, 1)?;
+    }
+    let after = ids(&rt, &world)?;
+    let gone: BTreeSet<u64> = before.difference(&after).copied().collect();
+    let new: BTreeSet<u64> = after.difference(&before).copied().collect();
+    ensure!(!gone.is_empty() && gone.len() == new.len(), "churn replaced {} units with {}", gone.len(), new.len());
+    let gone_index: BTreeSet<u32> = gone.iter().map(|e| *e as u32).collect();
+    let recycled = new.iter().filter(|e| gone_index.contains(&(**e as u32))).count();
+    ensure!(recycled > 0, "no index was recycled");
+    ensure!(new.iter().all(|e| !gone.contains(e)), "a replacement has a despawned unit's full id");
+    pipeline.capture(&rt, &world)?;
+    ensure!(pipeline.rows() == UNITS as usize - gone.len(), "replacements without Team/Sensor are not captured ({} rows)", pipeline.rows());
+    println!("churn: {} units replaced, {recycled} recycled indices with a new generation; {} rows in views (replacements have no Team)", gone.len(), pipeline.rows());
     Ok(())
 }

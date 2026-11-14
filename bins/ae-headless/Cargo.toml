@@ -15,3 +15,4 @@ ae_sim.workspace = true
 ae_wasm.workspace = true
 ae_profile.workspace = true
 anyhow.workspace = true
+ae_view.workspace = true

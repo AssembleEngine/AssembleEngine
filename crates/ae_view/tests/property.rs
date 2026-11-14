@@ -9,8 +9,8 @@
 //!   exactly one row;
 //! * a field holds a value exactly where the class table allows it, hidden
 //!   values are 0; shown values equal the sim's (blip positions within the
-//!   wobble; ghost values equal the entity's last sighting in line of
-//!   sight);
+//!   wobble; ghost values, the position included, equal the entity's last
+//!   sighting in line of sight, and no ghost sits on a cell in sight);
 //! * no word in any column equals either half of any sim entity id;
 //! * view ids are unique and ascending, kept while an entity stays in view,
 //!   never reused, and new for a recycled id or a return after absence.
@@ -46,7 +46,7 @@ fn allowed(class: ViewClass, state: RowState) -> bool {
         C::OwnerOnly => state == S::Own,
         C::Los => matches!(state, S::Own | S::Seen),
         C::Ghost => matches!(state, S::Own | S::Seen | S::Ghost),
-        C::RadarDegraded => matches!(state, S::Own | S::Seen | S::Blip),
+        C::RadarDegraded => matches!(state, S::Own | S::Seen | S::Blip | S::Ghost),
         C::Always => true,
     }
 }
@@ -244,8 +244,10 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
                     if let Some(u) = by_tag.get(&tag) {
                         assert!(expected_state(u).is_none(), "{}", at("a ghost of an entity in view"));
                     }
-                    let (gx, gy) = (f32::from_bits(last[X]), f32::from_bits(last[Y]));
-                    assert!(!coverage.sees(o, gx, gy).0, "{}", at("a ghost on a cell in line of sight"));
+                    // The ghost's own position (from the table) is the last sighting's.
+                    let (gx, gy) = (value(X).unwrap(), value(Y).unwrap());
+                    assert!(shown(X) && shown(Y) && (gx, gy) == (last[X], last[Y]), "{}", at("a ghost without its last-seen position"));
+                    assert!(!coverage.sees(o, f32::from_bits(gx), f32::from_bits(gy)).0, "{}", at("a ghost on a cell in line of sight"));
                     for &f in &want_fields {
                         let class = spec.fields[f].1;
                         assert_eq!(shown(f), allowed(class, state), "{}", at(&format!("field {f} shown in a ghost")));

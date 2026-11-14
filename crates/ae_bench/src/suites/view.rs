@@ -4,7 +4,9 @@
 //! entity, once per tick), one observer's build, and a tick for two
 //! observers (preparation + both builds; the M4 exit asks under 2 ms at
 //! 10k), with the army moving between ticks so ids, blips and ghosts are
-//! in steady churn. Rows per state are exact counters.
+//! in steady churn. The `_contact` case mixes the allyteams inside every
+//! squad, so nearly every enemy is in sight, as on the crossing map. Rows
+//! per state are exact counters.
 
 use super::Options;
 use crate::measure::time;
@@ -23,7 +25,9 @@ struct Army {
     radar: Vec<f32>,
 }
 
-fn army(n: usize, allies: u32) -> Army {
+/// `mixed`: allyteams alternate unit by unit inside every squad (armies
+/// in contact: most enemies in sight); otherwise squad by squad.
+fn army(n: usize, allies: u32, mixed: bool) -> Army {
     let mut s = 0x0F1E_3D7C_u64;
     let mut f = move || {
         s ^= s << 13;
@@ -42,7 +46,8 @@ fn army(n: usize, allies: u32) -> Army {
             c.push(w);
         }
         a.entities.push((1u64 << 32) | (0x1000 + i as u64 * 3));
-        a.ally.push(squad as u32 % allies);
+        // (i / 40: the unit's place in its squad; i % allies would equal squad % allies.)
+        a.ally.push(if mixed { (i / squads.len()) as u32 % allies } else { squad as u32 % allies });
         a.los.push(250.0 + f() * 400.0);
         a.radar.push(if i % 23 == 0 { 2000.0 } else { 0.0 });
     }
@@ -81,13 +86,13 @@ fn spec(ghosting: bool) -> ViewSpec {
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("view");
     let grid = SensorGrid::new(MAP, MAP, 32.0);
-    for (n, allies, ghosting) in [(10_000, 2, false), (10_000, 2, true), (50_000, 8, false)] {
+    for (n, allies, ghosting, mixed) in [(10_000, 2, false, false), (10_000, 2, true, false), (10_000, 2, false, true), (50_000, 8, false, false)] {
         if options.small && n > 10_000 {
             continue;
         }
-        let tag = format!("units{n}_allies{allies}{}", if ghosting { "_ghosts" } else { "" });
+        let tag = format!("units{n}_allies{allies}{}{}", if ghosting { "_ghosts" } else { "" }, if mixed { "_contact" } else { "" });
         let spec = spec(ghosting);
-        let mut a = army(n, allies);
+        let mut a = army(n, allies, mixed);
         let mut coverage = Coverage::new(grid, allies as usize);
         let mut observers = [Observer::new(0, 11), Observer::new(1, 22)];
         let mut tick = 0u64;

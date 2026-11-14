@@ -13,6 +13,11 @@
 //! `--nav water|land` provides the engine's host systems (`ae_services`:
 //! `nav_spawn`, `nav`, `spatial`) on that map, `--map-cells` cells square;
 //! the nav service's pool gets as many threads as the run's sim workers.
+//! `--teams N` gives the map's units allyteams and sensors
+//! (`NavPlugin::teams`); `--observers K` then builds K allyteams' views after
+//! every tick (`ae_services::view`) and prints the median capture +
+//! coverage time and view build time (all K together and per observer).
+//!
 //! `--compare` also runs the same plan through the standalone nav service
 //! (`ae_nav::scenario`) at each worker count: its state hash must equal the
 //! sim's nav digest, and both tick times are printed.
@@ -28,7 +33,7 @@ use anyhow::{Context, Result, bail};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off]";
+const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]";
 
 struct Opts {
     game: String,
@@ -38,6 +43,8 @@ struct Opts {
     digest: bool,
     every: u64,
     fuel: bool,
+    teams: u32,
+    observers: u32,
     range_rows: usize,
     /// Game-specific bits 32..64 of the game parameter (sandbox: wear percent).
     param_hi: u32,
@@ -49,7 +56,7 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -70,6 +77,8 @@ fn parse() -> Result<Opts> {
             }
             "--map-cells" => o.map_cells = value()?.parse()?,
             "--compare" => o.compare = true,
+            "--teams" => o.teams = value()?.parse()?,
+            "--observers" => o.observers = value()?.parse()?,
             "--overlap" => {
                 o.overlap = match value()?.as_str() {
                     "on" => true,
@@ -82,7 +91,7 @@ fn parse() -> Result<Opts> {
             _ => bail!("unknown argument {a}\n{USAGE}"),
         }
     }
-    if o.game.is_empty() || o.workers.is_empty() || o.workers.contains(&0) || (o.compare && o.nav.is_none()) {
+    if o.game.is_empty() || o.workers.is_empty() || o.workers.contains(&0) || (o.compare && o.nav.is_none()) || o.observers > o.teams || (o.teams > 0 && o.nav.is_none()) {
         bail!("{USAGE}");
     }
     Ok(o)
@@ -120,8 +129,10 @@ fn run() -> Result<bool> {
         ..RuntimeConfig::default()
     };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
+    let mut extent = 0.0;
     if let Some(map) = o.nav {
-        let nav = NavPlugin::new(map, o.map_cells);
+        let nav = NavPlugin { teams: o.teams, ..NavPlugin::new(map, o.map_cells) };
+        extent = nav.extent();
         plugins.push(Arc::new(nav.clone()));
         plugins.push(Arc::new(SpatialPlugin::square(nav.extent(), 64.0)));
     }
@@ -146,11 +157,35 @@ fn run() -> Result<bool> {
         let mut tick_ms = Vec::with_capacity(o.ticks as usize);
         let mut host_ms = Vec::with_capacity(o.ticks as usize);
         let nav_index = (0..rt.system_count()).find(|&i| rt.is_host_system(i) && rt.system_name(i) == "nav");
+        let mut view = if o.observers > 0 {
+            let pipeline = ae_services::view::ViewPipeline::new(&rt.schema, &["NavAgent"], o.teams as usize, extent)?;
+            let observers: Vec<ae_view::Observer> = (0..o.observers).map(|a| ae_view::Observer::new(a, 0x5EED + a as u64)).collect();
+            Some((pipeline, observers, Vec::new(), Vec::new(), [0usize; 4]))
+        } else {
+            None
+        };
+        let mut view_ms = 0.0;
         let started = Instant::now();
         for t in 0..o.ticks {
             let t0 = Instant::now();
             let s = rt.tick(&mut world, w)?;
             tick_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            if let Some((pipeline, observers, capture_ms, build_ms, rows)) = view.as_mut() {
+                let v0 = Instant::now();
+                pipeline.capture(&rt, &world)?;
+                let v1 = Instant::now();
+                let tables = pipeline.observe(observers);
+                let v2 = Instant::now();
+                capture_ms.push((v1 - v0).as_secs_f64() * 1e3);
+                build_ms.push((v2 - v1).as_secs_f64() * 1e3);
+                *rows = [0; 4];
+                for table in &tables {
+                    for st in &table.state {
+                        rows[*st as usize] += 1;
+                    }
+                }
+                view_ms += (v2 - v0).as_secs_f64() * 1e3;
+            }
             if let Some(i) = nav_index {
                 host_ms.push(s.host_system_ns[i] as f64 / 1e6);
             }
@@ -159,7 +194,25 @@ fn run() -> Result<bool> {
                 println!("  {w}w tick {:>6}: digest {:016x}", t + 1, rt.digest(&world)?.short());
             }
         }
-        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let wall_ms = started.elapsed().as_secs_f64() * 1e3 - view_ms;
+        if let Some((_, observers, capture_ms, build_ms, rows)) = view.as_mut() {
+            let median = |v: &mut Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v.get(v.len() / 2).copied().unwrap_or(0.0)
+            };
+            // Steady state: the second half of the run.
+            let half = capture_ms.len() / 2;
+            let (mut c, mut b) = (capture_ms.split_off(half), build_ms.split_off(half));
+            let n = observers.len();
+            println!(
+                "  {w}w views ({} teams, {n} observers, last tick rows own/seen/blip/ghost {:?} summed): capture + coverage median {:.3} ms, build {:.3} ms ({:.3} ms per observer)",
+                o.teams,
+                rows,
+                median(&mut c),
+                median(&mut b),
+                median(&mut b) / n as f64
+            );
+        }
         let digest = rt.digest(&world)?;
         let units = rt.count(&world, "Position").or_else(|_| rt.count(&world, "Body")).unwrap_or(0);
         let ticks = o.ticks.max(1) as f64;

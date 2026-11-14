@@ -8,7 +8,8 @@
 //! * else [`RowState::Blip`] if `a` has radar on its cell;
 //! * else absent, unless the table ghosts (it has a [`ViewClass::Ghost`]
 //!   field): an entity last seen in line of sight stays as a
-//!   [`RowState::Ghost`] row with its last-seen values until `a` has line
+//!   [`RowState::Ghost`] row with its last-seen values (the exact position
+//!   included) until `a` has line
 //!   of sight to that cell again and does not see it there (it moved, died
 //!   or is back as a `Seen` row, which takes the ghost's id back).
 //!
@@ -20,7 +21,7 @@
 //! | `OwnerOnly` | yes | - | - | - |
 //! | `Los` | yes | yes | - | - |
 //! | `Ghost` | yes | yes | - | last seen |
-//! | `RadarDegraded` | yes | yes | yes, position wobbled | - |
+//! | `RadarDegraded` | yes | yes | yes, position wobbled | last seen |
 //! | `Always` | yes | yes | yes | last seen |
 //!
 //! `Never` fields have no column at all. A hidden field reads 0 and its bit
@@ -76,7 +77,7 @@ impl ViewClass {
             (C::OwnerOnly, _) => false,
             (C::Los | C::Ghost | C::RadarDegraded | C::Always, S::Seen) => true,
             (C::RadarDegraded | C::Always, S::Blip) => true,
-            (C::Ghost | C::Always, S::Ghost) => true,
+            (C::Ghost | C::RadarDegraded | C::Always, S::Ghost) => true,
             _ => false,
         }
     }

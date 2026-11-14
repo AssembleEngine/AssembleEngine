@@ -1,28 +1,28 @@
 {
   "suite": "view",
-  "commit": "b0cbe01-dirty",
+  "commit": "c624b82-dirty",
   "machine": "local",
   "records": [
     {
       "metric": "units10000_allies2/frame_prepare",
       "kind": "time",
-      "value": 9750.0,
+      "value": 9510.0,
       "unit": "ns",
-      "spread": 0.34974358974358977
+      "spread": 0.1398527865404837
     },
     {
       "metric": "units10000_allies2/build_1_observer",
       "kind": "time",
-      "value": 525742.0,
+      "value": 520592.0,
       "unit": "ns",
-      "spread": 0.12930677024091664
+      "spread": 0.12989442788210345
     },
     {
       "metric": "units10000_allies2/tick_2_observers",
       "kind": "time",
-      "value": 1061855.0,
+      "value": 1069804.0,
       "unit": "ns",
-      "spread": 0.12196863036855314
+      "spread": 0.14935820019368035
     },
     {
       "metric": "units10000_allies2/rows_own_observer1",
@@ -55,23 +55,23 @@
     {
       "metric": "units10000_allies2_ghosts/frame_prepare",
       "kind": "time",
-      "value": 9550.0,
+      "value": 9740.0,
       "unit": "ns",
-      "spread": 0.28492146596858636
+      "spread": 0.1406570841889117
     },
     {
       "metric": "units10000_allies2_ghosts/build_1_observer",
       "kind": "time",
-      "value": 585824.0,
+      "value": 577393.0,
       "unit": "ns",
-      "spread": 0.10858551373791446
+      "spread": 0.13015571716318003
     },
     {
       "metric": "units10000_allies2_ghosts/tick_2_observers",
       "kind": "time",
-      "value": 1150617.0,
+      "value": 1122705.0,
       "unit": "ns",
-      "spread": 0.11841820518904206
+      "spread": 0.1581840287519874
     },
     {
       "metric": "units10000_allies2_ghosts/rows_own_observer1",
@@ -102,25 +102,74 @@
       "spread": 0.0
     },
     {
+      "metric": "units10000_allies2_contact/frame_prepare",
+      "kind": "time",
+      "value": 10430.0,
+      "unit": "ns",
+      "spread": 0.28475551294343243
+    },
+    {
+      "metric": "units10000_allies2_contact/build_1_observer",
+      "kind": "time",
+      "value": 659845.0,
+      "unit": "ns",
+      "spread": 0.07312323348665217
+    },
+    {
+      "metric": "units10000_allies2_contact/tick_2_observers",
+      "kind": "time",
+      "value": 1377191.0,
+      "unit": "ns",
+      "spread": 0.1359608071792511
+    },
+    {
+      "metric": "units10000_allies2_contact/rows_own_observer1",
+      "kind": "counter",
+      "value": 5000.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies2_contact/rows_seen_observer1",
+      "kind": "counter",
+      "value": 5000.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies2_contact/rows_blip_observer1",
+      "kind": "counter",
+      "value": 0.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies2_contact/rows_ghost_observer1",
+      "kind": "counter",
+      "value": 0.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
       "metric": "units50000_allies8/frame_prepare",
       "kind": "time",
-      "value": 46801.0,
+      "value": 47751.0,
       "unit": "ns",
-      "spread": 0.11452746736180851
+      "spread": 0.07664760947414714
     },
     {
       "metric": "units50000_allies8/build_1_observer",
       "kind": "time",
-      "value": 1274969.0,
+      "value": 1262678.0,
       "unit": "ns",
-      "spread": 0.09556546080728237
+      "spread": 0.05507500724650307
     },
     {
       "metric": "units50000_allies8/tick_2_observers",
       "kind": "time",
-      "value": 3382338.0,
+      "value": 3246822.0,
       "unit": "ns",
-      "spread": 0.11491725546057195
+      "spread": 0.16297536483367428
     },
     {
       "metric": "units50000_allies8/rows_own_observer1",

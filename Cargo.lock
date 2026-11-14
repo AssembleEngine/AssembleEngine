@@ -35,6 +35,7 @@ dependencies = [
  "ae_profile",
  "ae_services",
  "ae_sim",
+ "ae_view",
  "ae_wasm",
  "anyhow",
 ]

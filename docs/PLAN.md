@@ -1080,7 +1080,8 @@ client change.
 - View ids hide sim ids: given on coming into view, in an order shuffled by the observer's seed;
   kept while the entity stays in view; new after a recycled id (new generation) or a return after
   absence. A ghosting table (one with a `Ghost` field) keeps a row last seen in line of sight as a
-  `Ghost` with its last-seen `Ghost` and `Always` values, until the observer has line of sight to
+  `Ghost` with its last-seen `Ghost`, `RadarDegraded` (the exact position) and `Always` values, until
+  the observer has line of sight to
   that cell again; a returning entity takes its ghost's id back. Blip positions drift by up to
   `wobble` world units, hashed from (seed, view id, tick bucket) and blended across `wobble_ticks`.
 - Property test (`crates/ae_view/tests/property.rs`): 4 seeds × plain and ghosting tables × 60
@@ -1089,15 +1090,18 @@ client change.
   the coverage; every entity in view has exactly one row; each field shown exactly where its class
   allows, hidden values 0, shown values exact (blips within the wobble, ghosts equal to the last
   sighting, never on a cell in line of sight); no word equals either half of a sim id; ids unique,
-  ascending, kept in view, reused only by a returning entity taking its ghost's id. It saw 105 ghost
-  rows, 61,820 blip positions, and the two observers differed on 170 ticks. Four mutants of the
-  executor fail it (`Los` shown in blips, an entity id in hidden values, ghosts kept in line of
-  sight, ids reset each tick). A unit test checks the wobble is bounded, smooth and differs by
+  ascending, kept in view, reused only by a returning entity taking its ghost's id; a ghost's own
+  position equals the last sighting. It saw 105 ghost rows, 61,820 blip positions, and the two
+  observers differed on 170 ticks. Five mutants of the executor fail it (`Los` shown in blips, an
+  entity id in hidden values, ghosts kept in line of sight, ids reset each tick, ghosts without
+  their position; the last was the executor's first version, found in review: ghosts over `Body`
+  would have had x and y hidden). A unit test checks the wobble is bounded, smooth and differs by
   observer and id.
 - `ae-tool bench view` (baseline recorded): 10k units, 2 allyteams, 7 fields shown, ~7,100 rows per
   observer of which 1,630 blips: one observer 0.52 ms, a tick for two observers (preparation and both
-  builds) 1.08 ms, under the 2 ms exit budget; with a ghosting table 1.13 ms. 50k units and 8
-  allyteams: 3.3 ms for two observers.
+  builds) 1.08 ms; with a ghosting table 1.13 ms; the `_contact` case (allyteams mixed inside every
+  squad, 10,000 rows per observer, as on the crossing map) 1.38 ms. 50k units and 8 allyteams: 3.3 ms
+  for two observers.
 
 View classes in the schema, teams and sensors in the sim:
 - Field flags bits 8..12 carry the view class (`ae_abi::FIELD_VIEW_*`; 0 is never, so a field nobody
@@ -1153,10 +1157,20 @@ The client draws an observer's view (`ae-client --teams N [--observer K|all]`):
 - `ae-client --bench all` against the baseline: all 81 GPU metrics unchanged (vision off costs
   nothing measurable).
 
+Real workload: `ae-headless --game crossing --nav water --units 10000 --ticks 300 --workers 8 --teams 2
+--observers 2` (new options: after every tick, capture, coverage and the observers' builds, medians
+over the second half): 10,000 own + 9,224 seen + 276 blip rows across the two views; building both
+1.55 ms (0.77 ms per observer); capture + coverage 0.84 ms more, so the whole view step is 2.4 ms.
+
 M4 exit criteria: two observers see different worlds (the live test and the captures); the
-property test holds against an independent oracle; a view build is under 2 ms at 10k units (two
-observers 1.08 ms in the bench, one cold first build 1.5 ms in the client).
-- Not done: ghosts are only exercised on synthetic worlds (the crossing game has no static units);
+property test holds against an independent oracle; building the views of two observers takes
+1.55 ms at 10k units on the crossing map (under the 2 ms the exit asks), but capture and coverage
+add 0.84 ms, so the full copy-layer step for two observers is 2.4 ms.
+- Not done: the game's churn replacements get no `Team`/`Sensor` and leave every view (the live
+  test checks it, and that flecs gives recycled indices a new generation, so their 64-bit and view
+  ids are fresh); ghosts are only exercised on synthetic worlds (the crossing game has no static
+  units); the optional trusted WASM view-rule kernels and the `ViewSlot` latest/previous publish of
+  the architecture do not exist (the client's sim thread publishes a stream and a vision frame);
   explored cells are remembered by the client's sim thread, not by the copy layer; there is no key
   to switch observers while running; radar shows no coverage on the terrain; jammers, sonar and
   seismic sensors are not modelled; the sensors run on the view side, not as a sim service (the
