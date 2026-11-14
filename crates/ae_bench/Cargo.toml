@@ -10,6 +10,7 @@ ae_ecs.workspace = true
 ae_framegraph.workspace = true
 ae_nav.workspace = true
 ae_sim.workspace = true
+ae_sensors.workspace = true
 ae_spatial.workspace = true
 rayon.workspace = true
 ae_profile.workspace = true

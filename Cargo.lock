@@ -83,6 +83,7 @@ dependencies = [
  "ae_framegraph",
  "ae_nav",
  "ae_profile",
+ "ae_sensors",
  "ae_sim",
  "ae_spatial",
  "anyhow",
@@ -147,6 +148,13 @@ dependencies = [
 [[package]]
 name = "ae_render_abi"
 version = "0.0.1"
+
+[[package]]
+name = "ae_sensors"
+version = "0.0.1"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "ae_services"

@@ -1,0 +1,119 @@
+{
+  "suite": "sensors",
+  "commit": "d27cd83-dirty",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "units10000_allies2/stamp_1t",
+      "kind": "time",
+      "value": 1231989.0,
+      "unit": "ns",
+      "spread": 0.05548994349787214
+    },
+    {
+      "metric": "units10000_allies2/stamp_8t",
+      "kind": "time",
+      "value": 761929.0,
+      "unit": "ns",
+      "spread": 0.2846787561570698
+    },
+    {
+      "metric": "units10000_allies2/stamped_cells",
+      "kind": "counter",
+      "value": 11058004.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies2/los_cells",
+      "kind": "info",
+      "value": 133877.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies2/radar_cells",
+      "kind": "info",
+      "value": 31590.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies8/stamp_1t",
+      "kind": "time",
+      "value": 1251671.0,
+      "unit": "ns",
+      "spread": 0.055511392370678876
+    },
+    {
+      "metric": "units10000_allies8/stamp_8t",
+      "kind": "time",
+      "value": 286326.0,
+      "unit": "ns",
+      "spread": 0.4351787822272515
+    },
+    {
+      "metric": "units10000_allies8/stamped_cells",
+      "kind": "counter",
+      "value": 11058004.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies8/los_cells",
+      "kind": "info",
+      "value": 144460.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units10000_allies8/radar_cells",
+      "kind": "info",
+      "value": 31590.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_allies8/stamp_1t",
+      "kind": "time",
+      "value": 6224670.0,
+      "unit": "ns",
+      "spread": 0.026228539022952222
+    },
+    {
+      "metric": "units50000_allies8/stamp_8t",
+      "kind": "time",
+      "value": 1391563.0,
+      "unit": "ns",
+      "spread": 0.3557388346772658
+    },
+    {
+      "metric": "units50000_allies8/stamped_cells",
+      "kind": "counter",
+      "value": 55213183.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_allies8/los_cells",
+      "kind": "info",
+      "value": 155971.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units50000_allies8/radar_cells",
+      "kind": "info",
+      "value": 32004.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "grid_cells",
+      "kind": "info",
+      "value": 409600.0,
+      "unit": "",
+      "spread": 0.0
+    }
+  ]
+}

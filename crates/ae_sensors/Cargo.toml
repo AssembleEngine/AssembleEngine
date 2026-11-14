@@ -1,0 +1,9 @@
+[package]
+name = "ae_sensors"
+description = "Per-allyteam sensor coverage (line of sight, radar) as bit grids over integer cells, stamped from unit columns."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
