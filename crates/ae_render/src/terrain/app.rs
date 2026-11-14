@@ -22,7 +22,7 @@
 use super::camera::Camera;
 use super::heightmap::{Heightmap, Pyramid};
 use super::tileset::Tileset;
-use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, Wireframe};
+use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, VisionGrid, Wireframe};
 use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -101,6 +101,39 @@ pub struct TerrainView {
     pub tileset: bool,
     /// The tileset's blend-weight debug view.
     pub weights: bool,
+    /// Shade by the vision feed, if the app has one ([`TerrainApp::with_vision`]).
+    pub vision: bool,
+}
+
+/// One observer's vision for the terrain: line of sight now and cells ever
+/// seen, one bit per cell of `grid` (rows of [`VisionGrid::stride`] words).
+#[derive(Clone, Debug)]
+pub struct VisionFrame {
+    pub tick: u64,
+    pub los: Vec<u64>,
+    pub explored: Vec<u64>,
+}
+
+/// Where the sim side publishes vision frames (newest wins) for a grid
+/// fixed when the app is made.
+#[derive(Debug)]
+pub struct VisionFeed {
+    pub grid: VisionGrid,
+    latest: Mutex<Option<Arc<VisionFrame>>>,
+}
+
+impl VisionFeed {
+    pub fn new(grid: VisionGrid) -> Self {
+        Self { grid, latest: Mutex::new(None) }
+    }
+
+    pub fn publish(&self, frame: Arc<VisionFrame>) {
+        *self.latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
+    }
+
+    pub fn latest(&self) -> Option<Arc<VisionFrame>> {
+        self.latest.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
 }
 
 /// One pass of the scene's graph: the program it came from (its payload;
@@ -188,6 +221,9 @@ pub struct TerrainApp {
     renderer: Option<TerrainRenderer>,
     units: Option<UnitsSetup>,
     tileset: Option<Arc<Tileset>>,
+    vision: Option<Arc<VisionFeed>>,
+    /// Per slot: the tick of the vision frame written into it.
+    vision_written: Vec<Option<u64>>,
     unit_renderer: Option<UnitRenderer>,
     /// `(rows, visible)` of the last completed frame with units.
     unit_counts: Arc<Mutex<(u32, u32)>>,
@@ -211,7 +247,7 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -220,6 +256,8 @@ impl TerrainApp {
             renderer: None,
             units: None,
             tileset: None,
+            vision: None,
+            vision_written: Vec::new(),
             unit_renderer: None,
             unit_counts: Arc::default(),
             last_slot: 0,
@@ -244,6 +282,13 @@ impl TerrainApp {
     /// so one tileset serves any map). Without one, the material palette.
     pub fn with_tileset(mut self, tileset: Arc<Tileset>) -> Self {
         self.tileset = Some(tileset);
+        self
+    }
+
+    /// Shade the terrain by an observer's vision (fog of war) from `feed`;
+    /// until its first frame everything reads as unexplored.
+    pub fn with_vision(mut self, feed: Arc<VisionFeed>) -> Self {
+        self.vision = Some(feed);
         self
     }
 
@@ -351,6 +396,7 @@ impl TerrainApp {
             fog: view.fog,
             tileset: view.tileset,
             weights: view.weights,
+            vision: view.vision && self.vision.is_some(),
         }
     }
 }
@@ -395,7 +441,7 @@ impl RenderApp for TerrainApp {
         }
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }
@@ -465,6 +511,24 @@ impl RenderApp for TerrainApp {
         let stats = renderer.read_stats(slot);
         *self.stats.lock().unwrap_or_else(|p| p.into_inner()) = stats;
         renderer.write_frame(slot, &params);
+        if let Some(feed) = &self.vision {
+            if self.vision_written.len() <= slot {
+                self.vision_written.resize(slot + 1, None);
+            }
+            match feed.latest() {
+                Some(frame) if self.vision_written[slot] != Some(frame.tick) => {
+                    renderer.write_vision(slot, &frame.los, &frame.explored)?;
+                    self.vision_written[slot] = Some(frame.tick);
+                }
+                Some(_) => {}
+                None if self.vision_written[slot].is_none() => {
+                    let empty = vec![0u64; feed.grid.words()];
+                    renderer.write_vision(slot, &empty, &empty)?;
+                    self.vision_written[slot] = Some(u64::MAX);
+                }
+                None => {}
+            }
+        }
         if let (Some(units), Some(setup)) = (self.unit_renderer.as_mut(), self.units.as_ref()) {
             // This slot's previous frame has completed: its count is final.
             let previous = (units.rows(slot), units.read_visible(slot));

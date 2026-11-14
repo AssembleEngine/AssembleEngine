@@ -784,6 +784,7 @@ fn tileset_scene(
     tileset: Option<Arc<ae_render::terrain::tileset::Tileset>>,
     weights: bool,
     distance: f32,
+    vision: Option<Arc<ae_render::terrain::app::VisionFeed>>,
 ) -> (Vec<u8>, impl Fn(f32, f32, f32) -> (f32, f32)) {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
@@ -799,6 +800,9 @@ fn tileset_scene(
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
     if let Some(t) = tileset {
         app = app.with_tileset(t);
+    }
+    if let Some(v) = vision {
+        app = app.with_vision(v);
     }
     let camera = {
         let view = app.view();
@@ -870,7 +874,7 @@ fn tileset_boundaries_are_irregular_and_bounded() {
 
     let split = |x: usize, _: usize| if x < 32 { 0 } else { 2 };
     // Zoomed in on the boundary: about 14 px per cell.
-    let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, split, Some(t.clone()), true, 200.0);
+    let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, split, Some(t.clone()), true, 200.0, None);
     let rows = 4..236;
     let start = project(200.0, 256.0, 50.0).0.max(0.0) as u32;
     let cols = switch_columns(&pixels, rows.clone(), start, grass, sand);
@@ -891,7 +895,7 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     assert!(cols.iter().all(|&c| (lo..=hi).contains(&(c as f32))), "and stays in its band");
 
     // The palette: a straight boundary (grass and sand palette colours).
-    let (pixels, _) = tileset_scene(&gpu, |_, _| 50.0, split, None, false, 200.0);
+    let (pixels, _) = tileset_scene(&gpu, |_, _| 50.0, split, None, false, 200.0, None);
     let cols = switch_columns(&pixels, rows.clone(), start, srgb_bytes([0.23, 0.33, 0.12]), srgb_bytes([0.60, 0.54, 0.38]));
     eprintln!("palette boundary columns {}..={}", cols.iter().min().unwrap(), cols.iter().max().unwrap());
     assert!(spread(&cols) <= 1, "the palette's boundary is straight: spread {}", spread(&cols));
@@ -901,7 +905,7 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     // the cliff thresholds (1 − n.y = 0.18 .. 0.42) between about x = 27
     // and x = 38, a band the detail tilt and the height blend can fray.
     let ramp = |x: usize, _: usize| (x.clamp(16, 48) - 16).pow(2) as f32 * 0.25;
-    let (pixels, project) = tileset_scene(&gpu, ramp, |_, _| 0, Some(t.clone()), true, 620.0);
+    let (pixels, project) = tileset_scene(&gpu, ramp, |_, _| 0, Some(t.clone()), true, 620.0, None);
     let class = |x: f32, y: f32, h: f32| {
         let (u, v) = project(x, y, h);
         nearest(&pixels[((v as u32 * 320 + u as u32) * 4) as usize..], &[grass, rock])
@@ -1440,4 +1444,72 @@ fn parallel_recording_matches_serial() {
         assert!(pixels == serial, "{threads} threads without validation: other pixels");
         println!("{threads} recording thread(s): {PASSES} passes x {DRAWS} draws recorded in {ms:.2} ms (median of {FRAMES} frames, no validation)");
     }
+}
+
+/// Fog of war on the terrain (`TerrainApp::with_vision`), from straight
+/// above over a flat 512 m map with 32 m vision cells:
+/// * every cell in line of sight draws exactly what no vision draws;
+/// * line of sight on the left half only: the right half (never explored)
+///   is much darker than the left, and the left half matches the
+///   no-vision image there; explored-but-not-seen cells sit in between;
+/// * before the first vision frame everything reads as unexplored.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn vision_shades_the_terrain() {
+    use ae_render::terrain::app::{VisionFeed, VisionFrame};
+    use ae_render::terrain::renderer::VisionGrid;
+    let gpu = gpu();
+    let grid = VisionGrid { width: 16, height: 16, cell_size: 32.0 };
+    let plane = |f: &dyn Fn(u32, u32) -> bool| -> Vec<u64> {
+        let mut words = vec![0u64; grid.words()];
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                if f(x, y) {
+                    words[y as usize * grid.stride() + (x / 64) as usize] |= 1 << (x % 64);
+                }
+            }
+        }
+        words
+    };
+    let scene = |feed: Option<Arc<VisionFeed>>| tileset_scene(&gpu, |_, _| 50.0, |_, _| 0, None, false, 900.0, feed).0;
+    let feed = |los: &dyn Fn(u32, u32) -> bool, explored: &dyn Fn(u32, u32) -> bool| {
+        let f = Arc::new(VisionFeed::new(grid));
+        f.publish(Arc::new(VisionFrame { tick: 1, los: plane(los), explored: plane(explored) }));
+        Some(f)
+    };
+    let plain = scene(None);
+    let all = scene(feed(&|_, _| true, &|_, _| true));
+    assert!(plain == all, "full line of sight changed {} bytes", plain.iter().zip(&all).filter(|(a, b)| a != b).count());
+
+    // Left half seen, right half: top explored, bottom never.
+    let half = scene(feed(&|x, _| x < 8, &|x, y| x < 8 || y < 8));
+    let luma = |p: &[u8], x0: u32, x1: u32, y0: u32, y1: u32| {
+        let mut sum = 0.0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * 320 + x) * 4) as usize;
+                sum += 0.3 * p[i] as f64 + 0.59 * p[i + 1] as f64 + 0.11 * p[i + 2] as f64;
+            }
+        }
+        sum / ((x1 - x0) * (y1 - y0)) as f64
+    };
+    // The map spans the middle of the frame from above; sample well inside
+    // each quarter (screen y grows downwards, world y with it here or not:
+    // both right quarters are compared to the left).
+    let (left, right_a, right_b) = (luma(&half, 70, 140, 40, 200), luma(&half, 190, 250, 40, 100), luma(&half, 190, 250, 140, 200));
+    let (lit_left, plain_left) = (left, luma(&plain, 70, 140, 40, 200));
+    let (dim, dark) = (right_a.max(right_b), right_a.min(right_b));
+    println!("luma: left {left:.1} (no vision {plain_left:.1}), right explored {dim:.1}, never seen {dark:.1}");
+    assert!((lit_left - plain_left).abs() < 1.0, "line of sight draws as without vision");
+    // sRGB bytes: the shader's 0.2 and 0.5 factors (plus desaturation)
+    // read as about 0.5 and 0.75 of the brightness.
+    assert!(lit_left > 1.5 * dark, "never-seen ground is much darker");
+    assert!(dim > dark * 1.2 && dim < lit_left * 0.9, "explored ground sits between");
+
+    // A feed with no frame yet: all unexplored.
+    let empty = scene(Some(Arc::new(VisionFeed::new(grid))));
+    let unseen = luma(&empty, 190, 250, 40, 100).min(luma(&empty, 190, 250, 140, 200));
+    assert!((unseen - dark).abs() < 1.0, "before any vision frame, ground reads as never seen ({unseen:.1} vs {dark:.1})");
+    assert!(luma(&empty, 70, 140, 40, 200) < 0.7 * lit_left, "and the left is not lit");
+    assert_clean(&gpu);
 }

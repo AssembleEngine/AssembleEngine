@@ -44,7 +44,7 @@ use std::time::Instant;
 pub const ATTRIBUTES: [&str; 8] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 /// Classes with their own colour; higher class ids use the last one.
-pub const MAX_CLASSES: usize = 8;
+pub const MAX_CLASSES: usize = 16;
 /// Vertices of one unit (a four-faced dart).
 const UNIT_VERTICES: u32 = 12;
 

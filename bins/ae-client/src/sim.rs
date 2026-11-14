@@ -10,7 +10,12 @@
 use ae_nav::math::TICK_SECONDS;
 use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
+use ae_render::terrain::app::{VisionFeed, VisionFrame};
+use ae_render::terrain::renderer::VisionGrid;
 use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
+use ae_sensors::{Bits, SensorGrid};
+use ae_services::view::{SENSOR_CELL, ViewPipeline};
+use ae_view::{Observer, RowState, ViewTable};
 use ae_sim::capture::{Capture, CaptureSpec};
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
 use anyhow::{Context, Result};
@@ -37,11 +42,26 @@ pub struct SimOptions {
     /// The crossing game's `quake` tick (1..=255; 0: none): rock squares,
     /// then raised squares a tick later, landing with the nav repairs.
     pub quake: u8,
+    /// Allyteams (`NavPlugin::teams`; 0: none).
+    pub teams: u32,
+    /// Draw the world as this allyteam sees it (needs teams): its view
+    /// table and its vision on the terrain. `None`: everything.
+    pub observer: Option<u32>,
 }
+
+/// Radius drawn for a blip (its real one is line-of-sight only).
+const BLIP_RADIUS: f32 = 5.0;
+const ENEMY_TINT: [f32; 3] = [0.95, 0.15, 0.1];
 
 impl SimOptions {
     fn plugin(&self) -> NavPlugin {
-        NavPlugin::new(self.map, self.map_cells)
+        NavPlugin { teams: self.teams, ..NavPlugin::new(self.map, self.map_cells) }
+    }
+
+    /// The vision grid of an observer (the copy layer's sensor grid).
+    pub fn vision_grid(&self) -> VisionGrid {
+        let g = SensorGrid::new(self.plugin().extent(), self.plugin().extent(), SENSOR_CELL);
+        VisionGrid { width: g.width, height: g.height, cell_size: g.cell_size }
     }
 
     /// The game parameter: unit count, quake tick (orders at tick 0).
@@ -50,10 +70,18 @@ impl SimOptions {
     }
 
     /// One look per movement class of the map (the crossing game declares
-    /// the same classes): ships and hovercraft float.
+    /// the same classes): ships and hovercraft float. With an observer, the
+    /// same classes again for enemies (tinted red), then one for blips
+    /// (grey; their class is not known).
     pub fn classes(&self) -> Vec<UnitClass> {
         const COLORS: [[f32; 3]; 5] = [[0.95, 0.75, 0.10], [0.80, 0.12, 0.08], [0.92, 0.92, 0.96], [0.10, 0.80, 0.90], [0.75, 0.20, 0.85]];
-        self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], floats: p.medium.on_surface() }).collect()
+        let own: Vec<UnitClass> = self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], floats: p.medium.on_surface() }).collect();
+        if self.observer.is_none() {
+            return own;
+        }
+        let tint = |c: [f32; 3]| std::array::from_fn(|k| c[k] * 0.35 + ENEMY_TINT[k] * 0.65);
+        let enemy = own.iter().map(|c| UnitClass { color: tint(c.color), floats: c.floats });
+        own.iter().copied().chain(enemy).chain([UnitClass { color: [0.6, 0.6, 0.6], floats: false }]).collect()
     }
 }
 
@@ -67,6 +95,23 @@ pub struct Sim {
     spec: CaptureSpec,
     capture: Capture,
     streamer: Streamer,
+    view: Option<ViewState>,
+    classes: u32,
+}
+
+/// One observer's copy layer: the pipeline, the observer, what it has ever
+/// seen, and where its vision goes.
+struct ViewState {
+    pipeline: ViewPipeline,
+    observer: [Observer; 1],
+    explored: Bits,
+    vision: Option<Arc<VisionFeed>>,
+    table: ViewTable,
+    /// Spec fields the stream reads.
+    fields: [usize; 6],
+    /// Milliseconds of the last tick: capture + coverage, view build, rows
+    /// + stream.
+    ms: [f64; 3],
 }
 
 impl Sim {
@@ -79,7 +124,37 @@ impl Sim {
         let rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
         let world = rt.world_for(o.param(), o.workers)?;
         let spec = CaptureSpec::new(&rt.schema, &FIELDS)?;
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default() })
+        let view = match o.observer {
+            Some(ally) => {
+                anyhow::ensure!(ally < o.teams, "observer {ally} of {} teams", o.teams);
+                let pipeline = ViewPipeline::new(&rt.schema, &["NavAgent"], o.teams as usize, o.plugin().extent())?;
+                let field = |c: &str, f: &str| pipeline.field(c, f).with_context(|| format!("`{c}.{f}` is not viewed"));
+                let fields = [field("Body", "x")?, field("Body", "y")?, field("Body", "vx")?, field("Body", "vy")?, field("Body", "radius")?, field("NavAgent", "profile")?];
+                let grid = pipeline.coverage.grid;
+                Some(ViewState { pipeline, observer: [Observer::new(ally, 0x0B5E_4E00 ^ ally as u64)], explored: Bits::new(grid.width, grid.height), vision: None, table: ViewTable::default(), fields, ms: [0.0; 3] })
+            }
+            None => None,
+        };
+        let classes = o.plugin().map_profiles().len() as u32;
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes })
+    }
+
+    /// Publish the observer's vision here (with an observer).
+    pub fn with_vision(mut self, feed: Arc<VisionFeed>) -> Self {
+        if let Some(v) = self.view.as_mut() {
+            v.vision = Some(feed);
+        }
+        self
+    }
+
+    /// Rows of each state in the last view: own, seen, blip, ghost.
+    pub fn view_counts(&self) -> Option<[usize; 4]> {
+        let v = self.view.as_ref()?;
+        let mut n = [0; 4];
+        for s in &v.table.state {
+            n[*s as usize] += 1;
+        }
+        Some(n)
     }
 
     pub fn tick(&mut self) -> Result<()> {
@@ -95,18 +170,79 @@ impl Sim {
     }
 
     /// Capture the world and build the stream (`tick_seconds` 0: no
-    /// interpolation).
+    /// interpolation): every unit, or what the observer sees.
     pub fn stream(&mut self, tick_seconds: f32) -> Result<InstanceStream> {
         self.rt.capture(&self.world, &self.spec, &mut self.capture)?;
-        Ok(self.streamer.stream(&self.capture, Instant::now(), tick_seconds))
+        let Some(v) = self.view.as_mut() else {
+            return Ok(self.streamer.stream(&self.capture, Instant::now(), tick_seconds));
+        };
+        let t0 = Instant::now();
+        v.pipeline.capture(&self.rt, &self.world)?;
+        let t1 = Instant::now();
+        v.table = v.pipeline.observe(&mut v.observer).pop().unwrap();
+        let t2 = Instant::now();
+        let ally = v.observer[0].ally as usize;
+        let coverage = &v.pipeline.coverage;
+        v.explored.or(&coverage.los[ally]);
+        if let Some(feed) = &v.vision {
+            feed.publish(Arc::new(VisionFrame { tick: self.world.tick, los: coverage.los[ally].words.clone(), explored: v.explored.words.clone() }));
+        }
+        let t = &v.table;
+        let [fx, fy, fvx, fvy, fr, fp] = v.fields.map(|f| t.fields.iter().position(|&c| c == f).expect("viewed field"));
+        let rows: Vec<UnitRow> = (0..t.len())
+            .map(|r| {
+                let shown = |c: usize| t.mask[r] & (1 << c) != 0;
+                let word = |c: usize| t.columns[c][r];
+                let class = match t.state[r] {
+                    RowState::Own => word(fp),
+                    _ if shown(fp) => self.classes + word(fp),
+                    _ => 2 * self.classes,
+                };
+                UnitRow {
+                    key: t.ids[r] as u64,
+                    x: f32::from_bits(word(fx)),
+                    y: f32::from_bits(word(fy)),
+                    vx: f32::from_bits(word(fvx)),
+                    vy: f32::from_bits(word(fvy)),
+                    radius: if shown(fr) { word(fr) } else { BLIP_RADIUS.to_bits() },
+                    class,
+                    state: t.state[r] as u8,
+                }
+            })
+            .collect();
+        let stream = self.streamer.stream_rows(self.capture.tick, &rows, Instant::now(), tick_seconds);
+        v.ms = [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3];
+        Ok(stream)
+    }
+
+    /// The last view's milliseconds: capture + coverage, build, rows + stream.
+    pub fn view_ms(&self) -> Option<[f64; 3]> {
+        self.view.as_ref().map(|v| v.ms)
     }
 }
 
-/// Turns captures into streams, remembering the last one by entity.
+/// One unit for the stream: `key` orders rows and matches them across
+/// streams (an entity, or an observer's view id).
+#[derive(Clone, Copy, Debug)]
+pub struct UnitRow {
+    pub key: u64,
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    /// `f32` bits.
+    pub radius: u32,
+    pub class: u32,
+    /// Changing state (a blip seen, a unit lost to radar) snaps instead of
+    /// interpolating.
+    pub state: u8,
+}
+
+/// Turns captures into streams, remembering the last one by key.
 #[derive(Default)]
 pub struct Streamer {
-    /// Previous capture, sorted by entity: `(entity, x, y, heading x, heading y)`.
-    previous: Vec<(u64, f32, f32, f32, f32)>,
+    /// Previous stream, sorted by key: `(key, x, y, heading x, heading y, state)`.
+    previous: Vec<(u64, f32, f32, f32, f32, u8)>,
     order: Vec<u32>,
 }
 
@@ -120,27 +256,48 @@ impl Streamer {
         self.order.clear();
         self.order.extend(0..n as u32);
         self.order.sort_unstable_by_key(|&r| capture.entities[r as usize]);
-        let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(n));
-        let mut next = Vec::with_capacity(n);
+        let rows: Vec<UnitRow> = self
+            .order
+            .iter()
+            .map(|&r| {
+                let r = r as usize;
+                UnitRow {
+                    key: capture.entities[r],
+                    x: capture.f32(F_X, r),
+                    y: capture.f32(F_Y, r),
+                    vx: capture.f32(F_VX, r),
+                    vy: capture.f32(F_VY, r),
+                    radius: capture.columns[F_RADIUS][r],
+                    class: capture.columns[F_PROFILE][r],
+                    state: 0,
+                }
+            })
+            .collect();
+        self.stream_rows(capture.tick, &rows, published, tick_seconds)
+    }
+
+    /// The stream of `rows` (ascending by key), matched to the previous
+    /// stream by key; a row whose state changed starts where it is.
+    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], published: Instant, tick_seconds: f32) -> InstanceStream {
+        let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
+        let mut next = Vec::with_capacity(rows.len());
         let mut p = 0;
-        for &r in &self.order {
-            let r = r as usize;
-            let entity = capture.entities[r];
-            while p < self.previous.len() && self.previous[p].0 < entity {
+        for row in rows {
+            while p < self.previous.len() && self.previous[p].0 < row.key {
                 p += 1;
             }
-            let before = self.previous.get(p).filter(|prev| prev.0 == entity);
-            let (x, y) = (capture.f32(F_X, r), capture.f32(F_Y, r));
-            let (vx, vy) = (capture.f32(F_VX, r), capture.f32(F_VY, r));
-            let (px, py) = before.map_or((x, y), |b| (b.1, b.2));
+            let before = self.previous.get(p).filter(|prev| prev.0 == row.key);
+            let moved = before.filter(|b| b.5 == row.state);
+            let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
+            let (px, py) = moved.map_or((x, y), |b| (b.1, b.2));
             let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.3, b.4)) };
-            for (column, word) in columns.iter_mut().zip([x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), capture.columns[F_RADIUS][r], capture.columns[F_PROFILE][r]]) {
+            for (column, word) in columns.iter_mut().zip([x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class]) {
                 column.push(word);
             }
-            next.push((entity, x, y, hx, hy));
+            next.push((row.key, x, y, hx, hy, row.state));
         }
         self.previous = next;
-        InstanceStream { tick: capture.tick, published, tick_seconds, columns }
+        InstanceStream { tick, published, tick_seconds, columns }
     }
 }
 
@@ -156,6 +313,8 @@ pub struct SimStats {
     pub ready: bool,
     /// The sim stopped with an error (printed when it happened).
     pub failed: bool,
+    /// With an observer: its last view's rows (own, seen, blip, ghost).
+    pub view: Option<[usize; 4]>,
 }
 
 /// The sim thread.
@@ -168,14 +327,14 @@ pub struct SimThread {
 impl SimThread {
     /// Build the world and tick it at the nav rate, publishing units to
     /// `feed` and landed ground changes to `ground`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>) -> Self {
+    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
         let handle = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let result = run(o, feed, ground, &stop2, &stats2);
+                let result = run(o, feed, ground, vision, &stop2, &stats2);
                 if let Err(error) = &result {
                     eprintln!("sim failed: {error:#} (--units 0 runs without the sim)");
                     stats2.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
@@ -199,9 +358,12 @@ impl SimThread {
     }
 }
 
-fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
     let started = Instant::now();
     let mut sim = Sim::new(&o, Some(ground))?;
+    if let Some(feed) = vision {
+        sim = sim.with_vision(feed);
+    }
     eprintln!("sim: crossing game, {} units, {} workers, world built in {:.2} s", o.units, o.workers, started.elapsed().as_secs_f32());
     let period = Duration::from_secs_f32(TICK_SECONDS);
     let mut next = Instant::now();
@@ -213,13 +375,14 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, stop: &Atomi
         let t1 = Instant::now();
         let stream = sim.stream(TICK_SECONDS)?;
         let (tick, units) = (stream.tick, stream.len());
+        let view = sim.view_counts();
         feed.publish(Arc::new(stream));
         tick_sum += (t1 - t0).as_secs_f64() * 1e3;
         capture_sum += t1.elapsed().as_secs_f64() * 1e3;
         count += 1;
         if count == 30 {
             let mut s = stats.lock().unwrap_or_else(|p| p.into_inner());
-            *s = SimStats { tick, units, tick_ms: tick_sum / count as f64, capture_ms: capture_sum / count as f64, late, ready: true, failed: false };
+            *s = SimStats { tick, units, tick_ms: tick_sum / count as f64, capture_ms: capture_sum / count as f64, late, ready: true, failed: false, view };
             (tick_sum, capture_sum, count) = (0.0, 0.0, 0);
         }
         next += period;

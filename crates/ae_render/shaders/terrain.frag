@@ -21,6 +21,33 @@ vec3 hue(float h) {
 
 layout(set = 0, binding = 10) uniform sampler2DArray tileAlbedo; // rgb albedo, a height
 layout(set = 0, binding = 11) uniform sampler2DArray tileNormal; // rg tangent-space normal
+// Vision (fog of war): two bit planes over the vision grid, line of sight
+// then explored, rows of u.vision.w words.
+layout(std430, set = 0, binding = 13) readonly buffer VisionBuf { uint vision[]; };
+
+// 1 in line of sight, 0.5 explored, 0.2 never seen; cells off the grid read
+// as the nearest edge cell (the blend reaches half a cell past the map).
+float visionCell(ivec2 c) {
+    c = clamp(c, ivec2(0), ivec2(u.vision.xy) - 1);
+    uint stride = uint(u.vision.w);
+    uint i = uint(c.y) * stride + uint(c.x) / 32u;
+    uint bit = 1u << (uint(c.x) % 32u);
+    if ((vision[i] & bit) != 0u) {
+        return 1.0;
+    }
+    return (vision[stride * uint(u.vision.y) + i] & bit) != 0u ? 0.5 : 0.2;
+}
+
+// Bilinear over the four nearest cells, so 32 m cells do not show as blocks.
+float visionAt(vec2 world) {
+    vec2 p = world / u.vision.z - 0.5;
+    ivec2 c = ivec2(floor(p));
+    vec2 f = fract(p);
+    float a = mix(visionCell(c), visionCell(c + ivec2(1, 0)), f.x);
+    float b = mix(visionCell(c + ivec2(0, 1)), visionCell(c + ivec2(1, 1)), f.x);
+    return mix(a, b, f.y);
+}
+
 layout(set = 0, binding = 12) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z 1 = triplanar
@@ -277,6 +304,13 @@ void main() {
         vec3 shallow = vec3(0.16, 0.38, 0.42);
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
         color = mix(color * vec3(0.6, 0.8, 0.85), tint, 1.0 - exp(-depth * u.water.z));
+    }
+
+    if ((u.cfg.z & FLAG_VISION) != 0u) {
+        float v = visionAt(inWorld.xz);
+        color *= v;
+        // Out of sight also loses colour, so it reads as remembered, not dark.
+        color = mix(vec3(dot(color, vec3(0.3, 0.59, 0.11))), color, 0.4 + 0.6 * v);
     }
 
     float dist = distance(inWorld, u.camPos.xyz);

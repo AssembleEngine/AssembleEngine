@@ -43,6 +43,13 @@
 //! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
 //! (see `bench.rs`; `--bench list` names them).
 //!
+//! `--teams N` splits the crossing maps' units into N allyteams (with
+//! sensors); `--observer K` (default 0 with teams; `all` for everything)
+//! then draws the world as allyteam K sees it through the copy layer: its
+//! own units in their class colours, enemies in line of sight tinted red,
+//! radar blips grey, and the terrain lit where K sees now, dimmed where it
+//! has looked before, dark elsewhere.
+//!
 //! `--record-threads N` records the frame's passes on N threads, one
 //! command buffer per pass (default 1: all on the render thread).
 //!
@@ -60,7 +67,7 @@ use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_services::nav::{GroundFeed, Map};
 use ae_render::demo::DemoApp;
 use ae_render::swapchain::PresentPolicy;
-use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, lod_view};
+use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view};
 use ae_render::terrain::edit::TerrainEditor;
 use ae_render::terrain::tileset::{self, Tileset};
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
@@ -108,19 +115,24 @@ struct Options {
     bench: Option<bench::BenchOptions>,
     /// Threads recording render passes (1: the render thread alone).
     record_threads: usize,
+    /// Allyteams of the crossing maps' units (0: none).
+    teams: u32,
+    /// The allyteam whose view is drawn (`None`: everything).
+    observer: Option<u32>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1 }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
     let mut o = Options::default();
+    let mut observer_given = false;
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -166,6 +178,14 @@ fn parse() -> Result<Options> {
             "--label" => o.bench.get_or_insert_with(Default::default).label = Some(value("--label", &mut args)?),
             "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
+            "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
+            "--observer" => {
+                observer_given = true;
+                o.observer = match value("--observer", &mut args)?.as_str() {
+                    "all" => None,
+                    n => Some(n.parse().context("--observer N|all")?),
+                }
+            }
             "--record-threads" => o.record_threads = value("--record-threads", &mut args)?.parse::<usize>().context("--record-threads")?.max(1),
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
@@ -175,6 +195,12 @@ fn parse() -> Result<Options> {
             }
             other => bail!("unknown argument {other:?}\n{USAGE}"),
         }
+    }
+    if o.teams > 0 && !observer_given {
+        o.observer = Some(0);
+    }
+    if let Some(k) = o.observer {
+        anyhow::ensure!(k < o.teams, "--observer {k} needs --teams of at least {}", k + 1);
     }
     if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
         bail!("--frames, --warmup, --label, --out and --no-save go with --bench\n{USAGE}");
@@ -195,7 +221,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Land => Map::LandCrossing,
         MapKind::Generated | MapKind::Demo => return None,
     };
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake })
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
@@ -377,6 +403,11 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         let started = Instant::now();
         let ground = Arc::new(GroundFeed::default());
         let mut sim = sim::Sim::new(&s, Some(ground.clone()))?;
+        if s.observer.is_some() {
+            let vision = Arc::new(VisionFeed::new(s.vision_grid()));
+            sim = sim.with_vision(vision.clone());
+            app = app.with_vision(vision);
+        }
         let built = started.elapsed();
         for _ in 0..o.ticks {
             sim.tick()?;
@@ -401,6 +432,9 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         let t = Instant::now();
         let stream = sim.stream(0.0)?;
         let streamed = t.elapsed();
+        if let (Some([own, seen, blip, ghost]), Some([c, b, r])) = (sim.view_counts(), sim.view_ms()) {
+            eprintln!("observer {}: {own} own, {seen} seen, {blip} blips, {ghost} ghosts; capture + coverage {c:.3} ms, view {b:.3} ms, rows + stream {r:.3} ms", s.observer.unwrap_or(0));
+        }
         // Where each class is (to aim `--camera` at).
         let mut classes: Vec<(u32, f64, f64)> = vec![(0, 0.0, 0.0); s.classes().len()];
         for r in 0..stream.len() {
@@ -486,11 +520,15 @@ fn run(o: Options) -> Result<ExitCode> {
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));
+                let vision = s.observer.map(|_| Arc::new(VisionFeed::new(s.vision_grid())));
+                if let Some(v) = &vision {
+                    app = app.with_vision(v.clone());
+                }
                 let ground = Arc::new(GroundFeed::default());
                 let shown = nav.clone().context("units need a crossing map")?;
                 ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
                 edits = Some(app.terrain_edits());
-                sim_thread = Some(sim::SimThread::start(s, feed, ground));
+                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
@@ -546,7 +584,8 @@ fn run(o: Options) -> Result<ExitCode> {
                     if s.failed {
                         " | sim failed (see the terminal)".into()
                     } else if s.ready {
-                        format!(" | {} units, tick {}, {:.1} ms/tick", s.units, s.tick, s.tick_ms)
+                        let view = s.view.map(|[own, seen, blip, _]| format!(", observer {}: {own} own, {seen} seen, {blip} blips", o.observer.unwrap_or(0))).unwrap_or_default();
+                        format!(" | {} units, tick {}, {:.1} ms/tick{view}", s.units, s.tick, s.tick_ms)
                     } else {
                         " | building the world".into()
                     }

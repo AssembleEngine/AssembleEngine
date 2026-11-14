@@ -53,7 +53,12 @@ Terrain is dressed by material tilesets (reusable surface layers, projected by o
 height-blended; procedural `temperate` and `desert` sets for now, [docs/tilesets.md](docs/tilesets.md)).
 `ae-client --bench all` measures fixed scenes on the GPU for `bench-diff`; `--record-threads N` records
 render passes on several threads (one command buffer per pass); a frame graph can also come from a
-data file (`--render-module render/post.graph.json`). M3 is complete; M4 (copy layer, fog) is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+data file (`--render-module render/post.graph.json`). M3 is complete.
+
+M4 (copy layer and fog): `ae_sensors` stamps per-allyteam line-of-sight and radar grids, `ae_view`
+builds each observer's view table by the fields' view classes (`#[field(view = ...)]`), and
+`ae-client --teams 2 --observer 0` draws the world as that allyteam sees it, with fog of war on the
+terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

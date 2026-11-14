@@ -1126,7 +1126,42 @@ View classes in the schema, teams and sensors in the sim:
   fields; no view word lies in the entity index range; the observers' worlds differ (observer 0:
   1,500 own, 1,350 seen, ~105 blips; observer 1 sees all 1,500 enemies). Viewing leaves the digest
   unchanged, and with teams 1 and 2 workers agree. Two views build in 0.4–0.9 ms here (3,000 rows).
-- Not done: the client still draws from the raw capture; the fog pass does not exist.
+
+The client draws an observer's view (`ae-client --teams N [--observer K|all]`):
+- With `--teams`, the sim thread runs a `ViewPipeline` and one `Observer` (default allyteam 0;
+  `all` draws everything as before). Units are streamed from its view table: own units in their
+  class colours, enemies in line of sight in the same classes tinted red, blips grey (their class
+  and radius are line-of-sight fields, so a blip gets a fixed 5 m radius). The streamer now matches
+  rows by key (entity, or view id) and snaps a row whose state changed (a blip seen, a unit lost)
+  instead of interpolating across it. `MAX_CLASSES` went from 8 to 16 (11 classes in use).
+- Fog of war on the terrain: `TerrainApp::with_vision(VisionFeed)`. The sim publishes the
+  observer's line-of-sight plane and the cells it has ever seen (OR of every tick's line of sight);
+  the renderer copies the newest frame into the slot's host-visible storage buffer (binding 13,
+  two bit planes) in `prepare`, only when it changed, and `FrameUbo` gained a `vision` vec4. Flag 64:
+  the shader blends the four nearest cells (1 in sight, 0.5 explored, 0.2 never; lookups clamped
+  to the grid) and desaturates what is out of sight. A host write before submit needs no graph pass.
+- GPU test `vision_shades_the_terrain`: full line of sight is byte-identical to no vision; with sight
+  on the left half the left matches no vision (luma 167.0 vs 167.0), explored ground reads 132.6 and
+  never-seen ground 96.2 (sRGB bytes); a feed with no frame yet reads as never seen. All 15 GPU tests
+  pass with validation.
+- Captures (`--teams 2 --capture`, 10k units at tick 300): observer 0 has 5,000 own, 4,409 seen,
+  91 blips; observer 1 5,000 own, 4,815 seen, 185 blips. The ships in the river, out of observer 0's
+  sensors, are not drawn for it. The view path on the sim thread, first build (every id fresh):
+  capture + coverage 0.87–0.90 ms, view 1.48–1.54 ms, rows + stream 0.19–0.20 ms.
+- Windowed `--teams 2 --seconds 10 --exercise` under validation: 9 swapchain recreates, 0 messages,
+  5.4 ms/tick sim, capture + view + stream 2.5 ms per tick on the sim thread, 1 late tick.
+- `ae-client --bench all` against the baseline: all 81 GPU metrics unchanged (vision off costs
+  nothing measurable).
+
+M4 exit criteria: two observers see different worlds (the live test and the captures); the
+property test holds against an independent oracle; a view build is under 2 ms at 10k units (two
+observers 1.08 ms in the bench, one cold first build 1.5 ms in the client).
+- Not done: ghosts are only exercised on synthetic worlds (the crossing game has no static units);
+  explored cells are remembered by the client's sim thread, not by the copy layer; there is no key
+  to switch observers while running; radar shows no coverage on the terrain; jammers, sonar and
+  seismic sensors are not modelled; the sensors run on the view side, not as a sim service (the
+  plan lists them under native services); fog does not hide the units' own shadows or decals,
+  which do not exist yet.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

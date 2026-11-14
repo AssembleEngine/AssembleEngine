@@ -60,6 +60,29 @@ struct FrameUbo {
     cfg: [u32; 4],
     fog: [f32; 4],
     water: [f32; 4],
+    /// Vision grid: width, height (cells), cell size, u32 words per row.
+    vision: [f32; 4],
+}
+
+/// The cell layout of the vision (fog of war) planes a renderer can show:
+/// one bit per cell, rows of `stride` 64-bit words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisionGrid {
+    pub width: u32,
+    pub height: u32,
+    pub cell_size: f32,
+}
+
+impl VisionGrid {
+    /// 64-bit words per row.
+    pub fn stride(&self) -> usize {
+        (self.width as usize).div_ceil(64)
+    }
+
+    /// 64-bit words of one plane.
+    pub fn words(&self) -> usize {
+        self.stride() * self.height as usize
+    }
 }
 
 #[repr(C)]
@@ -98,6 +121,9 @@ pub struct FrameParams {
     /// With the tileset: show each pixel's layer blend weights as flat
     /// colours, unlit (a debug view).
     pub weights: bool,
+    /// Shade by the vision planes last written (`write_vision`): full in
+    /// line of sight, dimmed where explored, dark elsewhere.
+    pub vision: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +203,10 @@ pub struct TerrainRenderer {
     tile_normal: OwnedImage,
     tile_ubo: OwnedBuffer,
     has_tileset: bool,
+    /// Per slot: line-of-sight and explored bit planes (host-visible;
+    /// 16 bytes without a vision grid).
+    vision_bufs: Vec<OwnedBuffer>,
+    vision: Option<VisionGrid>,
     /// Nearest clamp, linear clamp, trilinear repeat (tilesets).
     samplers: [vk::Sampler; 3],
 }
@@ -219,6 +249,7 @@ impl TerrainRenderer {
         info: TerrainInfo,
         materials: Option<&[u8]>,
         tileset: Option<&Tileset>,
+        vision: Option<VisionGrid>,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -259,6 +290,10 @@ impl TerrainRenderer {
 
         let ubos = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: size_of::<FrameUbo>() as u64, usage: vk::BufferUsageFlags::UNIFORM_BUFFER }, MemoryLocation::CpuToGpu, "terrain frame"))
+            .collect::<Result<Vec<_>>>()?;
+        let vision_bytes = vision.map_or(16, |v| 2 * v.words() as u64 * 8);
+        let vision_bufs = (0..frames_in_flight)
+            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: vision_bytes, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "terrain vision"))
             .collect::<Result<Vec<_>>>()?;
         let stats = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: IND_WORDS * 4, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "terrain stats"))
@@ -341,13 +376,14 @@ impl TerrainRenderer {
                 b(10, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(11, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(12, vk::DescriptorType::UNIFORM_BUFFER),
+                b(13, vk::DescriptorType::STORAGE_BUFFER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 6 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
@@ -384,6 +420,8 @@ impl TerrainRenderer {
                 }
                 let table = [vk::DescriptorBufferInfo { buffer: tile_ubo.buffer, offset: 0, range: vk::WHOLE_SIZE }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(12).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&table));
+                let planes = [vk::DescriptorBufferInfo { buffer: vision_bufs[slot].buffer, offset: 0, range: vk::WHOLE_SIZE }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&planes));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -430,6 +468,8 @@ impl TerrainRenderer {
             tile_normal,
             tile_ubo,
             has_tileset: tileset.is_some(),
+            vision_bufs,
+            vision,
             samplers,
         })
     }
@@ -509,7 +549,8 @@ impl TerrainRenderer {
                     | if p.wireframe == Wireframe::Triangles { 2 } else { 0 }
                     | if i.has_materials { 8 } else { 0 }
                     | if self.has_tileset && p.tileset { 16 } else { 0 }
-                    | if self.has_tileset && p.tileset && p.weights { 32 } else { 0 },
+                    | if self.has_tileset && p.tileset && p.weights { 32 } else { 0 }
+                    | if self.vision.is_some() && p.vision { 64 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
@@ -517,10 +558,28 @@ impl TerrainRenderer {
                 Some(level) => [level, 1.0, 0.08, 0.0],
                 None => [0.0, 0.0, 0.0, 0.0],
             },
+            vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(bytes_of(&ubo));
         }
+    }
+
+    /// The vision grid this renderer was made for.
+    pub fn vision_grid(&self) -> Option<VisionGrid> {
+        self.vision
+    }
+
+    /// Write `slot`'s vision planes (its previous submission has completed):
+    /// line of sight and explored, [`VisionGrid::words`] each.
+    pub fn write_vision(&mut self, slot: usize, los: &[u64], explored: &[u64]) -> Result<()> {
+        let v = self.vision.context("this terrain renderer has no vision grid")?;
+        anyhow::ensure!(los.len() == v.words() && explored.len() == v.words(), "vision planes of {} and {} words for a {}x{} grid", los.len(), explored.len(), v.width, v.height);
+        let bytes = self.vision_bufs[slot].mapped().context("vision buffer is not mapped")?;
+        let half = v.words() * 8;
+        bytes[..half].copy_from_slice(slice_bytes(los));
+        bytes[half..2 * half].copy_from_slice(slice_bytes(explored));
+        Ok(())
     }
 
     /// The LOD update: split and merge passes, reduction, draw list. Records
@@ -625,7 +684,7 @@ impl TerrainRenderer {
         for b in [&mut self.tree, &mut self.bits, &mut self.snap, &mut self.leaves, &mut self.indirect, &mut self.submesh_vb, &mut self.submesh_ib] {
             b.destroy(gpu);
         }
-        for b in self.ubos.iter_mut().chain(self.stats.iter_mut()) {
+        for b in self.ubos.iter_mut().chain(self.stats.iter_mut()).chain(self.vision_bufs.iter_mut()) {
             b.destroy(gpu);
         }
         self.height_img.destroy(gpu);

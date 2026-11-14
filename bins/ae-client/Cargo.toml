@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 ae_bench.workspace = true
 ae_nav.workspace = true
+ae_sensors.workspace = true
+ae_view.workspace = true
 ae_services.workspace = true
 ae_sim.workspace = true
 ae_render = { path = "../../crates/ae_render" }

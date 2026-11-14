@@ -13,7 +13,7 @@
 #define ATTR_HEADING_Y 5u
 #define ATTR_RADIUS 6u
 #define ATTR_CLASS 7u
-#define MAX_CLASSES 8u
+#define MAX_CLASSES 16u
 
 layout(std140, set = 0, binding = 0) uniform Frame {
     mat4 viewProj;
