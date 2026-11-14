@@ -52,7 +52,8 @@ publishes landed ground changes, and the renderer patches its textures and error
 Terrain is dressed by material tilesets (reusable surface layers, projected by orientation and
 height-blended; procedural `temperate` and `desert` sets for now, [docs/tilesets.md](docs/tilesets.md)).
 `ae-client --bench all` measures fixed scenes on the GPU for `bench-diff`; `--record-threads N` records
-render passes on several threads (one command buffer per pass). Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+render passes on several threads (one command buffer per pass); a frame graph can also come from a
+data file (`--render-module render/post.graph.json`). M3 is complete; M4 (copy layer, fog) is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

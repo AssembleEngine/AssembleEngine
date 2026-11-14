@@ -1,6 +1,7 @@
 //! Render modules on the host: loading one with wasmtime, calling its
 //! `declare` and `frame` exports (contract in [`ae_render_abi::module`]),
-//! and building the in-repo modules (`render/<name>`).
+//! and building the in-repo modules (`render/<name>`). A graph file
+//! ([`crate::graph_file`]) loads through the same door.
 //!
 //! A render module is trusted (like the sim module) but gets its own store
 //! and memory and no imports: everything it hands back is copied out of its
@@ -37,7 +38,49 @@ impl ModuleFrame {
     }
 }
 
-pub struct RenderModule {
+/// A loaded render module: compiled WASM, or a graph file
+/// ([`crate::graph_file`]) that declares a fixed graph.
+pub enum RenderModule {
+    Wasm(WasmModule),
+    File(crate::graph_file::GraphFile),
+}
+
+impl RenderModule {
+    /// A self-contained graph file (JSON, as [`crate::graph_file::inline`]
+    /// writes it: it starts with `{`), or else WASM (binary or text).
+    pub fn load(engine: &Engine, bytes: &[u8]) -> Result<Self> {
+        if bytes.trim_ascii_start().starts_with(b"{") {
+            crate::graph_file::GraphFile::parse(bytes).map(Self::File)
+        } else {
+            WasmModule::load(engine, bytes).map(Self::Wasm)
+        }
+    }
+
+    /// The module's graph for a target, `None` if it declines.
+    pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<Option<Declared>> {
+        match self {
+            Self::Wasm(m) => m.declare(width, height, color_format, flags),
+            Self::File(f) => f.declare(width, height, color_format, flags),
+        }
+    }
+
+    pub fn frame(&mut self, input: &FrameInput) -> Result<ModuleFrame> {
+        match self {
+            Self::Wasm(m) => m.frame(input),
+            Self::File(f) => Ok(f.frame(input)),
+        }
+    }
+
+    /// When it was loaded.
+    pub fn loaded(&self) -> Instant {
+        match self {
+            Self::Wasm(m) => m.loaded,
+            Self::File(f) => f.loaded,
+        }
+    }
+}
+
+pub struct WasmModule {
     store: Store<()>,
     memory: Memory,
     declare: TypedFunc<(u32, u32, u32, u32), u32>,
@@ -46,7 +89,7 @@ pub struct RenderModule {
     pub loaded: Instant,
 }
 
-impl RenderModule {
+impl WasmModule {
     pub fn load(engine: &Engine, bytes: &[u8]) -> Result<Self> {
         let module = Module::new(engine, bytes).map_err(anyhow::Error::from).context("compiling the render module")?;
         if let Some(import) = module.imports().next() {
@@ -117,11 +160,15 @@ pub fn module_dir(name: &str) -> PathBuf {
 
 /// `cargo build --release` the in-repo module `render/<name>` (crate
 /// `ae_render_<name>`) for [`MODULE_TARGET`] and return its bytes, or read
-/// `name` as a file when it ends in `.wasm`. Build output goes to
-/// `target/render-modules`.
+/// `name` as a file when it ends in `.wasm`, or as a graph file when it
+/// ends in `.json` (made self-contained, [`crate::graph_file::inline`]).
+/// Build output goes to `target/render-modules`.
 pub fn build(name: &str) -> Result<Vec<u8>> {
     if name.ends_with(".wasm") {
         return std::fs::read(name).with_context(|| format!("read {name}"));
+    }
+    if name.ends_with(".json") {
+        return crate::graph_file::inline(Path::new(name));
     }
     let manifest = module_dir(name).join("Cargo.toml");
     ensure!(manifest.exists(), "no render module `{name}` (looked for {})", manifest.display());

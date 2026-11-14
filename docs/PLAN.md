@@ -1013,8 +1013,43 @@ Threaded recording (`ExecutorConfig::record_threads`, `ae-client --record-thread
   grouped (a pass per command buffer). The recording pool is the executor's own, not the engine-wide
   job pool the plan describes.
 
-Left in M3: a golden test of the frame graph `.dot` output (Verification) and a frame graph descriptor
-loadable from a data file (the editor's M3 cost).
+Golden `.dot` (Verification, "golden frame graph `.dot` output"): `crates/ae_render/tests/golden.rs`
+bakes the native scene graph (with units presenting and reading back, without units) and the demo
+graph (present, readback) and compares `dot::to_dot` with `tests/golden/*.dot`; it also checks the
+export is the same when built twice. `AE_UPDATE_GOLDEN=1` rewrites the files after an intended change.
+An edited golden line fails the test, naming the line.
+
+Frame graphs from data files (the editor's M3 cost, "descriptor loadable from a data file"):
+- `ae_render::graph_file`: a JSON file declares resources (`library` buffers, `image`s sized from the
+  target with an optional `scale`, one `output`), fullscreen programs (`fragment`: a `.spv`, or a
+  `.frag` compiled with `glslc`; constant `uniforms`) and passes (`library` or `program` payload,
+  access strings such as `"depth depth:clear"` or `"units.counts transfer_dst discard"`, `flag` n for
+  a conditional pass bit n of the app flags enables, `when` units / no_units / readback / present).
+  The host appends present or readback copy + host read for the output, as the modules write them.
+  It produces the same `Declared` (graph descriptor + program table) a module's `declare` returns.
+- `RenderModule` is now WASM or a graph file (JSON when the bytes start with `{`), so a file goes
+  through the same checks, library wiring and hot reload. `module::build("x.json")` inlines the
+  shaders (`fragment_hex`) so the bytes stand alone; a raw file with paths is refused by name.
+  `ae-client --render-module render/post.graph.json`; the watcher follows the file and its
+  directory.
+- `render/default.graph.json` and `render/post.graph.json` restate the two in-repo modules. Test
+  `tests/graph_file.rs` (no GPU): same descriptors (decoded and re-encoded, since the builder's name
+  blob follows call order) and byte-identical program tables, SPIR-V included, at 3 targets × 4 scene
+  kinds, and the same uniforms and enabled passes for app flags 0–3. A changed uniform or flag in
+  the file fails it. Unit tests cover role parsing and errors that name the pass and resource.
+- `--capture` with `post` and with `render/post.graph.json` (2,000 units): byte-identical, 0 validation
+  messages. Windowed, under validation: editing a uniform in the file reloaded it (2 loads); a
+  misspelt program name was rejected ("pass `vignette`: no program `vignet`") and the running graph
+  stayed.
+- Not done: uniforms are constants (no time or camera inputs; that still needs a WASM module); no
+  text form for compute programs (only library compute passes); no `ae-tool` command to convert a
+  module's declaration into a file.
+
+M3 is complete: every scope item has landed (depth/MRT, declaration ABI, reflection, instance streams
+and GPU culling, `terrain_cbt` with material tilesets, threaded recording, the GPU bench, golden
+`.dot`, graph files). The exit run (`ae-client` with 10k units, topology hot reload, validation
+clean) is covered by the runs above. What each part leaves open is in its "Not done" line. Next is
+M4 (copy layer and fog).
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

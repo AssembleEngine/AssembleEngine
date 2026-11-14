@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "resources": [
+    {"name": "terrain.leaves", "kind": "library"},
+    {"name": "terrain.indirect", "kind": "library"},
+    {"name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment"]},
+    {"name": "scene", "kind": "image", "format": "target", "usage": ["color_attachment", "sampled"]},
+    {"name": "target", "kind": "output"},
+    {"name": "units.instances", "kind": "library", "when": "units"},
+    {"name": "units.visible", "kind": "library", "when": "units"},
+    {"name": "units.indirect", "kind": "library", "when": "units"},
+    {"name": "units.counts", "kind": "library", "when": "units"}
+  ],
+  "programs": [
+    {"name": "grade", "fragment": "post/shaders/grade.frag", "uniforms": [1.04, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]},
+    {"name": "vignette", "fragment": "post/shaders/vignette.frag", "uniforms": [0.85, 0.35, 0.0, 0.0]}
+  ],
+  "passes": [
+    {"name": "terrain lod", "kind": "compute", "library": "terrain.lod", "access": ["terrain.leaves storage_buffer_write:compute", "terrain.indirect storage_buffer_write:compute"]},
+    {"name": "terrain", "kind": "graphics", "library": "terrain.draw", "access": ["terrain.leaves storage_buffer_read:vertex", "terrain.indirect indirect", "scene color:clear", "depth depth:clear"]},
+    {"name": "units reset", "kind": "transfer", "library": "units.reset", "when": "units", "access": ["units.indirect transfer_dst"]},
+    {"name": "units cull", "kind": "compute", "library": "units.cull", "when": "units", "access": ["units.instances storage_buffer_read:compute", "units.visible storage_buffer_write:compute", "units.indirect storage_buffer_write:compute"]},
+    {"name": "units", "kind": "graphics", "library": "units.draw", "when": "units", "access": ["units.instances storage_buffer_read:vertex", "units.visible storage_buffer_read:vertex", "units.indirect indirect", "scene color:load", "depth depth:load"]},
+    {"name": "units count", "kind": "transfer", "library": "units.count", "when": "units", "access": ["units.indirect transfer_src", "units.counts transfer_dst discard"]},
+    {"name": "units count read", "kind": "transfer", "library": "host.read", "when": "units", "root": true, "access": ["units.counts host_read"]},
+    {"name": "grade", "kind": "graphics", "program": "grade", "access": ["scene sampled:fragment", "target color:dont_care"]},
+    {"name": "vignette", "kind": "graphics", "program": "vignette", "flag": 0, "access": ["target color:load"]}
+  ]
+}

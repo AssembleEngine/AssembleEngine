@@ -1,6 +1,7 @@
 //! Render module hot reload: a thread that watches a module's sources (an
 //! in-repo module's `render/<name>` directory: `src/`, `shaders/`,
-//! `build.rs`, `Cargo.toml`) or its `.wasm` file, rebuilds it when they
+//! `build.rs`, `Cargo.toml`), its `.wasm` file, or a graph file (`.json`)
+//! and the directory it is in, rebuilds it when they
 //! change and hands the new bytes to the render thread, which swaps
 //! modules at its next frame (or keeps the running one if the new one is
 //! rejected).
@@ -43,6 +44,11 @@ impl ModuleWatch {
         let stop2 = stop.clone();
         let paths: Vec<PathBuf> = if name.ends_with(".wasm") {
             vec![PathBuf::from(&name)]
+        } else if name.ends_with(".json") {
+            // A graph file and the shaders beside it (paths are relative to it).
+            let file = PathBuf::from(&name);
+            let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+            vec![file, dir]
         } else {
             let dir = ae_render::module::module_dir(&name);
             ["src", "shaders", "build.rs", "Cargo.toml"].iter().map(|p| dir.join(p)).collect()

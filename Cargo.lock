@@ -139,6 +139,8 @@ dependencies = [
  "rayon",
  "rspirv",
  "sdl3-sys",
+ "serde",
+ "serde_json",
  "wasmtime",
 ]
 

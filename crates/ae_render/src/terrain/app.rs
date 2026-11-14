@@ -484,7 +484,7 @@ impl RenderApp for TerrainApp {
                 height: self.extent.height,
                 frame: state.frames,
                 units: self.unit_renderer.as_ref().map_or(0, |u| u.rows(slot)),
-                time: state.module.loaded.elapsed().as_secs_f32(),
+                time: state.module.loaded().elapsed().as_secs_f32(),
                 flags: view.module_flags,
                 view_proj: params.view_proj.to_cols_array(),
                 ..FrameInput::default()

@@ -4,13 +4,14 @@
 //! ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X]
 //!           [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo]
 //!           [--frames-in-flight N] [--units N] [--workers N] [--ticks N]
-//!           [--render-module NAME|FILE.wasm] [--capture FILE.ppm]
+//!           [--render-module NAME|FILE.wasm|FILE.json] [--capture FILE.ppm]
 //! ```
 //!
 //! `--render-module` takes the frame graph from a render module: an
 //! in-repo one (`render/<NAME>`: `default`, the engine's own graph from
-//! WASM; `post`, with a colour grade and a vignette V toggles) or a
-//! `.wasm` file. Its sources (or the file) are watched: an edit rebuilds it
+//! WASM; `post`, with a colour grade and a vignette V toggles), a `.wasm`
+//! file, or a graph file (`.json`, e.g. `render/post.graph.json`: the same
+//! graph as data, `ae_render::graph_file`). Its sources (or the file) are watched: an edit rebuilds it
 //! and the running client swaps it in at the next frame, or keeps the old
 //! one and prints why.
 //!
@@ -115,7 +116,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
