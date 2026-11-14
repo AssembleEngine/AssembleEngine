@@ -1,0 +1,10 @@
+[package]
+name = "ae_vfs"
+description = "Content file system: layered mounts (directories for now), reads by content path, and the content hash that names exactly what a game was built from."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+xxhash-rust.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "ae_catalog"
+description = "Unit and building definitions as data: JSON defs with `extends`, validated against a game's schema and resolved to the component bytes a spawn writes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_abi.workspace = true
+ae_sim.workspace = true
+ae_vfs.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

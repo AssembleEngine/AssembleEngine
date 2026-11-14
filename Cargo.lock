@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae_catalog"
+version = "0.0.1"
+dependencies = [
+ "ae_abi",
+ "ae_sim",
+ "ae_vfs",
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ae_ecs"
 version = "0.0.1"
 dependencies = [
@@ -229,6 +241,14 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "rayon",
+]
+
+[[package]]
+name = "ae_vfs"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -16,6 +16,8 @@ ae_sensors = { path = "crates/ae_sensors" }
 ae_view = { path = "crates/ae_view" }
 ae_replay = { path = "crates/ae_replay" }
 ae_net = { path = "crates/ae_net" }
+ae_vfs = { path = "crates/ae_vfs" }
+ae_catalog = { path = "crates/ae_catalog" }
 ae_render_abi = { path = "crates/ae_render_abi" }
 ae_nav = { path = "crates/ae_nav" }
 ae_ecs = { path = "crates/ae_ecs" }
