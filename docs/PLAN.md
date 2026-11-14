@@ -302,24 +302,83 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 
 ### M1 progress
 
-Done and tested (`cargo test --release -p ae_sim --test parallel_commands`):
+Done and tested (`cargo test -p ae_sim`, `cargo test --release -p ae_sim --test parallel_commands`):
 - `ae_ecs::arena`: deterministic column allocator over a host-claimed range of the shared memory.
 - `ae_wasm`: deterministic wasmtime config, shared memory, page claims, N instances with private
   stacks and TLS (instance 0 owns the heap).
-- `ae_sim`: work ranges cut in table order, per-worker command buffers keyed `{system, range, seq}`,
-  merge by key, serial apply with direct-to-table spawns, and the `ae_spawn`/`ae_despawn`/`ae_add`/
-  `ae_remove` imports. 100k entities, 30 ticks of a system that despawns, spawns, adds and removes
-  components from parallel ranges: identical digest at 1, 2, 4 and 8 workers and equal to a native
-  reference. Merging by worker instead of key gives a different digest on every run (negative control).
+- `ae_sim::command`: work ranges cut in table order, per-worker command buffers keyed `{system, range,
+  seq}`, merge by key, serial apply with direct-to-table spawns. 100k entities, 30 ticks of a system
+  that despawns, spawns, adds and removes components from parallel ranges: identical digest at 1, 2, 4
+  and 8 workers, equal to a native reference; merging by worker instead of key gives a different digest
+  on every run (negative control).
+- `ae_abi` + `sdk/ae-sdk` + `sdk/ae-sdk-macros`: `#[derive(Component)]` (also `#[component(event)]`),
+  `#[system(write(..), read(..), emits(..), reads_events(..), after(..), serial, every(n, phase) |
+  staggered(n) | once)]` and `schedule!(..)` write self-delimiting records into the `ae.schema` custom
+  section. Stable ids are explicit or FNV-1a of the name; field records carry offset, size, kind and
+  `hashed`/`synced`/`saved` flags. The host never relies on record order (the linker's choice): it keys
+  components by id, systems by name, and takes system order from the one `schedule!` record. Each
+  system is the export `ae_sys_<name>(desc)` with one uniform signature; the host writes a `RunDesc`
+  (columns, entity ids, tick, stagger filter, event spans, write mask) into per-worker scratch.
+  Guest imports use stable ids; the host maps them, checks value sizes, and rejects events emitted
+  into streams the system did not declare.
+- `ae_sim::schedule`: registration order refined by `after`, then an edge for every write/write,
+  write/read and read/write overlap on a component or event stream, pointing along that order; layer =
+  longest path. Layers are a function of the declarations only, so which layer's commands a system sees
+  is game semantics, not timing.
+- `ae_sim::events`: events are recorded under the emitting range's key and merged by key at the layer
+  end. Each reader has a cursor: when it runs it gets every event appended since its last run, so every
+  reader sees every event exactly once, also at `every(n)` cadence. Held events and cursors are in the
+  digest. Deviation from "double-buffered per tick" above: events live until every reader has seen
+  them, so a reader scheduled before its emitter gets them on its next run, and a slow-cadence reader
+  misses nothing.
+- Cadences: `every(n, phase)`, `staggered(n)` (rows whose entity index `% n == tick % n`, filtered by
+  the SDK's `run.rows()`), `once` (tick 0, setup).
+- `ae_sim::crew`: persistent workers, each owning one instance; the caller is worker 0. A layer is one
+  batch of jobs (a range, or all ranges of a serial or small system) claimed from a shared counter;
+  workers spin briefly before sleeping, and no more are woken than there are jobs.
+- `ae_sim::digest`: order-independent xxh3-128 row sum (from `hash.rs`) over hashed fields only, field
+  by field, so padding never reaches it; per-component parts for desync reports.
+- `ae-headless`: `--game sandbox --units N --ticks N --workers 1,2,4,8,16 [--digest] [--fuel]
+  [--param-hi N]`; fails on digest mismatch. `ae-tool bench sim-dispatch`; baseline recorded.
+- Tracy zones per tick, layer, job (system name) and merge/apply; plots of commands and events.
 
-Next: scheduler with read/write sets and layers (from `ecs_sim/src/engine/schedule.rs`), schema custom
-section and SDK derive, events as columnar streams, cadences, the order-independent digest from
-`hash.rs`, `ae-headless`, a sim-dispatch bench suite, and the 10k/50k-entity exit runs.
+Exit runs, sandbox game (5 systems in 4 layers; per row a small potential-field steering step on a
+quarter of the units, integration, wear with death events, despawn and respawn; a serial census reads
+the death events into a singleton). Ryzen 9 5900X, 3000 ticks, release:
+
+| Units | Churn | Digest equal 1/2/4/8/16 w, dev = release | 1 w mean tick | 8 w mean tick (speedup) | 8 w median | 8 w system phase | 16 w mean |
+|---|---|---|---|---|---|---|---|
+| 50k | default (units live ~30 s) | yes | 1.35-1.40 ms | 0.27 ms (4.97-5.18×) | 5.6-5.9× | 5.7-5.9× | 6.1-6.3× |
+| 50k | stress (~6 s, ~240 deaths/tick) | yes | 1.54 ms | 0.40 ms (3.8×) | 3.5× | 5.5× | 3.5× |
+| 10k | default | yes | 0.28 ms | 0.08 ms (3.6×) | 4.1× | 4.0× | 4.4× |
+| 10k | stress | yes | 0.31 ms | 0.11 ms (2.8×) | 4.1× | 3.8× | 3.1× |
+
+The 50k default row spans four runs in both worker orders (the first world in a process pays first-touch
+page faults, so 1 worker run first is slightly slower). Fuel metering (`--fuel`) gives the same digest
+as unmetered runs, and so do range sizes of 100, 256 and 1024 rows. Tick 0 (spawning every unit,
+serial) takes 25-37 ms at 50k and is excluded from the mean.
+
+The churn setting was chosen after the first measurement: the sandbox originally turned every unit over
+in about 6 s and reached 3.8× at 8 workers. That rate is now the `stress` row; the default (about 30 s)
+is what an RTS with heavy fighting looks like, and is the row that meets the target.
+
+What the numbers say: the ≥5× target is met, just, at 50k with realistic churn (mean tick after setup;
+whole run including setup 4.8-5.1×), and only there. At 10k the
+whole tick is under 0.3 ms on one worker, so per-layer dispatch (four wake-ups and merges per tick)
+dominates. Under stress churn the serial structural apply (about 0.25 ms on a wear tick, ~1100
+commands) is the limit, as the M0 spike predicted; system-phase scaling stays at 5.5×.
+
+Not done: per-worker bump arenas for parallel systems (and guest heap allocation from parallel systems
+is untested: every sandbox system uses stack buffers only; wasi-libc's malloc takes a lock in
+threads builds, but that path has not been exercised across instances); enable-bit columns; structural apply batched by
+source/destination table (needs a design that keeps the key order's result); singletons and
+NOT/OPTIONAL terms in the SDK; editor hints in the schema; save→load→continue; cross-platform digest
+CI; per-system wall time inside a parallel layer.
 
 ### M2 progress
 
 Started before M1 finished, on request: the services are built and tested standalone, with columnar
-APIs, and get wired into the sim schedule once the M1 scheduler exists.
+APIs, and get wired into the sim schedule next (the M1 runtime now exists).
 
 Done and tested (`cargo test -p ae_nav -p ae_spatial`; benches `ae-tool bench nav-sim`, `bench spatial`):
 - `ae_nav::reference`: pathsim's whole simulation (`sim.rs`, `commands.rs`, `replay.rs`) lifted
@@ -378,7 +437,7 @@ Deviations from the plan, deliberate:
 - Terrain stays in `ae_nav::terrain`; the planned `ae_terrain` crate split waits for map files (M6) and
   the render heightfield (M3).
 
-Next for M2: run the service from a sim system once the M1 scheduler lands (gather/scatter by entity
+Next for M2: run the service from the sim schedule, now that the M1 runtime exists (gather/scatter by entity
 through work ranges, a `MoveGoal` event stream instead of `CommandPayload`), movement classes from game
 data instead of `water_profiles()`, cost overlays, formation facing, and the spatial grid built from
 sim columns each tick.

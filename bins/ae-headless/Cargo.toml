@@ -1,0 +1,15 @@
+[package]
+name = "ae-headless"
+description = "Sim without window: runs a game module for N ticks at several worker counts and compares digests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+tracy = ["ae_profile/tracy"]
+
+[dependencies]
+ae_sim.workspace = true
+ae_wasm.workspace = true
+ae_profile.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "ae_abi"
+description = "Sim module ABI shared by host and guest SDK: run descriptor, schema section records, import names."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

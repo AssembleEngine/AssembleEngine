@@ -8,6 +8,13 @@
 //!   same at any worker count.
 //! * [`imports`]: the host functions sim modules call to emit commands.
 
+pub mod build;
 pub mod command;
+pub mod crew;
+pub mod digest;
+pub mod events;
 pub mod imports;
+pub mod runtime;
+pub mod schedule;
+pub mod schema;
 pub mod work;

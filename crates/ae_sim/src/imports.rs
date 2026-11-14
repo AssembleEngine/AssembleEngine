@@ -7,29 +7,68 @@
 //! | `ae_despawn(entity: u64)` | despawn |
 //! | `ae_add(entity: u64, component: u64, data: u32, len: u32)` | add or overwrite a component |
 //! | `ae_remove(entity: u64, component: u64)` | remove a component |
+//! | `ae_emit(stream: u64, data: u32, len: u32)` | emit an event |
 //!
 //! Spawn record (little-endian): `u32 count, u32 reserved`, then `count`
 //! entries of `u64 component, u32 len, u32 reserved, len bytes padded to 8`.
 //! Every command is recorded under the current work range's key and takes
 //! effect when the system's commands are merged.
+//!
+//! With an [`IdMap`] (modules built with the SDK), component and stream ids
+//! are the schema's stable ids; the host maps them to ECS ids and checks
+//! every value's size. Without one, component ids are ECS ids, passed through.
 
 use crate::command::{Command, CommandBuffer};
 use ae_ecs::{ComponentId, EntityId};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use wasmtime::{Caller, Linker, SharedMemory};
 
 pub const MAX_SPAWN_COMPONENTS: usize = 32;
 pub const MAX_COMPONENT_BYTES: usize = 4096;
 
+/// Stable schema ids -> ECS component ids and value sizes.
+#[derive(Clone, Debug, Default)]
+pub struct IdMap {
+    pub components: BTreeMap<u64, (ComponentId, usize)>,
+    /// Event stream id -> event size.
+    pub streams: BTreeMap<u64, usize>,
+    /// Streams each system (by schedule position) declared in `emits`.
+    pub emits: Vec<Vec<u64>>,
+}
+
+impl IdMap {
+    fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
+        let &(component, size) = self.components.get(&id).with_context(|| format!("unknown component id {id:#x}"))?;
+        if let Some(len) = len {
+            ensure!(len == size, "component {id:#x} is {size} bytes, got {len}");
+        }
+        Ok(component)
+    }
+}
+
 /// Store data of one sim worker instance.
 pub struct WorkerCtx {
     pub memory: SharedMemory,
     pub commands: CommandBuffer,
+    pub ids: Option<Arc<IdMap>>,
 }
 
 impl WorkerCtx {
     pub fn new(memory: SharedMemory) -> Self {
-        Self { memory, commands: CommandBuffer::default() }
+        Self { memory, commands: CommandBuffer::default(), ids: None }
+    }
+
+    pub fn with_ids(memory: SharedMemory, ids: Arc<IdMap>) -> Self {
+        Self { memory, commands: CommandBuffer::default(), ids: Some(ids) }
+    }
+
+    fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
+        match &self.ids {
+            Some(map) => map.component(id, len),
+            None => Ok(ComponentId(id)),
+        }
     }
 }
 
@@ -79,7 +118,13 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
         let mut run = || -> Result<()> {
             ensure!(len as usize <= 16 + MAX_SPAWN_COMPONENTS * (16 + MAX_COMPONENT_BYTES), "spawn record too large");
             let record = read_guest(&caller.data().memory, ptr, len as usize)?;
-            let components = parse_spawn(&record)?;
+            let mut components = parse_spawn(&record)?;
+            if caller.data().ids.is_some() {
+                for (component, data) in &mut components {
+                    *component = caller.data().component(component.0, Some(data.len()))?;
+                }
+                components.sort_by_key(|(c, _)| *c);
+            }
             caller.data_mut().commands.push(Command::Spawn(components))
         };
         run().map_err(trap)
@@ -94,13 +139,31 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
             let mut run = || -> Result<()> {
                 ensure!(len as usize <= MAX_COMPONENT_BYTES, "component of {len} bytes");
                 let data = read_guest(&caller.data().memory, ptr, len as usize)?;
-                caller.data_mut().commands.push(Command::Add(EntityId(entity), ComponentId(component), data))
+                let component = caller.data().component(component, Some(data.len()))?;
+                caller.data_mut().commands.push(Command::Add(EntityId(entity), component, data))
             };
             run().map_err(trap)
         },
     )?;
     linker.func_wrap("env", "ae_remove", |mut caller: Caller<'_, WorkerCtx>, entity: u64, component: u64| -> wasmtime::Result<()> {
-        caller.data_mut().commands.push(Command::Remove(EntityId(entity), ComponentId(component))).map_err(trap)
+        let mut run = || -> Result<()> {
+            let component = caller.data().component(component, None)?;
+            caller.data_mut().commands.push(Command::Remove(EntityId(entity), component))
+        };
+        run().map_err(trap)
+    })?;
+    linker.func_wrap("env", "ae_emit", |mut caller: Caller<'_, WorkerCtx>, stream: u64, ptr: u32, len: u32| -> wasmtime::Result<()> {
+        let mut run = || -> Result<()> {
+            let size = caller.data().ids.as_ref().and_then(|m| m.streams.get(&stream).copied());
+            let size = size.with_context(|| format!("unknown event stream {stream:#x}"))?;
+            ensure!(len as usize == size, "event of stream {stream:#x} is {size} bytes, got {len}");
+            let system = caller.data().commands.current_system().context("event emitted outside a system call")?;
+            let declared = caller.data().ids.as_ref().is_some_and(|m| m.emits.get(system as usize).is_some_and(|e| e.contains(&stream)));
+            ensure!(declared, "system at position {system} emits stream {stream:#x} without declaring it in `emits`");
+            let data = read_guest(&caller.data().memory, ptr, len as usize)?;
+            caller.data_mut().commands.push_event(stream, data)
+        };
+        run().map_err(trap)
     })?;
     Ok(())
 }

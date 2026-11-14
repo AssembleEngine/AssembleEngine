@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "bins/*", "spikes/parallel_guest"]
+members = ["crates/*", "bins/*", "sdk/*", "spikes/parallel_guest"]
 # The flecs build crate keeps its own manifest (see vendor/README.md).
-exclude = ["vendor", "spikes/parallel_guest/guest", "spikes/parallel_guest/guest2", "crates/ae_sim/tests/guest"]
+exclude = ["vendor", "games/sandbox", "spikes/parallel_guest/guest", "spikes/parallel_guest/guest2", "crates/ae_sim/tests/guest"]
 
 [workspace.package]
 version = "0.0.1"
@@ -19,6 +19,9 @@ ae_wasm = { path = "crates/ae_wasm" }
 ae_sim = { path = "crates/ae_sim" }
 ae_profile = { path = "crates/ae_profile" }
 ae_bench = { path = "crates/ae_bench" }
+ae_abi = { path = "crates/ae_abi" }
+ae-sdk = { path = "sdk/ae-sdk" }
+ae-sdk-macros = { path = "sdk/ae-sdk-macros" }
 
 anyhow = "1"
 ash = "0.38.0"

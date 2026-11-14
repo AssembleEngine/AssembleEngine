@@ -1,0 +1,20 @@
+# Sandbox game: the M1 exit workload. A sim module built for
+# wasm32-wasip1-threads by `ae-headless` (or `cargo build --release --target
+# wasm32-wasip1-threads` here). Not part of the main workspace.
+[package]
+name = "ae_game_sandbox"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

@@ -12,6 +12,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-headless"
+version = "0.0.1"
+dependencies = [
+ "ae_profile",
+ "ae_sim",
+ "ae_wasm",
+ "anyhow",
+]
+
+[[package]]
+name = "ae-sdk"
+version = "0.0.1"
+dependencies = [
+ "ae-sdk-macros",
+ "ae_abi",
+]
+
+[[package]]
+name = "ae-sdk-macros"
+version = "0.0.1"
+dependencies = [
+ "ae_abi",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "ae-tool"
 version = "0.0.1"
 dependencies = [
@@ -21,6 +49,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae_abi"
+version = "0.0.1"
+
+[[package]]
 name = "ae_bench"
 version = "0.0.1"
 dependencies = [
@@ -28,6 +60,7 @@ dependencies = [
  "ae_framegraph",
  "ae_nav",
  "ae_profile",
+ "ae_sim",
  "ae_spatial",
  "anyhow",
  "ash",
@@ -78,10 +111,14 @@ version = "0.0.1"
 name = "ae_sim"
 version = "0.0.1"
 dependencies = [
+ "ae-sdk",
+ "ae_abi",
  "ae_ecs",
+ "ae_profile",
  "ae_wasm",
  "anyhow",
  "wasmtime",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -2360,6 +2397,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser 0.248.0",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "zerocopy"

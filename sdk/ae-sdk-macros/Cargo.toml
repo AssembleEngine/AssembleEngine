@@ -1,0 +1,15 @@
+[package]
+name = "ae-sdk-macros"
+description = "Derive and attribute macros of the sim module SDK: components, events, systems and the schedule, written into the schema section."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+ae_abi.workspace = true

@@ -1,0 +1,399 @@
+{
+  "suite": "sim-dispatch",
+  "commit": "aec8e83-dirty",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "sandbox_default_units50000_ticks600/setup_tick_1t",
+      "kind": "time",
+      "value": 34892898.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_1t",
+      "kind": "time",
+      "value": 1428675.0,
+      "unit": "ns",
+      "spread": 0.29435455929445115
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_mean_1t",
+      "kind": "time",
+      "value": 1386523.7045075125,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/systems_1t",
+      "kind": "time",
+      "value": 1405633.06,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/apply_1t",
+      "kind": "time",
+      "value": 26272.236666666668,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/commands",
+      "kind": "counter",
+      "value": 71305.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/events",
+      "kind": "counter",
+      "value": 10652.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/digest_low32",
+      "kind": "info",
+      "value": 104725839.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/setup_tick_2t",
+      "kind": "time",
+      "value": 23515680.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_2t",
+      "kind": "time",
+      "value": 728163.0,
+      "unit": "ns",
+      "spread": 0.3101832968717169
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_mean_2t",
+      "kind": "time",
+      "value": 704121.427378965,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/systems_2t",
+      "kind": "time",
+      "value": 709175.82,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/apply_2t",
+      "kind": "time",
+      "value": 22993.37,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/setup_tick_4t",
+      "kind": "time",
+      "value": 22800467.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_4t",
+      "kind": "time",
+      "value": 380356.0,
+      "unit": "ns",
+      "spread": 0.3476295891217701
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_mean_4t",
+      "kind": "time",
+      "value": 366339.6677796327,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/systems_4t",
+      "kind": "time",
+      "value": 371658.5466666667,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/apply_4t",
+      "kind": "time",
+      "value": 22745.758333333335,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/setup_tick_8t",
+      "kind": "time",
+      "value": 22260438.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_8t",
+      "kind": "time",
+      "value": 232304.0,
+      "unit": "ns",
+      "spread": 0.5072706453612508
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_mean_8t",
+      "kind": "time",
+      "value": 239678.04841402336,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/systems_8t",
+      "kind": "time",
+      "value": 238328.33166666667,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/apply_8t",
+      "kind": "time",
+      "value": 25262.915,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/setup_tick_16t",
+      "kind": "time",
+      "value": 23862057.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_16t",
+      "kind": "time",
+      "value": 183173.0,
+      "unit": "ns",
+      "spread": 0.7059610313747113
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/tick_mean_16t",
+      "kind": "time",
+      "value": 200398.16360601003,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/systems_16t",
+      "kind": "time",
+      "value": 193337.78,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_default_units50000_ticks600/apply_16t",
+      "kind": "time",
+      "value": 30281.37,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/setup_tick_1t",
+      "kind": "time",
+      "value": 23784766.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_1t",
+      "kind": "time",
+      "value": 1444796.0,
+      "unit": "ns",
+      "spread": 0.49294986973939575
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_mean_1t",
+      "kind": "time",
+      "value": 1536115.9131886477,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/systems_1t",
+      "kind": "time",
+      "value": 1455519.325,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/apply_1t",
+      "kind": "time",
+      "value": 94335.31333333334,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/commands",
+      "kind": "counter",
+      "value": 337441.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/events",
+      "kind": "counter",
+      "value": 143720.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/digest_low32",
+      "kind": "info",
+      "value": 1405366997.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/setup_tick_2t",
+      "kind": "time",
+      "value": 23025612.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_2t",
+      "kind": "time",
+      "value": 764974.0,
+      "unit": "ns",
+      "spread": 0.8322792670077676
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_mean_2t",
+      "kind": "time",
+      "value": 896147.7278797997,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/systems_2t",
+      "kind": "time",
+      "value": 792714.7116666667,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/apply_2t",
+      "kind": "time",
+      "value": 114267.02333333333,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/setup_tick_4t",
+      "kind": "time",
+      "value": 24211404.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_4t",
+      "kind": "time",
+      "value": 413387.0,
+      "unit": "ns",
+      "spread": 1.250353784710211
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_mean_4t",
+      "kind": "time",
+      "value": 539850.5325542571,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/systems_4t",
+      "kind": "time",
+      "value": 436573.99666666664,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/apply_4t",
+      "kind": "time",
+      "value": 116281.56333333334,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/setup_tick_8t",
+      "kind": "time",
+      "value": 22618324.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_8t",
+      "kind": "time",
+      "value": 257315.0,
+      "unit": "ns",
+      "spread": 1.9161300351708994
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_mean_8t",
+      "kind": "time",
+      "value": 415011.95158597664,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/systems_8t",
+      "kind": "time",
+      "value": 296087.01166666666,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/apply_8t",
+      "kind": "time",
+      "value": 123912.70333333334,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/setup_tick_16t",
+      "kind": "time",
+      "value": 24584681.0,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_16t",
+      "kind": "time",
+      "value": 272425.0,
+      "unit": "ns",
+      "spread": 2.1391979443883637
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/tick_mean_16t",
+      "kind": "time",
+      "value": 428610.4991652755,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/systems_16t",
+      "kind": "time",
+      "value": 272863.4666666667,
+      "unit": "ns",
+      "spread": 0.0
+    },
+    {
+      "metric": "sandbox_stress_units50000_ticks600/apply_16t",
+      "kind": "time",
+      "value": 153570.97333333333,
+      "unit": "ns",
+      "spread": 0.0
+    }
+  ]
+}

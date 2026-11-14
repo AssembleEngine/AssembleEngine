@@ -28,12 +28,17 @@ pub enum Command {
     Remove(EntityId, ComponentId),
 }
 
-/// One worker's commands for the current tick.
+/// An event emitted by a system: stream id and the event's bytes.
+pub type Emitted = (CommandKey, u64, Vec<u8>);
+
+/// One worker's commands (and emitted events) for the current layer.
 #[derive(Default)]
 pub struct CommandBuffer {
     current: Option<(u32, u32)>,
     seq: u32,
+    event_seq: u32,
     entries: Vec<(CommandKey, Command)>,
+    events: Vec<Emitted>,
 }
 
 impl CommandBuffer {
@@ -41,6 +46,20 @@ impl CommandBuffer {
     pub fn begin(&mut self, system: u32, range: u32) {
         self.current = Some((system, range));
         self.seq = 0;
+        self.event_seq = 0;
+    }
+
+    /// Record an event under the current range's key. Events have their own
+    /// sequence, so emitting one never shifts command keys.
+    pub fn push_event(&mut self, stream: u64, bytes: Vec<u8>) -> Result<()> {
+        let (system, range) = self.current.ok_or_else(|| anyhow::anyhow!("event emitted outside a system call"))?;
+        self.events.push((CommandKey { system, range, seq: self.event_seq }, stream, bytes));
+        self.event_seq += 1;
+        Ok(())
+    }
+
+    pub fn take_events(&mut self) -> Vec<Emitted> {
+        std::mem::take(&mut self.events)
     }
 
     pub fn push(&mut self, command: Command) -> Result<()> {
@@ -48,6 +67,11 @@ impl CommandBuffer {
         self.entries.push((CommandKey { system, range, seq: self.seq }, command));
         self.seq += 1;
         Ok(())
+    }
+
+    /// Schedule position of the system being recorded.
+    pub fn current_system(&self) -> Option<u32> {
+        self.current.map(|(system, _)| system)
     }
 
     pub fn len(&self) -> usize {
