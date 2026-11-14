@@ -23,11 +23,16 @@
 //! the first one's repair is still running, so it lands with the next
 //! repair. `landed` records each `TerrainChanged` the nav service reports.
 //!
+//! `reorder` (tests only) gives every grouped unit a new order at one tick,
+//! by its group: stop, a route through two guide points near the goal, or a
+//! formation on a line through the goal.
+//!
 //! Game parameter: low 24 bits = unit count (read by the host's map), bits
-//! 24..32 = the quake tick (0: none), bits 32..48 = the tick orders are
-//! given, bits 48..64 = the churn tick (0: no churn).
+//! 24..32 = the quake tick (0: none), bits 32..40 = the tick orders are
+//! given, bits 40..48 = the reorder tick (0: none), bits 48..64 = the churn
+//! tick (0: no churn).
 
-use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, TerrainChanged, TerrainEdit, terrain};
+use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, terrain};
 use ae_sdk::{Component, Entity, Run, Spawn, add, despawn, emit, schedule, spatial_radius, system};
 
 /// Neighbours within four body radii, as of tick `tick`.
@@ -74,7 +79,7 @@ const QUAKE_EVERY: u32 = 97;
 const HILL_OFFSET: u32 = 48;
 
 fn delay(run: &Run) -> u64 {
-    (run.param() >> 32) & 0xFFFF
+    (run.param() >> 32) & 0xFF
 }
 
 #[system(read(Goal), emits(MoveOrder))]
@@ -86,9 +91,44 @@ fn orders(run: &Run) {
     for i in run.rows() {
         let g = goals[i];
         if g.group != 0 {
-            emit(&MoveOrder { entity: ids[i], x: g.x, y: g.y, group: g.group });
+            emit(&MoveOrder::move_to(ids[i], g.x, g.y, g.group));
         }
         add(ids[i], &Crowd { neighbours: 0, tick: 0 });
+    }
+}
+
+// `reorder`, mirrored in `ae_services/tests/crossing.rs`.
+/// Added to a unit's group id to make its new group's.
+const REGROUP: u64 = 1 << 40;
+
+/// Guide points of `reorder`'s route (`kind` 1) or formation (2) around a
+/// goal at `(x, y)`.
+fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
+    if kind == 1 { [(x - 160.0, y + 160.0), (x - 80.0, y + 80.0)] } else { [(x - 96.0, y - 96.0), (x + 96.0, y + 96.0)] }
+}
+
+#[system(read(Goal), emits(MoveOrder, OrderPoint))]
+fn reorder(run: &Run) {
+    if run.tick() != (run.param() >> 40) & 0xFF || run.tick() == 0 {
+        return;
+    }
+    let (goals, ids) = (run.read::<Goal>(), run.entities());
+    for i in run.rows() {
+        let g = goals[i];
+        if g.group == 0 {
+            continue;
+        }
+        let group = g.group + REGROUP;
+        let kind = g.group % 3;
+        if kind == 0 {
+            emit(&MoveOrder::stop(ids[i], group));
+            continue;
+        }
+        // Every unit emits its group's points; the copies agree.
+        for (index, (x, y)) in reorder_points(kind, g.x, g.y).into_iter().enumerate() {
+            emit(&OrderPoint { group, index: index as u32, x, y, reserved: 0 });
+        }
+        emit(&if kind == 1 { MoveOrder::route(ids[i], g.x, g.y, group) } else { MoveOrder::formation(ids[i], g.x, g.y, group) });
     }
 }
 
@@ -166,4 +206,4 @@ fn churn(run: &Run) {
     }
 }
 
-schedule!(host(nav_spawn), orders, quake, host(nav), host(spatial), crowding, churn, landed);
+schedule!(host(nav_spawn), orders, quake, reorder, host(nav), host(spatial), crowding, churn, landed);

@@ -260,7 +260,7 @@ pub mod engine {
     pub const NAV_AGENT: u64 = 0xAE00_0000_0000_0002;
     /// `Goal { x, y: f32, group: u64 }`: a destination the map gave the unit.
     pub const GOAL: u64 = 0xAE00_0000_0000_0003;
-    /// Event `MoveOrder { entity, x, y, group }`.
+    /// Event `MoveOrder { entity, x, y, group, kind, reserved }`.
     pub const MOVE_ORDER: u64 = 0xAE00_0000_0000_0004;
     /// Event `TerrainEdit { x0, y0, x1, y1, set, blocked, height, cost }`: a
     /// game's edit of a cell rectangle.
@@ -268,4 +268,7 @@ pub mod engine {
     /// Event `TerrainChanged { version, x0, y0, x1, y1 }`: a terrain version
     /// became authoritative.
     pub const TERRAIN_CHANGED: u64 = 0xAE00_0000_0000_0006;
+    /// Event `OrderPoint { group, index, x, y, reserved }`: a guide point of
+    /// a route or formation order.
+    pub const ORDER_POINT: u64 = 0xAE00_0000_0000_0007;
 }

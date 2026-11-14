@@ -464,15 +464,20 @@ crossing --nav water --compare`):
   query at once, and may use its own threads. State it keeps outside components is a digest part.
 - Engine components (`ae_sdk::nav`, opt-in cargo feature `nav`, fixed ids in `ae_abi::engine`): `Body
   {x, y, vx, vy, radius}`, `NavAgent {max_speed, profile, mode}`, `Goal {x, y, group}` and the events
-  `MoveOrder {entity, x, y, group}`, `TerrainEdit {x0, y0, x1, y1, set, blocked, height, cost}` (a cell
+  `MoveOrder {entity, x, y, group, kind}` (`order::MOVE`, `STOP`, `ROUTE`, `FORMATION`; constructors
+  `MoveOrder::move_to`, `stop`, `route`, `formation`), `OrderPoint {group, index, x, y}` (a route's or
+  formation's guide points, at most 64; a point may be sent more than once, by every unit of the group
+  say, if the copies agree), `TerrainEdit {x0, y0, x1, y1, set, blocked, height, cost}` (a cell
   rectangle; `set` flags pick the fields) and `TerrainChanged {version, x0, y0, x1, y1}`. Opt-in because the derive writes a schema record for every type it
   compiles: unconditionally linked, they were registered in the sandbox too and shifted its entity ids
   (and its pinned digest).
 - `ae_services::nav`: `nav_spawn` (tick 0) spawns a map plan's units; `nav` (every tick) gathers the
   `Body`+`NavAgent` rows, sorts them by entity, reconciles the service with them (a merge against the
   units' sorted entities, skipped when nothing joined or left: removals in one batch, new units in
-  entity order), turns the `MoveOrder` events since its last run into group commands (one per `group`,
-  id = group, in order of first event, unit ids ascending), steps the service on its own pool and writes
+  entity order), turns the `MoveOrder` and `OrderPoint` events since its last run into group
+  commands (`group_orders`: one per `group`, id = group, in order of first event, kind and point of the
+  first order, unit ids ascending; mixed kinds in a group, points without orders in the same tick, gaps
+  and disagreeing copies are errors), steps the service on its own pool and writes
   positions, velocities and modes back. The `TerrainEdit` events since its last run become one terrain
   patch (event order, a later edit of a cell wins; rectangles clipped to the map; out-of-range values are
   errors and stop the tick), queued before the step: it lands with its nav repair a fixed sim-time delay
@@ -497,8 +502,11 @@ crossing --nav water --compare`):
   (2,431 cells), at tick 101, while that repair runs, ground raised to 90 m in 9×9 cells around others
   (718 cells; land in lakes, hills on land). They land as versions 2 and 3 at ticks 102 and 104, 109
   units are moved out, and `landed` records two `TerrainChanged` whose rectangles are the two patches'.
-  Its bodies and nav state equal a standalone service driven through the same removals, additions and
-  patches at the same steps, at 1 and 8 workers. Not covered yet: un-blocking cells.
+  At tick 60 `reorder` gives every unit a new order by its group: a stop (157 units), a route
+  through two guide points (793) and a formation on a line (50), each unit sending its group's points.
+  Its bodies and nav state equal a standalone service driven through the same commands, removals,
+  additions and patches at the same steps, at 1 and 8 workers. (347 units end unreachable: the terrain
+  edits cut them off from their goals; without the reorder the count is the same.) Not covered yet: un-blocking cells.
 - Host systems run whole tables, so a `Staggered` host cadence is rejected.
 
 Exit run, 10k units on the 2560² water map, 600 ticks (`--compare`: the same plan through the
@@ -534,10 +542,13 @@ which shifted its entity ids: the pinned digest was re-pinned (bodies and nav st
 standalone service). With no edit they cost nothing measurable: 10k units, 600 ticks, 8 workers, 4.70 ms
 median (nav system 4.22 ms vs 3.91 ms standalone), 1 worker 17.46 ms; digests and nav state equal. The
 unit count in the game parameter is now its low 24 bits (`NavPlugin::units`); crossing uses bits 24..32
-for the edit tick.
+for the edit tick. Order kinds changed `MoveOrder`'s layout (32 bytes) and added `OrderPoint`, so
+the digest was re-pinned again; crossing's order tick is now bits 32..40 and the reorder tick bits
+40..48. The exit run after both: 8 workers 4.62 ms median (nav system 4.16 ms vs 3.89 ms standalone),
+1 worker 17.65 ms, digests and nav state equal.
 
 Next for M2: movement classes from game data instead of `water_profiles()`, cost overlays, formation
-facing, more order kinds than `MoveTo` in `MoveOrder` (route, formation, stop), and running host systems
+facing, and running host systems
 beside a layer's module systems instead of after them.
 
 ### M0 risk spikes

@@ -13,10 +13,8 @@
 //!    is gone are removed (one batch), new entities join in ascending entity
 //!    order, taking their start position, radius, speed and profile from the
 //!    row;
-//! 3. turns the `MoveOrder` events since its last run into group commands:
-//!    orders with the same `group` form one command whose id is the group,
-//!    queued in order of each group's first event (events arrive in key
-//!    order), unit ids ascending;
+//! 3. turns the `MoveOrder` and `OrderPoint` events since its last run into
+//!    group commands ([`group_orders`]);
 //! 4. turns the `TerrainEdit` events since its last run into one terrain
 //!    patch (event order; a later edit of a cell wins), see
 //!    [`terrain_patch`];
@@ -32,13 +30,13 @@
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, GOAL, MOVE_ORDER, NAV_AGENT, TERRAIN_CHANGED, TERRAIN_EDIT};
+use ae_abi::engine::{BODY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, TERRAIN_CHANGED, TERRAIN_EDIT};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{self, Plan};
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavService, UnitSpec};
 use ae_nav::terrain::{CellEdit, TerrainPatch};
-use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, TerrainChanged, TerrainEdit, terrain};
+use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, order, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -91,7 +89,7 @@ impl HostPlugin for NavPlugin {
         spawn.cadence = Cadence::Once;
         let mut nav = HostDecl::new("nav");
         nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
-        nav.reads_events = vec![MOVE_ORDER, TERRAIN_EDIT];
+        nav.reads_events = vec![MOVE_ORDER, ORDER_POINT, TERRAIN_EDIT];
         nav.emits = vec![TERRAIN_CHANGED];
         vec![spawn, nav]
     }
@@ -103,7 +101,7 @@ impl HostPlugin for NavPlugin {
             "nav_spawn" => expect_component(schema, Goal::SCHEMA).map(drop),
             _ => {
                 ensure!(CELL_SIZE == ae_nav::service::NavConfig::default().cell_size, "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size");
-                for record in [<MoveOrder as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA] {
+                for record in [<MoveOrder as Event>::SCHEMA, <OrderPoint as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA] {
                     expect_component(schema, record)?;
                 }
                 Ok(())
@@ -244,25 +242,11 @@ impl HostSystem for Nav {
 
         // 3. Orders, grouped in order of each group's first event.
         let orders: Vec<MoveOrder> = ctx.events(MOVE_ORDER)?;
-        let mut groups: Vec<(u64, WorldPos, Vec<u32>)> = Vec::new();
-        let mut slot: BTreeMap<u64, usize> = BTreeMap::new();
-        for o in &orders {
-            ensure!(o.group != 0, "move order for {:#x} without a group", o.entity.0);
-            let g = *slot.entry(o.group).or_insert_with(|| {
-                groups.push((o.group, WorldPos::new(o.x, o.y), Vec::new()));
-                groups.len() - 1
-            });
-            // Orders for entities without a unit (gone, or not navigable) are dropped.
-            if let Some(id) = nav.local_id(o.entity.0) {
-                groups[g].2.push(id);
-            }
-        }
-        for (group, to, mut ids) in groups {
-            ensure!(self.used_groups.insert(group), "move order group {group} was used before: a group id is a nav command id and must be new");
-            ids.sort_unstable();
-            ids.dedup();
-            if !ids.is_empty() {
-                nav.queue_command_at(CommandPayload { id: group, unit_ids: ids, kind: CommandKind::MoveTo, requested_point: to, corridor_tolerance_world: 48.0 });
+        let points: Vec<OrderPoint> = ctx.events(ORDER_POINT)?;
+        for command in group_orders(&orders, &points, |e| nav.local_id(e))? {
+            ensure!(self.used_groups.insert(command.id), "move order group {} was used before: a group id is a nav command id and must be new", command.id);
+            if !command.unit_ids.is_empty() {
+                nav.queue_command_at(command);
             }
         }
 
@@ -347,4 +331,128 @@ pub fn terrain_patch(edits: &[TerrainEdit], cells_x: i32, cells_y: i32) -> Resul
     }
     patch.finish();
     Ok(patch)
+}
+
+/// Group commands from one run's orders and guide points: orders with the
+/// same `group` form one command whose id is the group, in order of each
+/// group's first order (events arrive in key order), with the kind and
+/// point of that first order and its units' ids ascending (orders for
+/// entities without a unit, gone or not navigable, are dropped). A group's
+/// guide points are its `OrderPoint`s by index. Errors (game bugs): a group
+/// 0, an unknown kind, two kinds in one group, points for a group without
+/// orders in the same run, for a move or stop, beyond `MAX_POINTS`, with a
+/// gap, or two copies of one point that differ.
+pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl Fn(u64) -> Option<u32>) -> Result<Vec<CommandPayload>> {
+    struct Group {
+        id: u64,
+        kind: u32,
+        to: WorldPos,
+        units: Vec<u32>,
+        points: Vec<Option<WorldPos>>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    let mut slot: BTreeMap<u64, usize> = BTreeMap::new();
+    for o in orders {
+        ensure!(o.group != 0, "move order for {:#x} without a group", o.entity.0);
+        ensure!(o.kind <= order::FORMATION, "move order for {:#x}: unknown kind {}", o.entity.0, o.kind);
+        let g = *slot.entry(o.group).or_insert_with(|| {
+            groups.push(Group { id: o.group, kind: o.kind, to: WorldPos::new(o.x, o.y), units: Vec::new(), points: Vec::new() });
+            groups.len() - 1
+        });
+        let group = &mut groups[g];
+        ensure!(group.kind == o.kind, "move order group {}: kinds {} and {}", o.group, group.kind, o.kind);
+        if let Some(id) = local_id(o.entity.0) {
+            group.units.push(id);
+        }
+    }
+    for p in points {
+        let Some(&g) = slot.get(&p.group) else { bail!("guide point for group {} without orders in the same tick", p.group) };
+        let group = &mut groups[g];
+        ensure!(matches!(group.kind, order::ROUTE | order::FORMATION), "guide point for group {}, whose orders are not a route or formation", p.group);
+        ensure!(p.index < order::MAX_POINTS, "guide point {} of group {}: at most {} points", p.index, p.group, order::MAX_POINTS);
+        let i = p.index as usize;
+        if group.points.len() <= i {
+            group.points.resize(i + 1, None);
+        }
+        let at = WorldPos::new(p.x, p.y);
+        match group.points[i] {
+            None => group.points[i] = Some(at),
+            Some(q) => ensure!([q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits), "guide point {i} of group {}: ({}, {}) and ({}, {})", p.group, q.x, q.y, at.x, at.y),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|mut g| {
+            let guide_points = g.points.iter().enumerate().map(|(i, p)| p.with_context(|| format!("group {}: guide point {i} missing", g.id))).collect::<Result<Vec<_>>>()?;
+            let kind = match g.kind {
+                order::MOVE => CommandKind::MoveTo,
+                order::STOP => CommandKind::Stop,
+                order::ROUTE => CommandKind::FollowCurve { guide_points },
+                _ => CommandKind::CurveFormation { guide_points },
+            };
+            g.units.sort_unstable();
+            g.units.dedup();
+            Ok(CommandPayload { id: g.id, unit_ids: g.units, kind, requested_point: g.to, corridor_tolerance_world: CORRIDOR_TOLERANCE })
+        })
+        .collect()
+}
+
+/// How far (world units) a route may stray from its guide points.
+pub const CORRIDOR_TOLERANCE: f32 = 48.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ae_sdk::Entity;
+
+    fn point(group: u64, index: u32, x: f32) -> OrderPoint {
+        OrderPoint { group, index, x, y: 0.0, reserved: 0 }
+    }
+
+    /// Entity `e` is unit `e` (entities above 100 have no unit).
+    fn run(orders: &[MoveOrder], points: &[OrderPoint]) -> Result<Vec<CommandPayload>> {
+        group_orders(orders, points, |e| (e <= 100).then_some(e as u32))
+    }
+
+    #[test]
+    fn groups_keep_first_order_kind_point_and_sorted_units() -> Result<()> {
+        let orders = [
+            MoveOrder::route(Entity(5), 10.0, 20.0, 7),
+            MoveOrder::stop(Entity(3), 2),
+            MoveOrder::route(Entity(1), 99.0, 99.0, 7),
+            MoveOrder::route(Entity(500), 0.0, 0.0, 7),
+            MoveOrder::route(Entity(5), 10.0, 20.0, 7),
+        ];
+        // Every unit sends the points; copies agree, any order.
+        let points = [point(7, 1, 2.0), point(7, 0, 1.0), point(7, 1, 2.0), point(7, 0, 1.0)];
+        let out = run(&orders, &points)?;
+        assert_eq!(out.iter().map(|c| c.id).collect::<Vec<_>>(), [7, 2]);
+        assert_eq!(out[0].unit_ids, [1, 5]);
+        assert_eq!(out[0].requested_point, WorldPos::new(10.0, 20.0));
+        let CommandKind::FollowCurve { guide_points } = &out[0].kind else { panic!("{:?}", out[0].kind) };
+        assert_eq!(guide_points, &[WorldPos::new(1.0, 0.0), WorldPos::new(2.0, 0.0)]);
+        assert!(matches!(out[1].kind, CommandKind::Stop));
+        let formation = run(&[MoveOrder::formation(Entity(1), 0.0, 0.0, 9)], &[])?;
+        assert!(matches!(&formation[0].kind, CommandKind::CurveFormation { guide_points } if guide_points.is_empty()));
+        Ok(())
+    }
+
+    #[test]
+    fn game_bugs_are_errors() {
+        let route = MoveOrder::route(Entity(1), 0.0, 0.0, 7);
+        let cases: [(&[MoveOrder], &[OrderPoint], &str); 8] = [
+            (&[MoveOrder::move_to(Entity(1), 0.0, 0.0, 0)], &[], "without a group"),
+            (&[MoveOrder { kind: 4, ..route }], &[], "unknown kind"),
+            (&[route, MoveOrder::stop(Entity(2), 7)], &[], "kinds"),
+            (&[route], &[point(8, 0, 0.0)], "without orders"),
+            (&[MoveOrder::move_to(Entity(1), 0.0, 0.0, 7)], &[point(7, 0, 0.0)], "not a route or formation"),
+            (&[route], &[point(7, order::MAX_POINTS, 0.0)], "at most"),
+            (&[route], &[point(7, 1, 0.0)], "missing"),
+            (&[route], &[point(7, 0, 0.0), point(7, 0, 1.0)], "guide point 0"),
+        ];
+        for (orders, points, error) in cases {
+            let e = run(orders, points).unwrap_err().to_string();
+            assert!(e.contains(error), "expected `{error}`, got `{e}`");
+        }
+    }
 }

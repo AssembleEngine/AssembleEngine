@@ -252,8 +252,8 @@ fn compare(o: &Opts, w: usize, sim_nav: Option<u64>) -> Result<(bool, Vec<f64>)>
     let mut ms = Vec::with_capacity(o.ticks as usize);
     // The sim's first tick is the scenario's first step only when orders
     // are given at tick 0.
-    if o.param_hi & 0xFFFF != 0 {
-        bail!("--compare needs orders at tick 0 (--param-hi 0)");
+    if o.param_hi != 0 {
+        bail!("--compare runs the map's plan as is: orders at tick 0, nothing else (--param-hi 0)");
     }
     let mut last = Instant::now();
     s.run(o.ticks, |_, _, _| {

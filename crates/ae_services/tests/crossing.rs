@@ -30,6 +30,7 @@ use ae_services::nav::{Map, NavPlugin, terrain_patch};
 use ae_services::spatial::SpatialPlugin;
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
 use anyhow::{Result, ensure};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const UNITS: u32 = 1000;
@@ -40,10 +41,17 @@ const DELAY: u64 = 20;
 const CHURN: u64 = 150;
 /// The churned world's terrain edit tick.
 const QUAKE: u64 = 100;
+/// The churned world's second orders (stop, route or formation by group).
+const REORDER: u64 = 60;
+/// `games/crossing`'s `reorder`: new group ids, and guide points by kind.
+const REGROUP: u64 = 1 << 40;
+fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
+    if kind == 1 { [(x - 160.0, y + 160.0), (x - 80.0, y + 80.0)] } else { [(x - 96.0, y - 96.0), (x + 96.0, y + 96.0)] }
+}
 
 /// Final world digest (low 64 bits), identical in dev and release builds and
 /// at every worker count. Regenerate deliberately: run with `--nocapture`.
-const EXPECTED: u64 = 0x34be_c68b_786d_3da4;
+const EXPECTED: u64 = 0xf3b9_6c8f_5582_9aec;
 
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
@@ -93,7 +101,7 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
 
     let layers: Vec<Vec<&str>> = rt.schedule.layers.iter().map(|l| l.iter().map(|&i| rt.system_name(i)).collect()).collect();
-    assert_eq!(layers, [vec!["nav_spawn"], vec!["orders", "quake"], vec!["nav"], vec!["spatial", "churn", "landed"], vec!["crowding"]]);
+    assert_eq!(layers, [vec!["nav_spawn"], vec!["orders", "quake"], vec!["reorder"], vec!["nav"], vec!["spatial", "churn", "landed"], vec!["crowding"]]);
 
     // The standalone service on the same plan.
     let mut reference = water_crossing(UNITS, MAP_CELLS, 1);
@@ -114,7 +122,7 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     // Guest spatial queries against brute force, for the rows `crowding`
     // updated on the last tick (after nav moved the bodies; nothing moves
     // them later in the tick).
-    let by_entity: std::collections::BTreeMap<u64, Body> = rt.rows(&world, "Body")?.iter().map(|(e, b)| (*e, decode(b))).collect();
+    let by_entity: BTreeMap<u64, Body> = rt.rows(&world, "Body")?.iter().map(|(e, b)| (*e, decode(b))).collect();
     let mut checked = 0;
     for (e, c) in rt.rows(&world, "Crowd")? {
         let (neighbours, tick) = (u32::from_le_bytes(c[0..4].try_into()?), u32::from_le_bytes(c[4..8].try_into()?));
@@ -143,7 +151,7 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     let one = churned(&mut rt, 1)?;
     let many = churned(&mut rt, workers)?;
     ensure!(one.digest == many.digest && one.nav == many.nav, "churned world: 1 and {workers} workers differ");
-    let reference = churned_reference(&nav, &one)?;
+    let mut reference = churned_reference(&nav, &one)?;
     ensure!(one.bodies.len() == reference.bodies.len(), "{} bodies in the sim, {} in the reference", one.bodies.len(), reference.bodies.len());
     for (i, b) in one.bodies.iter().enumerate() {
         let r = &reference.bodies;
@@ -152,6 +160,21 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     }
     let ref_hash = reference.nav.state_hash();
     ensure!(one.nav == ref_hash, "churned world: nav state hash {:016x} in the sim, {ref_hash:016x} standalone", one.nav);
+    // The reorder reached the service: route and formation commands with
+    // units, and stopped units standing idle.
+    reference.nav.publish_snapshot();
+    let mut kinds: BTreeMap<String, (usize, u32)> = BTreeMap::new();
+    for c in &reference.nav.snapshot().unwrap().commands {
+        let k = kinds.entry(c.kind.clone()).or_default();
+        k.0 += 1;
+        k.1 += c.total_units;
+    }
+    for kind in ["route", "formation"] {
+        ensure!(kinds.get(kind).is_some_and(|k| k.1 > 0), "no {kind} command with units: {kinds:?}");
+    }
+    ensure!(one.modes[mode::IDLE as usize] > 0, "no stopped unit: modes {:?}", one.modes);
+    eprintln!("churned world: commands (count, units) by kind {kinds:?}; final modes {:?}", one.modes);
+
     // One repair runs at a time: the second patch, queued while the first
     // was being repaired, lands with the next repair. One `TerrainChanged`
     // per repair, covering its patch, versions in order.
@@ -191,6 +214,8 @@ struct Churned {
     plan_entities: Vec<u64>,
     /// `(new entity, the entity it replaced)`, by new entity.
     replaced: Vec<(u64, u64)>,
+    /// Units per `NavAgent::mode` at the end.
+    modes: [usize; 6],
     /// Every body `quake` saw on its two ticks (as of the end of ticks
     /// `QUAKE - 1` and `QUAKE`), by entity.
     quaked: [Vec<(u64, Body)>; 2],
@@ -224,7 +249,7 @@ fn quake_patch(s: &Scenario, bodies: &[(u64, Body)], hill: bool) -> Result<ae_na
 }
 
 fn churned(rt: &mut Runtime, workers: usize) -> Result<Churned> {
-    let mut world = rt.world_for(UNITS as u64 | QUAKE << 24 | DELAY << 32 | CHURN << 48, workers)?;
+    let mut world = rt.world_for(UNITS as u64 | QUAKE << 24 | DELAY << 32 | REORDER << 40 | CHURN << 48, workers)?;
     let (mut plan_entities, mut replaced, mut quaked) = (Vec::new(), Vec::new(), [Vec::new(), Vec::new()]);
     for t in 0..TICKS {
         rt.tick(&mut world, workers)?;
@@ -257,6 +282,13 @@ fn churned(rt: &mut Runtime, workers: usize) -> Result<Churned> {
         plan_entities,
         replaced,
         quaked,
+        modes: {
+            let mut modes = [0; 6];
+            for (_, a) in rt.rows(&world, "NavAgent")? {
+                modes[decode::<NavAgent>(&a).mode as usize] += 1;
+            }
+            modes
+        },
         landed,
     })
 }
@@ -279,6 +311,21 @@ fn churned_reference(plugin: &NavPlugin, sim: &Churned) -> Result<Scenario> {
                 let mut unit_ids: Vec<u32> = units.iter().map(|&k| s.nav.local_id(k as u64 + 1).unwrap()).collect();
                 unit_ids.sort_unstable();
                 s.nav.queue_command_at(CommandPayload { id: *id, unit_ids, kind: CommandKind::MoveTo, requested_point: *to, corridor_tolerance_world: 48.0 });
+            }
+        }
+        if t == REORDER {
+            // A group's first order is its first unit's, so groups queue in
+            // plan order (rows are in spawn order).
+            for (id, units, to) in &plan.orders {
+                let mut unit_ids: Vec<u32> = units.iter().map(|&k| s.nav.local_id(k as u64 + 1).unwrap()).collect();
+                unit_ids.sort_unstable();
+                let guides = |k| reorder_points(k, to.x, to.y).map(|(x, y)| WorldPos::new(x, y)).to_vec();
+                let kind = match id % 3 {
+                    0 => CommandKind::Stop,
+                    1 => CommandKind::FollowCurve { guide_points: guides(1) },
+                    _ => CommandKind::CurveFormation { guide_points: guides(2) },
+                };
+                s.nav.queue_command_at(CommandPayload { id: id + REGROUP, unit_ids, kind, requested_point: *to, corridor_tolerance_world: 48.0 });
             }
         }
         if t == QUAKE || t == QUAKE + 1 {

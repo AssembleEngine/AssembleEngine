@@ -11,10 +11,11 @@
 //!   tick ([`mode`] values).
 //! * [`Goal`]: where the map or scenario wants the unit to go. The engine
 //!   never acts on it; game systems decide when to order the unit there.
-//! * [`MoveOrder`]: an event that orders one unit to a point. Orders with the
-//!   same `group` emitted in one tick are one group command (a shared flow
-//!   field and formation slots); the group id is the nav command id, so a
-//!   game never reuses one.
+//! * [`MoveOrder`]: an event that orders one unit (move, stop, route or
+//!   formation). Orders with the same `group` emitted in one tick are one
+//!   group command (a shared flow field and formation slots); the group id is
+//!   the nav command id, so a game never reuses one. [`OrderPoint`] events
+//!   give a route's or formation's guide points.
 //! * [`TerrainEdit`] / [`TerrainChanged`]: events that edit the terrain, and
 //!   that report when an edit took effect.
 
@@ -59,9 +60,64 @@ pub struct Goal {
 #[component(id = 0xAE00_0000_0000_0004, event)]
 pub struct MoveOrder {
     pub entity: Entity,
+    /// Where the group goes (a route's end, the formation's anchor when it
+    /// has no guide points); the group's first order sets it. Ignored by
+    /// [`order::STOP`].
     pub x: f32,
     pub y: f32,
     pub group: u64,
+    /// [`order`] kind; every order of a group has the same.
+    pub kind: u32,
+    pub reserved: u32,
+}
+
+impl MoveOrder {
+    /// Go to `(x, y)`; the group shares one flow field and arrival slots.
+    pub fn move_to(entity: Entity, x: f32, y: f32, group: u64) -> Self {
+        Self { entity, x, y, group, kind: order::MOVE, reserved: 0 }
+    }
+
+    /// Leave the current command and stand where the unit comes to rest.
+    pub fn stop(entity: Entity, group: u64) -> Self {
+        Self { entity, x: 0.0, y: 0.0, group, kind: order::STOP, reserved: 0 }
+    }
+
+    /// Go to `(x, y)` along the group's guide points ([`OrderPoint`]), in
+    /// order, gathering at the end.
+    pub fn route(entity: Entity, x: f32, y: f32, group: u64) -> Self {
+        Self { entity, x, y, group, kind: order::ROUTE, reserved: 0 }
+    }
+
+    /// Take a slot spread evenly along the polyline of the group's guide
+    /// points (or around `(x, y)` without any).
+    pub fn formation(entity: Entity, x: f32, y: f32, group: u64) -> Self {
+        Self { entity, x, y, group, kind: order::FORMATION, reserved: 0 }
+    }
+}
+
+/// [`MoveOrder::kind`] values.
+pub mod order {
+    pub const MOVE: u32 = 0;
+    pub const STOP: u32 = 1;
+    pub const ROUTE: u32 = 2;
+    pub const FORMATION: u32 = 3;
+    /// Most guide points a group may have.
+    pub const MAX_POINTS: u32 = 64;
+}
+
+/// Guide point `index` (0, 1, .. without gaps, at most
+/// [`order::MAX_POINTS`]) of the route or formation of `group`, emitted in
+/// the same tick as the group's orders. A point may be emitted more than
+/// once (say, by every unit of the group) if the copies agree.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_0007, event)]
+pub struct OrderPoint {
+    pub group: u64,
+    pub index: u32,
+    pub x: f32,
+    pub y: f32,
+    pub reserved: u32,
 }
 
 /// Side of a map cell in world units. Terrain is edited in cells.
@@ -133,6 +189,7 @@ const _: () = {
     assert!(<NavAgent as Component>::ID == crate::abi::engine::NAV_AGENT);
     assert!(<Goal as Component>::ID == crate::abi::engine::GOAL);
     assert!(<MoveOrder as crate::Event>::ID == crate::abi::engine::MOVE_ORDER);
+    assert!(<OrderPoint as crate::Event>::ID == crate::abi::engine::ORDER_POINT);
     assert!(<TerrainEdit as crate::Event>::ID == crate::abi::engine::TERRAIN_EDIT);
     assert!(<TerrainChanged as crate::Event>::ID == crate::abi::engine::TERRAIN_CHANGED);
 };
