@@ -41,7 +41,7 @@ pub enum BakeError {
     NoAttachment { pass: String },
     HostReadShape { pass: String },
     AttachmentExtent { pass: String },
-    MultipleWriters { resource: String, first: String, second: String },
+    DepthShape { pass: String },
     UninitializedTransient { resource: String, pass: String },
     Cycle { passes: Vec<String> },
     CrossScope { pass: String, resource: String },
@@ -84,8 +84,8 @@ impl fmt::Display for BakeError {
             BakeError::AttachmentExtent { pass } => {
                 write!(f, "graphics pass {pass:?} has attachments of different extents")
             }
-            BakeError::MultipleWriters { resource, first, second } => {
-                write!(f, "resource {resource:?} is written by both {first:?} and {second:?}")
+            BakeError::DepthShape { pass } => {
+                write!(f, "graphics pass {pass:?} has more than one depth attachment")
             }
             BakeError::UninitializedTransient { resource, pass } => write!(
                 f,
@@ -311,6 +311,9 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
                 }
             }
         }
+        if pass.intents.iter().filter(|intent| intent.role.is_depth()).count() > 1 {
+            return Err(BakeError::DepthShape { pass: name() });
+        }
         if pass.kind == PassKind::Graphics && attachments == 0 {
             return Err(BakeError::NoAttachment { pass: name() });
         }
@@ -327,50 +330,67 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
     Ok(())
 }
 
+/// Dependencies from resource versions, in pass declaration order. Each
+/// write starts a new version of its resource:
+///
+/// * a read depends on the latest write declared before it, or, when no
+///   write precedes it, on the first write (so a lone writer is always read,
+///   whatever the declaration order);
+/// * a write depends on the previous write (write after write) and on every
+///   read of the previous version (write after read).
+///
+/// With one writer per resource this is plain producer → consumer.
 fn analyze<R>(graph: &FrameGraph<R>) -> Result<Analysis, BakeError> {
-    let mut writer: Vec<Option<PassId>> = vec![None; graph.resources.len()];
+    let mut first_writer: Vec<Option<PassId>> = vec![None; graph.resources.len()];
     for (index, pass) in graph.passes.iter().enumerate() {
-        let id = PassId(index as u32);
         for intent in &pass.intents {
-            if !intent.role.usage().write {
-                continue;
+            if intent.role.usage().write {
+                first_writer[intent.resource.index()].get_or_insert(PassId(index as u32));
             }
-            let slot = &mut writer[intent.resource.index()];
-            if let Some(first) = *slot {
-                return Err(BakeError::MultipleWriters {
-                    resource: graph.resource_name(intent.resource).to_string(),
-                    first: graph.pass_name(first).to_string(),
-                    second: pass.name.clone(),
-                });
-            }
-            *slot = Some(id);
         }
     }
-    // A global resource written by a scoped pass would be a cross-scope
-    // channel; `validate` already forbids scoped writes to global resources.
+    let mut last_writer: Vec<Option<PassId>> = vec![None; graph.resources.len()];
+    // Reads of the current version (only once a write has been declared).
+    let mut readers: Vec<Vec<PassId>> = vec![Vec::new(); graph.resources.len()];
+    // Reads declared before the first write: they read the first version,
+    // so they join its readers when the first write is reached.
+    let mut early: Vec<Vec<PassId>> = vec![Vec::new(); graph.resources.len()];
     let mut deps: Vec<Vec<PassId>> = vec![Vec::new(); graph.passes.len()];
     let mut edges = Vec::new();
     for (index, pass) in graph.passes.iter().enumerate() {
         let id = PassId(index as u32);
-        for intent in &pass.intents {
-            if intent.role.usage().write {
-                continue;
-            }
-            if let Some(from) = writer[intent.resource.index()]
-                && from != id
-            {
+        let mut depend = |from: PassId, resource: ResourceId| {
+            if from != id {
                 deps[index].push(from);
-                edges.push(Edge {
-                    from,
-                    to: id,
-                    resource: intent.resource,
-                });
+                edges.push(Edge { from, to: id, resource });
+            }
+        };
+        for intent in &pass.intents {
+            let r = intent.resource.index();
+            if intent.role.usage().write {
+                if let Some(previous) = last_writer[r] {
+                    depend(previous, intent.resource);
+                }
+                for reader in std::mem::take(&mut readers[r]) {
+                    depend(reader, intent.resource);
+                }
+                if last_writer[r].is_none() {
+                    readers[r] = std::mem::take(&mut early[r]);
+                }
+                last_writer[r] = Some(id);
+            } else if let Some(writer) = last_writer[r] {
+                depend(writer, intent.resource);
+                readers[r].push(id);
+            } else if let Some(writer) = first_writer[r] {
+                depend(writer, intent.resource);
+                early[r].push(id);
             }
         }
         deps[index].sort_unstable();
         deps[index].dedup();
     }
     edges.sort_by_key(|edge| (edge.from, edge.to, edge.resource));
+    edges.dedup();
     Ok(Analysis { deps, edges })
 }
 
@@ -735,20 +755,137 @@ mod tests {
         assert!(passes.contains(&"p".to_string()) && passes.contains(&"q".to_string()), "{passes:?}");
     }
 
+    /// A second writer declared before the present draws over the first;
+    /// one declared after it writes a version nobody reads and is pruned.
     #[test]
-    fn multiple_writers_are_rejected() {
+    fn writers_are_ordered_by_declaration() {
         let mut graph = chain();
         let back = ResourceId(2);
+        let present = graph.passes.pop().unwrap();
+        graph.roots.clear();
         graph.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
-        let err = bake(&graph, BakeOptions::default()).unwrap_err();
-        assert_eq!(
-            err,
-            BakeError::MultipleWriters {
-                resource: "backbuffer".into(),
-                first: "composite".into(),
-                second: "overlay".into(),
-            }
-        );
+        graph.passes.push(present);
+        graph.roots.push(PassId(graph.passes.len() as u32 - 1));
+        let baked = bake(&graph, BakeOptions::default()).unwrap();
+        assert_eq!(names(&graph, &baked), ["scene", "blur", "composite", "overlay", "present"]);
+
+        let mut late = chain();
+        late.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
+        let baked = bake(&late, BakeOptions::default()).unwrap();
+        assert_eq!(names(&late, &baked), ["scene", "blur", "composite", "present"]);
+    }
+
+    /// A read of one version runs before the next write (write after read),
+    /// and readers see the version declared before them.
+    #[test]
+    fn versions_order_reads_between_writes() {
+        let mut graph = FrameGraph::new();
+        let a = image(&mut graph, "a", ResourceClass::Persistent);
+        let b = image(&mut graph, "b", ResourceClass::Transient);
+        let c = image(&mut graph, "c", ResourceClass::Transient);
+        let back = backbuffer(&mut graph);
+        graph.pass("write a", PassKind::Graphics, ()).color(a, LoadOp::Clear).id();
+        graph.pass("read a v1", PassKind::Compute, ()).access(a, Role::StorageImageRead(ShaderStage::Compute)).discard(b, Role::StorageImageWrite(ShaderStage::Compute)).id();
+        graph.pass("rewrite a", PassKind::Graphics, ()).color(a, LoadOp::Load).id();
+        graph.pass("read a v2", PassKind::Compute, ()).access(a, Role::StorageImageRead(ShaderStage::Compute)).discard(c, Role::StorageImageWrite(ShaderStage::Compute)).id();
+        graph.pass("compose", PassKind::Graphics, ()).sampled(b, ShaderStage::Fragment).sampled(c, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph.pass("present", PassKind::Present, ()).present(back).root().id();
+        let baked = bake(&graph, BakeOptions::default()).unwrap();
+        let order = names(&graph, &baked);
+        let at = |name: &str| order.iter().position(|n| n == name).unwrap();
+        assert!(at("write a") < at("read a v1"));
+        assert!(at("read a v1") < at("rewrite a"), "{order:?}");
+        assert!(at("rewrite a") < at("read a v2"), "{order:?}");
+        let edge = |from: u32, to: u32| baked.edges.contains(&Edge { from: PassId(from), to: PassId(to), resource: a });
+        assert!(edge(0, 1) && edge(0, 2) && edge(1, 2) && edge(2, 3));
+        assert!(!edge(0, 3), "v2's reader depends on the rewrite, not the first write");
+    }
+
+    /// A read declared before the first write reads the first version, so
+    /// it runs before a second write. (`read` draws into the backbuffer
+    /// first; `final` loads it and adds what `use` made from the second
+    /// version.)
+    #[test]
+    fn early_reads_precede_the_second_write() {
+        let mut graph = FrameGraph::new();
+        let a = image(&mut graph, "a", ResourceClass::Persistent);
+        let other = image(&mut graph, "other", ResourceClass::Transient);
+        let back = backbuffer(&mut graph);
+        graph.pass("read", PassKind::Graphics, ()).sampled(a, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph.pass("w1", PassKind::Graphics, ()).color(a, LoadOp::Clear).id();
+        graph.pass("w2", PassKind::Graphics, ()).color(a, LoadOp::Load).id();
+        graph.pass("use", PassKind::Graphics, ()).sampled(a, ShaderStage::Fragment).color(other, LoadOp::Clear).id();
+        graph.pass("final", PassKind::Graphics, ()).sampled(other, ShaderStage::Fragment).color(back, LoadOp::Load).id();
+        graph.pass("present", PassKind::Present, ()).present(back).root().id();
+        let baked = bake(&graph, BakeOptions::default()).unwrap();
+        let order = names(&graph, &baked);
+        let at = |name: &str| order.iter().position(|n| n == name).unwrap();
+        assert!(at("w1") < at("read") && at("read") < at("w2") && at("w2") < at("use"), "{order:?}");
+        assert!(baked.edges.contains(&Edge { from: PassId(0), to: PassId(2), resource: a }), "write after read");
+    }
+
+    fn depth_image(graph: &mut FrameGraph, name: &str, class: ResourceClass) -> ResourceId {
+        let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+        graph.image(name, ImageDesc::depth_2d(vk::Format::D32_SFLOAT, 64, 64, usage), class)
+    }
+
+    /// Opaque clears depth, units load and extend it, decals test against
+    /// it read-only, and post samples it: one depth buffer, two writers.
+    #[test]
+    fn depth_buffer_shared_by_passes() {
+        let mut graph = FrameGraph::new();
+        let depth = depth_image(&mut graph, "depth", ResourceClass::Transient);
+        let gbuf0 = image(&mut graph, "albedo", ResourceClass::Transient);
+        let gbuf1 = image(&mut graph, "normal", ResourceClass::Transient);
+        let back = backbuffer(&mut graph);
+        graph.pass("terrain", PassKind::Graphics, ()).color(gbuf0, LoadOp::Clear).color(gbuf1, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
+        graph.pass("units", PassKind::Graphics, ()).color(gbuf0, LoadOp::Load).color(gbuf1, LoadOp::Load).depth(depth, LoadOp::Load).id();
+        graph.pass("decals", PassKind::Graphics, ()).color(gbuf0, LoadOp::Load).depth_read(depth).id();
+        graph.pass("light", PassKind::Graphics, ()).sampled(gbuf0, ShaderStage::Fragment).sampled(gbuf1, ShaderStage::Fragment).sampled(depth, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph.pass("present", PassKind::Present, ()).present(back).root().id();
+        let baked = bake(&graph, BakeOptions::default()).unwrap();
+        assert_eq!(names(&graph, &baked), ["terrain", "units", "decals", "light", "present"]);
+        let access = |pass: usize| baked.passes[pass].accesses.iter().find(|a| a.resource == depth).copied().unwrap();
+        assert!(access(0).discard && !access(1).discard);
+        assert_eq!(access(0).usage.layout, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        assert_eq!(access(2).usage.layout, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        assert!(!access(2).usage.write);
+        assert_eq!(access(1).store, Some(vk::AttachmentStoreOp::STORE));
+        assert_eq!(graph.passes[0].color_attachments().count(), 2);
+        assert_eq!(graph.passes[0].depth_attachment().map(|i| i.resource), Some(depth));
+        // Decals' read-only depth sees the units' version, so it runs after
+        // units even though it also writes albedo after them.
+        assert!(baked.edges.contains(&Edge { from: PassId(1), to: PassId(2), resource: depth }));
+    }
+
+    #[test]
+    fn depth_roles_are_checked() {
+        let mut graph = FrameGraph::new();
+        let depth = depth_image(&mut graph, "depth", ResourceClass::Transient);
+        let other = depth_image(&mut graph, "other", ResourceClass::Transient);
+        let color = image(&mut graph, "color", ResourceClass::Transient);
+        let back = backbuffer(&mut graph);
+        graph.pass("two depths", PassKind::Graphics, ()).depth(depth, LoadOp::Clear).depth(other, LoadOp::Clear).color(back, LoadOp::Clear).id();
+        graph.pass("present", PassKind::Present, ()).present(back).root().id();
+        assert_eq!(bake(&graph, BakeOptions::default()), Err(BakeError::DepthShape { pass: "two depths".into() }));
+
+        graph.passes[0].intents.remove(1);
+        graph.passes[0].intents[0].resource = color;
+        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::WrongResourceKind { .. })), "a colour image is not a depth attachment");
+
+        graph.passes[0].intents[0] = Intent { resource: depth, role: Role::ColorAttachment(LoadOp::Clear), discard: true };
+        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::WrongResourceKind { .. })), "a depth image is not a colour attachment");
+
+        // A depth-only pass (a shadow map) is a valid graphics pass.
+        let mut shadow = FrameGraph::new();
+        let map = depth_image(&mut shadow, "shadow", ResourceClass::Transient);
+        let back = backbuffer(&mut shadow);
+        shadow.pass("shadow", PassKind::Graphics, ()).depth(map, LoadOp::Clear).id();
+        shadow.pass("lit", PassKind::Graphics, ()).sampled(map, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        shadow.pass("present", PassKind::Present, ()).present(back).root().id();
+        let baked = bake(&shadow, BakeOptions::default()).unwrap();
+        assert_eq!(names(&shadow, &baked), ["shadow", "lit", "present"]);
+        assert_eq!(baked.passes[0].accesses[0].store, Some(vk::AttachmentStoreOp::STORE));
     }
 
     #[test]
@@ -869,7 +1006,8 @@ mod tests {
     }
 
     /// The layered-pass case the baseline merged: a second graphics pass
-    /// loading the first one's attachment is a second writer.
+    /// loading the first one's attachment is a second writer, ordered after
+    /// the first and read by the present.
     #[test]
     fn attachment_continuation_is_a_second_writer() {
         let mut graph = FrameGraph::new();
@@ -877,7 +1015,9 @@ mod tests {
         graph.pass("world", PassKind::Graphics, ()).color(back, LoadOp::Clear).id();
         graph.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::MultipleWriters { .. })));
+        let baked = bake(&graph, BakeOptions::default()).unwrap();
+        assert_eq!(names(&graph, &baked), ["world", "overlay", "present"]);
+        assert!(baked.passes[0].accesses[0].discard && !baked.passes[1].accesses[0].discard);
     }
 
     #[test]

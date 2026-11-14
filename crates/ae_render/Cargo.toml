@@ -1,0 +1,15 @@
+[package]
+name = "ae_render"
+description = "Vulkan side of the renderer: device, memory, swapchain, frame graph executor, render thread, SDL3 window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+ae_framegraph.workspace = true
+anyhow.workspace = true
+ash.workspace = true
+glam = "0.30"
+gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }
+sdl3-sys = { version = "0.7.2", features = ["use-ash-v0-38"] }

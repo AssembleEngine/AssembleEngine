@@ -82,9 +82,11 @@ impl ImageDesc {
         }
     }
 
+    /// A depth image; the aspect includes stencil when the format has one.
     pub fn depth_2d(format: vk::Format, width: u32, height: u32, usage: vk::ImageUsageFlags) -> Self {
+        let stencil = if has_stencil(format) { vk::ImageAspectFlags::STENCIL } else { vk::ImageAspectFlags::empty() };
         Self {
-            aspect: vk::ImageAspectFlags::DEPTH,
+            aspect: vk::ImageAspectFlags::DEPTH | stencil,
             ..Self::color_2d(format, width, height, usage)
         }
     }
@@ -95,6 +97,14 @@ impl ImageDesc {
             height: self.height,
         }
     }
+}
+
+/// Depth formats with a stencil component.
+pub fn has_stencil(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::D16_UNORM_S8_UINT | vk::Format::D24_UNORM_S8_UINT | vk::Format::D32_SFLOAT_S8_UINT | vk::Format::S8_UINT
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -192,9 +202,15 @@ impl LoadOp {
 /// resource must have been created with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
-    /// No depth role yet: the executor and pipelines build colour
-    /// attachments only, so a depth intent would bake and render nothing.
+    /// A colour attachment of a graphics pass; a pass may have several
+    /// (multiple render targets), bound in declaration order.
     ColorAttachment(LoadOp),
+    /// The depth(-stencil) attachment, tested and written. At most one depth
+    /// role per graphics pass. `Load` keeps earlier depth (a later pass
+    /// drawing into the same depth buffer).
+    DepthAttachment(LoadOp),
+    /// The depth attachment, tested but not written (read-only layout).
+    DepthRead,
     Sampled(ShaderStage),
     StorageImageRead(ShaderStage),
     StorageImageWrite(ShaderStage),
@@ -246,6 +262,22 @@ impl Role {
                 },
                 true,
             ),
+            Role::DepthAttachment(load) => make(
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                if load == LoadOp::Load {
+                    A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE
+                } else {
+                    A::DEPTH_STENCIL_ATTACHMENT_WRITE
+                },
+                true,
+            ),
+            Role::DepthRead => make(
+                L::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                A::DEPTH_STENCIL_ATTACHMENT_READ,
+                false,
+            ),
             Role::Sampled(stage) => make(L::SHADER_READ_ONLY_OPTIMAL, stage.stages(), A::SHADER_SAMPLED_READ, false),
             Role::StorageImageRead(stage) => make(L::GENERAL, stage.stages(), A::SHADER_STORAGE_READ, false),
             Role::StorageImageWrite(stage) => make(L::GENERAL, stage.stages(), A::SHADER_STORAGE_WRITE, true),
@@ -269,10 +301,16 @@ impl Role {
     }
 
     /// Image roles take image layouts; transfer roles apply to both kinds.
+    /// Attachment roles also need the matching aspect (colour or depth).
     pub fn applies_to(self, desc: &ResourceDesc) -> bool {
+        let aspect = match desc {
+            ResourceDesc::Image(image) => image.aspect,
+            ResourceDesc::Buffer(_) => vk::ImageAspectFlags::empty(),
+        };
         match self {
-            Role::ColorAttachment(_)
-            | Role::Sampled(_)
+            Role::ColorAttachment(_) => desc.is_image() && aspect.contains(vk::ImageAspectFlags::COLOR),
+            Role::DepthAttachment(_) | Role::DepthRead => desc.is_image() && aspect.contains(vk::ImageAspectFlags::DEPTH),
+            Role::Sampled(_)
             | Role::StorageImageRead(_)
             | Role::StorageImageWrite(_)
             | Role::StorageImageReadWrite(_)
@@ -296,6 +334,7 @@ impl Role {
                 use vk::ImageUsageFlags as U;
                 let required = match self {
                     Role::ColorAttachment(_) => U::COLOR_ATTACHMENT,
+                    Role::DepthAttachment(_) | Role::DepthRead => U::DEPTH_STENCIL_ATTACHMENT,
                     Role::Sampled(_) => U::SAMPLED,
                     Role::StorageImageRead(_) | Role::StorageImageWrite(_) | Role::StorageImageReadWrite(_) => {
                         U::STORAGE
@@ -324,17 +363,26 @@ impl Role {
     }
 
     pub fn is_attachment(self) -> bool {
-        matches!(self, Role::ColorAttachment(_))
+        matches!(self, Role::ColorAttachment(_) | Role::DepthAttachment(_) | Role::DepthRead)
+    }
+
+    pub fn is_depth(self) -> bool {
+        matches!(self, Role::DepthAttachment(_) | Role::DepthRead)
     }
 
     /// The access replaces the previous contents entirely.
     pub fn implies_discard(self) -> bool {
-        matches!(self, Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare))
+        matches!(
+            self,
+            Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare) | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare)
+        )
     }
 
+    /// Attachment load op (`DepthRead` loads).
     pub fn load_op(self) -> Option<LoadOp> {
         match self {
-            Role::ColorAttachment(load) => Some(load),
+            Role::ColorAttachment(load) | Role::DepthAttachment(load) => Some(load),
+            Role::DepthRead => Some(LoadOp::Load),
             _ => None,
         }
     }
@@ -368,6 +416,11 @@ impl<R> Pass<R> {
         self.intents
             .iter()
             .filter(|intent| matches!(intent.role, Role::ColorAttachment(_)))
+    }
+
+    /// The depth attachment, if any (`bake` allows at most one).
+    pub fn depth_attachment(&self) -> Option<&Intent> {
+        self.intents.iter().find(|intent| intent.role.is_depth())
     }
 }
 
@@ -546,6 +599,14 @@ impl<R> PassBuilder<'_, R> {
 
     pub fn color(self, resource: ResourceId, load: LoadOp) -> Self {
         self.access(resource, Role::ColorAttachment(load))
+    }
+
+    pub fn depth(self, resource: ResourceId, load: LoadOp) -> Self {
+        self.access(resource, Role::DepthAttachment(load))
+    }
+
+    pub fn depth_read(self, resource: ResourceId) -> Self {
+        self.access(resource, Role::DepthRead)
     }
 
     pub fn sampled(self, resource: ResourceId, stage: ShaderStage) -> Self {

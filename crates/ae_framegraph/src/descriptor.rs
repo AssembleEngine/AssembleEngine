@@ -72,15 +72,17 @@ fn role(kind: u32, arg: u32, index: usize) -> Result<Role, DescriptorError> {
     let kind = K::from_wire(kind).ok_or(DescriptorError::BadEnum { what: "intent role", index, value: kind })?;
     let s = |arg| stage(arg, "intent shader stage", index);
     let no_arg = |role: Role| if arg == 0 { Ok(role) } else { Err(DescriptorError::BadEnum { what: "intent argument", index, value: arg }) };
+    let load = || {
+        Ok(match abi::LoadOp::from_wire(arg).ok_or(DescriptorError::BadEnum { what: "intent load op", index, value: arg })? {
+            abi::LoadOp::Clear => LoadOp::Clear,
+            abi::LoadOp::Load => LoadOp::Load,
+            abi::LoadOp::DontCare => LoadOp::DontCare,
+        })
+    };
     match kind {
-        K::ColorAttachment => {
-            let load = match abi::LoadOp::from_wire(arg).ok_or(DescriptorError::BadEnum { what: "intent load op", index, value: arg })? {
-                abi::LoadOp::Clear => LoadOp::Clear,
-                abi::LoadOp::Load => LoadOp::Load,
-                abi::LoadOp::DontCare => LoadOp::DontCare,
-            };
-            Ok(Role::ColorAttachment(load))
-        }
+        K::ColorAttachment => Ok(Role::ColorAttachment(load()?)),
+        K::DepthAttachment => Ok(Role::DepthAttachment(load()?)),
+        K::DepthRead => no_arg(Role::DepthRead),
         K::Sampled => Ok(Role::Sampled(s(arg)?)),
         K::StorageImageRead => Ok(Role::StorageImageRead(s(arg)?)),
         K::StorageImageWrite => Ok(Role::StorageImageWrite(s(arg)?)),
@@ -261,12 +263,15 @@ fn stage_to_wire(stage: ShaderStage) -> abi::ShaderStage {
 
 fn role_to_wire(role: Role) -> abi::Role {
     use abi::Role as W;
+    let load = |load| match load {
+        LoadOp::Clear => abi::LoadOp::Clear,
+        LoadOp::Load => abi::LoadOp::Load,
+        LoadOp::DontCare => abi::LoadOp::DontCare,
+    };
     match role {
-        Role::ColorAttachment(load) => W::ColorAttachment(match load {
-            LoadOp::Clear => abi::LoadOp::Clear,
-            LoadOp::Load => abi::LoadOp::Load,
-            LoadOp::DontCare => abi::LoadOp::DontCare,
-        }),
+        Role::ColorAttachment(l) => W::ColorAttachment(load(l)),
+        Role::DepthAttachment(l) => W::DepthAttachment(load(l)),
+        Role::DepthRead => W::DepthRead,
         Role::Sampled(s) => W::Sampled(stage_to_wire(s)),
         Role::StorageImageRead(s) => W::StorageImageRead(stage_to_wire(s)),
         Role::StorageImageWrite(s) => W::StorageImageWrite(stage_to_wire(s)),

@@ -267,3 +267,42 @@ fn corrupted_declarations_never_panic() {
     eprintln!("20000 corrupted declarations: {decoded} decoded, {baked} also baked");
     assert!(decoded > 0, "mutations were too destructive to exercise bake");
 }
+
+/// Depth roles and a second writer survive the wire: a module's terrain +
+/// units + decals graph decodes to the native one.
+#[test]
+fn depth_and_continued_attachments_round_trip() {
+    use abi::{Class, GraphBuilder, ImageSpec};
+    const D32: u32 = 126; // VK_FORMAT_D32_SFLOAT
+    const RGBA8: u32 = 37;
+    const IMG_SAMPLED: u32 = 0x4;
+    const IMG_COLOR: u32 = 0x10;
+    const IMG_DEPTH: u32 = 0x20;
+    let mut g = GraphBuilder::new();
+    let depth = g.image("depth", ImageSpec::depth_2d(D32, 320, 200, IMG_DEPTH | IMG_SAMPLED), Class::Transient);
+    let color = g.image("color", ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR | IMG_SAMPLED), Class::Transient);
+    let back = g.image("backbuffer", ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR), Class::Backbuffer);
+    g.pass("terrain", abi::PassKind::Graphics, 1).color(color, abi::LoadOp::Clear).depth(depth, abi::LoadOp::Clear).id();
+    g.pass("units", abi::PassKind::Graphics, 2).color(color, abi::LoadOp::Load).depth(depth, abi::LoadOp::Load).id();
+    g.pass("decals", abi::PassKind::Graphics, 3).color(color, abi::LoadOp::Load).depth_read(depth).id();
+    g.pass("post", abi::PassKind::Graphics, 4).sampled(color, abi::ShaderStage::Fragment).sampled(depth, abi::ShaderStage::Fragment).color(back, abi::LoadOp::DontCare).id();
+    g.pass("present", abi::PassKind::Present, 5).present(back).root().id();
+    let decoded = decode(&g.finish()).expect("decode");
+
+    let mut native = FrameGraph::new();
+    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+    let ndepth = native.image("depth", ImageDesc::depth_2d(vk::Format::D32_SFLOAT, 320, 200, usage), ResourceClass::Transient);
+    let ncolor = native.image("color", ImageDesc::color_2d(SCENE_FORMAT, 320, 200, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+    let nback = native.image("backbuffer", ImageDesc::color_2d(SCENE_FORMAT, 320, 200, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer);
+    native.pass("terrain", PassKind::Graphics, ()).color(ncolor, LoadOp::Clear).depth(ndepth, LoadOp::Clear).id();
+    native.pass("units", PassKind::Graphics, ()).color(ncolor, LoadOp::Load).depth(ndepth, LoadOp::Load).id();
+    native.pass("decals", PassKind::Graphics, ()).color(ncolor, LoadOp::Load).depth_read(ndepth).id();
+    native.pass("post", PassKind::Graphics, ()).sampled(ncolor, ShaderStage::Fragment).sampled(ndepth, ShaderStage::Fragment).color(nback, LoadOp::DontCare).id();
+    native.pass("present", PassKind::Present, ()).present(nback).root().id();
+
+    assert_eq!(decoded.signature(), native.signature());
+    let baked = bake(&decoded, BakeOptions::default()).unwrap();
+    assert_eq!(baked, bake(&native, BakeOptions::default()).unwrap());
+    assert_eq!(baked.passes.len(), 5);
+    assert_eq!(decode(&encode(&native, |_| 0)).unwrap().signature(), native.signature());
+}

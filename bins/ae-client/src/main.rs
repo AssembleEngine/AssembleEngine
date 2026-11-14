@@ -1,0 +1,398 @@
+//! Windowed client.
+//!
+//! ```text
+//! ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X]
+//!           [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo]
+//!           [--frames-in-flight N] [--capture FILE.ppm]
+//! ```
+//!
+//! Shows the terrain of the M2 crossing maps (`water`, the default, or
+//! `land`; `--map-cells` as in `ae-headless`, default 2560 = pathsim's full
+//! map), map-rendering's generated test map (`generated`), or the frame
+//! graph demo (`demo`). The nav heightfield is taken as is: decimetres to
+//! world units (1 unit = 1 m) times `--relief` (default 1); ground under
+//! water is drawn with the water's depth as a tint.
+//!
+//! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
+//! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` more or less
+//! detail, T wireframe, L colour by LOD depth, G fog, C freeze the LOD,
+//! P print the camera, Esc quits.
+//!
+//! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
+//! subdivision settles) and writes a binary PPM.
+//!
+//! `--seconds` closes the window after S seconds; `--exercise` resizes,
+//! minimizes and restores on a schedule. Validation follows
+//! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
+//! the layer reported anything.
+
+use ae_nav::terrain::{NO_WATER, Terrain};
+use ae_render::demo::DemoApp;
+use ae_render::swapchain::PresentPolicy;
+use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, lod_view};
+use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
+use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
+use ae_render::thread::{GpuRenderConfig, GpuRenderThread};
+use ae_render::window::{SdlWindow, keys};
+use anyhow::{Context, Result, bail};
+use glam::Vec2;
+use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapKind {
+    Water,
+    Land,
+    Generated,
+    Demo,
+}
+
+struct Options {
+    map: MapKind,
+    map_cells: i32,
+    relief: f32,
+    camera: Option<[f32; 5]>,
+    seconds: Option<f32>,
+    exercise: bool,
+    present: PresentPolicy,
+    frames_in_flight: usize,
+    /// Render offscreen without a window and write this PPM file.
+    capture: Option<String>,
+}
+
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--capture FILE.ppm]";
+
+fn parse() -> Result<Options> {
+    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None };
+    let mut args = std::env::args().skip(1);
+    let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--map" => {
+                o.map = match value("--map", &mut args)?.as_str() {
+                    "water" => MapKind::Water,
+                    "land" => MapKind::Land,
+                    "generated" => MapKind::Generated,
+                    "demo" => MapKind::Demo,
+                    other => bail!("--map {other:?}: expected water, land, generated or demo"),
+                }
+            }
+            "--map-cells" => o.map_cells = value("--map-cells", &mut args)?.parse().context("--map-cells")?,
+            "--relief" => o.relief = value("--relief", &mut args)?.parse().context("--relief")?,
+            "--camera" => {
+                let text = value("--camera", &mut args)?;
+                let parts: Vec<f32> = text.split(',').map(str::parse).collect::<Result<_, _>>().context("--camera X,Z,DIST,YAW,PITCH")?;
+                let parts: [f32; 5] = parts.try_into().map_err(|_| anyhow::anyhow!("--camera takes five numbers"))?;
+                o.camera = Some(parts);
+            }
+            "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
+            "--exercise" => o.exercise = true,
+            "--capture" => o.capture = Some(value("--capture", &mut args)?),
+            "--fifo" => o.present = PresentPolicy::Fifo,
+            "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => bail!("unknown argument {other:?}\n{USAGE}"),
+        }
+    }
+    Ok(o)
+}
+
+/// Corner heightmap of the nav terrain's ground (bed under water), with
+/// world heights in metres × `relief`; and the water surface height.
+fn nav_heightmap(terrain: &Terrain, relief: f32) -> (Heightmap, f32, f32, Option<f32>) {
+    let (cx, cy) = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let ground = |x: usize, y: usize| {
+        let i = y * cx + x;
+        let depth = terrain.water_depth.get(i).copied().unwrap_or(0);
+        (terrain.height[i] as f32 - depth as f32) * 0.1 * relief
+    };
+    // A corner is the mean of the (up to four) cells around it.
+    let (width, height) = (cx + 1, cy + 1);
+    let mut data = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let (mut sum, mut n) = (0.0, 0.0);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                if x >= dx && y >= dy && x - dx < cx && y - dy < cy {
+                    sum += ground(x - dx, y - dy);
+                    n += 1.0;
+                }
+            }
+            data.push(sum / n);
+        }
+    }
+    let (lo, hi) = data.iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    let scale = (hi - lo).max(1e-3);
+    for v in &mut data {
+        *v = (*v - lo) / scale;
+    }
+    let water = (terrain.water_level != NO_WATER).then(|| terrain.water_level as f32 * 0.1 * relief);
+    (Heightmap { width, height, data }, scale, lo, water)
+}
+
+fn terrain_source(o: &Options) -> Result<TerrainSource> {
+    let started = Instant::now();
+    let mut materials = None;
+    let (heightmap, scale, offset, water, cell_size) = match o.map {
+        MapKind::Water | MapKind::Land => {
+            let terrain = if o.map == MapKind::Water {
+                ae_nav::scenario::water_crossing_terrain(o.map_cells)
+            } else {
+                ae_nav::scenario::land_crossing_terrain(o.map_cells)
+            };
+            let cell = terrain.geom.cell_size;
+            materials = Some(terrain.material.clone());
+            let (heightmap, scale, offset, water) = nav_heightmap(&terrain, o.relief);
+            (heightmap, scale, offset, water, cell)
+        }
+        MapKind::Generated => {
+            let side = (o.map_cells.max(2) as usize) | 1;
+            (generate(side, side, 1), 3000.0 * o.relief, 0.0, None, 8.0)
+        }
+        MapKind::Demo => unreachable!(),
+    };
+    let generated = started.elapsed();
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell_size, scale, offset, water);
+    eprintln!(
+        "terrain {}x{} cells ({:.2} s), heights {:.0}..{:.0} m{}, error pyramid {:.2} s",
+        info.cells.0,
+        info.cells.1,
+        generated.as_secs_f32(),
+        offset,
+        offset + scale,
+        water.map(|w| format!(", water at {w:.0} m")).unwrap_or_default(),
+        (started.elapsed() - generated).as_secs_f32()
+    );
+    Ok(TerrainSource { heightmap, pyramid, info, materials })
+}
+
+/// Resize, minimize, restore on a fixed schedule (seconds after start).
+fn exercise(window: &mut SdlWindow, started: Instant, step: &mut usize) {
+    const STEPS: [f32; 6] = [0.8, 1.6, 2.4, 3.0, 3.6, 4.2];
+    let at = STEPS[*step % STEPS.len()];
+    let cycle = (*step / STEPS.len()) as f32 * 4.8;
+    if started.elapsed().as_secs_f32() < cycle + at {
+        return;
+    }
+    match *step % STEPS.len() {
+        0 => window.set_size(800, 600),
+        1 => window.set_size(1600, 900),
+        2 => window.minimize(),
+        3 => window.restore(),
+        4 => window.set_size(640, 360),
+        _ => window.set_size(1280, 720),
+    }
+    *step += 1;
+}
+
+/// Camera and switches from this frame's input.
+fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mut TerrainView, source: &TerrainSource, dt: f32) {
+    let held = window.held();
+    let camera = &mut view.camera;
+    let speed = camera.distance * if held.fast { 2.5 } else { 0.9 } * dt;
+    let (forward, right) = camera.ground_axes();
+    let mut pan = Vec2::ZERO;
+    pan += forward * (held.forward as i32 - held.back as i32) as f32;
+    pan += right * (held.right as i32 - held.left as i32) as f32;
+    let (w, h) = source.info.extent();
+    camera.target = (camera.target + pan * speed).clamp(Vec2::ZERO, Vec2::new(w, h));
+    camera.yaw += (held.orbit_right as i32 - held.orbit_left as i32) as f32 * 1.5 * dt - events.drag.0 * 0.005;
+    camera.pitch = (camera.pitch + (held.tilt_up as i32 - held.tilt_down as i32) as f32 * 1.0 * dt + events.drag.1 * 0.004).clamp(0.08, 1.5);
+    camera.distance = (camera.distance * 0.88f32.powf(events.wheel)).clamp(20.0, w.max(h) * 2.0);
+    if events.pressed & keys::PLUS != 0 {
+        view.tau = (view.tau / 1.5).max(0.25);
+    }
+    if events.pressed & keys::MINUS != 0 {
+        view.tau = (view.tau * 1.5).min(64.0);
+    }
+    if events.pressed & keys::T != 0 {
+        view.wireframe = if view.wireframe == Wireframe::Off { Wireframe::Triangles } else { Wireframe::Off };
+    }
+    if events.pressed & keys::L != 0 {
+        view.lod_colors = !view.lod_colors;
+    }
+    if events.pressed & keys::G != 0 {
+        view.fog = !view.fog;
+    }
+    if events.pressed & keys::C != 0 {
+        view.frozen = match view.frozen {
+            Some(_) => None,
+            None => {
+                let (pw, ph) = window.pixel_size();
+                Some(lod_view(source, &view.camera, pw.max(1), ph.max(1)))
+            }
+        };
+    }
+    if events.pressed & keys::P != 0 {
+        let c = &view.camera;
+        println!("--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)", c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau);
+    }
+}
+
+/// Apply `--camera`.
+fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>) {
+    if let Some([x, z, distance, yaw, pitch]) = camera {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(x, z);
+        view.camera.distance = distance;
+        view.camera.yaw = yaw;
+        view.camera.pitch = pitch;
+    }
+}
+
+fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCode> {
+    use ae_render::device::{GpuDevice, GpuInstance};
+    use ae_render::executor::ExecutorConfig;
+    use ae_render::thread::{RenderApp, TargetInfo, run_headless};
+    let instance = Arc::new(GpuInstance::new(&[], None)?);
+    let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback);
+    place_camera(&app, o.camera);
+    let extent = ash::vk::Extent2D { width: 1280, height: 720 };
+    app.create_offscreen(&gpu, extent)?;
+    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
+    let executor = run_headless(&gpu, &mut app, target, 60, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, ..ExecutorConfig::default() })?;
+    let pixels = app.readback().context("no readback")?;
+    let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+    ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+    std::fs::write(path, ppm).with_context(|| format!("writing {path}"))?;
+    let stats = *app.stats().lock().unwrap();
+    RenderApp::destroy(&mut app, &gpu);
+    drop(gpu);
+    let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
+    let gpu_ms: Vec<String> = executor.pass_gpu_ms.iter().map(|ms| format!("{ms:.3}")).collect();
+    println!(
+        "wrote {path}: {} leaves, {} drawn; GPU ms per pass (lod, draw, copy, host read): {}; {}",
+        stats.leaves,
+        stats.drawn,
+        gpu_ms.join(", "),
+        validation_text(instance.validation, errors, warnings)
+    );
+    Ok(if errors + warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+fn run(o: Options) -> Result<ExitCode> {
+    let source = match o.map {
+        MapKind::Demo => None,
+        _ => Some(Arc::new(terrain_source(&o)?)),
+    };
+    if let Some(path) = &o.capture {
+        return capture(source.context("--capture needs a terrain map")?, &o, path);
+    }
+    let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
+    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false };
+    let mut terrain: Option<(Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>)> = None;
+    let mut thread = match &source {
+        None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
+        Some(source) => {
+            let app = TerrainApp::new(source.clone(), TerrainOutput::Present);
+            place_camera(&app, o.camera);
+            terrain = Some((app.view(), app.stats()));
+            GpuRenderThread::start(&window, app, config)?
+        }
+    };
+    let label = match o.map {
+        MapKind::Water => "water crossing",
+        MapKind::Land => "land crossing",
+        MapKind::Generated => "generated",
+        MapKind::Demo => "demo",
+    };
+    let started = Instant::now();
+    let mut last = Instant::now();
+    let mut sample = (Instant::now(), 0u64);
+    let mut step = 0;
+    loop {
+        let events = window.pump();
+        thread.handle_events(&events);
+        if events.quit || !thread.running() || o.seconds.is_some_and(|s| started.elapsed().as_secs_f32() >= s) {
+            break;
+        }
+        let dt = last.elapsed().as_secs_f32().min(0.1);
+        last = Instant::now();
+        if let (Some((view, _)), Some(source)) = (&terrain, &source) {
+            let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
+            steer(&window, &events, &mut view, source, dt);
+        }
+        if o.exercise {
+            exercise(&mut window, started, &mut step);
+        }
+        let elapsed = sample.0.elapsed().as_secs_f64();
+        if elapsed >= 0.5 {
+            let frames = thread.stats().frames;
+            let fps = frames.saturating_sub(sample.1) as f64 / elapsed;
+            let detail = match &terrain {
+                Some((view, stats)) => {
+                    let s = *stats.lock().unwrap_or_else(|p| p.into_inner());
+                    let tau = view.lock().unwrap_or_else(|p| p.into_inner()).tau;
+                    format!(" | {} leaves, {} drawn, {tau:.2} px", s.leaves, s.drawn)
+                }
+                None => String::new(),
+            };
+            window.set_title(&format!("AssemblyEngine | {label} | {fps:.0} fps{detail}"));
+            sample = (Instant::now(), frames);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let stats = thread.stop();
+    println!(
+        "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} acquire timeouts, {}",
+        stats.frames,
+        started.elapsed().as_secs_f32(),
+        stats.device,
+        stats.present_mode,
+        stats.swapchain_recreates,
+        stats.acquire_timeouts,
+        validation_text(stats.validation, stats.validation_errors, stats.validation_warnings)
+    );
+    if let Some(error) = stats.error {
+        bail!("render thread: {error}");
+    }
+    Ok(if stats.validation_errors + stats.validation_warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+fn validation_text(on: bool, errors: u64, warnings: u64) -> String {
+    if on { format!("validation: {errors} errors, {warnings} warnings") } else { "validation off (AE_VK_VALIDATION=1 turns it on)".into() }
+}
+
+fn main() -> ExitCode {
+    match parse().and_then(run) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Corners average the ground (surface minus water depth) of the cells
+    /// around them; heights are decimetres → metres; the water level too.
+    #[test]
+    fn nav_terrain_becomes_a_corner_heightmap() {
+        let terrain = ae_nav::scenario::water_crossing_terrain(256);
+        let (cx, cy) = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+        let (hm, scale, offset, water) = nav_heightmap(&terrain, 2.0);
+        assert_eq!((hm.width, hm.height), (cx + 1, cy + 1));
+        let ground = |x: usize, y: usize| {
+            let i = y * cx + x;
+            (terrain.height[i] - terrain.water_depth.get(i).copied().unwrap_or(0)) as f32 * 0.2
+        };
+        let world = |x: usize, y: usize| hm.data[y * hm.width + x] * scale + offset;
+        for (x, y) in [(1, 1), (100, 57), (cx - 1, cy - 1)] {
+            let want = (ground(x - 1, y - 1) + ground(x, y - 1) + ground(x - 1, y) + ground(x, y)) / 4.0;
+            assert!((world(x, y) - want).abs() < 1e-3 * scale.max(1.0), "corner ({x}, {y})");
+        }
+        assert!((world(0, 0) - ground(0, 0)).abs() < 1e-3 * scale.max(1.0), "a map corner has one cell");
+        assert_eq!(water, Some(terrain.water_level as f32 * 0.2));
+        assert!(terrain.water_depth.iter().any(|&d| d > 0), "the map has water to subtract");
+    }
+}

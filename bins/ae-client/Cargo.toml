@@ -1,0 +1,13 @@
+[package]
+name = "ae-client"
+description = "Windowed client: SDL3 window, Vulkan render thread driving the frame graph."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_nav.workspace = true
+ae_render = { path = "../../crates/ae_render" }
+glam = "0.30"
+ash.workspace = true
+anyhow.workspace = true

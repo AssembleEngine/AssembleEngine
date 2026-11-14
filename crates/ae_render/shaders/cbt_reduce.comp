@@ -1,0 +1,36 @@
+#version 460
+// Sum-reduction of the CBT, level by level.
+// mode 0: depth T nodes = popcount of their bitfield word
+// mode 1: one level `level` (>= 8) from the level below
+// mode 2: single workgroup finishing levels min(T,8)-1 .. 0 in shared memory
+#include "terrain_common.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { uint mode; uint writeDraw; uint level; uint pad; } pc;
+
+shared uint s[512];
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    uint t = u.cfg.y;
+    if (pc.mode == 0u) {
+        if (j < (1u << t)) tree[(1u << t) + j] = bitCount(bits[j]);
+    } else if (pc.mode == 1u) {
+        uint id = (1u << pc.level) + j;
+        if (j < (1u << pc.level)) tree[id] = tree[2u * id] + tree[2u * id + 1u];
+    } else {
+        uint top = min(t, 8u);
+        uint n = 1u << top;
+        if (j < n) s[n + j] = tree[n + j];
+        barrier();
+        for (int d = int(top) - 1; d >= 0; --d) {
+            uint m = 1u << uint(d);
+            if (j < m) {
+                uint id = m + j;
+                s[id] = s[2u * id] + s[2u * id + 1u];
+                tree[id] = s[id];
+            }
+            barrier();
+        }
+    }
+}

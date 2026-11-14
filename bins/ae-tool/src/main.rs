@@ -4,6 +4,7 @@
 //! ae-tool bench list
 //! ae-tool bench <suite>|all [--small] [--quick] [--threads N] [--label NAME] [--out DIR] [--no-save]
 //! ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
+//! ae-tool navbench [--scaling ...]   # runs ae_nav's navbench binary
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -19,13 +20,28 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   ae-tool bench list
   ae-tool bench <suite>|all [--small] [--quick] [--threads N] [--label NAME] [--out DIR] [--no-save]
-  ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]";
+  ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
+  ae-tool navbench [navbench arguments, e.g. --scaling]";
+
+/// Runs `ae_nav`'s `navbench` binary from the same target directory
+/// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
+/// through.
+fn navbench(args: &[String]) -> Result<ExitCode> {
+    let exe = std::env::current_exe().context("locating ae-tool")?;
+    let path = exe.with_file_name(format!("navbench{}", std::env::consts::EXE_SUFFIX));
+    if !path.exists() {
+        bail!("{} not found; build it with `cargo build --release -p ae_nav --bin navbench`", path.display());
+    }
+    let status = std::process::Command::new(&path).args(args).status().with_context(|| format!("running {}", path.display()))?;
+    Ok(ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8))
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("bench") => bench(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("bench-diff") => bench_diff(&args[1..]),
+        Some("navbench") => navbench(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

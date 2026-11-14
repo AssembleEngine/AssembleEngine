@@ -241,3 +241,15 @@ fn generated_water_map_crossing() {
     assert_eq!(hash, GENERATED_CROSSING_HASH, "generated crossing: got {hash:#018x}");
     assert_eq!(generated_crossing(4).0, hash, "thread count changed the result");
 }
+
+/// The viewer's terrain is the service's terrain.
+#[test]
+fn terrain_alone_equals_the_plans_terrain() {
+    let (nav, _) = ae_nav::scenario::water_crossing_plan(200, 384, 1);
+    let alone = ae_nav::scenario::water_crossing_terrain(384);
+    assert_eq!(alone.height, nav.terrain.height);
+    assert_eq!(alone.water_depth, nav.terrain.water_depth);
+    assert_eq!(alone.water_level, nav.terrain.water_level);
+    let (land, _) = ae_nav::scenario::land_crossing_plan(200, 384, 1);
+    assert_eq!(ae_nav::scenario::land_crossing_terrain(384).height, land.terrain.height);
+}

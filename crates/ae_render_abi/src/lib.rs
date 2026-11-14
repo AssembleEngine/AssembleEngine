@@ -71,8 +71,9 @@ wire_enum!(ShaderStage { Vertex = 0, Fragment = 1, Graphics = 2, Compute = 3 });
 wire_enum!(LoadOp { Clear = 0, Load = 1, DontCare = 2 });
 wire_enum!(
     /// What a pass does with a resource. Roles marked `(stage)` take a
-    /// [`ShaderStage`] argument, `ColorAttachment` takes a [`LoadOp`]; the
-    /// rest take 0.
+    /// [`ShaderStage`] argument, `ColorAttachment` and `DepthAttachment` take
+    /// a [`LoadOp`]; the rest take 0. Codes are only ever appended, so a
+    /// descriptor from an older module still decodes.
     RoleKind {
         ColorAttachment = 0,
         Sampled = 1,
@@ -89,6 +90,8 @@ wire_enum!(
         TransferDst = 12,
         HostRead = 13,
         Present = 14,
+        DepthAttachment = 15,
+        DepthRead = 16,
     }
 );
 
@@ -117,6 +120,10 @@ pub enum Role {
     TransferDst,
     HostRead,
     Present,
+    /// Depth(-stencil) attachment, tested and written.
+    DepthAttachment(LoadOp),
+    /// Depth attachment, tested only.
+    DepthRead,
 }
 
 impl Role {
@@ -138,12 +145,14 @@ impl Role {
             TransferDst => (RoleKind::TransferDst as u32, 0),
             HostRead => (RoleKind::HostRead as u32, 0),
             Present => (RoleKind::Present as u32, 0),
+            DepthAttachment(load) => (RoleKind::DepthAttachment as u32, load as u32),
+            DepthRead => (RoleKind::DepthRead as u32, 0),
         }
     }
 
     /// The access replaces previous contents (mirrors the host rule).
     pub fn implies_discard(self) -> bool {
-        matches!(self, Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare))
+        matches!(self, Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare) | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare))
     }
 }
 
@@ -165,6 +174,12 @@ impl ImageSpec {
     /// Single mip, single layer, single sample, colour aspect.
     pub fn color_2d(format: u32, width: u32, height: u32, usage: u32) -> Self {
         Self { format, width, height, usage, mip_levels: 1, layers: 1, samples: 1, aspect: 1 }
+    }
+
+    /// Single mip, single layer, single sample, depth aspect (a combined
+    /// depth-stencil format needs `aspect: 2 | 4`).
+    pub fn depth_2d(format: u32, width: u32, height: u32, usage: u32) -> Self {
+        Self { aspect: 2, ..Self::color_2d(format, width, height, usage) }
     }
 }
 
@@ -284,6 +299,14 @@ impl PassWriter<'_> {
 
     pub fn color(self, resource: ResourceRef, load: LoadOp) -> Self {
         self.access(resource, Role::ColorAttachment(load))
+    }
+
+    pub fn depth(self, resource: ResourceRef, load: LoadOp) -> Self {
+        self.access(resource, Role::DepthAttachment(load))
+    }
+
+    pub fn depth_read(self, resource: ResourceRef) -> Self {
+        self.access(resource, Role::DepthRead)
     }
 
     pub fn sampled(self, resource: ResourceRef, stage: ShaderStage) -> Self {

@@ -158,6 +158,19 @@ pub fn land_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profi
     (nav, Plan { units: specs, orders: vec![(1, all, goal)] })
 }
 
+/// The terrain of [`land_crossing_plan`] alone (no hierarchy, no units),
+/// for viewers. Equal to the service's terrain for any unit count.
+pub fn land_crossing_terrain(map_cells: i32) -> Terrain {
+    Terrain::generate(&config(0, map_cells, 1).terrain_config())
+}
+
+/// The terrain of [`water_crossing_plan`] alone (no hierarchy, no units).
+pub fn water_crossing_terrain(map_cells: i32) -> Terrain {
+    let mut tc: TerrainConfig = config(0, map_cells, 1).terrain_config();
+    tc.water = WaterMode::Surface;
+    Terrain::generate(&tc)
+}
+
 /// The water map (`WaterMode::Surface`: lakes and a river between the spawn
 /// plaza and the goal) with all five classes of [`water_profiles`]: of the
 /// `units`, 5% are ships in the river, the rest spawn on the plaza as

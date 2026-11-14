@@ -1,0 +1,87 @@
+#version 460
+// One thread per CBT leaf: emit the leaf into the (culled) draw list, then split or
+// merge it according to its screen-space geometric error.
+#include "terrain_common.glsl"
+
+layout(local_size_x = 64) in;
+
+#define MODE_SPLIT 0u
+#define MODE_MERGE 1u
+#define MODE_NONE 2u
+layout(push_constant) uniform PC { uint mode; uint writeDraw; uint level; uint pad; } pc;
+
+struct Bounds {
+    vec3 bmin, bmax;
+    float px;     // screen-space error of drawing this node with its sub-mesh
+    bool inMap;
+};
+
+Bounds nodeBounds(ivec2 v0, ivec2 v1, ivec2 v2) {
+    Bounds r;
+    vec2 c0 = latticeToCell(v0), c1 = latticeToCell(v1), c2 = latticeToCell(v2);
+    vec2 a = min(min(c0, c1), c2), b = max(max(c0, c1), c2);
+    r.inMap = a.x < u.map.x && a.y < u.map.y;
+    float err = meshError(length(c1 - c0), c0, c1, c2, a, b, true);
+    a = clamp(a, vec2(0.0), u.map.xy);
+    b = clamp(b, vec2(0.0), u.map.xy);
+    float hmin, hmax;
+    boxHeights(a, b, hmin, hmax);
+    r.bmin = cellToWorldBox(a, hmin);
+    r.bmax = cellToWorldBox(b, hmax);
+    r.px = projectError(err, r.bmin, r.bmax);
+    return r;
+}
+
+bool inFrustum(vec4 planes[6], vec3 bmin, vec3 bmax) {
+    for (int i = 0; i < 6; ++i) {
+        vec3 p = mix(bmin, bmax, greaterThan(planes[i].xyz, vec3(0.0)));
+        if (dot(planes[i].xyz, p) + planes[i].w < 0.0) return false;
+    }
+    return true;
+}
+
+// Screen-space error in pixels (scaled down outside the view frustum, so that
+// off-screen terrain stays coarser but not so coarse that it pops when it comes in).
+float pixelError(Bounds r) {
+    if (!r.inMap) return 0.0;
+    return inFrustum(u.lodFrustum, r.bmin, r.bmax) ? r.px : r.px / u.lod.z;
+}
+
+float nodePixelError(uint id) {
+    ivec2 v0, v1, v2;
+    decodeTriangle(id, v0, v1, v2);
+    return pixelError(nodeBounds(v0, v1, v2));
+}
+
+void main() {
+    uint handle = gl_GlobalInvocationID.x;
+    if (handle >= ind[IND_LEAF_COUNT]) return;
+
+    uint id = decodeLeaf(handle);
+    ivec2 v0, v1, v2;
+    decodeTriangle(id, v0, v1, v2);
+    Bounds r = nodeBounds(v0, v1, v2);
+
+    if (pc.writeDraw != 0u && r.inMap && inFrustum(u.drawFrustum, r.bmin, r.bmax)) {
+        uint slot = atomicAdd(ind[IND_DRAW_INSTANCES], 1u);
+        if (slot < u.cfg.w) leaves[slot] = Leaf(ivec4(v0, v1), ivec4(v2, int(id), 0));
+    }
+
+    float tau = u.lod.x;
+    if (pc.mode == MODE_SPLIT) {
+        if (pixelError(r) > tau) splitConforming(id);
+    } else if (pc.mode == MODE_MERGE && depthOf(id) > 1u) {
+        // Merge the whole diamond (parent + the parent's hypotenuse neighbour) when all
+        // four children are leaves and neither parent would be split again.
+        uint base = id >> 1;
+        uint top = edgeNeighbor(base);
+        if (top == 0u) top = base;
+        if (isLeaf(id ^ 1u) && isLeaf(2u * top) && isLeaf(2u * top + 1u)) {
+            float keep = tau * u.lod.w;
+            if (nodePixelError(base) <= keep && (top == base || nodePixelError(top) <= keep)) {
+                mergeNode(id);
+                mergeNode(2u * top + 1u);
+            }
+        }
+    }
+}

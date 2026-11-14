@@ -37,6 +37,12 @@ the spatial index. Engine systems run beside the game systems of their layer. 10
 under it and when the terrain changes under them; a tick takes 4.6-4.75 ms
 (median) on 8 workers, of which the nav system is 4.2-4.3 ms against 3.9-4.0 ms standalone. Details: [docs/PLAN.md](docs/PLAN.md) "M2 progress".
 
+M3 (rendering) has started: the frame graph has depth attachments and ordered writers (several passes
+drawing into one target), `ae_render` holds the lifted Vulkan executor and render thread, GPU tests run
+offscreen with zero validation messages, and `ae-client` shows the crossing map's terrain (GPU-refined
+CBT/LEB from map-rendering, coloured by the nav materials, water as a depth tint) with RTS camera
+controls. Units are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+
 | Crate | What it is | Origin |
 |---|---|---|
 | `crates/ae_ecs` | Storage and query layer; flecs behind `flecs_backend`; the column arena | ecs_sim (`flecs.rs`, vendored flecs 4.1.6 + patch) |
@@ -51,11 +57,13 @@ under it and when the terrain changes under them; a tick takes 4.6-4.75 ms
 | `bins/ae-headless` | Runs a game module at several worker counts; prints digests, timings, speedups | new |
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
-| `crates/ae_framegraph` | Frame graph declare/bake/barriers, plus the declaration decoder | ecs_sim `frame_graph` |
+| `crates/ae_framegraph` | Frame graph declare/bake/barriers (colour, depth, several writers per resource), plus the declaration decoder | ecs_sim `frame_graph` |
+| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
+| `bins/ae-client` | Window plus render thread: the crossing map's terrain with camera controls, or offscreen captures | new |
 | `crates/ae_render_abi` | Frame graph declaration wire format and builder for render modules (no deps, builds for WASM) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
-| `bins/ae-tool` | `bench` and `bench-diff` | new |
+| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary) | new |
 | `spikes/parallel_guest` | M0 risk spikes (three binaries) | new |
 | `vendor/` | flecs and its build crate | ecs_sim `vendor/` |
 
@@ -63,6 +71,8 @@ under it and when the terrain changes under them; a tick takes 4.6-4.75 ms
 
 - Rust 1.98 with the `wasm32-wasip1-threads` target (`rustup target add wasm32-wasip1-threads`).
 - A C compiler (flecs is built from source).
+- `glslc` (shaderc) to build `ae_render`; SDL3 and a Vulkan 1.3 driver to run `ae-client` and the GPU
+  tests, which also need `VK_LAYER_KHRONOS_validation`.
 - Optional: `wasmtime` CLI to run the nav golden test as WASM; the Tracy profiler GUI for `--features tracy`.
 
 ## Commands
@@ -106,6 +116,13 @@ cargo test --release -p ae_nav --test water                              # movem
 # Navigation at scale
 ./target/release/ae-tool bench nav-sim --threads 8 --no-save            # 10k units, land + water, 1..8 workers
 cargo run --release -p ae_nav --bin navbench -- --quick                  # pathsim's navbench on the lifted reference
+./target/release/ae-tool navbench --scaling                              # same binary, worker scaling (build navbench first)
+
+# Rendering (needs a Vulkan 1.3 GPU)
+cargo test -p ae_render --test gpu -- --ignored --test-threads=1         # offscreen, validation must stay silent
+cargo run --release -p ae-client                                         # the water crossing map (WASD, wheel, right-drag)
+cargo run --release -p ae-client -- --map land --capture land.ppm        # offscreen frame + GPU ms per pass
+AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
 ```
 
 Set `AE_BENCH_MACHINE` on a dedicated benchmark machine so wall times are only ever compared against

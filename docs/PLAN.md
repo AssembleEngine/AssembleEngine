@@ -26,8 +26,11 @@ architecture and the milestone order. Four prototypes supply most of the hard pa
 | UI | RmlUi over FFI (RML/RCSS documents + data models), driven by untrusted widget modules. |
 | Body math | f32 under strict rules; cross-platform golden-hash check in M0, fixed-point only if it fails. |
 
-Assumed defaults (change if wrong): tick rate is per-game data, default 30 Hz; Linux + Windows on Vulkan 1.3,
-aarch64 as a determinism CI target.
+Assumed defaults (change if wrong): tick rate is per-game data, default 30 Hz; aarch64 as a determinism
+CI target.
+
+Decided (2026-11-14): Vulkan 1.3 is the rendering baseline on Linux (and Windows, if targeted); macOS is
+left for later.
 
 Decided from the M0 spike: the trusted sim runs with **no fuel and no epoch interruption** in release
 (both cost about 10% per row). A host watchdog thread catches a tick overrun, logs the system and row
@@ -608,6 +611,113 @@ system 4.22 ms vs 4.03 ms standalone), 1 worker 17.59 ms, digests and nav state 
 
 M2's listed work is done. Left for later: per-class cost overlays, units turning to a facing (needs a
 heading in `Body`), and the second hierarchy level (M10).
+
+### M3 progress
+
+Frame graph (`cargo test -p ae_framegraph`):
+- Depth: `Role::DepthAttachment(LoadOp)` (tested and written, `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`) and
+  `Role::DepthRead` (tested only, `DEPTH_STENCIL_READ_ONLY_OPTIMAL`); a sampled depth image uses
+  `Sampled`. At most one depth role per graphics pass (`BakeError::DepthShape`); a depth-only graphics
+  pass (a shadow map) is valid. Attachment roles now also check the image aspect (a colour image is not
+  a depth attachment and the reverse).
+- Several colour attachments per pass already worked (bound in declaration order); now tested on the GPU.
+- Several writers per resource ("versions"), replacing the lifted single-writer rule
+  (`MultipleWriters` is gone): in pass declaration order each write starts a version; a read depends on
+  the latest write declared before it (or, with none before it, on the first write, so single-writer
+  graphs bake exactly as before: all 22 lifted tests pass unchanged except the one that asserted the
+  old error, which now asserts the order); a write depends on the previous write and on every read of
+  the previous version. Reads declared before the first write join the first version's readers, so a
+  second write waits for them too (`early_reads_precede_the_second_write`, which fails without that
+  rule). A write declared after the last read of a resource is pruned like any unreachable pass. This is what lets terrain clear depth, units load and extend it, and decals test
+  against it read-only.
+- Wire format: `RoleKind::DepthAttachment = 15`, `DepthRead = 16`, appended, so older descriptors still
+  decode and `VERSION` stays 1; `ImageSpec::depth_2d`, `PassBuilder::depth`, `depth_read`. A module's
+  depth + continued-attachment graph decodes to the native one (`tests/descriptor.rs`).
+- `ae-tool bench framegraph-bake` against `bench/results/baseline`: 36 metrics, 34 unchanged, 0
+  regressed (bake +2 to +8%, under the threshold; barrier counts, physical resources and descriptor
+  bytes identical).
+
+`ae_render` (new; `cargo test -p ae_render --test gpu -- --ignored --test-threads=1`, needs a Vulkan
+1.3 GPU and `VK_LAYER_KHRONOS_validation`): ecs_sim's `device`, `memory`, `swapchain`, `pipeline`,
+`executor`, `thread`, `window` (SDL3 through `sdl3-sys`, as the plan says) and the demo graph as a test
+fixture, lifted with module paths changed only. Not lifted: `view_renderer`, `packet`, `view` (they
+draw ecs_sim's presentation views; M4's copy layer replaces them). Shaders in `crates/ae_render/shaders`
+are compiled by `build.rs` with `glslc` (`GLSLC` overrides; a missing `glslc` fails the build with
+that message). Additions: the executor binds a pass's depth attachment (and stencil when the image has a
+stencil aspect), clears it from `Recorder::clear_depth` (default 1.0) and turns a first-use depth load
+into a clear like colour; `GraphicsDesc` takes `color_formats` (one per attachment) and an optional
+`DepthState {format, write, compare}`. GPU tests (RTX 3060 Ti, validation including synchronization
+validation, any message fails the test): the four lifted ones, plus `depth_and_multiple_targets`: three
+passes share one transient depth buffer over two colour targets (clear, load-and-extend, read-only
+decal), and every expected pixel is checked in both targets over three frames, once with `D32_SFLOAT`
+and once with `D32_SFLOAT_S8_UINT` (`ImageDesc::depth_2d` gives combined formats both aspects, the
+pipeline declares the stencil format, the executor binds the stencil attachment). Zero validation
+messages.
+
+Open: `ae_render` and `ae-client` are workspace members with no feature gate, so `cargo test
+--workspace` (and the headless CI targets, including the pending aarch64 check) now needs `glslc` and
+SDL3 installed. Fix when CI is set up: `default-members` without them for headless runners, or
+checked-in SPIR-V.
+
+`ae-client` (new): SDL3 window plus `ae_render`'s render thread, for now showing the demo graph (triangle,
+compute blur/invert, composite to the swapchain). `--seconds S` exits after S seconds; `--exercise`
+resizes, minimizes and restores on a schedule; the exit status is 1 if validation reported anything.
+`AE_VK_VALIDATION=1 ae-client --seconds 6 --exercise` (debug): 14,937 frames, 6 swapchain recreates,
+0 validation errors or warnings. Environment variables renamed from `ECS_SIM_*` to `AE_*`
+(`AE_VK_VALIDATION`, `AE_VK_SYNC_VALIDATION`, `AE_RENDER_TRACE`, `AE_RENDER_TRACE_EVENTS`).
+
+Terrain (`ae_render::terrain`, lifted from `~/map-rendering`): the CBT/LEB subdivision refined on the GPU
+against a screen-space error target (Dupuy's concurrent binary tree, conforming longest-edge bisection,
+an error pyramid for the metric; see map-rendering's README for the method). `leb`, `heightmap` (PGM,
+test-terrain generator, error pyramid) and `camera` are lifted unchanged with their CPU tests (the
+camera gained `Copy`); the shaders are lifted with an include renamed. The renderer is rewritten around
+the frame graph:
+- Two passes: `terrain lod` (compute) runs the prototype's split/merge/reduce sequence with its own
+  internal full barriers and declares the draw list and indirect arguments as storage writes;
+  `terrain` (graphics) reads the draw list in the vertex stage and the arguments as an indirect buffer,
+  with a colour target and a transient reverse-Z depth buffer (`D32_SFLOAT`, cleared to 0 through
+  `Recorder::clear_depth`). The CBT buffers are owned by the renderer and shared by every frame slot
+  (the subdivision evolves frame to frame); uniforms are per slot.
+- Static data goes up through `ae_render::upload` (staging buffer, one-shot command buffer, waited).
+- The device now requires `shaderClipDistance` (the LEB square is a power of two, clipped to the map)
+  and enables `fillModeNonSolid` where present (wireframe).
+- Additions to the prototype's shaders: a water level in the uniforms tints ground below it by depth
+  (no water surface until M7), and an optional per-cell material texture colours the ground
+  (bilinear between cell centres, slopes still turn to rock), a placeholder for the tilesets.
+- The heightfield is the M2 crossing map's nav terrain (`ae_nav::scenario::water_crossing_terrain`,
+  `land_crossing_terrain`: the terrain without hierarchy or units, equal to the service's, tested in
+  `tests/water.rs`): ground = surface − water depth, corners averaged from the cells around them
+  (unit test in `ae-client`); materials from `Terrain::material`. Heights: nav stores decimetres and
+  never relates them to world units (its slope limits are raw decimetres per 8-unit cell: scout 135,
+  heavy 95, ship 60), so render assumes 1 world unit = 1 m (factor 0.1, `--relief` on top). Under that
+  assumption a scout's limit is a 59° step, a heavy's 50°. To settle when units get real scale.
+- `ae-client` shows it: `--map water|land|generated|demo`, `--map-cells`, `--relief`, `--camera`,
+  RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` detail, T wireframe, L LOD colours,
+  G fog, C freeze LOD, P print camera); `--capture FILE.ppm` renders 1280x720 offscreen without a
+  window and prints GPU time per pass. The SDL window now reports wheel, drag, toggle keys and held
+  movement keys (ecs_sim's F "full frame" key is gone).
+- Captures are `R8G8B8A8_SRGB` like the swapchain, so they show what the window shows; the
+  prototype's fog and lighting make the 20 km overview look pale (G toggles fog), left as is until the
+  tilesets redo the look. `ae-client` prints "validation off" instead of zero counts when the layer is
+  not loaded (`GpuRenderStats::validation`).
+- Checked: GPU test `terrain_renders_offscreen` (generated 513² map, 24 frames: refined beyond 64
+  leaves, sky above terrain, zero validation messages). The water map (2560² cells, heights 1..150 m,
+  water at 17 m): terrain 1.0 s and error pyramid 0.19 s to build; with validation, 0 messages in
+  `--capture` and in an 8 s windowed `--exercise` run (7 swapchain recreates). GPU per frame at
+  1280x720 (RTX 3060 Ti, release, profiling on): LOD pass 0.25–0.33 ms, draw 0.05–0.07 ms, at 700 to
+  3,500 leaves for overview, close-up and grazing views; about 2,450 fps windowed over the whole map.
+  These are printed, not recorded: the GPU bench (`ae-client --bench`, JSON for `bench-diff`) is still
+  to be written.
+
+Next in M3: the 10k-unit instance stream (an end-of-tick copy of the sim's `Body` columns behind the
+`InstanceStream {table, field → attribute}` shape, so M4's view tables replace it without changing
+render; the render thread never waits on the sim), then the render module ABI, reflection and hot
+reload, then material tilesets (procedural placeholder textures until a texture source is chosen),
+replacing the material palette. Terrain patches (`TerrainChanged`) do not reach the render heightfield
+yet; that comes with the sim connection.
+
+M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
+the same target directory).
 
 ### M0 risk spikes
 

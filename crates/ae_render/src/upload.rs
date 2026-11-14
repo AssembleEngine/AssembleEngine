@@ -1,0 +1,127 @@
+//! One-shot uploads of static data (terrain textures, lookup tables, meshes)
+//! through a staging buffer, outside the frame graph: the call waits for
+//! the copy, so the data is ready (images in `SHADER_READ_ONLY_OPTIMAL`)
+//! before any frame uses it. For data that never changes after creation;
+//! per-frame data goes through graph resources.
+
+use crate::device::{GpuDevice, fatal};
+use crate::memory::{OwnedBuffer, OwnedImage};
+use ae_framegraph::{BufferDesc, ImageDesc};
+use anyhow::{Context as _, Result};
+use ash::vk;
+use gpu_allocator::MemoryLocation;
+
+/// Record `record` into a fresh command buffer, submit it and wait.
+pub fn one_shot(gpu: &GpuDevice, record: impl FnOnce(vk::CommandBuffer)) -> Result<()> {
+    let device = &gpu.device;
+    unsafe {
+        let pool = device
+            .create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(gpu.queue_family).flags(vk::CommandPoolCreateFlags::TRANSIENT), None)
+            .context("upload command pool")?;
+        let result = (|| -> Result<()> {
+            let cmd = device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(1))?[0];
+            device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            record(cmd);
+            device.end_command_buffer(cmd)?;
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            let submit = vk::SubmitInfo2::default().command_buffer_infos(&cmds);
+            let submitted = device.queue_submit2(gpu.queue, &[submit], fence).map_err(fatal).context("upload submit");
+            let waited = submitted.and_then(|()| device.wait_for_fences(&[fence], true, u64::MAX).map_err(fatal).context("upload wait"));
+            device.destroy_fence(fence, None);
+            waited
+        })();
+        device.destroy_command_pool(pool, None);
+        result
+    }
+}
+
+fn staging(gpu: &GpuDevice, bytes: &[u8], name: &str) -> Result<OwnedBuffer> {
+    let desc = BufferDesc { size: bytes.len().max(4) as u64, usage: vk::BufferUsageFlags::TRANSFER_SRC };
+    let mut buffer = OwnedBuffer::new(gpu, desc, MemoryLocation::CpuToGpu, name)?;
+    buffer.mapped().context("staging buffer is not host-visible")?[..bytes.len()].copy_from_slice(bytes);
+    Ok(buffer)
+}
+
+/// A device-local buffer holding `bytes` (`usage` gets `TRANSFER_DST` added).
+pub fn buffer(gpu: &GpuDevice, bytes: &[u8], usage: vk::BufferUsageFlags, name: &str) -> Result<OwnedBuffer> {
+    let desc = BufferDesc { size: bytes.len().max(4) as u64, usage: usage | vk::BufferUsageFlags::TRANSFER_DST };
+    let target = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuOnly, name)?;
+    let mut source = staging(gpu, bytes, "staging")?;
+    let size = bytes.len() as u64;
+    let copied = one_shot(gpu, |cmd| unsafe {
+        if size > 0 {
+            gpu.device.cmd_copy_buffer(cmd, source.buffer, target.buffer, &[vk::BufferCopy::default().size(size)]);
+        }
+        // Visible to every later use on this queue.
+        let barrier = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)];
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barrier));
+    });
+    source.destroy(gpu);
+    if let Err(err) = copied {
+        let mut target = target;
+        target.destroy(gpu);
+        return Err(err);
+    }
+    Ok(target)
+}
+
+/// A sampled 2D colour image with one mip per entry of `mips` (mip `i` is
+/// `width >> i` by `height >> i`, tightly packed), left in
+/// `SHADER_READ_ONLY_OPTIMAL`.
+pub fn image(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, mips: &[&[u8]], name: &str) -> Result<OwnedImage> {
+    let desc = ImageDesc { mip_levels: mips.len() as u32, ..ImageDesc::color_2d(format, width, height, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST) };
+    let target = OwnedImage::new(gpu, desc, name)?;
+    let bytes: Vec<u8> = mips.concat();
+    let mut source = staging(gpu, &bytes, "staging")?;
+    let mut offset = 0u64;
+    let regions: Vec<vk::BufferImageCopy> = mips
+        .iter()
+        .enumerate()
+        .map(|(level, mip)| {
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(offset)
+                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level as u32, base_array_layer: 0, layer_count: 1 })
+                .image_extent(vk::Extent3D { width: (width >> level).max(1), height: (height >> level).max(1), depth: 1 });
+            offset += mip.len() as u64;
+            region
+        })
+        .collect();
+    let range = target.range();
+    let copied = one_shot(gpu, |cmd| unsafe {
+        let to_dst = [vk::ImageMemoryBarrier2::default()
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(target.image)
+            .subresource_range(range)];
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
+        gpu.device.cmd_copy_buffer_to_image(cmd, source.buffer, target.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
+        let to_read = [vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(target.image)
+            .subresource_range(range)];
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
+    });
+    source.destroy(gpu);
+    if let Err(err) = copied {
+        let mut target = target;
+        target.destroy(gpu);
+        return Err(err);
+    }
+    Ok(target)
+}
