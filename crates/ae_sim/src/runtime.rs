@@ -1,6 +1,8 @@
 //! A sim module running a world: schema -> components, queries and
 //! schedule; each tick runs the schedule layer by layer on the worker crew,
-//! merging and applying commands and events at every layer end.
+//! merging and applying commands and events at every layer end. Host
+//! systems ([`crate::host`]) the module schedules run in their layer after
+//! the module's systems, on the calling thread.
 //!
 //! One [`Runtime`] per process: the column arena and flecs' column allocator
 //! are process-wide. A runtime can run several worlds one after another
@@ -11,9 +13,10 @@ use crate::command::{Applier, ApplyStats, Command, CommandKey, Emitted, merge};
 use crate::crew::{Batch, BatchSystem, Crew, Job, Worker, WorkerOut};
 use crate::digest::StateHash;
 use crate::events::EventStore;
+use crate::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, SpatialIndex};
 use crate::imports::{self, IdMap, WorkerCtx};
 use crate::schedule::{self, Cadence, Mode, Schedule, SystemDecl};
-use crate::schema::{ComponentDecl, Schema};
+use crate::schema::{ComponentDecl, Schema, Slot};
 use crate::work::{WorkRange, ranges};
 use ae_abi::{EventSpan, MAX_EVENT_READS, MAX_TERMS, RUN_DESC_BYTES};
 use ae_ecs::flecs_backend as fb;
@@ -55,20 +58,40 @@ impl Default for RuntimeConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// `schema.systems[i]`.
+    Module(usize),
+    /// `hosts[i]`.
+    Host(usize),
+}
+
 struct SystemRt {
     name: Arc<str>,
     decl: SystemDecl,
-    /// Stable component ids of the terms, and which are written.
+    /// Stable component ids of the query terms, and which are written.
     term_ids: Vec<u64>,
     write_mask: u32,
+    kind: Kind,
+}
+
+/// A host system the module schedules, and the plugin that provides it.
+struct HostSlot {
+    plugin: usize,
+    decl: HostDecl,
 }
 
 pub struct Runtime {
     pub schema: Schema,
+    /// Over all systems, module and host, in `schedule!` order (see
+    /// [`Self::system_name`]).
     pub schedule: Schedule,
     systems: Vec<SystemRt>,
+    hosts: Vec<HostSlot>,
+    plugins: Vec<Arc<dyn HostPlugin>>,
     cfg: RuntimeConfig,
     memory: GuestMemory,
+    shared: wasmtime::SharedMemory,
     crew: Crew,
     events_at: u32,
     events_len: usize,
@@ -89,8 +112,12 @@ pub struct TickStats {
     pub commands: u64,
     pub events: u64,
     pub apply: ApplyStats,
-    /// Guest fuel per system (schema order), with fuel metering.
+    /// Running host systems, summed.
+    pub host_ns: u64,
+    /// Guest fuel per system (runtime order), with fuel metering.
     pub fuel: Vec<u64>,
+    /// Wall time per host system (runtime order; zero for module systems).
+    pub host_system_ns: Vec<u64>,
 }
 
 pub struct World {
@@ -100,6 +127,9 @@ pub struct World {
     ecs_ids: Vec<Option<ComponentId>>,
     /// Query and terms per system (`None`: no query).
     queries: Vec<Option<(fb::Query, Vec<Term>)>>,
+    /// State of each host system (by host slot).
+    hosts: Vec<Box<dyn HostSystem>>,
+    spatial: Option<Arc<SpatialIndex>>,
     /// One single-term query per hashed component.
     hash_queries: Vec<(usize, fb::Query, [Term; 1])>,
     applier: Applier,
@@ -138,32 +168,76 @@ impl Digest {
 
 impl Runtime {
     pub fn new(wasm: &[u8], cfg: RuntimeConfig) -> Result<Self> {
+        Self::with_hosts(wasm, cfg, Vec::new())
+    }
+
+    /// A runtime whose module may schedule host systems from `plugins`
+    /// (the first plugin providing a name wins).
+    pub fn with_hosts(wasm: &[u8], cfg: RuntimeConfig, plugins: Vec<Arc<dyn HostPlugin>>) -> Result<Self> {
         let schema = Schema::from_module(wasm)?;
         ensure!(cfg.max_workers >= 1 && cfg.range_rows >= 1, "bad runtime config");
+        let offered: Vec<Vec<HostDecl>> = plugins.iter().map(|p| p.systems()).collect();
         // The schedule only needs resource identity, so it is computed on
         // stable ids, once.
         let mut systems = Vec::new();
-        let mut decls = Vec::new();
-        for s in &schema.systems {
-            let terms: Vec<Term> = s.terms.iter().map(|&(id, access)| Term { component: ComponentId(id), access }).collect();
-            let write_mask = s.terms.iter().enumerate().filter(|(_, (_, a))| *a == Access::Write).fold(0u32, |m, (i, _)| m | 1 << i);
-            let decl = SystemDecl {
-                name: s.name.clone(),
-                terms,
-                emits: s.emits.clone(),
-                reads_events: s.reads_events.clone(),
-                after: s.after.clone(),
-                mode: s.mode,
-                cadence: s.cadence,
-            };
-            decls.push(decl.clone());
-            systems.push(SystemRt { name: s.name.as_str().into(), decl, term_ids: s.terms.iter().map(|t| t.0).collect(), write_mask });
+        let mut hosts = Vec::new();
+        for slot in &schema.order {
+            match slot {
+                Slot::Module(i) => {
+                    let s = &schema.systems[*i];
+                    let terms: Vec<Term> = s.terms.iter().map(|&(id, access)| Term { component: ComponentId(id), access }).collect();
+                    let decl = SystemDecl {
+                        name: s.name.clone(),
+                        terms,
+                        emits: s.emits.clone(),
+                        reads_events: s.reads_events.clone(),
+                        after: s.after.clone(),
+                        mode: s.mode,
+                        cadence: s.cadence,
+                    };
+                    systems.push(SystemRt { name: s.name.as_str().into(), decl, term_ids: s.terms.iter().map(|t| t.0).collect(), write_mask: write_mask(&s.terms), kind: Kind::Module(*i) });
+                }
+                Slot::Host(name) => {
+                    let (plugin, decl) = offered
+                        .iter()
+                        .enumerate()
+                        .find_map(|(p, decls)| decls.iter().find(|d| d.name == *name).map(|d| (p, d.clone())))
+                        .with_context(|| format!("the module schedules host system `{name}`, which no host plugin provides"))?;
+                    plugins[plugin].check(name, &schema).with_context(|| format!("host system `{name}`"))?;
+                    decl.cadence.validate()?;
+                    // The row filter is the SDK's (`run.rows()`); a host system sees whole tables.
+                    ensure!(!matches!(decl.cadence, Cadence::Staggered { .. }), "host system `{name}`: staggered cadence is for module systems");
+                    ensure!(decl.query.len() <= MAX_TERMS && decl.reads_events.len() <= MAX_EVENT_READS, "host system `{name}`: too many terms or streams");
+                    for &(id, _) in &decl.query {
+                        ensure!(schema.component(id).is_some_and(|c| !c.event), "host system `{name}` queries component {id:#x}, which the module does not declare");
+                    }
+                    for &id in decl.emits.iter().chain(&decl.reads_events) {
+                        ensure!(schema.component(id).is_some_and(|c| c.event), "host system `{name}` uses event stream {id:#x}, which the module does not declare");
+                    }
+                    let mut terms: Vec<Term> = decl.query.iter().map(|&(id, access)| Term { component: ComponentId(id), access }).collect();
+                    // Created components order like writes (no query term).
+                    terms.extend(decl.creates.iter().filter(|id| !decl.query.iter().any(|q| q.0 == **id)).map(|&id| Term { component: ComponentId(id), access: Access::Write }));
+                    let sd = SystemDecl {
+                        name: name.clone(),
+                        terms,
+                        emits: decl.emits.clone(),
+                        reads_events: decl.reads_events.clone(),
+                        after: decl.after.clone(),
+                        mode: Mode::Serial,
+                        cadence: decl.cadence,
+                    };
+                    systems.push(SystemRt { name: name.as_str().into(), decl: sd, term_ids: decl.query.iter().map(|t| t.0).collect(), write_mask: write_mask(&decl.query), kind: Kind::Host(hosts.len()) });
+                    hosts.push(HostSlot { plugin, decl });
+                }
+            }
         }
+        let decls: Vec<SystemDecl> = systems.iter().map(|s| s.decl.clone()).collect();
         let schedule = schedule::compute(&decls)?;
 
         let module = SimModule::new(wasm, cfg.metering)?;
         let memory = module.new_memory()?;
         let ctx_memory = memory.clone();
+        let shared = memory.clone();
         let mut events_at = 0;
         let mut set = InstanceSetBuilder {
             module: &module,
@@ -193,16 +267,43 @@ impl Runtime {
             workers.push(Worker { instance, funcs, desc, ids_buf, ids_cap, metered: cfg.metering == Metering::Fuel });
         }
         let crew = Crew::new(workers)?;
-        let layer_labels = schedule.layers.iter().enumerate().map(|(k, l)| format!("layer {k}: {}", l.iter().map(|&i| schema.systems[i].name.as_str()).collect::<Vec<_>>().join(" "))).collect();
-        Ok(Self { schema, schedule, systems, cfg, memory: guest, crew, events_at, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels })
+        let layer_labels = schedule.layers.iter().enumerate().map(|(k, l)| format!("layer {k}: {}", l.iter().map(|&i| &*systems[i].name).collect::<Vec<_>>().join(" "))).collect();
+        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels })
+    }
+
+    /// Current size of the shared guest memory, in bytes (column arena,
+    /// event staging and the guest heap).
+    pub fn memory_bytes(&self) -> usize {
+        self.shared.data_size()
     }
 
     pub fn max_workers(&self) -> usize {
         self.crew.size()
     }
 
-    /// A fresh world at tick 0. `param` reaches every system call.
+    /// Systems, module and host, in `schedule!` order: the indices of
+    /// [`Self::schedule`] and of [`TickStats::fuel`].
+    pub fn system_count(&self) -> usize {
+        self.systems.len()
+    }
+
+    pub fn system_name(&self, i: usize) -> &str {
+        &self.systems[i].name
+    }
+
+    pub fn is_host_system(&self, i: usize) -> bool {
+        matches!(self.systems[i].kind, Kind::Host(_))
+    }
+
+    /// A fresh world at tick 0. `param` reaches every system call. Host
+    /// systems size their own thread pools for the most workers.
     pub fn world(&self, param: u64) -> Result<World> {
+        self.world_for(param, self.max_workers())
+    }
+
+    /// A fresh world whose host systems size their thread pools for
+    /// `workers` (results never depend on it).
+    pub fn world_for(&self, param: u64, workers: usize) -> Result<World> {
         let world = unsafe { fb::init()? };
         let mut ids = IdMap::default();
         let mut ecs_ids = Vec::new();
@@ -225,11 +326,14 @@ impl Runtime {
         let ecs = |stable: u64| ids.components[&stable].0;
         let mut queries = Vec::new();
         for s in &self.systems {
-            if s.decl.terms.is_empty() {
+            // Query terms come first; a host system's `creates` follow them
+            // for scheduling only.
+            let query = &s.decl.terms[..s.term_ids.len()];
+            if query.is_empty() {
                 queries.push(None);
                 continue;
             }
-            let terms: Vec<Term> = s.decl.terms.iter().map(|t| Term { component: ecs(t.component.0), access: t.access }).collect();
+            let terms: Vec<Term> = query.iter().map(|t| Term { component: ecs(t.component.0), access: t.access }).collect();
             queries.push(Some((unsafe { fb::create_query(world, &terms)? }, terms)));
         }
         let mut hash_queries = Vec::new();
@@ -250,14 +354,29 @@ impl Runtime {
                 events.add_reader(stream, i)?;
             }
         }
-        Ok(World { world, ids: Arc::new(ids), ecs_ids, queries, hash_queries, applier: Applier::default(), events, tick: 0, param })
+        let init = HostInit { param, workers };
+        let mut hosts: Vec<Option<Box<dyn HostSystem>>> = (0..self.hosts.len()).map(|_| None).collect();
+        for (p, plugin) in self.plugins.iter().enumerate() {
+            let mine: Vec<usize> = (0..self.hosts.len()).filter(|&h| self.hosts[h].plugin == p).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let names: Vec<&str> = mine.iter().map(|&h| self.hosts[h].decl.name.as_str()).collect();
+            let made = plugin.instantiate(&init, &names)?;
+            ensure!(made.len() == mine.len(), "host plugin made {} systems for {} names", made.len(), mine.len());
+            for (h, system) in mine.into_iter().zip(made) {
+                hosts[h] = Some(system);
+            }
+        }
+        let hosts = hosts.into_iter().map(|h| h.expect("every host slot has a plugin")).collect();
+        Ok(World { world, ids: Arc::new(ids), ecs_ids, queries, hash_queries, hosts, spatial: None, applier: Applier::default(), events, tick: 0, param })
     }
 
     /// Run one tick on `workers` workers.
     pub fn tick(&mut self, w: &mut World, workers: usize) -> Result<TickStats> {
         ae_profile::zone!("sim_tick");
         let tick = w.tick;
-        let mut stats = TickStats { fuel: vec![0; self.systems.len()], ..Default::default() };
+        let mut stats = TickStats { fuel: vec![0; self.systems.len()], host_system_ns: vec![0; self.systems.len()], ..Default::default() };
         if tick == 1 {
             for (i, s) in self.systems.iter().enumerate() {
                 if s.decl.cadence == Cadence::Once {
@@ -273,28 +392,44 @@ impl Runtime {
                 self.prepare(w, layer, tick)?
             };
             stats.prepare_ns += started.elapsed().as_nanos() as u64;
-            let Some(batch) = batch else { continue };
-            let index_of: Vec<usize> = batch.systems.iter().map(|s| s.index).collect();
-            let started = Instant::now();
-            let outs = self.crew.run(Arc::new(batch), workers);
-            stats.systems_ns += started.elapsed().as_nanos() as u64;
+            let hosts: Vec<usize> = self.schedule.layers[layer].iter().copied().filter(|&i| matches!(self.systems[i].kind, Kind::Host(_)) && self.systems[i].decl.cadence.runs_on(tick)).collect();
+            if batch.is_none() && hosts.is_empty() {
+                continue;
+            }
+            let mut commands = Vec::new();
+            let mut events: Vec<Emitted> = Vec::new();
+            if let Some(batch) = batch {
+                let index_of: Vec<usize> = batch.systems.iter().map(|s| s.index).collect();
+                let started = Instant::now();
+                let outs = self.crew.run(Arc::new(batch), workers);
+                stats.systems_ns += started.elapsed().as_nanos() as u64;
+                for out in outs {
+                    let WorkerOut { commands: c, events: e, fuel, calls, error } = out;
+                    if let Some(error) = error {
+                        return Err(error.context(format!("tick {tick}, layer {layer}")));
+                    }
+                    commands.push(c);
+                    events.extend(e);
+                    stats.calls += calls;
+                    for (k, f) in fuel.into_iter().enumerate() {
+                        stats.fuel[index_of[k]] += f;
+                    }
+                }
+            }
+            for i in hosts {
+                let _zone = ae_profile::zone_dyn(&self.systems[i].name);
+                let started = Instant::now();
+                let (c, e) = self.run_host(w, i, tick).with_context(|| format!("tick {tick}, host system `{}`", self.systems[i].name))?;
+                let ns = started.elapsed().as_nanos() as u64;
+                stats.host_ns += ns;
+                stats.host_system_ns[i] += ns;
+                stats.calls += 1;
+                commands.push(c);
+                events.extend(e);
+            }
 
             ae_profile::zone!("merge_apply");
             let started = Instant::now();
-            let mut commands = Vec::with_capacity(outs.len());
-            let mut events: Vec<Emitted> = Vec::new();
-            for out in outs {
-                let WorkerOut { commands: c, events: e, fuel, calls, error } = out;
-                if let Some(error) = error {
-                    return Err(error.context(format!("tick {tick}, layer {layer}")));
-                }
-                commands.push(c);
-                events.extend(e);
-                stats.calls += calls;
-                for (k, f) in fuel.into_iter().enumerate() {
-                    stats.fuel[index_of[k]] += f;
-                }
-            }
             let commands: Vec<(CommandKey, Command)> = merge(commands)?;
             events.sort_unstable_by_key(|(key, stream, _)| (*key, *stream));
             ensure!(events.windows(2).all(|p| p[0].0 != p[1].0), "duplicate event key: a work range ran twice");
@@ -321,6 +456,7 @@ impl Runtime {
         let mut staged = 0usize;
         for &i in &self.schedule.layers[layer] {
             let s = &self.systems[i];
+            let Kind::Module(module) = s.kind else { continue };
             if !s.decl.cadence.runs_on(tick) {
                 continue;
             }
@@ -352,6 +488,7 @@ impl Runtime {
             systems.push(BatchSystem {
                 name: s.name.clone(),
                 index: i,
+                module,
                 position: self.schedule.position[i],
                 term_count: s.term_ids.len() as u32,
                 term_ids,
@@ -365,7 +502,41 @@ impl Runtime {
         if systems.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Batch::new(systems, jobs, tick, w.param, w.ids.clone(), self.memory)))
+        Ok(Some(Batch::new(systems, jobs, tick, w.param, w.ids.clone(), self.memory, w.spatial.clone())))
+    }
+
+    /// Run host system `i` (runtime order); its commands and events.
+    fn run_host(&self, w: &mut World, i: usize, tick: u64) -> Result<HostOut> {
+        let s = &self.systems[i];
+        let Kind::Host(h) = s.kind else { unreachable!() };
+        let decl = &self.hosts[h].decl;
+        let (ranges, sizes) = match &w.queries[i] {
+            Some((q, terms)) => {
+                let sizes = terms.iter().map(|t| unsafe { fb::component_size(w.world, t.component) }).collect::<Result<Vec<_>>>()?;
+                (unsafe { ranges(w.world, *q, terms, usize::MAX, self.memory)? }, sizes)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut buffer = crate::command::CommandBuffer::default();
+        buffer.begin(self.schedule.position[i], 0);
+        let World { hosts, events, ids, spatial, param, .. } = w;
+        let mut ctx = HostCtx {
+            tick,
+            param: *param,
+            ranges: &ranges,
+            sizes: &sizes,
+            memory: self.memory,
+            events,
+            reader: i,
+            reads: &decl.reads_events,
+            emits: &decl.emits,
+            commands: &mut buffer,
+            ids,
+            spatial,
+        };
+        hosts[h].run(&mut ctx)?;
+        let e = buffer.take_events();
+        Ok((buffer.take(), e))
     }
 
     /// Order-independent digest of every hashed field of every live row,
@@ -400,6 +571,15 @@ impl Runtime {
         let events = w.events.digest();
         total.merge(&events);
         parts.push(("(events)".into(), events.finish(), w.events.held() as u64));
+        for (i, s) in self.systems.iter().enumerate() {
+            let Kind::Host(h) = s.kind else { continue };
+            if let Some(hash) = w.hosts[h].digest() {
+                let mut part = StateHash::new();
+                part.add_row(u64::MAX - 1, ae_abi::name_id(&s.name), &hash.to_le_bytes());
+                total.merge(&part);
+                parts.push((format!("(host {})", s.name), part.finish(), i as u64));
+            }
+        }
         Ok(Digest { total: total.finish(), parts })
     }
 
@@ -446,9 +626,24 @@ impl Runtime {
         Ok(out)
     }
 
+    /// [`HostSystem::digest`] of the host system named `name`.
+    pub fn host_digest(&self, w: &World, name: &str) -> Option<u128> {
+        self.systems.iter().find_map(|s| match s.kind {
+            Kind::Host(h) if &*s.name == name => w.hosts[h].digest(),
+            _ => None,
+        })
+    }
+
     pub fn events_held(&self, w: &World) -> usize {
         w.events.held()
     }
+}
+
+/// A host system run's commands and events.
+type HostOut = (Vec<(CommandKey, Command)>, Vec<Emitted>);
+
+fn write_mask(terms: &[(u64, Access)]) -> u32 {
+    terms.iter().enumerate().filter(|(_, (_, a))| *a == Access::Write).fold(0u32, |m, (i, _)| m | 1 << i)
 }
 
 fn add_stats(t: &mut ApplyStats, s: &ApplyStats) {

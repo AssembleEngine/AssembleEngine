@@ -310,20 +310,46 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
     })
 }
 
-/// `schedule!(a, b, c)`: the registration order of the module's systems.
-/// Exactly one per module; every system must be listed.
+/// One `schedule!` entry: a module system, or `host(name)` for a system the
+/// engine provides (e.g. `host(nav)`).
+enum Entry {
+    Module(Ident),
+    Host(Ident),
+}
+
+impl syn::parse::Parse for Entry {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        if name == "host" && input.peek(syn::token::Paren) {
+            let content;
+            parenthesized!(content in input);
+            return Ok(Entry::Host(content.parse()?));
+        }
+        Ok(Entry::Module(name))
+    }
+}
+
+/// `schedule!(a, host(nav), b)`: the registration order of the module's
+/// systems and of the host systems it uses. Exactly one per module; every
+/// module system must be listed.
 #[proc_macro]
 pub fn schedule(input: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let entries = parse_macro_input!(input with Punctuated::<Entry, Token![,]>::parse_terminated);
     let mut r = Record::new(abi::KIND_ORDER);
-    r.u32(names.len() as u32);
+    r.u32(entries.len() as u32);
     r.u32(0);
-    for n in &names {
-        r.string(&n.to_string());
+    let mut funcs = Vec::new();
+    for e in &entries {
+        match e {
+            Entry::Module(n) => {
+                r.string(&n.to_string());
+                funcs.push(n);
+            }
+            Entry::Host(n) => r.string(&format!("{}{}", abi::HOST_SYSTEM_PREFIX, n)),
+        }
     }
     let (n, value) = r.finish();
-    let count = names.len();
-    let funcs = names.iter();
+    let count = funcs.len();
     let section = section_static(&Ident::new("__AE_SCHEMA_ORDER", Span::call_site()), n, value);
     // Naming each function checks at compile time that the systems exist.
     quote! {

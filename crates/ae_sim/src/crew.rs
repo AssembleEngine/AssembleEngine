@@ -7,6 +7,7 @@
 //! event is keyed by `{system position, range, seq}` and merged by key.
 
 use crate::command::{Command, CommandKey, Emitted};
+use crate::host::SpatialIndex;
 use crate::imports::{IdMap, WorkerCtx};
 use crate::work::WorkRange;
 use ae_abi::{EventSpan, MAX_EVENT_READS, MAX_TERMS, RunDesc};
@@ -21,8 +22,10 @@ use wasmtime::TypedFunc;
 pub struct BatchSystem {
     /// Profiler zone name.
     pub name: Arc<str>,
-    /// Index into the schema's systems (and each worker's export table).
+    /// Index into the runtime's systems (module and host).
     pub index: usize,
+    /// Index into the module's systems (and each worker's export table).
+    pub module: usize,
     pub position: u32,
     pub term_count: u32,
     pub term_ids: [u64; MAX_TERMS],
@@ -47,13 +50,14 @@ pub struct Batch {
     pub param: u64,
     pub ids: Arc<IdMap>,
     pub memory: GuestMemory,
+    pub spatial: Option<Arc<SpatialIndex>>,
     next: AtomicUsize,
     failed: AtomicBool,
 }
 
 impl Batch {
-    pub fn new(systems: Vec<BatchSystem>, jobs: Vec<Job>, tick: u64, param: u64, ids: Arc<IdMap>, memory: GuestMemory) -> Self {
-        Self { systems, jobs, tick, param, ids, memory, next: AtomicUsize::new(0), failed: AtomicBool::new(false) }
+    pub fn new(systems: Vec<BatchSystem>, jobs: Vec<Job>, tick: u64, param: u64, ids: Arc<IdMap>, memory: GuestMemory, spatial: Option<Arc<SpatialIndex>>) -> Self {
+        Self { systems, jobs, tick, param, ids, memory, spatial, next: AtomicUsize::new(0), failed: AtomicBool::new(false) }
     }
 }
 
@@ -82,12 +86,15 @@ pub struct Worker {
 impl Worker {
     pub fn run(&mut self, batch: &Batch) -> WorkerOut {
         let mut out = WorkerOut { fuel: vec![0; batch.systems.len()], ..Default::default() };
-        self.instance.store.data_mut().ids = Some(batch.ids.clone());
+        let ctx = self.instance.store.data_mut();
+        ctx.ids = Some(batch.ids.clone());
+        ctx.spatial = batch.spatial.clone();
         if let Err(e) = self.run_jobs(batch, &mut out) {
             batch.failed.store(true, Ordering::Relaxed);
             out.error = Some(e);
         }
         let ctx = self.instance.store.data_mut();
+        ctx.spatial = None;
         out.commands = ctx.commands.take();
         out.events = ctx.commands.take_events();
         out
@@ -131,7 +138,7 @@ impl Worker {
                 }
                 self.instance.store.data_mut().commands.begin(sys.position, range.index);
                 let before = if self.metered { self.instance.store.get_fuel()? } else { 0 };
-                self.funcs[sys.index].call(&mut self.instance.store, self.desc).map_err(|e| anyhow!("system trapped: {e:?}"))?;
+                self.funcs[sys.module].call(&mut self.instance.store, self.desc).map_err(|e| anyhow!("system trapped: {e:?}"))?;
                 if self.metered {
                     out.fuel[job.system] += before - self.instance.store.get_fuel()?;
                 }

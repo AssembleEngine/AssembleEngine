@@ -54,12 +54,29 @@ impl SystemRecord {
     }
 }
 
+/// One `schedule!` entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// `systems[i]`.
+    Module(usize),
+    /// A host system the engine must provide (`host(name)`).
+    Host(String),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Schema {
     /// Components and event streams, sorted by id.
     pub components: Vec<ComponentDecl>,
-    /// Systems in registration order (the module's `schedule!`).
+    /// The module's own systems, in registration order.
     pub systems: Vec<SystemRecord>,
+    /// The whole `schedule!`: module and host systems in registration order.
+    pub order: Vec<Slot>,
+}
+
+/// Parse one component record (as `ae_sdk::Component::SCHEMA` holds it).
+pub fn component_record(rec: &[u8]) -> Result<ComponentDecl> {
+    ensure!(rec.len() >= 8 && abi::get_u32(rec, 0) == abi::KIND_COMPONENT && abi::get_u32(rec, 4) as usize == rec.len(), "not a component record");
+    component(rec)
 }
 
 /// Payloads of every custom section named `name`, concatenated in file order.
@@ -243,13 +260,23 @@ impl Schema {
         }
         let order = order.context("module has no schedule! listing its systems")?;
         let mut ordered = Vec::new();
+        let mut slots = Vec::new();
+        let mut hosts = BTreeSet::new();
         for name in &order {
+            if let Some(host) = name.strip_prefix(abi::HOST_SYSTEM_PREFIX) {
+                ensure!(!systems.contains_key(host) && !ordered.iter().any(|s: &SystemRecord| s.name == host), "`{host}` is both a module system and a host system");
+                ensure!(hosts.insert(host.to_string()), "schedule! lists host system `{host}` twice");
+                slots.push(Slot::Host(host.to_string()));
+                continue;
+            }
+            ensure!(!hosts.contains(name), "`{name}` is both a module system and a host system");
+            slots.push(Slot::Module(ordered.len()));
             ordered.push(systems.remove(name).with_context(|| format!("schedule! lists `{name}`, which is not a #[system]"))?);
         }
         if let Some(name) = systems.keys().next() {
             bail!("system `{name}` is missing from schedule!");
         }
-        let schema = Schema { components: components.into_values().collect(), systems: ordered };
+        let schema = Schema { components: components.into_values().collect(), systems: ordered, order: slots };
         for s in &schema.systems {
             for (id, _) in &s.terms {
                 let c = schema.component(*id).with_context(|| format!("system `{}` queries unknown component {id:#x}", s.name))?;

@@ -18,24 +18,32 @@ M1 (parallel deterministic sim core) runs end to end: a game is a WASM module bu
 schedule layers from the declared reads and writes, runs each layer's systems on persistent workers,
 merges commands and events by key, and digests the world. The sandbox game at 50k units gives the same
 digest at 1, 2, 4, 8 and 16 workers and in dev and release builds, and runs about 5× faster on 8
-workers than on 1 (mean tick, 4.97-5.18× over four runs). Not done yet: per-worker bump arenas,
-enable-bit columns, batched structural apply, editor hints in the schema, cross-platform digest CI. Details: [docs/PLAN.md](docs/PLAN.md) "M1 progress".
+workers than on 1 (mean tick, 4.97-5.18× over four runs). Guest heap allocation (`Vec`, `BTreeMap`,
+`String`, boxes freed by another worker) from parallel systems is correct, but wasi-libc's one heap
+lock serialises it: an allocation-heavy probe runs slower at 8 workers than at 4. Not done yet:
+per-worker bump arenas, enable-bit columns, batched structural apply, editor hints in the schema,
+cross-platform digest CI. Details: [docs/PLAN.md](docs/PLAN.md) "M1 progress".
 
-M2 (native services) has started in parallel: the columnar navigation service carved from pathsim
+M2 (native services) runs inside the sim: the columnar navigation service carved from pathsim
 (bit-equal to it), movement classes with water (ships, hovercraft, amphibious, fording land units) and
-the spatial query service, all tested and benchmarked standalone. 10k units on the water map run at
-about 4 ms per tick (median) on 8 workers. They are not yet driven from sim systems; the M1 runtime
-now exists, so that is the next step.
-Details: [docs/PLAN.md](docs/PLAN.md) "M2 progress".
+the spatial index are host systems in the game's schedule (`schedule!(host(nav_spawn), orders,
+host(nav), host(spatial), crowding, churn)`), ordered by the same read/write rules as WASM systems. The game
+decides when units move by emitting `MoveOrder` events; its systems query the spatial index. 10k units
+cross the 2560² water map with the same digest at 1, 2, 4 and 8 workers and the same nav state as the
+standalone service, also when units are despawned and replaced under it; a tick takes 4.6-4.75 ms
+(median) on 8 workers, of which the nav system is 4.2-4.3 ms against 3.9-4.0 ms standalone. Details: [docs/PLAN.md](docs/PLAN.md) "M2 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
 | `crates/ae_ecs` | Storage and query layer; flecs behind `flecs_backend`; the column arena | ecs_sim (`flecs.rs`, vendored flecs 4.1.6 + patch) |
 | `crates/ae_wasm` | wasmtime runtime: deterministic config, shared memory, N instances with private stacks and TLS | new, from the M0 spikes |
 | `crates/ae_abi` | Sim module ABI: run descriptor, schema section records, import names (no deps, builds for WASM) | new |
-| `crates/ae_sim` | Runtime: schema, layered schedule, worker crew, deferred commands and events keyed `{system, range, seq}`, digest | new; schedule and digest from ecs_sim |
-| `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!`, typed columns, commands, events | new |
+| `crates/ae_sim` | Runtime: schema, layered schedule, worker crew, host systems, deferred commands and events keyed `{system, range, seq}`, digest | new; schedule and digest from ecs_sim |
+| `crates/ae_services` | Engine services as host systems: `nav_spawn` + `nav` (the nav service over `Body`/`NavAgent` rows, `MoveOrder` events as group commands), `spatial` (index for guest queries) | new |
+| `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!` (with `host(..)` entries), typed columns, commands, events, spatial queries; engine components in `ae_sdk::nav` (feature `nav`) | new |
 | `games/sandbox` | The M1 exit workload (built for wasm32 by the tools; not a workspace member) | new |
+| `games/crossing` | The M2 exit workload: orders and neighbour counts in WASM, the units moved by the nav host system | new |
+| `games/alloc` | Guest heap allocation probe for `tests/guest_alloc.rs` | new |
 | `bins/ae-headless` | Runs a game module at several worker counts; prints digests, timings, speedups | new |
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
@@ -78,11 +86,15 @@ cargo build --release -p ae-headless
 ./target/release/ae-headless --game sandbox --units 50000 --ticks 3000 --workers 1,2,4,8,16 --digest
 ./target/release/ae-headless --game sandbox --units 50000 --ticks 600 --workers 1,8 --param-hi 500   # stress churn
 ./target/release/ae-headless --game sandbox --units 10000 --ticks 300 --workers 1 --fuel            # guest fuel per system
+# Nav inside the sim (M2): 10k units on the water map; --compare also runs the standalone service
+./target/release/ae-headless --game crossing --nav water --units 10000 --ticks 600 --workers 1,2,4,8 --compare
 ./target/release/ae-tool bench sim-dispatch --threads 16 --no-save
 
 # Determinism
 cargo test --release -p ae_sim --test parallel_commands -- --nocapture   # 1..8 workers, same world
 cargo test -p ae_sim --test sandbox                                      # whole runtime, pinned digest
+cargo test --release -p ae_sim --test guest_alloc -- --nocapture         # guest heap from parallel systems
+cargo test --release -p ae_services --test crossing -- --nocapture       # nav in the sim = standalone nav
 cargo test -p ae_nav --test golden                                       # bit-equal to the pathsim prototype
 cargo test -p ae_nav --test reference_sim --test service_vs_reference    # whole sim and service equal pathsim
 cargo test --release -p ae_nav --test water                              # movement classes on water maps

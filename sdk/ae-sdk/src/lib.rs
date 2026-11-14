@@ -28,6 +28,12 @@
 pub use ae_abi as abi;
 pub use ae_sdk_macros::{Component, schedule, system};
 
+// The derive names `::ae_sdk`; this lets the SDK use it on its own types.
+extern crate self as ae_sdk;
+
+#[cfg(feature = "nav")]
+pub mod nav;
+
 use abi::RunDesc;
 
 /// Engine entity id.
@@ -178,6 +184,7 @@ mod host {
         pub fn ae_add(entity: u64, component: u64, data: u32, len: u32);
         pub fn ae_remove(entity: u64, component: u64);
         pub fn ae_emit(stream: u64, data: u32, len: u32);
+        pub fn ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32;
     }
 }
 
@@ -200,6 +207,9 @@ mod host {
         native()
     }
     pub unsafe fn ae_emit(_: u64, _: u32, _: u32) {
+        native()
+    }
+    pub unsafe fn ae_spatial_radius(_: f32, _: f32, _: f32, _: u32, _: u32) -> u32 {
         native()
     }
 }
@@ -225,6 +235,16 @@ pub fn remove<C: Component>(entity: Entity) {
 pub fn emit<E: Event>(event: &E) {
     let (ptr, len) = bytes_of(event);
     unsafe { host::ae_emit(E::ID, ptr, len) }
+}
+
+/// Entities whose centre lies within `r` of `(x, y)`, from the spatial
+/// index the host's `spatial` system built last (a module that calls this
+/// lists `host(spatial)` in its `schedule!`, and runs `after(spatial)` to see
+/// this tick's positions). Fills `out` with up to `out.len()` ids, in the
+/// index's fixed order, and returns the total count, which may be larger.
+pub fn spatial_radius(x: f32, y: f32, r: f32, out: &mut [Entity]) -> usize {
+    let (ptr, cap) = (out.as_mut_ptr() as usize as u32, out.len() as u32);
+    unsafe { host::ae_spatial_radius(x, y, r, ptr, cap) as usize }
 }
 
 /// Builds a spawn record: `Spawn::new().with(&a).with(&b).submit()`.

@@ -1,0 +1,20 @@
+# Crossing game: the M2 exit workload (units of every movement class cross a
+# map with water, moved by the engine's nav service inside the sim). Built
+# for wasm32-wasip1-threads; not part of the main workspace.
+[package]
+name = "ae_game_crossing"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

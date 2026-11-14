@@ -8,6 +8,8 @@
 //! | `ae_add(entity: u64, component: u64, data: u32, len: u32)` | add or overwrite a component |
 //! | `ae_remove(entity: u64, component: u64)` | remove a component |
 //! | `ae_emit(stream: u64, data: u32, len: u32)` | emit an event |
+//! | `ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32` | entities near a point, from the host's spatial index |
+//! | `wasi_snapshot_preview1::sched_yield()` | yield the thread (wasi-libc's malloc lock waits with it) |
 //!
 //! Spawn record (little-endian): `u32 count, u32 reserved`, then `count`
 //! entries of `u64 component, u32 len, u32 reserved, len bytes padded to 8`.
@@ -19,6 +21,7 @@
 //! every value's size. Without one, component ids are ECS ids, passed through.
 
 use crate::command::{Command, CommandBuffer};
+use crate::host::SpatialIndex;
 use ae_ecs::{ComponentId, EntityId};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
@@ -39,7 +42,7 @@ pub struct IdMap {
 }
 
 impl IdMap {
-    fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
+    pub(crate) fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
         let &(component, size) = self.components.get(&id).with_context(|| format!("unknown component id {id:#x}"))?;
         if let Some(len) = len {
             ensure!(len == size, "component {id:#x} is {size} bytes, got {len}");
@@ -53,15 +56,18 @@ pub struct WorkerCtx {
     pub memory: SharedMemory,
     pub commands: CommandBuffer,
     pub ids: Option<Arc<IdMap>>,
+    /// The spatial index of the current batch, if a host system built one.
+    pub spatial: Option<Arc<SpatialIndex>>,
+    hits: Vec<u32>,
 }
 
 impl WorkerCtx {
     pub fn new(memory: SharedMemory) -> Self {
-        Self { memory, commands: CommandBuffer::default(), ids: None }
+        Self { memory, commands: CommandBuffer::default(), ids: None, spatial: None, hits: Vec::new() }
     }
 
     pub fn with_ids(memory: SharedMemory, ids: Arc<IdMap>) -> Self {
-        Self { memory, commands: CommandBuffer::default(), ids: Some(ids) }
+        Self { ids: Some(ids), ..Self::new(memory) }
     }
 
     fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
@@ -110,6 +116,14 @@ pub fn parse_spawn(record: &[u8]) -> Result<Vec<(ComponentId, Vec<u8>)>> {
 
 fn trap(error: anyhow::Error) -> wasmtime::Error {
     wasmtime::Error::msg(format!("{error:#}"))
+}
+
+static YIELDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Times any guest instance in this process waited on a lock with
+/// `sched_yield` (wasi-libc's malloc lock under contention).
+pub fn sched_yields() -> u64 {
+    YIELDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Define the command imports.
@@ -164,6 +178,36 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
             caller.data_mut().commands.push_event(stream, data)
         };
         run().map_err(trap)
+    })?;
+    linker.func_wrap(
+        "env",
+        "ae_spatial_radius",
+        |mut caller: Caller<'_, WorkerCtx>, x: f32, y: f32, r: f32, out: u32, cap: u32| -> wasmtime::Result<u32> {
+            let mut run = || -> Result<u32> {
+                let ctx = caller.data_mut();
+                let index = ctx.spatial.clone().context("no spatial index: schedule `host(spatial)` before querying it")?;
+                ensure!(r.is_finite() && r >= 0.0 && x.is_finite() && y.is_finite(), "bad spatial query ({x}, {y}, r {r})");
+                index.grid.radius_one(ae_spatial::Circle { x, y, r }, &mut ctx.hits);
+                let n = ctx.hits.len().min(cap as usize);
+                let end = out as usize + n * 8;
+                ensure!(end <= ctx.memory.data_size(), "spatial query output {out:#x}+{} is out of bounds", n * 8);
+                // The output buffer is the calling system's own memory.
+                let dst = unsafe { (ctx.memory.data().as_ptr() as *mut u8).add(out as usize) };
+                for (k, &item) in ctx.hits[..n].iter().enumerate() {
+                    unsafe { dst.add(k * 8).cast::<u64>().write_unaligned(index.entities[item as usize]) };
+                }
+                Ok(ctx.hits.len() as u32)
+            };
+            run().map_err(trap)
+        },
+    )?;
+    // wasi-libc's malloc lock calls this while it waits for another
+    // instance to release the heap. Yielding has no effect on results, only
+    // on how the wait is spent. (Every other WASI import traps.)
+    linker.func_wrap("wasi_snapshot_preview1", "sched_yield", || -> i32 {
+        YIELDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::yield_now();
+        0
     })?;
     Ok(())
 }

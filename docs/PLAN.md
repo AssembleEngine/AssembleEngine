@@ -368,17 +368,32 @@ whole tick is under 0.3 ms on one worker, so per-layer dispatch (four wake-ups a
 dominates. Under stress churn the serial structural apply (about 0.25 ms on a wear tick, ~1100
 commands) is the limit, as the M0 spike predicted; system-phase scaling stays at 5.5×.
 
-Not done: per-worker bump arenas for parallel systems (and guest heap allocation from parallel systems
-is untested: every sandbox system uses stack buffers only; wasi-libc's malloc takes a lock in
-threads builds, but that path has not been exercised across instances); enable-bit columns; structural apply batched by
+Guest heap from parallel systems (`cargo test --release -p ae_sim --test guest_alloc -- --nocapture`,
+`games/alloc`): two parallel systems in one layer allocate on every row (vectors grown by push,
+sorts, B-tree maps, strings, and blocks held until the row's next run, so most are freed by another
+instance; one block in 128 is 64-256 KiB, so the heap grows from several instances at once). Every
+result is checked against a stack computation in the guest and every held block's contents before its
+free. 4000 rows, 90 ticks, 128-row ranges: no failed check, identical digests at 8, 1, 2 and 4 workers,
+and the heap grew under 8-way load (263 -> 280 MiB) and then stopped.
+- Found on the first run: under contention wasi-libc's malloc lock calls
+  `wasi_snapshot_preview1::sched_yield`, which the host did not define, so the guest trapped. The host
+  now provides it (a thread yield; counted, `ae_sim::imports::sched_yields`).
+- Correct, but not fast: the one heap lock serialises allocation. 23 million lock waits at 8 workers;
+  wall time 5.75 s at 1 worker, 3.25 s at 2, 2.01 s at 4 and 3.78 s at 8 (8 is slower than 4). The
+  probe is far more allocation-heavy than typical system code, but per-worker bump arenas (planned
+  above) are now a measured need, not a precaution, for any game that allocates per row.
+- The guest heap is not reset between worlds of one runtime (worlds share the module instance);
+  blocks a world leaves allocated stay allocated.
+
+Not done: per-worker bump arenas for parallel systems; enable-bit columns; structural apply batched by
 source/destination table (needs a design that keeps the key order's result); singletons and
 NOT/OPTIONAL terms in the SDK; editor hints in the schema; save→load→continue; cross-platform digest
 CI; per-system wall time inside a parallel layer.
 
 ### M2 progress
 
-Started before M1 finished, on request: the services are built and tested standalone, with columnar
-APIs, and get wired into the sim schedule next (the M1 runtime now exists).
+Started before M1 finished, on request: the services were built and tested standalone, with columnar
+APIs, then wired into the sim schedule as host systems (see "In the sim" below).
 
 Done and tested (`cargo test -p ae_nav -p ae_spatial`; benches `ae-tool bench nav-sim`, `bench spatial`):
 - `ae_nav::reference`: pathsim's whole simulation (`sim.rs`, `commands.rs`, `replay.rs`) lifted
@@ -437,10 +452,74 @@ Deviations from the plan, deliberate:
 - Terrain stays in `ae_nav::terrain`; the planned `ae_terrain` crate split waits for map files (M6) and
   the render heightfield (M3).
 
-Next for M2: run the service from the sim schedule, now that the M1 runtime exists (gather/scatter by entity
-through work ranges, a `MoveGoal` event stream instead of `CommandPayload`), movement classes from game
-data instead of `water_profiles()`, cost overlays, formation facing, and the spatial grid built from
-sim columns each tick.
+In the sim (`cargo test --release -p ae_services --test crossing -- --nocapture`; `ae-headless --game
+crossing --nav water --compare`):
+- Host systems (`ae_sim::host`): native code in the sim schedule. A module places them with
+  `schedule!(.., host(nav), ..)`; a `HostPlugin` given to `Runtime::with_hosts` provides them, checks the
+  module's layout of every engine component they touch against the engine's own record, and creates
+  fresh per-world state. A host system declares query terms, created components, emitted and read
+  streams, `after` and a cadence, and is ordered by the same conflict rules as module systems; its
+  commands and events carry its schedule position and merge with everyone else's. It runs on the
+  coordinating thread after its layer's module systems (which cannot conflict with it), sees its whole
+  query at once, and may use its own threads. State it keeps outside components is a digest part.
+- Engine components (`ae_sdk::nav`, opt-in cargo feature `nav`, fixed ids in `ae_abi::engine`): `Body
+  {x, y, vx, vy, radius}`, `NavAgent {max_speed, profile, mode}`, `Goal {x, y, group}` and the event
+  `MoveOrder {entity, x, y, group}`. Opt-in because the derive writes a schema record for every type it
+  compiles: unconditionally linked, they were registered in the sandbox too and shifted its entity ids
+  (and its pinned digest).
+- `ae_services::nav`: `nav_spawn` (tick 0) spawns a map plan's units; `nav` (every tick) gathers the
+  `Body`+`NavAgent` rows, sorts them by entity, reconciles the service with them (a merge against the
+  units' sorted entities, skipped when nothing joined or left: removals in one batch, new units in
+  entity order), turns the `MoveOrder` events since its last run into group commands (one per `group`,
+  id = group, in order of first event, unit ids ascending), steps the service on its own pool and writes
+  positions, velocities and modes back. The game decides when units move (`games/crossing`: orders at
+  the tick in its parameter). `ae_nav::scenario` plans are now data (`Plan`), so a map's units and
+  orders can be spawned by the sim or added to a standalone service.
+- `ae_services::spatial`: rebuilds the grid from every `Body` in its layer and publishes it to module
+  systems, which call `ae_sdk::spatial_radius` (import `ae_spatial_radius`, answered on the calling
+  worker by `Grid::radius_one`, no thread pool). The index is only replaced in its own layer, so a
+  query's answer is deterministic wherever the querying system sits; `after(spatial)` gets this tick's.
+- Checks: 1,000 units on the 768² water map for 300 ticks reach the same nav state hash and
+  bit-identical bodies as the same plan driven through the standalone service, and the same pinned world
+  digest (nav state included) in dev and release and at 1/2/4/8 workers; 250 guest spatial queries equal
+  brute force. A second world exercises units changing under the service: orders at tick 20 (when every
+  row also moves to another table, as the game adds a component), and at tick 150 a game system
+  despawns a seventh of the units and spawns replacements in the same tick (143 removals and 143 joins
+  with recycled entity ids). Its bodies and nav state equal a standalone service driven through the same
+  removals and additions at the same step, at 1 and 8 workers.
+- Host systems run whole tables, so a `Staggered` host cadence is rejected.
+
+Exit run, 10k units on the 2560² water map, 600 ticks (`--compare`: the same plan through the
+standalone service at the same thread count; nav state equal at every count; digests equal). Medians,
+ranges over two runs:
+
+| Workers | Sim tick | Nav host system | Standalone service | Spatial | Module systems (orders, crowding, churn) |
+|---|---|---|---|---|---|
+| 1 | 17.3-17.7 ms | 16.6-16.9 ms | 16.4-16.6 ms | 0.19-0.20 ms | 0.51-0.53 ms |
+| 2 | 10.1-10.5 ms | 9.6-9.9 ms | 9.2-9.4 ms | 0.20-0.23 ms | 0.33-0.37 ms |
+| 4 | 6.4-6.5 ms | 6.0 ms | 5.4-5.7 ms | 0.20-0.22 ms | 0.23-0.25 ms |
+| 8 | 4.62-4.75 ms | 4.20-4.28 ms | 3.89-3.96 ms | 0.21-0.22 ms | 0.23-0.25 ms |
+
+Run to 3,000 ticks (100 s) at 1 and 8 workers: same digest, nav state equal to the standalone service;
+8 workers 4.64 ms median (nav system 4.19 ms vs 3.86 ms standalone), p99 13.0 ms.
+
+The nav step itself costs what it does standalone (median 4.0-4.1 ms at 8 workers vs 3.84-3.96 ms over
+two runs); gather, reconcile, orders, columns and scatter add 0.13 ms. A first version looked units up
+in the service's entity map and binary-searched rows per unit: 0.6 ms more. A 32-unit spatial cell
+made the rebuild 0.4 ms (it clears and prefix-sums one counter per cell, 410k cells on this map); 64
+gives 0.2 ms and identical hits. Building a world (terrain, hierarchy) takes 2.5 s at 8 threads.
+
+Re-measured after these changes (host systems touch the tick loop, the crew and the scenarios): M1's
+sandbox at 50k units, 3000 ticks, 8 workers: 5.35-5.45× mean tick after setup in both run orders (was
+4.97-5.18×), same digest. `bench-diff` against the baselines: `spatial` 10/10 unchanged, `nav-sim` 37
+unchanged and 3 improved, `sim-dispatch` 43 unchanged, 2 improved, 1 flagged (`setup_tick_8t` under
+stress churn 22.6 -> 25.0 ms: a single-sample metric, the tick that spawns 50k units, which varies
+25-37 ms between headless runs) and the 16-thread rows absent (the baseline was recorded with
+`--threads 16`).
+
+Next for M2: movement classes from game data instead of `water_profiles()`, cost overlays, formation
+facing, more order kinds than `MoveTo` in `MoveOrder` (route, formation, stop), and running host systems
+beside a layer's module systems instead of after them.
 
 ### M0 risk spikes
 

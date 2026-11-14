@@ -15,7 +15,9 @@ dependencies = [
 name = "ae-headless"
 version = "0.0.1"
 dependencies = [
+ "ae_nav",
  "ae_profile",
+ "ae_services",
  "ae_sim",
  "ae_wasm",
  "anyhow",
@@ -108,6 +110,20 @@ name = "ae_render_abi"
 version = "0.0.1"
 
 [[package]]
+name = "ae_services"
+version = "0.0.1"
+dependencies = [
+ "ae-sdk",
+ "ae_abi",
+ "ae_ecs",
+ "ae_nav",
+ "ae_profile",
+ "ae_sim",
+ "ae_spatial",
+ "anyhow",
+]
+
+[[package]]
 name = "ae_sim"
 version = "0.0.1"
 dependencies = [
@@ -115,6 +131,7 @@ dependencies = [
  "ae_abi",
  "ae_ecs",
  "ae_profile",
+ "ae_spatial",
  "ae_wasm",
  "anyhow",
  "wasmtime",

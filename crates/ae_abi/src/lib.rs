@@ -32,6 +32,9 @@
 
 pub const SCHEMA_SECTION: &str = "ae.schema";
 pub const SYSTEM_EXPORT_PREFIX: &str = "ae_sys_";
+/// A `schedule!` entry naming a host (native) system rather than one of the
+/// module's own: `host:<name>`. The host must provide a system of that name.
+pub const HOST_SYSTEM_PREFIX: &str = "host:";
 
 pub const KIND_COMPONENT: u32 = 1;
 pub const KIND_SYSTEM: u32 = 2;
@@ -241,4 +244,22 @@ pub mod imports {
     pub const REMOVE: &str = "ae_remove";
     /// `ae_emit(stream: u64, data: u32, len: u32)`.
     pub const EMIT: &str = "ae_emit";
+    /// `ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32`:
+    /// entities whose centre is within `r` of `(x, y)` in the spatial index
+    /// the host rebuilt last; writes up to `cap` entity ids (`u64`) at `out`
+    /// and returns the total count.
+    pub const SPATIAL_RADIUS: &str = "ae_spatial_radius";
+}
+
+/// Stable ids of the components engine services read and write (defined in
+/// `ae_sdk::nav`; host services check the module's layout against them).
+pub mod engine {
+    /// `Body { x, y, vx, vy, radius: f32 }`: a moving body.
+    pub const BODY: u64 = 0xAE00_0000_0000_0001;
+    /// `NavAgent { max_speed: f32, profile: u32, mode: u32 }`.
+    pub const NAV_AGENT: u64 = 0xAE00_0000_0000_0002;
+    /// `Goal { x, y: f32, group: u64 }`: a destination the map gave the unit.
+    pub const GOAL: u64 = 0xAE00_0000_0000_0003;
+    /// Event `MoveOrder { entity, x, y, group }`.
+    pub const MOVE_ORDER: u64 = 0xAE00_0000_0000_0004;
 }

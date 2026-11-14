@@ -9,6 +9,8 @@ license.workspace = true
 tracy = ["ae_profile/tracy"]
 
 [dependencies]
+ae_nav.workspace = true
+ae_services.workspace = true
 ae_sim.workspace = true
 ae_wasm.workspace = true
 ae_profile.workspace = true

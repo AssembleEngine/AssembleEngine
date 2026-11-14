@@ -8,3 +8,9 @@ license.workspace = true
 [dependencies]
 ae_abi.workspace = true
 ae-sdk-macros.workspace = true
+
+[features]
+# Engine service components (`ae_sdk::nav`). Opt-in: the derive writes a
+# schema record for every type it compiles, and a module's components are
+# registered (and take entity ids) whether its systems use them or not.
+nav = []

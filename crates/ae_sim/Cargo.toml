@@ -9,6 +9,7 @@ license.workspace = true
 ae_abi.workspace = true
 ae_ecs.workspace = true
 ae_profile.workspace = true
+ae_spatial.workspace = true
 ae_wasm.workspace = true
 anyhow.workspace = true
 wasmtime.workspace = true

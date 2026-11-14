@@ -1,0 +1,16 @@
+[package]
+name = "ae_services"
+description = "Native engine services as host systems in the sim schedule: navigation and the spatial index."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_abi.workspace = true
+ae_ecs.workspace = true
+ae_nav.workspace = true
+ae_profile.workspace = true
+ae_sim.workspace = true
+ae_spatial.workspace = true
+ae-sdk = { workspace = true, features = ["nav"] }
+anyhow.workspace = true

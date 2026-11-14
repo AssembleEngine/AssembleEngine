@@ -49,7 +49,7 @@ fn sandbox_is_identical_at_every_worker_count() -> Result<()> {
     let cfg = RuntimeConfig { max_workers: workers, range_rows: 256, parallel_min_rows: 512, ..RuntimeConfig::default() };
     let mut rt = Runtime::new(&wasm, cfg)?;
 
-    let names = |layer: &Vec<usize>| layer.iter().map(|&i| rt.schema.systems[i].name.clone()).collect::<Vec<_>>();
+    let names = |layer: &Vec<usize>| layer.iter().map(|&i| rt.system_name(i).to_string()).collect::<Vec<_>>();
     let layers: Vec<Vec<String>> = rt.schedule.layers.iter().map(names).collect();
     assert_eq!(layers, [vec!["setup", "think"], vec!["integrate"], vec!["wear"], vec!["census"]]);
 

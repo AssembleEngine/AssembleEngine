@@ -13,6 +13,7 @@ pub mod command;
 pub mod crew;
 pub mod digest;
 pub mod events;
+pub mod host;
 pub mod imports;
 pub mod runtime;
 pub mod schedule;

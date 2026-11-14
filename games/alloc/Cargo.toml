@@ -1,0 +1,20 @@
+# Allocation probe: guest heap use from parallel systems, driven by
+# crates/ae_sim/tests/guest_alloc.rs. Built for wasm32-wasip1-threads; not
+# part of the main workspace.
+[package]
+name = "ae_game_alloc"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

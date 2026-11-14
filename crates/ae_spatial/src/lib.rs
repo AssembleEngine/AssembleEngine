@@ -186,15 +186,21 @@ impl Grid {
 
     /// Items with centre within each circle; hits ascending by item index.
     pub fn radius(&self, queries: &[Circle], out: &mut Hits) {
-        self.batch(queries.len(), out, false, |q, items, _| {
-            let Circle { x, y, r } = queries[q];
-            let r2 = r * r;
-            self.for_cells(x - r, y - r, x + r, y + r, |i| {
-                let (dx, dy) = (self.x[i as usize] - x, self.y[i as usize] - y);
-                if dx * dx + dy * dy <= r2 { items.push(i); }
-            });
-            items.sort_unstable();
+        self.batch(queries.len(), out, false, |q, items, _| self.radius_one(queries[q], items));
+    }
+
+    /// One radius query on the calling thread (no thread pool): replaces
+    /// `items` with the items whose centre is within the circle, ascending.
+    /// Same hits as [`Self::radius`].
+    pub fn radius_one(&self, c: Circle, items: &mut Vec<u32>) {
+        let Circle { x, y, r } = c;
+        let r2 = r * r;
+        items.clear();
+        self.for_cells(x - r, y - r, x + r, y + r, |i| {
+            let (dx, dy) = (self.x[i as usize] - x, self.y[i as usize] - y);
+            if dx * dx + dy * dy <= r2 { items.push(i); }
         });
+        items.sort_unstable();
     }
 
     /// Items with centre inside each box; hits ascending by item index.
