@@ -1241,6 +1241,35 @@ Desync localisation (`--replay FILE --bisect --inject TICK:Component.field:ROW`)
   per-tick digests and rows (the relay's job); no Windows or aarch64 runs (no such machines here),
   so "replay digests equal on Linux and Windows" is not checked.
 
+Lockstep over UDP (`ae_net`, `ae-relay`, `ae-headless --connect`):
+- Relay-paced: `ae-relay --players N --ticks T [--hz 30]` waits for N clients whose world headers
+  agree (the replay header), then closes one bundle per tick on its own clock from every input a
+  player sent for that tick or earlier, by player, then intended tick, then the player's order; a
+  late input goes into a later bundle, so no client waits for another, only for the relay. Clients
+  run tick t only with bundle t.
+- Loss needs no handshakes: every 10 ms a client resends all inputs the relay has not reported taken,
+  the next bundle it needs and its recent digests; the relay sends each client the bundles from the
+  one it needs (up to 48 KB per datagram). Inputs are scheduled `rtt/2` in ticks plus 2 ahead
+  (adaptive input delay from the echoed timestamps).
+- The relay compares the digests every client reports at each checkpoint and at the end (a desync
+  is reported with each player's digest and makes it exit 1), and `--record` writes the game as a
+  replay (bundles, plus the agreed digests as checkpoints) that `ae-headless --replay --verify` checks
+  alone. `ae_net::Emulator` delays (latency + jitter, so reordering) and drops (seeded) outgoing
+  datagrams on either side.
+- Clients with `--script orders` send their own player's orders (at most 32 per order tick);
+  `--inject` makes one client diverge.
+- Run: relay + 4 clients (2,000 units, 512 cells, 2 workers each), 40 ms latency + 0..30 ms jitter
+  + 5% loss on every sender, 300 ticks: 29.4 Hz, 1,024 commands (1 taken late), 10 digest rounds, in
+  sync, the relay dropped 922 of 17,280 datagrams; the recorded replay verifies (10 checkpoints).
+- Test `bins/ae-headless/tests/lockstep.rs` (builds `ae-relay`): 3 clients, 30 ms + 0..20 ms jitter +
+  5% loss, 240 ticks: in sync, 8 digest rounds, every client at the agreed digest, the recording
+  verifies; then a bit flipped in one client after tick 100 is reported as a desync at tick 120 (the
+  next checkpoint) and the relay exits 1.
+- Not done: QUIC (`quinn`) as planned; plain UDP with idempotent packets instead, no encryption or
+  authentication; players cannot join late or reconnect; the relay does not validate ownership;
+  checkpoints only carry totals over the network (parts stay local), so a network desync is
+  localised by replaying the recording with `--bisect` on one machine.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

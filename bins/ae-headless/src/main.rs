@@ -27,10 +27,14 @@
 //! differs from a clean one: tick, digest parts, entities and fields.
 //! `AE_DIGEST_COST=1` times the world digest.
 //!
+//! `--connect ADDR --player P` plays in lockstep with `ae-relay` (see
+//! `client.rs`).
+//!
 //! `--compare` also runs the same plan through the standalone nav service
 //! (`ae_nav::scenario`) at each worker count: its state hash must equal the
 //! sim's nav digest, and both tick times are printed.
 
+mod client;
 mod replay;
 
 use ae_nav::scenario::Scenario;
@@ -47,7 +51,8 @@ use std::time::Instant;
 const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]
        ae-headless --game NAME --nav water ... --record FILE.aerep [--script orders] [--checkpoint-every N]
        ae-headless --game NAME --replay FILE.aerep [--verify] [--workers N]
-       ae-headless --game NAME --replay FILE.aerep --bisect --inject TICK:Component.field:ROW";
+       ae-headless --game NAME --replay FILE.aerep --bisect --inject TICK:Component.field:ROW
+       ae-headless --game NAME --nav water ... --connect RELAY_ADDR --player P [--script orders] [--latency MS] [--jitter MS] [--loss PCT]";
 
 struct Opts {
     game: String,
@@ -75,10 +80,16 @@ struct Opts {
     checkpoint_every: u64,
     bisect: bool,
     inject: Option<replay::Inject>,
+    connect: Option<String>,
+    player: u32,
+    latency: u64,
+    jitter: u64,
+    loss: f64,
+    seed: u64,
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None, connect: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -112,6 +123,12 @@ fn parse() -> Result<Opts> {
             "--replay" => o.replay = Some(value()?),
             "--verify" => o.verify = true,
             "--bisect" => o.bisect = true,
+            "--connect" => o.connect = Some(value()?),
+            "--player" => o.player = value()?.parse()?,
+            "--latency" => o.latency = value()?.parse()?,
+            "--jitter" => o.jitter = value()?.parse()?,
+            "--loss" => o.loss = value()?.parse::<f64>()? / 100.0,
+            "--seed" => o.seed = value()?.parse()?,
             "--inject" => o.inject = Some(replay::Inject::parse(&value()?)?),
             "--checkpoint-every" => o.checkpoint_every = value()?.parse()?,
             "--script" => match value()?.as_str() {
@@ -150,6 +167,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool> {
     let o = parse()?;
+    if let Some(relay) = &o.connect {
+        return client::run(&o, relay, o.player);
+    }
     if let Some(path) = &o.record {
         return replay::record(&o, path);
     }

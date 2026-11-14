@@ -1,0 +1,11 @@
+[package]
+name = "ae_net"
+description = "Relay-paced lockstep over UDP: packets carrying tick bundles, inputs and digests, and a network emulator (latency, jitter, loss)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_sim.workspace = true
+ae_replay.workspace = true
+anyhow.workspace = true

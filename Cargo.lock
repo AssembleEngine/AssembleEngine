@@ -34,12 +34,23 @@ dependencies = [
  "ae-sdk",
  "ae_abi",
  "ae_nav",
+ "ae_net",
  "ae_profile",
  "ae_replay",
  "ae_services",
  "ae_sim",
  "ae_view",
  "ae_wasm",
+ "anyhow",
+]
+
+[[package]]
+name = "ae-relay"
+version = "0.0.1"
+dependencies = [
+ "ae_net",
+ "ae_replay",
+ "ae_sim",
  "anyhow",
 ]
 
@@ -125,6 +136,15 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ae_net"
+version = "0.0.1"
+dependencies = [
+ "ae_replay",
+ "ae_sim",
+ "anyhow",
 ]
 
 [[package]]

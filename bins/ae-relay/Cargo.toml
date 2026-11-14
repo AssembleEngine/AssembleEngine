@@ -1,0 +1,12 @@
+[package]
+name = "ae-relay"
+description = "Lockstep relay: paces the game, closes one command bundle per tick from the players' inputs, compares their digests, records the replay. Runs no sim."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_net.workspace = true
+ae_replay.workspace = true
+ae_sim.workspace = true
+anyhow.workspace = true

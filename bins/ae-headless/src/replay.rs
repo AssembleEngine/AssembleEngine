@@ -43,7 +43,7 @@ fn map_of(name: &str) -> Result<Map> {
 }
 
 /// The world's header, from the module and the run's configuration.
-fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_every: u64) -> Result<Header> {
+pub fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_every: u64) -> Result<Header> {
     let schema = ae_sim::schema::custom_sections(wasm, ae_abi::SCHEMA_SECTION)?;
     let mut config = BTreeMap::new();
     if let Some((map, cells, teams)) = nav {
@@ -54,7 +54,7 @@ fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_ever
     Ok(Header { engine: env!("CARGO_PKG_VERSION").into(), module_hash: ae_replay::hash(wasm), schema_hash: ae_replay::hash(&schema), param, config, checkpoint_every })
 }
 
-fn runtime(wasm: &[u8], nav: Option<(Map, i32, u32)>, workers: usize, range_rows: usize) -> Result<Runtime> {
+pub fn runtime(wasm: &[u8], nav: Option<(Map, i32, u32)>, workers: usize, range_rows: usize) -> Result<Runtime> {
     let cfg = RuntimeConfig { max_workers: workers, range_rows, ..RuntimeConfig::default() };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
     if let Some((map, cells, teams)) = nav {
@@ -72,10 +72,11 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// `--script orders`: two players; every 40 ticks (from tick 5) each
-/// orders about one unit in 16 (by a hash of entity and tick) to a point up
-/// to 800 m away, as one group. Deterministic from the world alone.
-fn orders(rt: &Runtime, world: &World) -> Result<TickBundle> {
+/// `--script orders`: `players` players (at most 16); every 40 ticks (from
+/// tick 5) each orders about one unit in 16 (by a hash of entity and tick)
+/// to a point up to 800 m away, as one group. Deterministic from the world
+/// alone.
+pub fn orders(rt: &Runtime, world: &World, players: u32) -> Result<TickBundle> {
     let tick = world.tick;
     let mut b = TickBundle::new(tick);
     if tick % 40 != 5 {
@@ -84,7 +85,7 @@ fn orders(rt: &Runtime, world: &World) -> Result<TickBundle> {
     for (e, bytes) in rt.rows(world, "Body")? {
         let h = mix(e ^ tick.rotate_left(17));
         let player = (h % 16) as u32;
-        if player >= 2 {
+        if player >= players {
             continue;
         }
         let body: Body = unsafe { bytes.as_ptr().cast::<Body>().read_unaligned() };
@@ -113,7 +114,7 @@ pub fn record(o: &Opts, path: &str) -> Result<bool> {
     let (mut commands, mut checkpoints) = (0usize, 0usize);
     let started = Instant::now();
     for _ in 0..o.ticks {
-        let bundle = if o.script { orders(&rt, &world)? } else { TickBundle::new(world.tick) };
+        let bundle = if o.script { orders(&rt, &world, 2)? } else { TickBundle::new(world.tick) };
         commands += bundle.commands.len();
         rec.bundle(&bundle)?;
         rt.tick_with(&mut world, o.workers[0], &bundle)?;
@@ -195,7 +196,7 @@ impl Inject {
     }
 
     /// Apply it if the world is at its tick; the entity it hit.
-    fn apply(&self, rt: &Runtime, w: &mut World) -> Result<Option<u64>> {
+    pub fn apply(&self, rt: &Runtime, w: &mut World) -> Result<Option<u64>> {
         if w.tick != self.tick {
             return Ok(None);
         }
