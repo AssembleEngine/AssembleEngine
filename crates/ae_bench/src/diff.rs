@@ -90,6 +90,7 @@ pub fn diff(base: &[Report], head: &[Report], thresholds: Thresholds) -> Diff {
         unit: String,
         value: f64,
         machine: String,
+        tolerance: Option<f64>,
     }
     let index = |reports: &[Report]| -> BTreeMap<Key, Entry> {
         let mut map = BTreeMap::new();
@@ -97,7 +98,7 @@ pub fn diff(base: &[Report], head: &[Report], thresholds: Thresholds) -> Diff {
             for r in &report.records {
                 map.insert(
                     (report.suite.clone(), r.metric.clone()),
-                    Entry { kind: r.kind, unit: r.unit.clone(), value: r.value, machine: report.machine.clone() },
+                    Entry { kind: r.kind, unit: r.unit.clone(), value: r.value, machine: report.machine.clone(), tolerance: r.tolerance },
                 );
             }
         }
@@ -116,7 +117,11 @@ pub fn diff(base: &[Report], head: &[Report], thresholds: Thresholds) -> Diff {
             let verdict = match (b, h) {
                 (None, Some(_)) => Verdict::Added,
                 (Some(_), None) => Verdict::Removed,
-                (Some(b), Some(h)) => judge(b.kind, b.value, h.value, b.machine == h.machine, thresholds),
+                (Some(b), Some(h)) => {
+                    // A record's own tolerance widens the global one (either side's).
+                    let own = b.tolerance.into_iter().chain(h.tolerance).fold(thresholds.time, f64::max);
+                    judge(b.kind, b.value, h.value, b.machine == h.machine, Thresholds { time: own, ..thresholds })
+                }
                 (None, None) => unreachable!(),
             };
             let unit = h.or(b).map(|e| e.unit.clone()).unwrap_or_default();
@@ -153,7 +158,7 @@ mod tests {
             machine: machine.into(),
             records: records
                 .iter()
-                .map(|(m, kind, value)| Record { metric: m.to_string(), kind: *kind, value: *value, unit: "ns".into(), spread: 0.0 })
+                .map(|(m, kind, value)| Record { metric: m.to_string(), kind: *kind, value: *value, unit: "ns".into(), spread: 0.0, tolerance: None })
                 .collect(),
         }
     }
@@ -174,6 +179,20 @@ mod tests {
         assert_eq!(get("c_up"), Verdict::Regressed);
         assert_eq!(get("c_down"), Verdict::Improved);
         assert_eq!(get("c_same"), Verdict::Same);
+    }
+
+    #[test]
+    fn a_record_tolerance_widens_the_global_one() {
+        let mut base = report("m", &[("cpu", Kind::Time, 100.0), ("gpu", Kind::Time, 100.0)]);
+        base.records[0].tolerance = Some(0.25);
+        let head = report("m", &[("cpu", Kind::Time, 120.0), ("gpu", Kind::Time, 120.0)]);
+        let v = verdicts(base.clone(), head.clone());
+        let get = |v: &[(String, Verdict)], name: &str| v.iter().find(|(m, _)| m == name).unwrap().1;
+        assert_eq!(get(&v, "cpu"), Verdict::Same);
+        assert_eq!(get(&v, "gpu"), Verdict::Regressed);
+        let mut slower = head;
+        slower.records[0].value = 130.0;
+        assert_eq!(get(&verdicts(base, slower), "cpu"), Verdict::Regressed);
     }
 
     #[test]

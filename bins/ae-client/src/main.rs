@@ -39,11 +39,15 @@
 //! subdivision settles) and writes a binary PPM; with units it first runs
 //! `--ticks` sim ticks (default 300) and shows that tick.
 //!
+//! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
+//! (see `bench.rs`; `--bench list` names them).
+//!
 //! `--seconds` closes the window after S seconds; `--exercise` resizes,
 //! minimizes and restores on a schedule. Validation follows
 //! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
 //! the layer reported anything.
 
+mod bench;
 mod ground;
 mod sim;
 mod watch;
@@ -96,12 +100,21 @@ struct Options {
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
+    /// `--bench`: scenes to measure instead of opening a window.
+    bench: Option<bench::BenchOptions>,
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--capture FILE.ppm]";
+impl Default for Options {
+    fn default() -> Self {
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None }
+    }
+}
+
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--capture FILE.ppm]
+       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false };
+    let mut o = Options::default();
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -141,6 +154,12 @@ fn parse() -> Result<Options> {
             "--tileset-size" => o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?,
             "--weights" => o.weights = true,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
+            "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
+            "--frames" => o.bench.get_or_insert_with(Default::default).frames = value("--frames", &mut args)?.parse().context("--frames")?,
+            "--warmup" => o.bench.get_or_insert_with(Default::default).warmup = value("--warmup", &mut args)?.parse().context("--warmup")?,
+            "--label" => o.bench.get_or_insert_with(Default::default).label = Some(value("--label", &mut args)?),
+            "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
+            "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
             "-h" | "--help" => {
@@ -149,6 +168,9 @@ fn parse() -> Result<Options> {
             }
             other => bail!("unknown argument {other:?}\n{USAGE}"),
         }
+    }
+    if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
+        bail!("--frames, --warmup, --label, --out and --no-save go with --bench\n{USAGE}");
     }
     Ok(o)
 }
@@ -428,6 +450,9 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
 }
 
 fn run(o: Options) -> Result<ExitCode> {
+    if let Some(b) = &o.bench {
+        return bench::run(b);
+    }
     let (source, nav) = match o.map {
         MapKind::Demo => (None, None),
         _ => {

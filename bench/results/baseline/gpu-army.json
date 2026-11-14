@@ -1,0 +1,125 @@
+{
+  "suite": "gpu-army",
+  "commit": "785e1d3-dirty",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "gpu_total",
+      "kind": "time",
+      "value": 409824.00614302605,
+      "unit": "ns",
+      "spread": 0.6852502070393252
+    },
+    {
+      "metric": "pass/units reset",
+      "kind": "time",
+      "value": 768.0000271648169,
+      "unit": "ns",
+      "spread": 0.041666679298537075,
+      "tolerance": 2.6666665723443894
+    },
+    {
+      "metric": "pass/units cull",
+      "kind": "time",
+      "value": 4447.9998759925365,
+      "unit": "ns",
+      "spread": 0.20143881804106717,
+      "tolerance": 0.46043166751280645
+    },
+    {
+      "metric": "pass/units count",
+      "kind": "time",
+      "value": 2015.9999839961529,
+      "unit": "ns",
+      "spread": 0.4126984979420589,
+      "tolerance": 1.0158730239374387
+    },
+    {
+      "metric": "pass/units count read",
+      "kind": "time",
+      "value": 1760.0000137463212,
+      "unit": "ns",
+      "spread": 0.05454547258501874,
+      "tolerance": 1.163636354547887
+    },
+    {
+      "metric": "pass/terrain lod",
+      "kind": "time",
+      "value": 214399.99341964722,
+      "unit": "ns",
+      "spread": 0.0388059888213487
+    },
+    {
+      "metric": "pass/terrain",
+      "kind": "time",
+      "value": 148095.9951877594,
+      "unit": "ns",
+      "spread": 0.008426980423912775
+    },
+    {
+      "metric": "pass/units",
+      "kind": "time",
+      "value": 37888.00165057182,
+      "unit": "ns",
+      "spread": 0.027026936675475493
+    },
+    {
+      "metric": "cpu_frame",
+      "kind": "time",
+      "value": 65630.99061203004,
+      "unit": "ns",
+      "spread": 0.4540541097623615,
+      "tolerance": 0.5
+    },
+    {
+      "metric": "cpu_record",
+      "kind": "time",
+      "value": 50940.997898578644,
+      "unit": "ns",
+      "spread": 0.433442637576722,
+      "tolerance": 0.5
+    },
+    {
+      "metric": "leaves",
+      "kind": "counter",
+      "value": 82500.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "drawn",
+      "kind": "counter",
+      "value": 13800.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units_visible",
+      "kind": "info",
+      "value": 8606.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "frames",
+      "kind": "info",
+      "value": 300.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "width",
+      "kind": "info",
+      "value": 1280.0,
+      "unit": "px",
+      "spread": 0.0
+    },
+    {
+      "metric": "height",
+      "kind": "info",
+      "value": 720.0,
+      "unit": "px",
+      "spread": 0.0
+    }
+  ]
+}

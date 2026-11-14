@@ -25,6 +25,11 @@ pub struct Record {
     pub unit: String,
     /// Relative spread of the samples ((p90 - p10) / median); 0 for exact values.
     pub spread: f64,
+    /// Allowed relative increase of this time before `bench-diff` calls it
+    /// a regression, when larger than the global `--time-tolerance` (for
+    /// metrics known to be noisier, such as short CPU phases).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,7 +52,14 @@ impl Report {
             value: sample.median_ns,
             unit: "ns".to_string(),
             spread: sample.spread,
+            tolerance: None,
         });
+    }
+
+    /// A time with its own regression tolerance (see [`Record::tolerance`]).
+    pub fn time_with_tolerance(&mut self, metric: &str, sample: crate::measure::Sample, tolerance: f64) {
+        self.time(metric, sample);
+        self.records.last_mut().unwrap().tolerance = Some(tolerance);
     }
 
     pub fn counter(&mut self, metric: &str, value: u64, unit: &str) {
@@ -59,7 +71,7 @@ impl Report {
     }
 
     fn push_exact(&mut self, metric: &str, kind: Kind, value: u64, unit: &str) {
-        self.records.push(Record { metric: metric.to_string(), kind, value: value as f64, unit: unit.to_string(), spread: 0.0 });
+        self.records.push(Record { metric: metric.to_string(), kind, value: value as f64, unit: unit.to_string(), spread: 0.0, tolerance: None });
     }
 
     /// Write to `<dir>/<label>/<suite>.json` and return the path.

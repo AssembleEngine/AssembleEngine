@@ -419,6 +419,11 @@ impl<P> Headless<P> {
         self.executor.stats()
     }
 
+    /// See [`Executor::take_gpu_frames`].
+    pub fn take_gpu_frames(&mut self) -> Vec<Vec<f32>> {
+        self.executor.take_gpu_frames()
+    }
+
     /// Wait, then drop the executor; its statistics.
     pub fn finish(mut self) -> Result<ExecutorStats> {
         self.wait()?;

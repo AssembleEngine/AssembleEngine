@@ -51,7 +51,7 @@ Terrain edits the sim makes reach the render heightfield (`ae-client --quake 60`
 publishes landed ground changes, and the renderer patches its textures and error pyramid in place.
 Terrain is dressed by material tilesets (reusable surface layers, projected by orientation and
 height-blended; procedural `temperate` and `desert` sets for now, [docs/tilesets.md](docs/tilesets.md)).
-The GPU bench and threaded recording are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+`ae-client --bench all` measures fixed scenes on the GPU for `bench-diff`. Threaded recording is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
@@ -100,6 +100,7 @@ cargo build --release -p ae-tool
 ./target/release/ae-tool bench all --label mychange            # writes bench/results/mychange/
 ./target/release/ae-tool bench-diff bench/results/baseline bench/results/mychange   # exit 1 on regression
 cargo bench -p ae_framegraph -p ae_nav     # criterion micro benches
+./target/release/ae-client --bench all --label mychange          # GPU scenes (needs a GPU): bench/results/mychange/gpu-*.json
 
 # Profiling
 cargo run --release -p ae-tool --features tracy -- bench nav --quick --no-save   # attach Tracy

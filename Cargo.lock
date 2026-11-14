@@ -15,6 +15,7 @@ dependencies = [
 name = "ae-client"
 version = "0.0.1"
 dependencies = [
+ "ae_bench",
  "ae_nav",
  "ae_render",
  "ae_services",

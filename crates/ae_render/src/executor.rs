@@ -197,7 +197,14 @@ pub struct Executor<R> {
     frame: u64,
     stats: ExecutorStats,
     gpu_accum: Vec<(f64, u64)>,
+    /// Per-frame GPU pass times (ms, baked order), oldest first, while
+    /// profiling; capped at [`MAX_GPU_FRAMES`] and drained by
+    /// [`Executor::take_gpu_frames`].
+    gpu_frames: Vec<Vec<f32>>,
 }
+
+/// Frames of per-pass GPU times kept until taken (older ones are dropped).
+pub const MAX_GPU_FRAMES: usize = 16_384;
 
 impl<R> Executor<R> {
     pub fn new(gpu: Arc<GpuDevice>, config: ExecutorConfig) -> Result<Self> {
@@ -243,6 +250,7 @@ impl<R> Executor<R> {
             frame: 0,
             stats: ExecutorStats::default(),
             gpu_accum: Vec::new(),
+            gpu_frames: Vec::new(),
         })
     }
 
@@ -320,6 +328,7 @@ impl<R> Executor<R> {
         self.stats.physical_resources = baked.physical.len();
         self.stats.estimated_bytes = baked.estimated_bytes();
         self.gpu_accum = vec![(0.0, 0); baked.passes.len()];
+        self.gpu_frames.clear();
         self.baked = Some(baked);
         self.graph = graph;
         Ok(true)
@@ -355,16 +364,30 @@ impl<R> Executor<R> {
             };
             if result.is_ok() {
                 let period = self.gpu.timestamp_period as f64;
+                let mut frame = Vec::with_capacity(data.len() / 2);
                 for (pass, pair) in data.as_chunks::<2>().0.iter().enumerate() {
+                    let ms = pair[1].saturating_sub(pair[0]) as f64 * period / 1.0e6;
+                    frame.push(ms as f32);
                     if let Some(accum) = self.gpu_accum.get_mut(pass) {
-                        accum.0 += pair[1].saturating_sub(pair[0]) as f64 * period / 1.0e6;
+                        accum.0 += ms;
                         accum.1 += 1;
                     }
                 }
+                if self.gpu_frames.len() >= MAX_GPU_FRAMES {
+                    self.gpu_frames.remove(0);
+                }
+                self.gpu_frames.push(frame);
             }
             slot.pending_queries = 0;
         }
         Ok(FrameToken { slot: slot_index })
+    }
+
+    /// The per-pass GPU times (ms, baked order as `stats().pass_names`) of
+    /// the frames whose timestamps were collected since the last call (or
+    /// the last rebake), oldest first. Empty unless profiling.
+    pub fn take_gpu_frames(&mut self) -> Vec<Vec<f32>> {
+        std::mem::take(&mut self.gpu_frames)
     }
 
     pub fn image_available(&self, token: FrameToken) -> vk::Semaphore {

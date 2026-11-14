@@ -947,7 +947,44 @@ numbers in [docs/tilesets.md](tilesets.md)):
   (the palette's snow and dry bands are gone with a tileset); no runtime tileset swap; one tile per
   layer (macro variation only, no stochastic tiling).
 
-Next in M3: the GPU bench (`ae-client --bench`, JSON for `bench-diff`), and threaded recording.
+GPU bench (`ae-client --bench <scene>[,<scene>...]|all|list [--frames N] [--warmup N] [--label NAME]
+[--out DIR] [--no-save]`):
+- Six fixed scenes, offscreen at 1280x720 with per-pass timestamps: `overview` (water map middle
+  from 3 km), `army` (8,606 of 10k units visible), `orbit` (one turn of yaw at a low angle, so LOD
+  and culling change every frame), `close`, `palette` (as `close` without the tileset) and `cliffs`
+  (generated map). Units come from the crossing game run headless to tick 300, once per map. Each
+  scene warms up for 60 frames and at least a second (GPU clocks: without it the first scene read
+  15–25 % slow), then renders 300.
+- One report per scene, `bench/results/<label>/gpu-<scene>.json`, read by `ae-tool bench-diff`:
+  median GPU time per pass and in total, render-thread CPU time per frame (`cpu_frame`, fence waits
+  excluded) and its recording part (`cpu_record`); counters `leaves` and `drawn` (summed over the
+  frames: deterministic, so more is a regression); info `units_visible` (last frame, read after the
+  GPU finished), frames and size. The readback copy only offscreen rendering has is left out: it
+  follows the host bus (±25 % between runs).
+- `ae_bench` gained a per-record `tolerance` that widens `--time-tolerance` for that metric:
+  CPU times get 50 % (tens of microseconds; medians move by up to 30 % between runs, once 60 %),
+  passes under ~20 µs get 2 µs absolute (the timer ticks in about 1 µs). `Executor::take_gpu_frames`
+  gives the per-frame pass times (capped at 16,384 frames; reset by a rebake).
+- Repeatability: three back-to-back `--bench all` runs, 81 metrics, 0 flagged between any two;
+  GPU totals agree within 1 %. 0 validation messages (`AE_VK_VALIDATION=1`, 30 frames each). All six
+  scenes take about 8 s, most of it building the map and the sim.
+- Baseline (RTX 3060 Ti, `bench/results/baseline/gpu-*.json`), GPU ms per frame:
+
+  | Scene | Total | `terrain lod` | `terrain` | Leaves drawn per frame |
+  |---|---|---|---|---|
+  | overview | 0.40 | 0.22 | 0.17 | 423 |
+  | army | 0.41 | 0.21 | 0.15 | 46 (units 0.04) |
+  | orbit | 0.48 | 0.23 | 0.23 | 2,619 |
+  | close | 0.36 | 0.21 | 0.15 | 42 |
+  | palette | 0.26 | 0.21 | 0.04 | 42 |
+  | cliffs | 0.59 | 0.23 | 0.36 | 14,043 |
+
+  The CBT update (`terrain lod`, a compute pass) is a fixed ~0.21 ms in every scene, half or more of
+  the frame: the first thing to look at for GPU time.
+- Not done: no GPU runner in CI, so nothing runs it automatically; scenes are built into the
+  client (not data); one resolution; the CPU times are too noisy to gate small changes.
+
+Next in M3: threaded recording.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
