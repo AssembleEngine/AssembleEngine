@@ -26,11 +26,13 @@ cross-platform digest CI. Details: [docs/PLAN.md](docs/PLAN.md) "M1 progress".
 
 M2 (native services) runs inside the sim: the columnar navigation service carved from pathsim
 (bit-equal to it), movement classes with water (ships, hovercraft, amphibious, fording land units) and
-the spatial index are host systems in the game's schedule (`schedule!(host(nav_spawn), orders,
-host(nav), host(spatial), crowding, churn)`), ordered by the same read/write rules as WASM systems. The game
-decides when units move by emitting `MoveOrder` events; its systems query the spatial index. 10k units
-cross the 2560² water map with the same digest at 1, 2, 4 and 8 workers and the same nav state as the
-standalone service, also when units are despawned and replaced under it; a tick takes 4.6-4.75 ms
+the spatial index are host systems in the game's schedule (`schedule!(host(nav_spawn), orders, quake,
+host(nav), host(spatial), crowding, churn, landed)`), ordered by the same read/write rules as WASM systems.
+The game decides when units move by emitting `MoveOrder` events and edits the terrain with `TerrainEdit`
+events (the nav service repairs its paths, moves buried units out and reports `TerrainChanged`); its
+systems query the spatial index. 10k units cross the 2560² water map with the same digest at 1, 2, 4 and
+8 workers and the same nav state as the standalone service, also when units are despawned and replaced
+under it and when the terrain changes under them; a tick takes 4.6-4.75 ms
 (median) on 8 workers, of which the nav system is 4.2-4.3 ms against 3.9-4.0 ms standalone. Details: [docs/PLAN.md](docs/PLAN.md) "M2 progress".
 
 | Crate | What it is | Origin |
@@ -39,10 +41,10 @@ standalone service, also when units are despawned and replaced under it; a tick 
 | `crates/ae_wasm` | wasmtime runtime: deterministic config, shared memory, N instances with private stacks and TLS | new, from the M0 spikes |
 | `crates/ae_abi` | Sim module ABI: run descriptor, schema section records, import names (no deps, builds for WASM) | new |
 | `crates/ae_sim` | Runtime: schema, layered schedule, worker crew, host systems, deferred commands and events keyed `{system, range, seq}`, digest | new; schedule and digest from ecs_sim |
-| `crates/ae_services` | Engine services as host systems: `nav_spawn` + `nav` (the nav service over `Body`/`NavAgent` rows, `MoveOrder` events as group commands), `spatial` (index for guest queries) | new |
+| `crates/ae_services` | Engine services as host systems: `nav_spawn` + `nav` (the nav service over `Body`/`NavAgent` rows, `MoveOrder` events as group commands, `TerrainEdit` events as terrain patches), `spatial` (index for guest queries) | new |
 | `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!` (with `host(..)` entries), typed columns, commands, events, spatial queries; engine components in `ae_sdk::nav` (feature `nav`) | new |
 | `games/sandbox` | The M1 exit workload (built for wasm32 by the tools; not a workspace member) | new |
-| `games/crossing` | The M2 exit workload: orders and neighbour counts in WASM, the units moved by the nav host system | new |
+| `games/crossing` | The M2 exit workload: orders, neighbour counts and terrain edits in WASM, the units moved by the nav host system | new |
 | `games/alloc` | Guest heap allocation probe for `tests/guest_alloc.rs` | new |
 | `bins/ae-headless` | Runs a game module at several worker counts; prints digests, timings, speedups | new |
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |

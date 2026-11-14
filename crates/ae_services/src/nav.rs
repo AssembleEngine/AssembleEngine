@@ -17,20 +17,28 @@
 //!    orders with the same `group` form one command whose id is the group,
 //!    queued in order of each group's first event (events arrive in key
 //!    order), unit ids ascending;
-//! 4. steps the service on the bodies in service order (positions,
+//! 4. turns the `TerrainEdit` events since its last run into one terrain
+//!    patch (event order; a later edit of a cell wins), see
+//!    [`terrain_patch`];
+//! 5. steps the service on the bodies in service order (positions,
 //!    velocities and radii from the rows) on the service's own thread pool,
-//!    then writes positions, velocities and each agent's mode back.
+//!    then writes positions, velocities and each agent's mode back;
+//! 6. emits a `TerrainChanged` for every terrain repair that landed in the
+//!    step (a patch lands with its navigation repair a fixed sim-time delay
+//!    after it was queued; patches queued while a repair runs land with the
+//!    next one, under one event).
 //!
 //! The service's own state (cohorts, slots, fields, jobs) is the system's
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, GOAL, MOVE_ORDER, NAV_AGENT};
+use ae_abi::engine::{BODY, GOAL, MOVE_ORDER, NAV_AGENT, TERRAIN_CHANGED, TERRAIN_EDIT};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{self, Plan};
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavService, UnitSpec};
-use ae_sdk::nav::{Body, Goal, MoveOrder, NavAgent};
+use ae_nav::terrain::{CellEdit, TerrainPatch};
+use ae_sdk::nav::{Body, CELL_SIZE, Goal, MoveOrder, NavAgent, TerrainChanged, TerrainEdit, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -56,8 +64,13 @@ pub struct NavPlugin {
 }
 
 impl NavPlugin {
-    /// The service (without units) and the plan for a world whose game
-    /// parameter's low 32 bits are the unit count.
+    /// The unit count in a game parameter: its low 24 bits (the game owns
+    /// the rest).
+    pub fn units(param: u64) -> u32 {
+        (param & 0xFF_FFFF) as u32
+    }
+
+    /// The service (without units) and the plan for `units` units.
     pub fn plan(&self, units: u32, workers: usize) -> (NavService, Plan) {
         match self.map {
             Map::WaterCrossing => scenario::water_crossing_plan(units, self.map_cells, workers),
@@ -78,7 +91,8 @@ impl HostPlugin for NavPlugin {
         spawn.cadence = Cadence::Once;
         let mut nav = HostDecl::new("nav");
         nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
-        nav.reads_events = vec![MOVE_ORDER];
+        nav.reads_events = vec![MOVE_ORDER, TERRAIN_EDIT];
+        nav.emits = vec![TERRAIN_CHANGED];
         vec![spawn, nav]
     }
 
@@ -87,12 +101,18 @@ impl HostPlugin for NavPlugin {
         expect_component(schema, NavAgent::SCHEMA)?;
         match name {
             "nav_spawn" => expect_component(schema, Goal::SCHEMA).map(drop),
-            _ => expect_component(schema, <MoveOrder as Event>::SCHEMA).map(drop),
+            _ => {
+                ensure!(CELL_SIZE == ae_nav::service::NavConfig::default().cell_size, "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size");
+                for record in [<MoveOrder as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA] {
+                    expect_component(schema, record)?;
+                }
+                Ok(())
+            }
         }
     }
 
     fn instantiate(&self, init: &HostInit, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
-        let (service, plan) = self.plan(init.param as u32, init.workers);
+        let (service, plan) = self.plan(Self::units(init.param), init.workers);
         // The spawner and the stepper are separate systems over one plan.
         let mut service = Some(service);
         let mut plan = Some(plan);
@@ -246,7 +266,17 @@ impl HostSystem for Nav {
             }
         }
 
-        // 4. Step on the bodies, in service order. Rows and units are now
+        // 4. Terrain edits, as one patch.
+        let edits: Vec<TerrainEdit> = ctx.events(TERRAIN_EDIT)?;
+        if !edits.is_empty() {
+            let geom = &nav.terrain.geom;
+            let patch = terrain_patch(&edits, geom.cells_x, geom.cells_y)?;
+            if !patch.cells.is_empty() {
+                nav.queue_terrain_patch(patch);
+            }
+        }
+
+        // 5. Step on the bodies, in service order. Rows and units are now
         // the same entities, both sorted: row k is unit `units[k].1`.
         let n = s.rows.len();
         s.order.resize(n, 0);
@@ -280,10 +310,41 @@ impl HostSystem for Nav {
             }
         }
         s.rows.clear();
+
+        // 6. Terrain versions that took effect.
+        for c in nav.take_terrain_changes() {
+            let (x0, y0, x1, y1) = c.cells;
+            ctx.emit(TERRAIN_CHANGED, bytes_of(&TerrainChanged { version: c.version, x0, y0, x1, y1 }))?;
+        }
         Ok(())
     }
 
     fn digest(&self) -> Option<u128> {
         Some(self.service.state_hash() as u128)
     }
+}
+
+/// One terrain patch from `edits`, in order, on a map of `cells_x` by
+/// `cells_y` cells: each edit's rectangle clipped to the map, a later edit of
+/// a cell winning field by field. Edits with unknown flags or values out of
+/// range are errors (a game bug, not something to clamp silently).
+pub fn terrain_patch(edits: &[TerrainEdit], cells_x: i32, cells_y: i32) -> Result<TerrainPatch> {
+    let mut patch = TerrainPatch::new();
+    for e in edits {
+        ensure!(e.set & !(terrain::BLOCKED | terrain::HEIGHT | terrain::COST) == 0, "terrain edit with unknown flags {:#x}", e.set);
+        let blocked = (e.set & terrain::BLOCKED != 0).then_some(e.blocked);
+        let height = (e.set & terrain::HEIGHT != 0).then_some(e.height);
+        let cost = (e.set & terrain::COST != 0).then_some(e.cost);
+        ensure!(blocked.is_none_or(|b| b <= 1), "terrain edit: blocked must be 0 or 1, not {}", e.blocked);
+        ensure!(height.is_none_or(|h| (0..=2400).contains(&h)), "terrain edit: height {} outside 0..=2400 decimetres", e.height);
+        ensure!(cost.is_none_or(|c| (1..=255).contains(&c)), "terrain edit: cost {} outside 1..=255", e.cost);
+        let (x0, y0, x1, y1) = (e.x0.max(0), e.y0.max(0), e.x1.min(cells_x - 1), e.y1.min(cells_y - 1));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                patch.push(CellEdit { x, y, blocked: blocked.map(|b| b == 1), height: height.map(|h| h as i16), cost: cost.map(|c| c as u8), material: None });
+            }
+        }
+    }
+    patch.finish();
+    Ok(patch)
 }

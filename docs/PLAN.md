@@ -463,8 +463,9 @@ crossing --nav water --compare`):
   coordinating thread after its layer's module systems (which cannot conflict with it), sees its whole
   query at once, and may use its own threads. State it keeps outside components is a digest part.
 - Engine components (`ae_sdk::nav`, opt-in cargo feature `nav`, fixed ids in `ae_abi::engine`): `Body
-  {x, y, vx, vy, radius}`, `NavAgent {max_speed, profile, mode}`, `Goal {x, y, group}` and the event
-  `MoveOrder {entity, x, y, group}`. Opt-in because the derive writes a schema record for every type it
+  {x, y, vx, vy, radius}`, `NavAgent {max_speed, profile, mode}`, `Goal {x, y, group}` and the events
+  `MoveOrder {entity, x, y, group}`, `TerrainEdit {x0, y0, x1, y1, set, blocked, height, cost}` (a cell
+  rectangle; `set` flags pick the fields) and `TerrainChanged {version, x0, y0, x1, y1}`. Opt-in because the derive writes a schema record for every type it
   compiles: unconditionally linked, they were registered in the sandbox too and shifted its entity ids
   (and its pinned digest).
 - `ae_services::nav`: `nav_spawn` (tick 0) spawns a map plan's units; `nav` (every tick) gathers the
@@ -472,7 +473,13 @@ crossing --nav water --compare`):
   units' sorted entities, skipped when nothing joined or left: removals in one batch, new units in
   entity order), turns the `MoveOrder` events since its last run into group commands (one per `group`,
   id = group, in order of first event, unit ids ascending), steps the service on its own pool and writes
-  positions, velocities and modes back. The game decides when units move (`games/crossing`: orders at
+  positions, velocities and modes back. The `TerrainEdit` events since its last run become one terrain
+  patch (event order, a later edit of a cell wins; rectangles clipped to the map; out-of-range values are
+  errors and stop the tick), queued before the step: it lands with its nav repair a fixed sim-time delay
+  later (2 ticks at 30 Hz), buried units are moved to the nearest open cell, and `nav` emits one
+  `TerrainChanged` per landed repair (what render and the copy layer will refresh). One repair runs at a
+  time; patches queued meanwhile land together with the next, under one event whose rectangle covers
+  them all and whose version is the terrain's after them (versions count patches, so they can skip). The game decides when units move (`games/crossing`: orders at
   the tick in its parameter). `ae_nav::scenario` plans are now data (`Plan`), so a map's units and
   orders can be spawned by the sim or added to a standalone service.
 - `ae_services::spatial`: rebuilds the grid from every `Body` in its layer and publishes it to module
@@ -485,8 +492,13 @@ crossing --nav water --compare`):
   brute force. A second world exercises units changing under the service: orders at tick 20 (when every
   row also moves to another table, as the game adds a component), and at tick 150 a game system
   despawns a seventh of the units and spawns replacements in the same tick (143 removals and 143 joins
-  with recycled entity ids). Its bodies and nav state equal a standalone service driven through the same
-  removals and additions at the same step, at 1 and 8 workers.
+  with recycled entity ids). The same world edits the terrain on two ticks (`quake`): at tick 100 rock
+  5×5 cells inside 17×17 cells of slow ground around every unit whose entity index is a multiple of 97
+  (2,431 cells), at tick 101, while that repair runs, ground raised to 90 m in 9×9 cells around others
+  (718 cells; land in lakes, hills on land). They land as versions 2 and 3 at ticks 102 and 104, 109
+  units are moved out, and `landed` records two `TerrainChanged` whose rectangles are the two patches'.
+  Its bodies and nav state equal a standalone service driven through the same removals, additions and
+  patches at the same steps, at 1 and 8 workers. Not covered yet: un-blocking cells.
 - Host systems run whole tables, so a `Staggered` host cadence is rejected.
 
 Exit run, 10k units on the 2560² water map, 600 ticks (`--compare`: the same plan through the
@@ -516,6 +528,13 @@ unchanged and 3 improved, `sim-dispatch` 43 unchanged, 2 improved, 1 flagged (`s
 stress churn 22.6 -> 25.0 ms: a single-sample metric, the tick that spawns 50k units, which varies
 25-37 ms between headless runs) and the 16-thread rows absent (the baseline was recorded with
 `--threads 16`).
+
+Terrain edits added the `quake` and `landed` systems and the `Landed` component to the crossing game,
+which shifted its entity ids: the pinned digest was re-pinned (bodies and nav state still equal the
+standalone service). With no edit they cost nothing measurable: 10k units, 600 ticks, 8 workers, 4.70 ms
+median (nav system 4.22 ms vs 3.91 ms standalone), 1 worker 17.46 ms; digests and nav state equal. The
+unit count in the game parameter is now its low 24 bits (`NavPlugin::units`); crossing uses bits 24..32
+for the edit tick.
 
 Next for M2: movement classes from game data instead of `water_profiles()`, cost overlays, formation
 facing, more order kinds than `MoveTo` in `MoveOrder` (route, formation, stop), and running host systems

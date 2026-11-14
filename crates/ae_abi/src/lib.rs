@@ -262,4 +262,10 @@ pub mod engine {
     pub const GOAL: u64 = 0xAE00_0000_0000_0003;
     /// Event `MoveOrder { entity, x, y, group }`.
     pub const MOVE_ORDER: u64 = 0xAE00_0000_0000_0004;
+    /// Event `TerrainEdit { x0, y0, x1, y1, set, blocked, height, cost }`: a
+    /// game's edit of a cell rectangle.
+    pub const TERRAIN_EDIT: u64 = 0xAE00_0000_0000_0005;
+    /// Event `TerrainChanged { version, x0, y0, x1, y1 }`: a terrain version
+    /// became authoritative.
+    pub const TERRAIN_CHANGED: u64 = 0xAE00_0000_0000_0006;
 }
