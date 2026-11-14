@@ -367,3 +367,24 @@ const _: () = {
     assert!(<TerrainChanged as crate::Event>::ID == crate::abi::engine::TERRAIN_CHANGED);
     assert!(<CostOverlay as crate::Event>::ID == crate::abi::engine::COST_OVERLAY);
 };
+
+/// Declare every component and event the engine's nav, spatial and view
+/// services read or write (see [`crate::declare!`]), for a module that
+/// schedules those services without naming all of them in its systems.
+#[macro_export]
+macro_rules! use_nav {
+    () => {
+        $crate::declare!(
+            $crate::nav::Body,
+            $crate::nav::NavAgent,
+            $crate::nav::Goal,
+            $crate::nav::Team,
+            $crate::nav::Sensor,
+            $crate::nav::MoveOrder,
+            $crate::nav::OrderPoint,
+            $crate::nav::TerrainEdit,
+            $crate::nav::TerrainChanged,
+            $crate::nav::CostOverlay,
+        );
+    };
+}

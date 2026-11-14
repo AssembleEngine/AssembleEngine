@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "defs": {
+    "factory": {
+      "extends": "structure",
+      "components": {
+        "Body": {
+          "radius": 20.0
+        },
+        "Health": {
+          "hp": 2000,
+          "max": 2000
+        },
+        "Sensor": {
+          "los": 500.0,
+          "radar": 1500.0
+        }
+      }
+    },
+    "structure": {
+      "abstract": true,
+      "components": {
+        "Health": {
+          "hp": 1000,
+          "max": 1000
+        },
+        "Sensor": {
+          "los": 400.0,
+          "radar": 0.0
+        }
+      }
+    },
+    "tank": {
+      "extends": "unit",
+      "components": {
+        "Health": {
+          "hp": 300,
+          "max": 300
+        },
+        "NavAgent": {
+          "max_speed": 9.0,
+          "mode": 0,
+          "profile": 1
+        }
+      }
+    },
+    "unit": {
+      "abstract": true,
+      "components": {
+        "Body": {
+          "radius": 4.0
+        },
+        "Sensor": {
+          "los": 350.0,
+          "radar": 0.0
+        }
+      }
+    }
+  }
+}

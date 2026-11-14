@@ -210,12 +210,14 @@ version = "0.0.1"
 dependencies = [
  "ae-sdk",
  "ae_abi",
+ "ae_catalog",
  "ae_ecs",
  "ae_nav",
  "ae_profile",
  "ae_sensors",
  "ae_sim",
  "ae_spatial",
+ "ae_vfs",
  "ae_view",
  "anyhow",
 ]

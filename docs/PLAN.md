@@ -1270,6 +1270,39 @@ Lockstep over UDP (`ae_net`, `ae-relay`, `ae-headless --connect`):
   checkpoints only carry totals over the network (parts stay local), so a network desync is
   localised by replaying the recording with `--bisect` on one machine.
 
+### M6 progress
+
+Content files and the catalogue:
+- `ae_vfs`: a stack of directory mounts (a later mount overrides files of earlier ones); content
+  paths are relative and `/`-separated (absolute, `..`, empty parts and backslashes refused);
+  `content_hash` is xxh3-128 over every visible file's path and bytes, for replay and lockstep
+  headers. Archives will be another kind of mount.
+- `ae_catalog`: defs as JSON (the graph files' format family): components and field values,
+  `extends` (field by field) and `abstract` defs. Resolved against the game's schema to component
+  bytes (unset fields zero); a def id is FNV-1a of its name, like component ids, so adding a def
+  renumbers nothing. Twelve errors are tested to name the def and the problem (unknown component or
+  field, wrong kind, integer out of range, entity/byte fields, events, unknown parent, `extends`
+  cycle, version, unknown keys, a def in two files). `CatalogFile::write` is canonical (sorted keys,
+  two-space indent): parse, write, parse gives the same bytes, and messy input writes canonically.
+
+Spawning defs (`ae_sdk` feature `catalog`, `ae_services::catalog`):
+- `SpawnRequest { def, ally, x, y }` (event) and `Def { id }` (line of sight); the host system
+  `catalog_spawn` spawns each request in event order: the def's components, `Body.x/y` at the
+  request, a `Team`, a `Def`; an unknown def is skipped and counted in its digest part.
+- Schema records in the game crate: a type's record lived in its defining crate's object, which the
+  linker drops when nothing references it (the skirmish game only emitted `SpawnRequest`, and named
+  no nav type at all). `#[system]` now also writes copies of the records of every type it names,
+  and `ae_sdk::declare!(T, ...)`, `use_nav!()` and `use_catalog!()` declare types a game uses
+  without naming them in a system. The parser already accepted identical duplicates; crossing's
+  pinned digest is unchanged.
+- `games/skirmish` (new): parameter = map side in metres << 24 | tanks << 40; `start` spawns a
+  `factory` at each allyteam's base (15% in from opposite corners) and its tanks in a ring;
+  `content/defs/units.json` holds `unit`/`structure` (abstract), `tank`, `factory`, and a game
+  component `Health`. Test `ae_services/tests/skirmish.rs`: the catalogue loads through the VFS;
+  each allyteam gets one factory at its base (radius 20) and 6 tanks within 130 m (radius 4); the
+  view of each allyteam has exactly its 7 units as `Own` rows (the M4 gap for game-spawned units is
+  closed); 1 and 2 workers agree.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

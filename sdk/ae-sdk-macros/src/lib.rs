@@ -313,6 +313,20 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
     let (n, value) = r.finish();
     let export = format_ident!("{}{}", abi::SYSTEM_EXPORT_PREFIX, name);
     let section = section_static(&format_ident!("__AE_SCHEMA_SYS_{}", name), n, value);
+    // Copies of the records of every type the system names, in this crate:
+    // a type's own record lives in its defining crate's object, which the
+    // linker drops when nothing references it (an SDK event a game only
+    // emits). The schema parser accepts identical duplicates.
+    let types: Vec<&Path> = a.terms.iter().map(|(t, _)| t).chain(&a.emits).chain(&a.reads).collect();
+    let uses = types.iter().enumerate().map(|(i, ty)| {
+        let id = format_ident!("__AE_USES_{}_{}", name, i);
+        quote! {
+            #[used]
+            #[allow(non_upper_case_globals)]
+            #[cfg_attr(target_family = "wasm", unsafe(link_section = "ae.schema"))]
+            static #id: [u8; <#ty>::__AE_SCHEMA.len()] = <#ty>::__AE_SCHEMA;
+        }
+    });
     Ok(quote! {
         #func
         #[doc(hidden)]
@@ -322,6 +336,7 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
             #name(&run);
         }
         #section
+        #(#uses)*
     })
 }
 

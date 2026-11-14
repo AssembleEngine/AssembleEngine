@@ -34,6 +34,9 @@ extern crate self as ae_sdk;
 #[cfg(feature = "nav")]
 pub mod nav;
 
+#[cfg(feature = "catalog")]
+pub mod catalog;
+
 use abi::RunDesc;
 
 /// Engine entity id.
@@ -286,4 +289,22 @@ impl Spawn {
         let (ptr, len) = (self.buf.as_ptr() as usize as u32, self.len as u32);
         unsafe { host::ae_spawn(ptr, len) }
     }
+}
+
+/// Declare components or events the module uses without a `#[system]`
+/// naming them (e.g. ones only engine services create, like
+/// `ae_sdk::catalog::Def`): puts copies of their schema records in this
+/// crate, so they are in the module's schema however the linker treats
+/// the crates that define them.
+#[macro_export]
+macro_rules! declare {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            const _: () = {
+                #[used]
+                #[cfg_attr(target_family = "wasm", unsafe(link_section = "ae.schema"))]
+                static RECORD: [u8; <$ty>::__AE_SCHEMA.len()] = <$ty>::__AE_SCHEMA;
+            };
+        )+
+    };
 }

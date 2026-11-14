@@ -1,0 +1,21 @@
+# Skirmish game: the M6 workload. Two allyteams with factories, an economy
+# and weapons, defined by its content (`content/`): unit and building defs
+# in `content/defs/*.json`, spawned by the engine's catalogue service. Built
+# for wasm32-wasip1-threads; not part of the main workspace.
+[package]
+name = "ae_game_skirmish"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "catalog"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

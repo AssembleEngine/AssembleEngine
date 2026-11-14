@@ -325,4 +325,9 @@ pub mod engine {
     pub const TEAM: u64 = 0xAE00_0000_0000_0009;
     /// `Sensor { los, radar: f32 }`: line-of-sight and radar radii.
     pub const SENSOR: u64 = 0xAE00_0000_0000_000A;
+    /// Event `SpawnRequest { def: u64, ally: u32, reserved: u32, x, y: f32 }`:
+    /// spawn a catalogue def for an allyteam at a position.
+    pub const SPAWN_REQUEST: u64 = 0xAE00_0000_0000_000B;
+    /// `Def { id: u64 }`: the catalogue def an entity was spawned from.
+    pub const DEF: u64 = 0xAE00_0000_0000_000C;
 }

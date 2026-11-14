@@ -14,3 +14,5 @@ ae-sdk-macros.workspace = true
 # schema record for every type it compiles, and a module's components are
 # registered (and take entity ids) whether its systems use them or not.
 nav = []
+# Catalogue spawning (`ae_sdk::catalog`): spawn requests and def ids. Needs nav.
+catalog = ["nav"]
