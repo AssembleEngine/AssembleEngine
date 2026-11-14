@@ -1319,8 +1319,14 @@ Skirmish rules (all in the game crate; content in `games/skirmish/content/defs/u
   200 m now), and both factories keep feeding them. With a handicap (parameter bits 48..56: 30 more
   starting tanks for allyteam 0) allyteam 0 breaks through and wins at tick 2,497, with the same
   tick and digest at 1 and 2 workers (test `skirmish.rs`).
-- Not done: units do not retarget after the rally point (no attack-move), no unit AI; the content
-  hash is not yet in the replay header; no human or bot input.
+- `ae-headless --content DIR` mounts a game's content, loads its catalogue against the module, adds
+  the catalogue service, and puts `content = <hash>` in the replay and lockstep header: a replay of
+  the skirmish refuses to play without `--content` ("content = … in the replay, unset here") or with
+  one tank's hp changed (two hashes named). Recorded handicap match: 2,600 ticks, 87 checkpoints,
+  48 KB, verifies at 1 worker (end-to-end test in `tests/replay.rs`). `Header::check` was being
+  called from the wrong side, which reversed its messages; fixed.
+- Not done: units do not retarget after the rally point (no attack-move), no unit AI; no human or
+  bot input.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

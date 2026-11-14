@@ -11,7 +11,7 @@
 //! client diverge (the relay must notice).
 
 use super::Opts;
-use super::replay::{header, orders, runtime};
+use super::replay::{content, header, orders, runtime};
 use ae_net::{Emulator, Packet, micros};
 use ae_sim::input::{Command, TickBundle};
 use anyhow::{Context, Result};
@@ -39,9 +39,10 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let wasm = ae_sim::build::game(&o.game)?;
     let nav = o.nav.map(|m| (m, o.map_cells, o.teams));
     let param = o.units | (o.param_hi as u64) << 32;
-    let h = header(&wasm, param, nav, o.checkpoint_every.max(1))?;
+    let content = content(o, &wasm)?;
+    let h = header(&wasm, param, nav, content.as_ref(), o.checkpoint_every.max(1))?;
     let workers = o.workers[0];
-    let mut rt = runtime(&wasm, nav, workers, o.range_rows)?;
+    let mut rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
     let mut world = rt.world_for(param, workers)?;
 
     let socket = UdpSocket::bind("127.0.0.1:0")?;

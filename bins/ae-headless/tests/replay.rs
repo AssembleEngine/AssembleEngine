@@ -1,7 +1,8 @@
 //! Record, replay and bisect through the `ae-headless` binary.
 //! * A recording of the crossing game with scripted player orders replays
 //!   with every checkpoint matching, at 1 and at 2 workers.
-//! * A replay refuses another game module, naming it.
+//! * A replay refuses another game module, naming it; a game with content
+//!   (skirmish) records its content hash and refuses to replay without it.
 //! * A bit flipped in one entity's field in one run is localised: the
 //!   first divergence is after the next tick, at that entity (and at most a
 //!   couple of neighbours the nav service moved by it).
@@ -44,5 +45,18 @@ fn record_replay_and_bisect() {
     assert!(rows.iter().any(|r| r.starts_with(&format!("  Body.y of entity {hit}:"))), "{out}");
     let entities: std::collections::BTreeSet<&str> = rows.iter().filter_map(|r| r.split(" of entity ").nth(1)?.split(':').next()).collect();
     assert!(entities.len() <= 3, "the damage after one tick: {entities:?}\n{out}");
+
+    // A game with content: the content hash is part of the header.
+    let content = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/skirmish/content");
+    let sk = dir.join("skirmish.aerep");
+    let sk = sk.to_str().unwrap();
+    let param_hi = (2048u64 >> 8 | 6 << 8 | 30 << 16).to_string();
+    let world = ["--game", "skirmish", "--nav", "land", "--map-cells", "256", "--units", "0", "--param-hi", &param_hi, "--workers", "2"];
+    let (ok, out) = headless(&[&world[..], &["--content", content, "--ticks", "300", "--record", sk]].concat());
+    assert!(ok, "{out}");
+    let (ok, out) = headless(&["--game", "skirmish", "--replay", sk, "--verify", "--content", content]);
+    assert!(ok && out.contains("10 checkpoints match"), "{out}");
+    let (ok, out) = headless(&["--game", "skirmish", "--replay", sk, "--verify"]);
+    assert!(!ok && out.contains("in the replay, unset here"), "{out}");
     std::fs::remove_dir_all(&dir).ok();
 }

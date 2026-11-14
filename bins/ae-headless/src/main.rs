@@ -27,6 +27,10 @@
 //! differs from a clean one: tick, digest parts, entities and fields.
 //! `AE_DIGEST_COST=1` times the world digest.
 //!
+//! `--content DIR` mounts a game's content: its catalogue (`DIR/defs/`)
+//! spawns the game's `SpawnRequest`s, and its hash goes into replay and
+//! lockstep headers.
+//!
 //! `--connect ADDR --player P` plays in lockstep with `ae-relay` (see
 //! `client.rs`).
 //!
@@ -81,6 +85,8 @@ struct Opts {
     bisect: bool,
     inject: Option<replay::Inject>,
     connect: Option<String>,
+    /// A content directory: its catalogue spawns defs (`SpawnRequest`).
+    content: Option<String>,
     player: u32,
     latency: u64,
     jitter: u64,
@@ -89,7 +95,7 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None, connect: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -124,6 +130,7 @@ fn parse() -> Result<Opts> {
             "--verify" => o.verify = true,
             "--bisect" => o.bisect = true,
             "--connect" => o.connect = Some(value()?),
+            "--content" => o.content = Some(value()?),
             "--player" => o.player = value()?.parse()?,
             "--latency" => o.latency = value()?.parse()?,
             "--jitter" => o.jitter = value()?.parse()?,
@@ -192,6 +199,10 @@ fn run() -> Result<bool> {
     };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
     let mut extent = 0.0;
+    if let Some(c) = replay::content(&o, &wasm)? {
+        println!("content {}: {} defs, hash {:032x}", o.content.as_deref().unwrap_or(""), c.catalog.defs.len(), c.hash);
+        plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(c.catalog.clone())));
+    }
     if let Some(map) = o.nav {
         let nav = NavPlugin { teams: o.teams, ..NavPlugin::new(map, o.map_cells) };
         extent = nav.extent();

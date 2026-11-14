@@ -42,10 +42,30 @@ fn map_of(name: &str) -> Result<Map> {
     })
 }
 
+/// A game's content (`--content DIR`): its catalogue and the hash of every
+/// file, which goes into headers so other content is refused by name.
+pub struct Content {
+    pub hash: u128,
+    pub catalog: Arc<ae_catalog::Catalog>,
+}
+
+/// Mount `--content`, load its catalogue (`defs/`) against the module.
+pub fn content(o: &Opts, wasm: &[u8]) -> Result<Option<Content>> {
+    let Some(dir) = &o.content else { return Ok(None) };
+    let mut vfs = ae_vfs::Vfs::new();
+    vfs.mount_dir(dir)?;
+    let schema = ae_sim::schema::Schema::from_module(wasm)?;
+    let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).with_context(|| format!("the catalogue in {dir}"))?;
+    Ok(Some(Content { hash: vfs.content_hash()?, catalog: Arc::new(catalog) }))
+}
+
 /// The world's header, from the module and the run's configuration.
-pub fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_every: u64) -> Result<Header> {
+pub fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, content: Option<&Content>, checkpoint_every: u64) -> Result<Header> {
     let schema = ae_sim::schema::custom_sections(wasm, ae_abi::SCHEMA_SECTION)?;
     let mut config = BTreeMap::new();
+    if let Some(c) = content {
+        config.insert("content".into(), format!("{:032x}", c.hash));
+    }
     if let Some((map, cells, teams)) = nav {
         config.insert("map".into(), map_name(map).into());
         config.insert("map_cells".into(), cells.to_string());
@@ -54,13 +74,16 @@ pub fn header(wasm: &[u8], param: u64, nav: Option<(Map, i32, u32)>, checkpoint_
     Ok(Header { engine: env!("CARGO_PKG_VERSION").into(), module_hash: ae_replay::hash(wasm), schema_hash: ae_replay::hash(&schema), param, config, checkpoint_every })
 }
 
-pub fn runtime(wasm: &[u8], nav: Option<(Map, i32, u32)>, workers: usize, range_rows: usize) -> Result<Runtime> {
+pub fn runtime(wasm: &[u8], nav: Option<(Map, i32, u32)>, content: Option<&Content>, workers: usize, range_rows: usize) -> Result<Runtime> {
     let cfg = RuntimeConfig { max_workers: workers, range_rows, ..RuntimeConfig::default() };
     let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
     if let Some((map, cells, teams)) = nav {
         let plugin = NavPlugin { teams, ..NavPlugin::new(map, cells) };
         plugins.push(Arc::new(plugin.clone()));
         plugins.push(Arc::new(SpatialPlugin::square(plugin.extent(), 64.0)));
+    }
+    if let Some(c) = content {
+        plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(c.catalog.clone())));
     }
     Runtime::with_hosts(wasm, cfg, plugins)
 }
@@ -106,8 +129,9 @@ pub fn record(o: &Opts, path: &str) -> Result<bool> {
     let nav = o.nav.map(|m| (m, o.map_cells, o.teams));
     let param = o.units | (o.param_hi as u64) << 32;
     let every = o.checkpoint_every.max(1);
-    let header = header(&wasm, param, nav, every)?;
-    let mut rt = runtime(&wasm, nav, o.workers[0], o.range_rows)?;
+    let content = content(o, &wasm)?;
+    let header = header(&wasm, param, nav, content.as_ref(), every)?;
+    let mut rt = runtime(&wasm, nav, content.as_ref(), o.workers[0], o.range_rows)?;
     let mut world = rt.world_for(param, o.workers[0])?;
     let file = std::fs::File::create(path).with_context(|| format!("create {path}"))?;
     let mut rec = Recorder::new(std::io::BufWriter::new(file), &header)?;
@@ -142,9 +166,10 @@ pub fn replay(o: &Opts, path: &str, verify: bool) -> Result<bool> {
         Some(m) => Some((map_of(m)?, h.config["map_cells"].parse()?, h.config.get("teams").map_or(Ok(0), |t| t.parse())?)),
         None => None,
     };
-    header(&wasm, h.param, nav, h.checkpoint_every)?.check(&h).context("this replay does not match the world")?;
+    let content = content(o, &wasm)?;
+    h.check(&header(&wasm, h.param, nav, content.as_ref(), h.checkpoint_every)?).context("this replay does not match the world (a game with content needs the same --content)")?;
     let workers = o.workers[0];
-    let mut rt = runtime(&wasm, nav, workers, o.range_rows)?;
+    let mut rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
     let mut world = rt.world_for(h.param, workers)?;
     let mut checkpoints = replay.checkpoints.iter().peekable();
     let started = Instant::now();
@@ -241,11 +266,12 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
         Some(m) => Some((map_of(m)?, h.config["map_cells"].parse()?, h.config.get("teams").map_or(Ok(0), |t| t.parse())?)),
         None => None,
     };
-    header(&wasm, h.param, nav, h.checkpoint_every)?.check(&h).context("this replay does not match the world")?;
+    let content = content(o, &wasm)?;
+    h.check(&header(&wasm, h.param, nav, content.as_ref(), h.checkpoint_every)?).context("this replay does not match the world (a game with content needs the same --content)")?;
     let workers = o.workers[0];
     // Run to `until`, calling `each` after every tick (stop when it says).
     let play = |fault: bool, until: u64, each: &mut dyn FnMut(&Runtime, &World) -> Result<bool>| -> Result<Option<u64>> {
-        let mut rt = runtime(&wasm, nav, workers, o.range_rows)?;
+        let mut rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
         let mut world = rt.world_for(h.param, workers)?;
         let mut hit = None;
         while world.tick < until {
@@ -300,7 +326,7 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
     println!("first divergence after tick {t} (the fault was applied after tick {}); digest parts that differ: {}", inject.tick, parts.join(", "));
     // Rows that differ, field by field.
     let schema = {
-        let rt = runtime(&wasm, nav, workers, o.range_rows)?;
+        let rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
         rt.schema.clone()
     };
     let mut lines = 0;
