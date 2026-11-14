@@ -709,12 +709,76 @@ the frame graph:
   These are printed, not recorded: the GPU bench (`ae-client --bench`, JSON for `bench-diff`) is still
   to be written.
 
-Next in M3: the 10k-unit instance stream (an end-of-tick copy of the sim's `Body` columns behind the
-`InstanceStream {table, field → attribute}` shape, so M4's view tables replace it without changing
-render; the render thread never waits on the sim), then the render module ABI, reflection and hot
-reload, then material tilesets (procedural placeholder textures until a texture source is chosen),
-replacing the material palette. Terrain patches (`TerrainChanged`) do not reach the render heightfield
-yet; that comes with the sim connection.
+Units (the 10k-unit instance stream):
+- End-of-tick capture in the sim core: `ae_sim::capture::CaptureSpec` names 4-byte fields by
+  component and field (resolved through the schema, so `ae_sim` names no components);
+  `Runtime::capture` copies them, from every entity with all those components, into reused
+  field-major columns plus entity ids. It runs between ticks through an uncached flecs query:
+  flecs gives every cached query an entity, so a cached capture query (and the old `count`/`rows`,
+  now uncached too) created mid-run shifted the ids later spawns get. `ae_services/tests/capture.rs`
+  runs the crossing game through orders, a reorder, a quake and churn, capturing after every tick,
+  and gets the same final digest as without capturing (with a cached query it differs: checked);
+  the captured words equal the components' bytes by entity.
+- Render side (`ae_render::units`): an `InstanceStream` is a fixed set of 4-byte attributes per row
+  (`x, y, prev_x, prev_y, heading_x, heading_y, radius, class`), column by column; whoever feeds it
+  maps its own fields onto them, so the renderer never sees the sim, and M4's view tables replace
+  the feeder, not the renderer. `UnitFeed` holds the latest stream behind a mutex held only to swap an
+  `Arc`: the producer publishes after each tick, the render thread takes the latest at `prepare`;
+  neither waits for the other. Positions interpolate from `prev` to latest over the tick after
+  publication.
+- Five passes after the terrain LOD: `units reset` (transfer: instance count 0), `units cull`
+  (compute: frustum test per unit, appends visible indices and counts them atomically), `units`
+  (graphics, declared after the terrain draw: one indirect instanced draw of a 12-vertex dart built from `gl_VertexIndex`, sized by
+  radius, turned by heading, coloured by class, lit and fogged like the terrain). The draw loads the
+  terrain's colour target and depth buffer: the ordered-writer case the frame graph change was for.
+  `units count` copies the indirect arguments to a host buffer per slot and `units count read`
+  (a host-read root) makes it visible, so `prepare` reads the previous frame's visible count (status
+  line, `--capture`).
+  Instance data is one host-visible buffer per frame slot (fixed capacity, so the graph never
+  rebakes on unit count), rewritten only when a newer tick arrives. Heights come from the terrain's
+  height texture; classes whose medium is on the surface (ships, hovercraft) sit at
+  max(ground, water level), the rest on the ground (amphibious on the bed). Units smaller than 7 px
+  are drawn 7 px across, so armies stay visible from the overview.
+- `ae-client` runs the crossing game (`--units`, default 10000; `--workers`, default half the
+  cores up to 8) on a sim thread at the nav rate (30 Hz) on the same map and map size the terrain
+  shows; after each tick it captures `Body.{x,y,vx,vy,radius}` and `NavAgent.profile` and builds the
+  stream, matching rows to the previous capture by entity (sorted merge; new units start where they
+  are; a standing unit keeps its last heading; unit-tested). `--capture` first runs `--ticks` ticks
+  (default 300) synchronously and prints where each class is.
+- Executor stats now carry the baked pass names beside the GPU times (the times were printed
+  against a guessed order before; the bake puts the unit reset and cull before the terrain LOD).
+- Checked: GPU test `units_render_over_terrain` (four units, one behind the camera: the visible
+  count read back is 3, and 4 when the shader's frustum test is disabled, checked; each visible
+  unit shows its class colour at its projected position, a floating one at the water level,
+  nothing at a moved unit's previous position; zero validation messages). Water map, 10k units,
+  release, RTX 3060 Ti: world built in 2.5–2.6 s; capture + stream 0.14–0.30 ms per tick; sim tick
+  4.6–5.0 ms (capture runs) to 5.2–6.0 ms (beside a 2,500 fps render thread, 8 workers), so 30 Hz
+  holds with one late tick (the first); windowed about 2,500–2,600 fps with or without units.
+  With validation (synchronization validation included, the default): 0 messages in `--capture`
+  on both maps and in 12 s windowed `--exercise` runs (11 swapchain recreates) with the sim
+  running, so the per-slot instance rewrite every tick is covered.
+- GPU per pass, 1280x720, profiling on, 60-frame offscreen captures over the 6k-unit army
+  (`--camera 2900,17900,1400,0.4,0.85`, 8,606 of 10,000 units visible): unit cull 0.005–0.017 ms,
+  unit draw 0.03–0.14 ms. These captures are noisy: terrain LOD measured 0.27–0.34 ms without units
+  (last turn's 0.25–0.33 ms holds; the old labels happened to be right, as that graph bakes in
+  declaration order) but 0.27–0.56 ms with them. The spread is not the units' drawing: with
+  `--ticks 1` (5,168 visible) LOD is 0.27 ms, and the unrelated readback copy swings with it
+  (0.17–0.94 ms); it follows the 1.5 s, 8-worker sim run right before rendering (GPU clocks, at a
+  guess). The GPU bench (warm-up, more frames, recorded spread) has to settle such numbers.
+- Found on the way: a struct holding both a `Runtime` and its `World` must declare the world first
+  (fields drop in order, and the world's columns live in the runtime's memory); `World::drop` after
+  the runtime crashed in flecs.
+- Not done: the cull only tests the frustum (no occlusion, no LOD meshes); one draw for all
+  classes; terrain edits (`TerrainChanged`) still do not reach the render heightfield, so units can
+  stand above or inside edited ground. `ae-client` now builds `games/crossing` on first use
+  (cargo and the `wasm32-wasip1-threads` target, as `ae-headless`); a sim failure is printed when
+  it happens and shown in the title, and `--units 0` runs without the sim.
+
+Next in M3: the render module ABI, reflection and hot reload (the units and terrain passes become
+passes a render module declares), then material tilesets (procedural placeholder textures until a
+texture source is chosen) replacing the material palette, and `TerrainChanged` patches reaching the
+render heightfield. The GPU bench (`ae-client --bench`, JSON for `bench-diff`) is still to be
+written.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

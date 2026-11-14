@@ -41,14 +41,17 @@ M3 (rendering) has started: the frame graph has depth attachments and ordered wr
 drawing into one target), `ae_render` holds the lifted Vulkan executor and render thread, GPU tests run
 offscreen with zero validation messages, and `ae-client` shows the crossing map's terrain (GPU-refined
 CBT/LEB from map-rendering, coloured by the nav materials, water as a depth tint) with RTS camera
-controls. Units are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+controls, and 10k units of the crossing game on it: the sim runs at 30 Hz on its own thread, an
+end-of-tick capture of `Body`/`NavAgent` feeds an instance stream, and the GPU culls and draws them
+(interpolated between ticks, ships on the water) while the render thread runs at ~2,500 fps without
+waiting for the sim. The render module ABI is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
 | `crates/ae_ecs` | Storage and query layer; flecs behind `flecs_backend`; the column arena | ecs_sim (`flecs.rs`, vendored flecs 4.1.6 + patch) |
 | `crates/ae_wasm` | wasmtime runtime: deterministic config, shared memory, N instances with private stacks and TLS | new, from the M0 spikes |
 | `crates/ae_abi` | Sim module ABI: run descriptor, schema section records, import names (no deps, builds for WASM) | new |
-| `crates/ae_sim` | Runtime: schema, layered schedule, worker crew, host systems, deferred commands and events keyed `{system, range, seq}`, digest | new; schedule and digest from ecs_sim |
+| `crates/ae_sim` | Runtime: schema, layered schedule, worker crew, host systems, deferred commands and events keyed `{system, range, seq}`, digest, end-of-tick field captures | new; schedule and digest from ecs_sim |
 | `crates/ae_services` | Engine services as host systems: `nav_spawn` + `nav` (the nav service over `Body`/`NavAgent` rows, `MoveOrder`/`OrderPoint` events as group commands, `TerrainEdit` events as terrain patches), `spatial` (index for guest queries) | new |
 | `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!` (with `host(..)` entries), typed columns, commands, events, spatial queries; engine components and `movement_classes!` in `ae_sdk::nav` (feature `nav`) | new |
 | `games/sandbox` | The M1 exit workload (built for wasm32 by the tools; not a workspace member) | new |
@@ -58,8 +61,8 @@ controls. Units are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
 | `crates/ae_framegraph` | Frame graph declare/bake/barriers (colour, depth, several writers per resource), plus the declaration decoder | ecs_sim `frame_graph` |
-| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
-| `bins/ae-client` | Window plus render thread: the crossing map's terrain with camera controls, or offscreen captures | new |
+| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); GPU-culled unit instances (`units`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
+| `bins/ae-client` | Window plus render thread and sim thread: the crossing map's terrain and units with camera controls, or offscreen captures | new |
 | `crates/ae_render_abi` | Frame graph declaration wire format and builder for render modules (no deps, builds for WASM) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
@@ -72,7 +75,8 @@ controls. Units are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 - Rust 1.98 with the `wasm32-wasip1-threads` target (`rustup target add wasm32-wasip1-threads`).
 - A C compiler (flecs is built from source).
 - `glslc` (shaderc) to build `ae_render`; SDL3 and a Vulkan 1.3 driver to run `ae-client` and the GPU
-  tests, which also need `VK_LAYER_KHRONOS_validation`.
+  tests, which also need `VK_LAYER_KHRONOS_validation`. `ae-client` builds the crossing game on first
+  use, like `ae-headless` (the wasm target above); `--units 0` runs it without the sim.
 - Optional: `wasmtime` CLI to run the nav golden test as WASM; the Tracy profiler GUI for `--features tracy`.
 
 ## Commands
@@ -120,8 +124,10 @@ cargo run --release -p ae_nav --bin navbench -- --quick                  # paths
 
 # Rendering (needs a Vulkan 1.3 GPU)
 cargo test -p ae_render --test gpu -- --ignored --test-threads=1         # offscreen, validation must stay silent
-cargo run --release -p ae-client                                         # the water crossing map (WASD, wheel, right-drag)
-cargo run --release -p ae-client -- --map land --capture land.ppm        # offscreen frame + GPU ms per pass
+cargo run --release -p ae-client                                         # water crossing map + 10k units (WASD, wheel, right-drag)
+cargo run --release -p ae-client -- --map land --capture land.ppm        # 300 sim ticks, then an offscreen frame + GPU ms per pass
+cargo run --release -p ae-client -- --units 0                            # terrain only
+cargo test --release -p ae_services --test capture                       # capturing every tick leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
 ```
 

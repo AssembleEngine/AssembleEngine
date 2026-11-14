@@ -356,6 +356,14 @@ impl TerrainRenderer {
         })
     }
 
+    /// The height texture (one corner per texel, normalised: world height =
+    /// sample × `height_scale` + `height_offset`) with its bilinear sampler,
+    /// for passes that place things on the ground. Lives as long as the
+    /// renderer.
+    pub fn height_texture(&self) -> (vk::ImageView, vk::Sampler) {
+        (self.height_img.view, self.samplers[1])
+    }
+
     pub fn info(&self) -> &TerrainInfo {
         &self.info
     }
@@ -393,12 +401,7 @@ impl TerrainRenderer {
 
     /// Per-frame uniforms for `slot` (its previous submission has completed).
     pub fn write_frame(&mut self, slot: usize, p: &FrameParams) {
-        let planes = |m: Mat4| -> [[f32; 4]; 6] {
-            let r = |i: usize| m.row(i);
-            // Vulkan clip space, reverse-Z with an infinite far plane.
-            let ps: [Vec4; 6] = [r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1), r(3) - r(2), Vec4::new(0.0, 0.0, 0.0, 1.0)];
-            ps.map(|p| (p / p.truncate().length().max(1e-20)).to_array())
-        };
+        let planes = frustum_planes;
         let i = &self.info;
         let ubo = FrameUbo {
             view_proj: p.view_proj.to_cols_array(),
@@ -537,6 +540,14 @@ impl TerrainRenderer {
         self.error_img.destroy(gpu);
         self.material_img.destroy(gpu);
     }
+}
+
+/// The six planes of `view_proj` (Vulkan clip space, reverse-Z with an
+/// infinite far plane), normalised, inside where `dot(n, p) + d >= 0`.
+pub fn frustum_planes(view_proj: Mat4) -> [[f32; 4]; 6] {
+    let r = |i: usize| view_proj.row(i);
+    let ps: [Vec4; 6] = [r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1), r(3) - r(2), Vec4::new(0.0, 0.0, 0.0, 1.0)];
+    ps.map(|p| (p / p.truncate().length().max(1e-20)).to_array())
 }
 
 fn graphics_pipeline(

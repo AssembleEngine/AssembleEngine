@@ -527,3 +527,83 @@ fn terrain_renders_offscreen() {
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
 }
+
+/// Units over the terrain: an instance stream of four units, reset + cull +
+/// indirect draw after the terrain draw into the same target and depth
+/// buffer. The cull passes three (the fourth is behind the camera: the
+/// instance count read back is 3); each shows its class colour at its
+/// projected position; the previous position of a moved unit (alpha 1
+/// shows the latest) shows none; validation stays silent.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn units_render_over_terrain() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    // Flat ground at 50 with water at 60 (class 1 floats on it).
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let red = [1.0, 0.02, 0.02];
+    let blue = [0.02, 0.02, 1.0];
+    let magenta = [1.0, 0.02, 1.0];
+    let classes = vec![UnitClass { color: red, floats: false }, UnitClass { color: blue, floats: true }, UnitClass { color: magenta, floats: false }];
+    // (x, y, prev_x, prev_y, class): the red unit moved from (420, 512).
+    let units = [(560.0f32, 512.0f32, 420.0f32, 512.0f32, 0u32), (512.0, 600.0, 512.0, 600.0, 1), (470.0, 440.0, 470.0, 440.0, 2), (512.0, -4000.0, 512.0, -4000.0, 0)];
+    let mut columns: [Vec<u32>; 8] = Default::default();
+    for &(x, y, px, py, class) in &units {
+        for (a, word) in [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 4.0f32.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0 };
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
+    let camera = {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(512.0, 512.0);
+        view.camera.pitch = 1.4;
+        view.camera.distance = 700.0;
+        view.fog = false;
+        view.camera
+    };
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    run_headless(&gpu, &mut app, target, 12, config).unwrap();
+    let pixels = app.readback().unwrap();
+    if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
+        let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+        ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(&path, ppm).unwrap();
+    }
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let pixel = |x: f32, y: f32, h: f32| -> [u8; 3] {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "({x}, {y}) projects into the view");
+        let i = (v as usize * extent.width as usize + u as usize) * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    let [r, g, b] = pixel(560.0, 512.0, 50.0).map(|c| c as i32);
+    assert!(r > 2 * g && r > 2 * b, "red unit at its latest position: {r} {g} {b}");
+    let [r, g, b] = pixel(512.0, 600.0, 60.0).map(|c| c as i32);
+    assert!(b > 2 * r && b > 2 * g, "blue unit on the water: {r} {g} {b}");
+    let [r, g, b] = pixel(470.0, 440.0, 50.0).map(|c| c as i32);
+    assert!(r > 2 * g && b > 2 * g, "magenta unit: {r} {g} {b}");
+    let [r, g, b] = pixel(420.0, 512.0, 50.0).map(|c| c as i32);
+    assert!(!(r > 2 * g && r > 2 * b), "nothing red where the red unit was a tick ago: {r} {g} {b}");
+    assert_eq!(app.last_unit_counts(), Some((4, 3)), "four rows uploaded, three pass the cull");
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}

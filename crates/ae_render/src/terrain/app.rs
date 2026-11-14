@@ -1,6 +1,9 @@
 //! The terrain as a [`RenderApp`]: a LOD compute pass, a draw pass into the
 //! backbuffer (or an offscreen target read back to the host) with a
-//! transient reverse-Z depth buffer, and present.
+//! transient reverse-Z depth buffer, and present. With units
+//! ([`TerrainApp::with_units`]), three more passes after the terrain draw:
+//! reset, cull and draw the units into the same target and depth buffer
+//! (see [`crate::units`]).
 //!
 //! The view (camera, error target, debug switches) is shared with the main
 //! thread through [`TerrainApp::view`]; the render thread reads it once per
@@ -13,12 +16,14 @@ use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::thread::{RenderApp, TargetInfo};
+use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
 use ash::vk;
 use glam::Vec2;
 use gpu_allocator::MemoryLocation;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// Sky / fog colour (linear).
@@ -67,6 +72,11 @@ pub struct TerrainView {
 pub enum TerrainPass {
     Lod,
     Draw,
+    UnitsReset,
+    UnitsCull,
+    UnitsDraw,
+    UnitsCount,
+    UnitsCountRead,
     Copy,
     HostRead,
     Present,
@@ -83,6 +93,8 @@ pub enum TerrainOutput {
 struct Ids {
     leaves: ResourceId,
     indirect: ResourceId,
+    /// Instances, visible list, indirect draw, host count copy.
+    units: Option<[ResourceId; 4]>,
     target: Option<ResourceId>,
     readback: Option<ResourceId>,
 }
@@ -99,6 +111,12 @@ pub struct TerrainApp {
     stats: Arc<Mutex<FrameStats>>,
     output: TerrainOutput,
     renderer: Option<TerrainRenderer>,
+    units: Option<UnitsSetup>,
+    unit_renderer: Option<UnitRenderer>,
+    /// `(rows, visible)` of the last completed frame with units.
+    unit_counts: Arc<Mutex<(u32, u32)>>,
+    /// The slot `prepare` last filled.
+    last_slot: usize,
     offscreen: Option<Offscreen>,
     ids: Option<Ids>,
     extent: vk::Extent2D,
@@ -115,12 +133,35 @@ impl TerrainApp {
             stats: Arc::default(),
             output,
             renderer: None,
+            units: None,
+            unit_renderer: None,
+            unit_counts: Arc::default(),
+            last_slot: 0,
             offscreen: None,
             ids: None,
             extent: vk::Extent2D { width: 1, height: 1 },
             update_lod: true,
             wireframe: Wireframe::Off,
         }
+    }
+
+    /// Draw the units of `setup.feed` on the terrain.
+    pub fn with_units(mut self, setup: UnitsSetup) -> Self {
+        self.units = Some(setup);
+        self
+    }
+
+    /// Units in the stream and units the cull passed, of the most recently
+    /// completed frame.
+    pub fn unit_counts(&self) -> Arc<Mutex<(u32, u32)>> {
+        self.unit_counts.clone()
+    }
+
+    /// `(rows, visible)` of the last frame `prepare` filled, once the device
+    /// is idle (after `run_headless`).
+    pub fn last_unit_counts(&mut self) -> Option<(u32, u32)> {
+        let units = self.unit_renderer.as_mut()?;
+        Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
     }
 
     /// The shared view; the main thread writes it, the render thread reads
@@ -163,6 +204,13 @@ impl TerrainApp {
     }
 }
 
+/// The terrain's fog (colour and density) for other passes, as the terrain
+/// renderer sets it.
+fn fog(info: &TerrainInfo, on: bool) -> [f32; 4] {
+    let density = if on { 1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2) } else { 0.0 };
+    [0.62, 0.70, 0.80, density]
+}
+
 /// The view a frozen LOD would keep (call on the main thread with the
 /// target's size).
 pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32) -> LodView {
@@ -177,12 +225,19 @@ impl RenderApp for TerrainApp {
     type Pass = TerrainPass;
 
     fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
+        if let Some(mut old) = self.unit_renderer.take() {
+            old.destroy(gpu);
+        }
         if let Some(mut old) = self.renderer.take() {
             old.destroy(gpu);
         }
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
-        self.renderer = Some(TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?);
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
+        if let Some(setup) = &self.units {
+            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+        }
+        self.renderer = Some(terrain);
         Ok(())
     }
 
@@ -214,7 +269,33 @@ impl RenderApp for TerrainApp {
             .color(target_id, LoadOp::Clear)
             .depth(depth, LoadOp::Clear)
             .id();
-        let mut ids = Ids { leaves, indirect, target: None, readback: None };
+        let units = self.unit_renderer.as_ref().map(|u| {
+            let instances = graph.buffer("unit instances", u.instances_desc(), ResourceClass::External);
+            let visible = graph.buffer("unit visible", u.visible_desc(), ResourceClass::External);
+            let draws = graph.buffer("unit indirect", u.indirect_desc(), ResourceClass::External);
+            graph.pass("units reset", PassKind::Transfer, TerrainPass::UnitsReset).access(draws, Role::TransferDst).id();
+            graph
+                .pass("units cull", PassKind::Compute, TerrainPass::UnitsCull)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+                .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
+                .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
+                .id();
+            // Declared after the terrain draw: a second writer of the
+            // target and the depth buffer, ordered after it.
+            graph
+                .pass("units", PassKind::Graphics, TerrainPass::UnitsDraw)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .color(target_id, LoadOp::Load)
+                .depth(depth, LoadOp::Load)
+                .id();
+            let counts = graph.buffer("unit counts", u.counts_desc(), ResourceClass::External);
+            graph.pass("units count", PassKind::Transfer, TerrainPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
+            graph.pass("units count read", PassKind::Transfer, TerrainPass::UnitsCountRead).access(counts, Role::HostRead).root().id();
+            [instances, visible, draws, counts]
+        });
+        let mut ids = Ids { leaves, indirect, units, target: None, readback: None };
         let backbuffer = match self.output {
             TerrainOutput::Present => {
                 graph.pass("present", PassKind::Present, TerrainPass::Present).present(target_id).root().id();
@@ -243,11 +324,39 @@ impl RenderApp for TerrainApp {
         let stats = renderer.read_stats(slot);
         *self.stats.lock().unwrap_or_else(|p| p.into_inner()) = stats;
         renderer.write_frame(slot, &params);
+        if let (Some(units), Some(setup)) = (self.unit_renderer.as_mut(), self.units.as_ref()) {
+            // This slot's previous frame has completed: its count is final.
+            let previous = (units.rows(slot), units.read_visible(slot));
+            *self.unit_counts.lock().unwrap_or_else(|p| p.into_inner()) = previous;
+            let stream = setup.feed.latest();
+            let frame = UnitFrame {
+                view_proj: params.view_proj,
+                cam_pos: params.cam_pos,
+                proj_scale: view.camera.proj_scale(self.extent.height as f32),
+                fog: fog(&self.source.info, params.fog),
+            };
+            units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
+        }
+        self.last_slot = slot;
         Ok(())
     }
 
-    fn external(&self, resource: ResourceId, _slot: usize) -> Option<Binding> {
+    fn external(&self, resource: ResourceId, slot: usize) -> Option<Binding> {
         let (renderer, ids) = (self.renderer.as_ref()?, self.ids.as_ref()?);
+        if let (Some([instances, visible, draws, counts]), Some(units)) = (ids.units, self.unit_renderer.as_ref()) {
+            if resource == counts {
+                return Some(Binding::Buffer(units.counts(slot)));
+            }
+            if resource == instances {
+                return Some(Binding::Buffer(units.instances(slot)));
+            }
+            if resource == visible {
+                return Some(Binding::Buffer(units.visible()));
+            }
+            if resource == draws {
+                return Some(Binding::Buffer(units.indirect()));
+            }
+        }
         if resource == ids.leaves {
             return Some(Binding::Buffer(renderer.leaves()));
         }
@@ -277,10 +386,20 @@ impl RenderApp for TerrainApp {
 
     fn status(&self) -> String {
         let stats = *self.stats.lock().unwrap_or_else(|p| p.into_inner());
-        format!("terrain: {} leaves, {} drawn", stats.leaves, stats.drawn)
+        let units = match &self.unit_renderer {
+            Some(_) => {
+                let (rows, visible) = *self.unit_counts.lock().unwrap_or_else(|p| p.into_inner());
+                format!(", {rows} units, {visible} visible")
+            }
+            None => String::new(),
+        };
+        format!("terrain: {} leaves, {} drawn{units}", stats.leaves, stats.drawn)
     }
 
     fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
+        if let Some(mut units) = self.unit_renderer.take() {
+            units.destroy(gpu);
+        }
         if let Some(mut renderer) = self.renderer.take() {
             renderer.destroy(gpu);
         }
@@ -318,6 +437,16 @@ impl Recorder<TerrainPass> for TerrainApp {
         match pass {
             TerrainPass::Lod => renderer.record_lod(ctx, self.update_lod),
             TerrainPass::Draw => renderer.record_draw(ctx, self.wireframe),
+            TerrainPass::UnitsReset | TerrainPass::UnitsCull | TerrainPass::UnitsDraw | TerrainPass::UnitsCount => {
+                let units = self.unit_renderer.as_ref().context("unit renderer not created")?;
+                match pass {
+                    TerrainPass::UnitsReset => units.record_reset(ctx),
+                    TerrainPass::UnitsCull => units.record_cull(ctx),
+                    TerrainPass::UnitsDraw => units.record_draw(ctx),
+                    _ => units.record_count(ctx),
+                }
+            }
+            TerrainPass::UnitsCountRead => {}
             TerrainPass::Copy => {
                 let ids = self.ids.as_ref().context("not declared")?;
                 let image = ctx.image(ids.target.context("no target")?)?;

@@ -9,6 +9,7 @@
 //! (e.g. the same game at 1, 2, 4, 8 and 16 workers); each [`World`] starts
 //! from the same empty state.
 
+use crate::capture::{Capture, CaptureSpec};
 use crate::command::{Applier, ApplyStats, Command, CommandKey, Emitted, merge};
 use crate::crew::{Batch, BatchSystem, Crew, Job, Worker, WorkerOut};
 use crate::digest::StateHash;
@@ -604,7 +605,7 @@ impl Runtime {
         let terms = [Term { component: id, access: Access::Read }];
         let mut n = 0;
         unsafe {
-            let q = fb::create_query(w.world, &terms)?;
+            let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
                 n += chunk.count;
                 Ok(())
@@ -624,7 +625,7 @@ impl Runtime {
         let terms = [Term { component: id, access: Access::Read }];
         let mut out = Vec::new();
         unsafe {
-            let q = fb::create_query(w.world, &terms)?;
+            let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
                 let ids = std::slice::from_raw_parts(chunk.entities, chunk.count);
                 let data = std::slice::from_raw_parts(chunk.fields[0], chunk.count * size);
@@ -638,6 +639,37 @@ impl Runtime {
         }
         out.sort_by_key(|(e, _)| *e);
         Ok(out)
+    }
+
+    /// Copy the fields of `spec` from every entity that has all its
+    /// components into `out` (between ticks; see [`crate::capture`]).
+    pub fn capture(&self, w: &World, spec: &CaptureSpec, out: &mut Capture) -> Result<()> {
+        let mut terms = Vec::with_capacity(spec.components.len());
+        for &ci in &spec.components {
+            let id = w.ecs_ids[ci].with_context(|| format!("`{}` is an event stream", self.schema.components[ci].name))?;
+            terms.push(Term { component: id, access: Access::Read });
+        }
+        out.tick = w.tick;
+        out.entities.clear();
+        out.columns.resize_with(spec.fields.len(), Vec::new);
+        for column in &mut out.columns {
+            column.clear();
+        }
+        unsafe {
+            let q = fb::create_query_uncached(w.world, &terms)?;
+            let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
+                out.entities.extend_from_slice(std::slice::from_raw_parts(chunk.entities, chunk.count));
+                for (column, &(term, offset)) in out.columns.iter_mut().zip(&spec.fields) {
+                    let base = chunk.fields[term].cast_const();
+                    let stride = spec.sizes[term];
+                    column.extend((0..chunk.count).map(|r| base.add(r * stride + offset).cast::<u32>().read_unaligned()));
+                }
+                Ok(())
+            });
+            fb::fini_query(q);
+            r?;
+        }
+        Ok(())
     }
 
     /// [`HostSystem::digest`] of the host system named `name`.

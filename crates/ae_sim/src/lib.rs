@@ -7,8 +7,11 @@
 //!   by key and applied serially, so entity ids and table layout come out the
 //!   same at any worker count.
 //! * [`imports`]: the host functions sim modules call to emit commands.
+//! * [`capture`]: end-of-tick copies of chosen fields for consumers outside
+//!   the sim (rendering).
 
 pub mod build;
+pub mod capture;
 pub mod command;
 pub mod crew;
 pub mod digest;

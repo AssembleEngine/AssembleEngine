@@ -17,6 +17,8 @@ version = "0.0.1"
 dependencies = [
  "ae_nav",
  "ae_render",
+ "ae_services",
+ "ae_sim",
  "anyhow",
  "ash",
  "glam",

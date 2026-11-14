@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 ae_nav.workspace = true
+ae_services.workspace = true
+ae_sim.workspace = true
 ae_render = { path = "../../crates/ae_render" }
 glam = "0.30"
 ash.workspace = true

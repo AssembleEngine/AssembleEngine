@@ -1,0 +1,24 @@
+#version 460
+// Frustum culling of the unit instances: appends the index of every unit
+// whose bounding sphere touches the view to the visible list and counts it
+// in the indirect draw's instance count (reset to 0 by the pass before).
+#define CULL
+#include "units_common.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= u.counts.x) {
+        return;
+    }
+    Unit unit = loadUnit(i);
+    vec3 centre = unit.pos + vec3(0.0, 0.4 * unit.size, 0.0);
+    float r = 1.6 * unit.size;
+    for (int k = 0; k < 6; k++) {
+        if (dot(u.frustum[k].xyz, centre) + u.frustum[k].w < -r) {
+            return;
+        }
+    }
+    visible[atomicAdd(cmd.instanceCount, 1u)] = i;
+}

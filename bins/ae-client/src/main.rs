@@ -3,7 +3,8 @@
 //! ```text
 //! ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X]
 //!           [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo]
-//!           [--frames-in-flight N] [--capture FILE.ppm]
+//!           [--frames-in-flight N] [--units N] [--workers N] [--ticks N]
+//!           [--capture FILE.ppm]
 //! ```
 //!
 //! Shows the terrain of the M2 crossing maps (`water`, the default, or
@@ -13,26 +14,40 @@
 //! world units (1 unit = 1 m) times `--relief` (default 1); ground under
 //! water is drawn with the water's depth as a tint.
 //!
+//! On the crossing maps the sim runs beside the renderer: the crossing game
+//! (`games/crossing`, built on first use) with `--units` units (default
+//! 10000, 0 for none) on the same map, `--workers` sim workers, ticked at
+//! 30 Hz on its own thread. Units are drawn as darts coloured by movement
+//! class (scout yellow, heavy red, ship white, hovercraft cyan, amphibious
+//! purple), interpolated between ticks; ships and hovercraft sit on the
+//! water surface. The terrain shows at once, the units once the world is
+//! built.
+//!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` more or less
 //! detail, T wireframe, L colour by LOD depth, G fog, C freeze the LOD,
 //! P print the camera, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
-//! subdivision settles) and writes a binary PPM.
+//! subdivision settles) and writes a binary PPM; with units it first runs
+//! `--ticks` sim ticks (default 300) and shows that tick.
 //!
 //! `--seconds` closes the window after S seconds; `--exercise` resizes,
 //! minimizes and restores on a schedule. Validation follows
 //! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
 //! the layer reported anything.
 
+mod sim;
+
 use ae_nav::terrain::{NO_WATER, Terrain};
+use ae_services::nav::Map;
 use ae_render::demo::DemoApp;
 use ae_render::swapchain::PresentPolicy;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, lod_view};
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
 use ae_render::thread::{GpuRenderConfig, GpuRenderThread};
+use ae_render::units::{UnitFeed, UnitsSetup};
 use ae_render::window::{SdlWindow, keys};
 use anyhow::{Context, Result, bail};
 use glam::Vec2;
@@ -59,12 +74,16 @@ struct Options {
     frames_in_flight: usize,
     /// Render offscreen without a window and write this PPM file.
     capture: Option<String>,
+    units: u32,
+    workers: usize,
+    /// Sim ticks before a capture.
+    ticks: u64,
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--capture FILE.ppm]";
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--capture FILE.ppm]";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None };
+    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300 };
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -89,6 +108,9 @@ fn parse() -> Result<Options> {
             "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
             "--exercise" => o.exercise = true,
             "--capture" => o.capture = Some(value("--capture", &mut args)?),
+            "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
+            "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
+            "--ticks" => o.ticks = value("--ticks", &mut args)?.parse().context("--ticks")?,
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
             "-h" | "--help" => {
@@ -99,6 +121,26 @@ fn parse() -> Result<Options> {
         }
     }
     Ok(o)
+}
+
+/// Half the cores, 1 to 8: the nav service's pool and the sim workers
+/// share them with the render and main threads.
+fn default_workers() -> usize {
+    (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 8)
+}
+
+/// The sim for this map, if it has units.
+fn sim_options(o: &Options) -> Option<sim::SimOptions> {
+    let map = match o.map {
+        MapKind::Water => Map::WaterCrossing,
+        MapKind::Land => Map::LandCrossing,
+        MapKind::Generated | MapKind::Demo => return None,
+    };
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers })
+}
+
+fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
+    UnitsSetup { feed, capacity: s.units, classes: s.classes(), min_pixels: 7.0 }
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with
@@ -253,6 +295,40 @@ fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCo
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
     let mut app = TerrainApp::new(source, TerrainOutput::Readback);
+    let mut sim_note = String::new();
+    if let Some(s) = sim_options(o) {
+        let started = Instant::now();
+        let mut sim = sim::Sim::new(&s)?;
+        let built = started.elapsed();
+        for _ in 0..o.ticks {
+            sim.tick()?;
+        }
+        let ticked = started.elapsed() - built;
+        let t = Instant::now();
+        let stream = sim.stream(0.0)?;
+        let streamed = t.elapsed();
+        // Where each class is (to aim `--camera` at).
+        let mut classes: Vec<(u32, f64, f64)> = vec![(0, 0.0, 0.0); s.classes().len()];
+        for r in 0..stream.len() {
+            if let Some(c) = classes.get_mut(stream.columns[7][r] as usize) {
+                *c = (c.0 + 1, c.1 + f32::from_bits(stream.columns[0][r]) as f64, c.2 + f32::from_bits(stream.columns[1][r]) as f64);
+            }
+        }
+        for (i, (n, x, y)) in classes.iter().enumerate().filter(|c| c.1.0 > 0) {
+            eprintln!("class {i}: {n} units, centre {:.0},{:.0}, {} moving", x / *n as f64, y / *n as f64, sim.moving(i as u32));
+        }
+        sim_note = format!(
+            "; sim: {} units at tick {}, world {:.2} s, {:.2} ms/tick, capture + stream {:.3} ms",
+            stream.len(),
+            stream.tick,
+            built.as_secs_f32(),
+            ticked.as_secs_f64() * 1e3 / o.ticks.max(1) as f64,
+            streamed.as_secs_f64() * 1e3
+        );
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(stream));
+        app = app.with_units(units_setup(&s, feed));
+    }
     place_camera(&app, o.camera);
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
@@ -263,14 +339,16 @@ fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCo
     ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
     std::fs::write(path, ppm).with_context(|| format!("writing {path}"))?;
     let stats = *app.stats().lock().unwrap();
+    let counts = app.last_unit_counts();
     RenderApp::destroy(&mut app, &gpu);
     drop(gpu);
     let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
-    let gpu_ms: Vec<String> = executor.pass_gpu_ms.iter().map(|ms| format!("{ms:.3}")).collect();
+    let gpu_ms: Vec<String> = executor.pass_names.iter().zip(&executor.pass_gpu_ms).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
     println!(
-        "wrote {path}: {} leaves, {} drawn; GPU ms per pass (lod, draw, copy, host read): {}; {}",
+        "wrote {path}: {} leaves, {} drawn{}; GPU ms per pass: {}{sim_note}; {}",
         stats.leaves,
         stats.drawn,
+        counts.map(|(rows, visible)| format!(", {visible} of {rows} units visible")).unwrap_or_default(),
         gpu_ms.join(", "),
         validation_text(instance.validation, errors, warnings)
     );
@@ -288,10 +366,16 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
     let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false };
     let mut terrain: Option<(Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>)> = None;
+    let mut sim_thread = None;
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
-            let app = TerrainApp::new(source.clone(), TerrainOutput::Present);
+            let mut app = TerrainApp::new(source.clone(), TerrainOutput::Present);
+            if let Some(s) = sim_options(&o) {
+                let feed = Arc::new(UnitFeed::default());
+                app = app.with_units(units_setup(&s, feed.clone()));
+                sim_thread = Some(sim::SimThread::start(s, feed));
+            }
             place_camera(&app, o.camera);
             terrain = Some((app.view(), app.stats()));
             GpuRenderThread::start(&window, app, config)?
@@ -334,12 +418,35 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
                 None => String::new(),
             };
+            let sim = match &sim_thread {
+                Some(t) => {
+                    let s = t.stats();
+                    if s.failed {
+                        " | sim failed (see the terminal)".into()
+                    } else if s.ready {
+                        format!(" | {} units, tick {}, {:.1} ms/tick", s.units, s.tick, s.tick_ms)
+                    } else {
+                        " | building the world".into()
+                    }
+                }
+                None => String::new(),
+            };
+            let detail = detail + &sim;
             window.set_title(&format!("AssemblyEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
         }
         std::thread::sleep(Duration::from_millis(2));
     }
     let stats = thread.stop();
+    if let Some(t) = sim_thread {
+        let s = t.stop().context("sim thread")?;
+        if s.ready {
+            println!(
+                "sim: {} units, tick {}, last second: {:.2} ms/tick, capture + stream {:.3} ms/tick; {} ticks ran late",
+                s.units, s.tick, s.tick_ms, s.capture_ms, s.late
+            );
+        }
+    }
     println!(
         "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} acquire timeouts, {}",
         stats.frames,

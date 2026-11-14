@@ -168,3 +168,8 @@ pub fn push_bytes<T: Copy>(value: &T) -> &[u8] {
     // Safety: `T: Copy` plain-old-data push-constant blocks.
     unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>()) }
 }
+
+pub fn slice_bytes<T: Copy>(values: &[T]) -> &[u8] {
+    // Safety: plain-old-data (integers and floats) only.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values)) }
+}

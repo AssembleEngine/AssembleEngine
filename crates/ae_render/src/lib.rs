@@ -20,5 +20,6 @@ pub mod pipeline;
 pub mod swapchain;
 pub mod terrain;
 pub mod thread;
+pub mod units;
 pub mod upload;
 pub mod window;

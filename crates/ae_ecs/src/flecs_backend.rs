@@ -135,6 +135,18 @@ pub unsafe fn entity_alive(world: World, entity: EntityId) -> bool {
 
 /// Create a cached query from AND terms.
 pub unsafe fn create_query(world: World, terms: &[Term]) -> Result<Query> {
+    unsafe { query_with_cache(world, terms, ecs_query_cache_kind_t_EcsQueryCacheAll) }
+}
+
+/// A query without a cache. Flecs gives every cached query an entity, so
+/// creating one in the middle of a run changes the ids later spawns get;
+/// an uncached query creates no entity and leaves the world as it was.
+/// For inspection (counts, end-of-tick captures) between ticks.
+pub unsafe fn create_query_uncached(world: World, terms: &[Term]) -> Result<Query> {
+    unsafe { query_with_cache(world, terms, ecs_query_cache_kind_t_EcsQueryCacheNone) }
+}
+
+unsafe fn query_with_cache(world: World, terms: &[Term], cache: ecs_query_cache_kind_t) -> Result<Query> {
     ensure!(!terms.is_empty() && terms.len() <= MAX_QUERY_TERMS, "bad term count");
     let mut desc = unsafe { MaybeUninit::<ecs_query_desc_t>::zeroed().assume_init() };
     for (slot, term) in desc.terms.iter_mut().zip(terms.iter()) {
@@ -144,7 +156,7 @@ pub unsafe fn create_query(world: World, terms: &[Term]) -> Result<Query> {
             Access::Write => FLECS_INOUT,
         };
     }
-    desc.cache_kind = ecs_query_cache_kind_t_EcsQueryCacheAll;
+    desc.cache_kind = cache;
     let query = unsafe { ecs_query_init(world, &desc) };
     if query.is_null() {
         bail!("ecs_query_init failed");

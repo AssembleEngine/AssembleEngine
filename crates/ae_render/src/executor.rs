@@ -140,6 +140,8 @@ pub struct ExecutorStats {
     pub submit_ms: f32,
     /// Average GPU time per baked pass (profiling only), baked order.
     pub pass_gpu_ms: Vec<f32>,
+    /// Names of the baked passes, baked order (as `pass_gpu_ms`).
+    pub pass_names: Vec<String>,
 }
 
 struct Physical {
@@ -263,6 +265,7 @@ impl<R> Executor<R> {
             .iter()
             .map(|(sum, count)| if *count > 0 { (*sum / *count as f64) as f32 } else { 0.0 })
             .collect();
+        stats.pass_names = self.baked.iter().flat_map(|b| b.order()).map(|p| self.graph.passes[p.0 as usize].name.clone()).collect();
         stats
     }
 
