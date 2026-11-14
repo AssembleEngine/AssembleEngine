@@ -607,3 +607,363 @@ fn units_render_over_terrain() {
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
 }
+
+/// A flat map (ground at 50, 1024 world units square), units from `rows`
+/// `(x, y, radius, class)`, rendered offscreen for a few frames from
+/// `camera`; returns `(rows uploaded, units the GPU cull kept)` and the
+/// frame the units saw.
+fn cull_on_gpu(
+    gpu: &Arc<GpuDevice>,
+    rows: &[(f32, f32, f32, u32)],
+    capacity: u32,
+    min_pixels: f32,
+    camera: impl FnOnce(&mut ae_render::terrain::camera::Camera),
+) -> ((u32, u32), ae_render::units::InstanceStream, ae_render::units::UnitFrame) {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
+
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let mut columns: [Vec<u32>; 8] = Default::default();
+    for &(x, y, radius, class) in rows {
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns };
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(stream.clone()));
+    let classes = vec![UnitClass { color: [1.0, 0.0, 0.0], floats: false }];
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels });
+    let cam = {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        camera(&mut view.camera);
+        view.camera
+    };
+    let extent = vk::Extent2D { width: 320, height: 200 };
+    app.create_offscreen(gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    run_headless(gpu, &mut app, target, 4, config).unwrap();
+    let counts = app.last_unit_counts().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, gpu);
+    let view = lod_view(&source, &cam, extent.width, extent.height);
+    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4] };
+    (counts, stream, frame)
+}
+
+/// The GPU cull keeps exactly the units the CPU copy of its test keeps:
+/// 3,000 units scattered around and behind an oblique camera, some far
+/// away and tiny. Units within half a world unit of a plane (where
+/// rounding decides) are left out of the set. The set covers what the
+/// cull must get right: units culled by each side plane, units whose
+/// centre is outside the view but whose body reaches into it (kept), and
+/// far units kept only because they are drawn at the minimum pixel size.
+/// Then a stream longer than the capacity: only `capacity` rows are
+/// uploaded and culled.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn units_cull_matches_the_cpu_reference() {
+    use ae_render::units::cull_margins;
+    const MIN_PIXELS: f32 = 7.0;
+    let gpu = gpu();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let camera = |c: &mut ae_render::terrain::camera::Camera| {
+        c.target = glam::Vec2::new(512.0, 512.0);
+        c.distance = 450.0;
+        c.yaw = 0.6;
+        c.pitch = 0.9;
+    };
+    let ground = |_: f32, _: f32, _: u32| 50.0;
+    // Candidates near the view, then far small ones along the view
+    // direction; keep only those clear of every plane by half a unit.
+    let mut candidates: Vec<(f32, f32, f32, u32)> = (0..6000).map(|_| (-400.0 + 1800.0 * random(), -400.0 + 1800.0 * random(), 1.0 + 11.0 * random(), 0)).collect();
+    candidates.extend((0..1500).map(|_| (-6000.0 + 12000.0 * random(), -6000.0 + 12000.0 * random(), 0.3 + 0.7 * random(), 0)));
+    // The frame does not depend on the units: probe it with one.
+    let (_, _, frame) = cull_on_gpu(&gpu, &candidates[..1], 1, MIN_PIXELS, camera);
+    let probe = ae_render::units::InstanceStream {
+        tick: 0,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        columns: std::array::from_fn(|a| candidates.iter().map(|&(x, y, r, c)| [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0, r.to_bits(), c][a]).collect()),
+    };
+    let margins = cull_margins(&probe, &frame, MIN_PIXELS, 1.0, ground);
+    let rows: Vec<(f32, f32, f32, u32)> = candidates.iter().zip(&margins).filter(|(_, m)| m.0.abs() > 0.5).map(|(c, _)| *c).take(3000).collect();
+    assert_eq!(rows.len(), 3000);
+
+    let ((uploaded, visible), stream, frame2) = cull_on_gpu(&gpu, &rows, 4096, MIN_PIXELS, camera);
+    assert_eq!(frame2.view_proj, frame.view_proj, "same camera, same frame");
+    let margins = cull_margins(&stream, &frame, MIN_PIXELS, 1.0, ground);
+    let unenlarged = cull_margins(&stream, &frame, 0.0, 1.0, ground);
+    let kept = margins.iter().filter(|m| m.0 >= 0.0).count() as u32;
+    let mut culled_by = [0usize; 6];
+    for m in margins.iter().filter(|m| m.0 < 0.0) {
+        culled_by[m.1] += 1;
+    }
+    let straddling = margins.iter().filter(|m| m.0 >= 0.0 && m.0 < m.2).count();
+    let by_min_size = margins.iter().zip(&unenlarged).filter(|(m, u)| m.0 >= 0.0 && u.0 < 0.0).count();
+    eprintln!("{uploaded} rows, GPU kept {visible}, CPU keeps {kept}; culled by plane {culled_by:?}; {straddling} kept with the centre outside; {by_min_size} kept only at the minimum size");
+    assert_eq!(uploaded, 3000);
+    assert_eq!(visible, kept, "GPU and CPU cull agree");
+    assert!(kept > 300 && kept < 2700, "a mix of kept and culled units: {kept}");
+    assert!(culled_by[..4].iter().all(|&n| n > 20), "every side plane culls some: {culled_by:?}");
+    assert!(straddling > 10, "units across the view's edge are kept: {straddling}");
+    assert!(by_min_size > 5, "far units kept by the minimum size: {by_min_size}");
+
+    // More rows than capacity: the first 64 are uploaded; all in view.
+    let crowd: Vec<(f32, f32, f32, u32)> = (0..100).map(|i| (500.0 + (i % 10) as f32 * 4.0, 500.0 + (i / 10) as f32 * 4.0, 1.0, 0)).collect();
+    let ((uploaded, visible), _, _) = cull_on_gpu(&gpu, &crowd, 64, MIN_PIXELS, camera);
+    assert_eq!((uploaded, visible), (64, 64), "capacity caps the rows");
+    assert_clean(&gpu);
+}
+
+/// The default render module drives the same scene as the native graph:
+/// terrain and units, offscreen, 16 frames; the pixels are byte for byte
+/// the same, and the module is reported active with no errors.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn the_default_module_renders_like_the_native_graph() {
+    let gpu = gpu();
+    let wasm = ae_render::module::build("default").expect("build render/default");
+    let native = scene_pixels(&gpu, None, 16);
+    let from_module = scene_pixels(&gpu, Some(wasm), 16);
+    assert_eq!(native.0.len(), from_module.0.len());
+    let differing = native.0.iter().zip(&from_module.0).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 0, "{differing} bytes differ");
+    assert_eq!(native.1, from_module.1, "same unit counts");
+    assert!(native.1.1 > 0, "units were drawn: {:?}", native.1);
+    assert_clean(&gpu);
+}
+
+/// A generated map with a few hundred units, offscreen at 320x200,
+/// natively or driven by `module`.
+fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrain::app::TerrainApp {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{build_pyramid, generate};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+
+    let heightmap = generate(257, 257, 3);
+    let pyramid = build_pyramid(&heightmap, 300.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 300.0, 0.0, Some(40.0));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let mut columns: [Vec<u32>; 8] = Default::default();
+    for i in 0..400u32 {
+        let (x, y) = (300.0 + (i % 20) as f32 * 70.0, 300.0 + (i / 20) as f32 * 70.0);
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.5f32.to_bits(), 6.0f32.to_bits(), i % 3].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+    let classes = vec![UnitClass { color: [1.0, 0.8, 0.1], floats: false }, UnitClass { color: [0.9, 0.9, 0.95], floats: true }, UnitClass { color: [0.8, 0.1, 0.1], floats: false }];
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0 });
+    if let Some(wasm) = module {
+        app = app.with_module(wasm);
+    }
+    {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.pitch = 0.6;
+        view.camera.distance = 1600.0;
+    }
+    app.create_offscreen(gpu, SCENE_EXTENT).unwrap();
+    app
+}
+
+const SCENE_EXTENT: vk::Extent2D = vk::Extent2D { width: 320, height: 200 };
+
+/// The scene of [`scene_app`] rendered for `frames` frames: the pixels and
+/// the unit counts (rows, visible).
+fn scene_pixels(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize) -> (Vec<u8>, (u32, u32)) {
+    use ae_render::thread::{TargetInfo, run_headless};
+    let mut app = scene_app(gpu, module);
+    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    run_headless(gpu, &mut app, target, frames, config).unwrap();
+    let status = app.module_status().lock().unwrap().clone();
+    assert!(status.errors.is_empty(), "{:?}", status.errors);
+    assert_eq!(status.active, app.module_status().lock().unwrap().loads > 0);
+    let pixels = app.readback().unwrap();
+    let counts = app.last_unit_counts().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, gpu);
+    (pixels, counts)
+}
+
+/// Mean of the sRGB-encoded RGB values over a `w`x`h` box at (x, y).
+fn mean_rgb(pixels: &[u8], x: u32, y: u32, w: u32, h: u32) -> f64 {
+    let mut sum = 0u64;
+    for row in y..y + h {
+        for col in x..x + w {
+            let i = ((row * SCENE_EXTENT.width + col) * 4) as usize;
+            sum += pixels[i] as u64 + pixels[i + 1] as u64 + pixels[i + 2] as u64;
+        }
+    }
+    sum as f64 / (3 * w * h) as f64
+}
+
+/// A WAT module that declares `graph` and `programs` (bytes for the test
+/// scene's target) and traps in `frame`.
+fn trapping_module(graph: &[u8], programs: &[u8]) -> Vec<u8> {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("\\{b:02x}")).collect::<String>();
+    let (g, p) = (4096u32, 4096 + graph.len() as u32);
+    let words: Vec<u8> = [g, graph.len() as u32, p, programs.len() as u32].iter().flat_map(|w| w.to_le_bytes()).collect();
+    format!(
+        r#"(module
+            (memory (export "memory") 2)
+            (data (i32.const 64) "{}")
+            (data (i32.const {g}) "{}")
+            (data (i32.const {p}) "{}")
+            (func (export "ae_render_version") (result i32) i32.const 1)
+            (func (export "ae_render_declare") (param i32 i32 i32 i32) (result i32) i32.const 64)
+            (func (export "ae_render_input") (result i32) i32.const 1024)
+            (func (export "ae_render_frame") (result i32) unreachable))"#,
+        hex(&words),
+        hex(graph),
+        hex(programs)
+    )
+    .into_bytes()
+}
+
+/// Render modules replaced while running, in one executor:
+/// default → post (another topology: one rebake; the grade changes the
+/// picture) → the post module's vignette switched on by a host flag (a
+/// conditional pass: no rebake; corners darken, the centre stays) →
+/// garbage handed over (rejected, the post module keeps rendering the same
+/// picture) → a graph running one fullscreen program in two passes
+/// (rejected by name, likewise) → a module that declares the default graph but traps in
+/// `frame` (installed, then stopped: its graph keeps rendering, like the
+/// default module's). Validation stays silent throughout.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn render_modules_reload_while_running() {
+    use ae_render::thread::{Headless, TargetInfo};
+    let gpu = gpu();
+    let default = ae_render::module::build("default").expect("build render/default");
+    let post = ae_render::module::build("post").expect("build render/post");
+    let mut app = scene_app(&gpu, Some(default.clone()));
+    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() };
+    let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+    let status = app.module_status();
+    let reload = app.module_reload();
+    let mut step = |app: &mut ae_render::terrain::app::TerrainApp, frames: usize| -> (Vec<u8>, u64) {
+        run.frames(app, frames).unwrap();
+        run.wait().unwrap();
+        (app.readback().unwrap(), run.stats().bakes)
+    };
+    let (w, h) = (SCENE_EXTENT.width, SCENE_EXTENT.height);
+    let corners = |p: &[u8]| (mean_rgb(p, 0, 0, 24, 24) + mean_rgb(p, w - 24, 0, 24, 24) + mean_rgb(p, 0, h - 24, 24, 24) + mean_rgb(p, w - 24, h - 24, 24, 24)) / 4.0;
+    let centre = |p: &[u8]| mean_rgb(p, w / 2 - 20, h / 2 - 20, 40, 40);
+
+    let (plain, bakes) = step(&mut app, 12);
+    assert_eq!((bakes, status.lock().unwrap().loads), (1, 1));
+
+    *reload.lock().unwrap() = Some(post.clone());
+    let (graded, bakes) = step(&mut app, 12);
+    assert_eq!((bakes, status.lock().unwrap().loads), (2, 2), "the post module's graph rebaked once");
+    let changed = plain.iter().zip(&graded).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+    assert!(changed > plain.len() / 4, "the grade changes the picture: {changed} of {} bytes", plain.len());
+    assert!((centre(&graded) - centre(&plain)).abs() < 40.0, "but keeps it recognisable");
+
+    app.view().lock().unwrap().module_flags = 1;
+    let (vignetted, bakes) = step(&mut app, 4);
+    assert_eq!(bakes, 2, "switching a conditional pass does not rebake");
+    eprintln!("corners {:.1} -> {:.1}, centre {:.1} -> {:.1}", corners(&graded), corners(&vignetted), centre(&graded), centre(&vignetted));
+    assert!(corners(&vignetted) < corners(&graded) * 0.6, "the vignette darkens the corners");
+    assert!((centre(&vignetted) - centre(&graded)).abs() < 2.0, "and leaves the centre");
+
+    *reload.lock().unwrap() = Some(b"not a module".to_vec());
+    let (kept, bakes) = step(&mut app, 4);
+    {
+        let s = status.lock().unwrap();
+        assert_eq!((s.loads, s.errors.len()), (2, 1));
+        assert!(s.errors[0].contains("reload rejected"), "{}", s.errors[0]);
+    }
+    assert_eq!(bakes, 2);
+    let drift = kept.iter().zip(&vignetted).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+    assert!(drift < kept.len() / 100, "the post module keeps rendering: {drift} bytes moved");
+
+    // A graph running one fullscreen program in two passes (the grade of
+    // the post module, scene -> mid -> target): rejected by name, the post
+    // module keeps rendering.
+    let shared = {
+        use ae_render_abi::module::{Program, ProgramTable};
+        use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, Role, ShaderStage};
+        let engine = ae_render::module::engine();
+        let mut m = ae_render::module::RenderModule::load(&engine, &post).unwrap();
+        let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
+        let declared = m.declare(w, h, vk::Format::R8G8B8A8_SRGB.as_raw() as u32, flags).unwrap().unwrap();
+        let tables = ProgramTable::decode(&declared.programs).unwrap();
+        let grade = tables.iter().find_map(|p| match *p {
+            Program::Fullscreen { label: "grade", spirv, .. } => Some(spirv.to_vec()),
+            _ => None,
+        });
+        let srgb = vk::Format::R8G8B8A8_SRGB.as_raw() as u32;
+        let (mut g, mut p) = (GraphBuilder::new(), ProgramTable::new());
+        let leaves = g.buffer("terrain.leaves", 0, 0, Class::External);
+        let indirect = g.buffer("terrain.indirect", 0, 0, Class::External);
+        let depth = g.image("depth", ImageSpec::depth_2d(vk::Format::D32_SFLOAT.as_raw() as u32, w, h, 0x20), Class::Transient);
+        let scene = g.image("scene", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
+        let mid = g.image("mid", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
+        let target = g.image("readback.target", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x1), Class::External);
+        let buffer = g.buffer("readback.buffer", 0, 0, Class::External);
+        let lod = p.library("terrain.lod");
+        g.pass("terrain lod", PassKind::Compute, lod).access(leaves, Role::StorageBufferWrite(ShaderStage::Compute)).access(indirect, Role::StorageBufferWrite(ShaderStage::Compute)).id();
+        let draw = p.library("terrain.draw");
+        g.pass("terrain", PassKind::Graphics, draw).access(leaves, Role::StorageBufferRead(ShaderStage::Vertex)).access(indirect, Role::IndirectBuffer).color(scene, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
+        let program = p.push(Program::Fullscreen { label: "grade", spirv: &grade.unwrap(), uniform_bytes: 32 });
+        g.pass("grade once", PassKind::Graphics, program).sampled(scene, ShaderStage::Fragment).color(mid, LoadOp::DontCare).id();
+        g.pass("grade twice", PassKind::Graphics, program).sampled(mid, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        let copy = p.library("readback.copy");
+        g.pass("copy", PassKind::Transfer, copy).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
+        let read = p.library("host.read");
+        g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
+        trapping_module(&g.finish(), &p.finish())
+    };
+    *reload.lock().unwrap() = Some(shared);
+    let (still, bakes) = step(&mut app, 4);
+    {
+        let s = status.lock().unwrap();
+        assert_eq!((s.loads, s.errors.len()), (2, 2), "{:?}", s.errors);
+        assert!(s.errors[1].contains("`grade once` and `grade twice`"), "{}", s.errors[1]);
+    }
+    assert_eq!(bakes, 2);
+    let drift = still.iter().zip(&vignetted).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+    assert!(drift < still.len() / 100, "the post module keeps rendering: {drift} bytes moved");
+
+    // The default module's declaration for this target, served by a module
+    // that traps every frame.
+    let declared = {
+        let engine = ae_render::module::engine();
+        let mut m = ae_render::module::RenderModule::load(&engine, &default).unwrap();
+        let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
+        m.declare(w, h, vk::Format::R8G8B8A8_SRGB.as_raw() as u32, flags).unwrap().unwrap()
+    };
+    *reload.lock().unwrap() = Some(trapping_module(&declared.graph, &declared.programs));
+    let (trapped, bakes) = step(&mut app, 8);
+    {
+        let s = status.lock().unwrap();
+        assert_eq!((s.loads, s.errors.len()), (3, 3), "{:?}", s.errors);
+        assert!(s.errors[2].contains("stopped"), "{}", s.errors[2]);
+    }
+    assert_eq!(bakes, 3, "back to the default topology");
+    let off = trapped.iter().zip(&plain).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+    assert!(off < trapped.len() / 100, "its graph renders like the default module's: {off} bytes differ");
+
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    drop(run);
+    assert_clean(&gpu);
+}

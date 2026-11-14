@@ -1,0 +1,20 @@
+# The default render module: the scene's frame graph (terrain, units,
+# present or readback) declared from WASM. Built for wasm32-unknown-unknown;
+# not part of the main workspace.
+[package]
+name = "ae_render_default"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-render-sdk = { path = "../../sdk/ae-render-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+
+[workspace]

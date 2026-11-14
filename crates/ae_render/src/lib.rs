@@ -15,7 +15,10 @@
 pub mod demo;
 pub mod device;
 pub mod executor;
+pub mod fullscreen;
+pub mod library;
 pub mod memory;
+pub mod module;
 pub mod pipeline;
 pub mod swapchain;
 pub mod terrain;

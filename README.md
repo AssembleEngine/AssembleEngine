@@ -44,7 +44,10 @@ CBT/LEB from map-rendering, coloured by the nav materials, water as a depth tint
 controls, and 10k units of the crossing game on it: the sim runs at 30 Hz on its own thread, an
 end-of-tick capture of `Body`/`NavAgent` feeds an instance stream, and the GPU culls and draws them
 (interpolated between ticks, ships on the water) while the render thread runs at ~2,500 fps without
-waiting for the sim. The render module ABI is next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
+waiting for the sim. The frame graph can come from a render module (WASM): it wires engine library
+passes (terrain, units) and its own fullscreen shaders (reflected and checked against the declared
+passes), and is swapped while running when its sources change (`ae-client --render-module post`).
+Material tilesets are next. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
@@ -61,9 +64,11 @@ waiting for the sim. The render module ABI is next. Details: [docs/PLAN.md](docs
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
 | `crates/ae_framegraph` | Frame graph declare/bake/barriers (colour, depth, several writers per resource), plus the declaration decoder | ecs_sim `frame_graph` |
-| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); GPU-culled unit instances (`units`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
+| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); GPU-culled unit instances (`units`); the pass library, render module host and fullscreen programs with SPIR-V reflection (`library`, `module`, `fullscreen`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
 | `bins/ae-client` | Window plus render thread and sim thread: the crossing map's terrain and units with camera controls, or offscreen captures | new |
-| `crates/ae_render_abi` | Frame graph declaration wire format and builder for render modules (no deps, builds for WASM) | new |
+| `crates/ae_render_abi` | Frame graph declaration wire format and builder; the render module contract and program table (no deps, builds for WASM) | new |
+| `sdk/ae-render-sdk` | Guest SDK for render modules: `RenderModule` trait, `render_module!` exports | new |
+| `render/default`, `render/post` | Render modules: the engine's scene graph from WASM; the same with a colour grade and a vignette (built for `wasm32-unknown-unknown`; not workspace members) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
 | `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary) | new |
@@ -72,7 +77,8 @@ waiting for the sim. The render module ABI is next. Details: [docs/PLAN.md](docs
 
 ## Requirements
 
-- Rust 1.98 with the `wasm32-wasip1-threads` target (`rustup target add wasm32-wasip1-threads`).
+- Rust 1.98 with the `wasm32-wasip1-threads` target (`rustup target add wasm32-wasip1-threads`), and
+  `wasm32-unknown-unknown` for render modules (`rustup target add wasm32-unknown-unknown`).
 - A C compiler (flecs is built from source).
 - `glslc` (shaderc) to build `ae_render`; SDL3 and a Vulkan 1.3 driver to run `ae-client` and the GPU
   tests, which also need `VK_LAYER_KHRONOS_validation`. `ae-client` builds the crossing game on first
@@ -127,6 +133,8 @@ cargo test -p ae_render --test gpu -- --ignored --test-threads=1         # offsc
 cargo run --release -p ae-client                                         # water crossing map + 10k units (WASD, wheel, right-drag)
 cargo run --release -p ae-client -- --map land --capture land.ppm        # 300 sim ticks, then an offscreen frame + GPU ms per pass
 cargo run --release -p ae-client -- --units 0                            # terrain only
+cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (V: vignette)
+cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
 ```

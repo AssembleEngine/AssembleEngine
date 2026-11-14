@@ -5,6 +5,16 @@
 //! reset, cull and draw the units into the same target and depth buffer
 //! (see [`crate::units`]).
 //!
+//! The graph is the engine's own ([`native_graph`]) or a render module's
+//! ([`TerrainApp::with_module`]): the module declares resources and passes
+//! from the pass library ([`crate::library`]); the host sizes the library
+//! resources, checks the wiring and records the passes. A new module can be
+//! handed over while running ([`TerrainApp::module_reload`]): it replaces
+//! the old one at the next frame if it loads, declares and wires; otherwise
+//! the old one keeps rendering and the error is reported
+//! ([`TerrainApp::module_status`]). A trap in the module's per-frame call
+//! stops calling it; its last graph keeps rendering.
+//!
 //! The view (camera, error target, debug switches) is shared with the main
 //! thread through [`TerrainApp::view`]; the render thread reads it once per
 //! frame and never waits for anyone else.
@@ -16,6 +26,10 @@ use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::thread::{RenderApp, TargetInfo};
+use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
+use crate::fullscreen::FullscreenProgram;
+use crate::module::{ModuleFrame, RenderModule};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
@@ -66,20 +80,65 @@ pub struct TerrainView {
     pub fog: bool,
     /// Keep the subdivision of this view (fly around a frozen mesh).
     pub frozen: Option<LodView>,
+    /// Passed to the render module every frame ([`FrameInput::flags`]).
+    pub module_flags: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerrainPass {
-    Lod,
-    Draw,
-    UnitsReset,
-    UnitsCull,
-    UnitsDraw,
-    UnitsCount,
-    UnitsCountRead,
-    Copy,
-    HostRead,
-    Present,
+/// One pass of the scene's graph: the program it came from (its payload;
+/// [`NATIVE`] for the engine's own graph) and what it records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScenePass {
+    pub program: u32,
+    pub work: PassWork,
+}
+
+/// The program of the native graph's passes (never disabled).
+pub const NATIVE: u32 = u32::MAX;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PassWork {
+    Library(LibraryPass),
+    /// [`LibraryPass::ReadbackCopy`] with its source image and buffer.
+    Readback { image: ResourceId, buffer: ResourceId },
+    /// A module's fullscreen program (by payload), sampling `sampled` in
+    /// order.
+    Fullscreen { sampled: Vec<ResourceId> },
+}
+
+/// The render module driving the graph, with its wired declaration.
+struct ModuleState {
+    module: RenderModule,
+    /// Target the declaration is for.
+    declared_for: (vk::Extent2D, vk::Format),
+    graph: FrameGraph<ScenePass>,
+    resources: ResourceMap,
+    /// By payload: the fullscreen programs and where their uniform blocks
+    /// start in the module's per-frame uniform bytes.
+    programs: Vec<Option<(FullscreenProgram, usize)>>,
+    uniform_bytes: usize,
+    frame: ModuleFrame,
+    /// `frame` trapped: no more calls; the graph keeps rendering.
+    failed: bool,
+    frames: u32,
+}
+
+/// A module's declaration, wired and with its programs built.
+struct ModuleGraph {
+    graph: FrameGraph<ScenePass>,
+    resources: ResourceMap,
+    programs: Vec<Option<(FullscreenProgram, usize)>>,
+    uniform_bytes: usize,
+}
+
+/// Render module loads and errors, for the main thread.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleStatus {
+    /// Modules loaded and installed (the first one included).
+    pub loads: u32,
+    /// A module is driving the graph.
+    pub active: bool,
+    /// Every error so far, oldest first (failed reloads, traps).
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,13 +149,10 @@ pub enum TerrainOutput {
     Readback,
 }
 
-struct Ids {
-    leaves: ResourceId,
-    indirect: ResourceId,
-    /// Instances, visible list, indirect draw, host count copy.
-    units: Option<[ResourceId; 4]>,
-    target: Option<ResourceId>,
-    readback: Option<ResourceId>,
+/// The installed graph's library resources (by resource index) and its
+/// readback image, if any.
+struct Wiring {
+    resources: ResourceMap,
 }
 
 struct Offscreen {
@@ -118,7 +174,15 @@ pub struct TerrainApp {
     /// The slot `prepare` last filled.
     last_slot: usize,
     offscreen: Option<Offscreen>,
-    ids: Option<Ids>,
+    wiring: Option<Wiring>,
+    engine: Option<wasmtime::Engine>,
+    module: Option<ModuleState>,
+    gpu: Option<Arc<GpuDevice>>,
+    frames_in_flight: usize,
+    /// Linear, clamped: what fullscreen programs sample with.
+    sampler: vk::Sampler,
+    pending_module: Arc<Mutex<Option<Vec<u8>>>>,
+    module_status: Arc<Mutex<ModuleStatus>>,
     extent: vk::Extent2D,
     update_lod: bool,
     wireframe: Wireframe,
@@ -126,7 +190,7 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0 };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -138,7 +202,14 @@ impl TerrainApp {
             unit_counts: Arc::default(),
             last_slot: 0,
             offscreen: None,
-            ids: None,
+            wiring: None,
+            engine: None,
+            module: None,
+            gpu: None,
+            frames_in_flight: 1,
+            sampler: vk::Sampler::null(),
+            pending_module: Arc::default(),
+            module_status: Arc::default(),
             extent: vk::Extent2D { width: 1, height: 1 },
             update_lod: true,
             wireframe: Wireframe::Off,
@@ -149,6 +220,22 @@ impl TerrainApp {
     pub fn with_units(mut self, setup: UnitsSetup) -> Self {
         self.units = Some(setup);
         self
+    }
+
+    /// Take the graph from the render module `wasm` (loaded at the first
+    /// frame; failing to load it is an error of that frame).
+    pub fn with_module(self, wasm: Vec<u8>) -> Self {
+        *self.pending_module.lock().unwrap_or_else(|p| p.into_inner()) = Some(wasm);
+        self
+    }
+
+    /// Put a module here to replace the running one at the next frame.
+    pub fn module_reload(&self) -> Arc<Mutex<Option<Vec<u8>>>> {
+        self.pending_module.clone()
+    }
+
+    pub fn module_status(&self) -> Arc<Mutex<ModuleStatus>> {
+        self.module_status.clone()
     }
 
     /// Units in the stream and units the cull passed, of the most recently
@@ -222,7 +309,7 @@ pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32
 }
 
 impl RenderApp for TerrainApp {
-    type Pass = TerrainPass;
+    type Pass = ScenePass;
 
     fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
         if let Some(mut old) = self.unit_renderer.take() {
@@ -230,6 +317,17 @@ impl RenderApp for TerrainApp {
         }
         if let Some(mut old) = self.renderer.take() {
             old.destroy(gpu);
+        }
+        self.gpu = Some(gpu.clone());
+        self.frames_in_flight = frames_in_flight;
+        if self.sampler == vk::Sampler::null() {
+            let info = vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+            self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
@@ -241,78 +339,56 @@ impl RenderApp for TerrainApp {
         Ok(())
     }
 
-    fn declare(&mut self, target: TargetInfo) -> Result<(FrameGraph<TerrainPass>, Option<ResourceId>)> {
-        let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
+    fn declare(&mut self, target: TargetInfo) -> Result<(FrameGraph<ScenePass>, Option<ResourceId>)> {
         self.extent = target.extent;
-        let (width, height) = (target.extent.width, target.extent.height);
-        let mut graph = FrameGraph::new();
-        let leaves = graph.buffer("terrain leaves", renderer.leaves_desc(), ResourceClass::External);
-        let indirect = graph.buffer("terrain indirect", renderer.indirect_desc(), ResourceClass::External);
-        let depth = graph.image("depth", ImageDesc::depth_2d(DEPTH_FORMAT, width, height, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT), ResourceClass::Transient);
-        let (color, class) = match self.output {
-            TerrainOutput::Present => (ImageDesc::color_2d(target.format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer),
-            TerrainOutput::Readback => (
-                ImageDesc::color_2d(READBACK_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC),
-                ResourceClass::External,
-            ),
-        };
-        let target_id = graph.image("target", color, class);
-        graph
-            .pass("terrain lod", PassKind::Compute, TerrainPass::Lod)
-            .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
-            .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
-            .id();
-        graph
-            .pass("terrain", PassKind::Graphics, TerrainPass::Draw)
-            .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
-            .access(indirect, Role::IndirectBuffer)
-            .color(target_id, LoadOp::Clear)
-            .depth(depth, LoadOp::Clear)
-            .id();
-        let units = self.unit_renderer.as_ref().map(|u| {
-            let instances = graph.buffer("unit instances", u.instances_desc(), ResourceClass::External);
-            let visible = graph.buffer("unit visible", u.visible_desc(), ResourceClass::External);
-            let draws = graph.buffer("unit indirect", u.indirect_desc(), ResourceClass::External);
-            graph.pass("units reset", PassKind::Transfer, TerrainPass::UnitsReset).access(draws, Role::TransferDst).id();
-            graph
-                .pass("units cull", PassKind::Compute, TerrainPass::UnitsCull)
-                .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
-                .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
-                .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
-                .id();
-            // Declared after the terrain draw: a second writer of the
-            // target and the depth buffer, ordered after it.
-            graph
-                .pass("units", PassKind::Graphics, TerrainPass::UnitsDraw)
-                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(draws, Role::IndirectBuffer)
-                .color(target_id, LoadOp::Load)
-                .depth(depth, LoadOp::Load)
-                .id();
-            let counts = graph.buffer("unit counts", u.counts_desc(), ResourceClass::External);
-            graph.pass("units count", PassKind::Transfer, TerrainPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
-            graph.pass("units count read", PassKind::Transfer, TerrainPass::UnitsCountRead).access(counts, Role::HostRead).root().id();
-            [instances, visible, draws, counts]
-        });
-        let mut ids = Ids { leaves, indirect, units, target: None, readback: None };
-        let backbuffer = match self.output {
-            TerrainOutput::Present => {
-                graph.pass("present", PassKind::Present, TerrainPass::Present).present(target_id).root().id();
-                Some(target_id)
+        let env = self.env(target)?;
+        let pending = self.pending_module.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(wasm) = pending {
+            match self.load_module(&wasm, &env) {
+                Ok(state) => {
+                    if let Some(old) = self.module.replace(state) {
+                        self.retire(old.programs);
+                    }
+                    let mut status = self.module_status.lock().unwrap_or_else(|p| p.into_inner());
+                    status.loads += 1;
+                    status.active = true;
+                }
+                Err(error) if self.module.is_none() => return Err(error.context("render module")),
+                Err(error) => self.module_status.lock().unwrap_or_else(|p| p.into_inner()).errors.push(format!("reload rejected, the running module stays: {error:#}")),
             }
-            TerrainOutput::Readback => {
-                let size = width as u64 * height as u64 * 4;
-                let readback = graph.buffer("readback", BufferDesc { size, usage: vk::BufferUsageFlags::TRANSFER_DST }, ResourceClass::External);
-                graph.pass("copy", PassKind::Transfer, TerrainPass::Copy).access(target_id, Role::TransferSrc).discard(readback, Role::TransferDst).id();
-                graph.pass("host read", PassKind::Transfer, TerrainPass::HostRead).access(readback, Role::HostRead).root().id();
-                ids.target = Some(target_id);
-                ids.readback = Some(readback);
-                None
+        }
+        let (graph, resources) = match self.module.take() {
+            Some(mut state) => {
+                if state.declared_for != (env.extent, env.color_format) {
+                    let declared = self.declare_module(&mut state.module, &env);
+                    match declared {
+                        Ok(d) => {
+                            let old = std::mem::replace(&mut state.programs, d.programs);
+                            self.retire(old);
+                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, (env.extent, env.color_format));
+                        }
+                        Err(error) => {
+                            self.module = Some(state);
+                            return Err(error.context("render module declaring a new target"));
+                        }
+                    }
+                }
+                let out = (state.graph.clone(), state.resources.clone());
+                self.module = Some(state);
+                out
+            }
+            None => {
+                let (graph, wiring) = self.wire(native_graph(&env, self.output), &env, |p| Ok((NATIVE, ScenePassSource::Library(*p))))?;
+                (graph, wiring.resources)
             }
         };
-        self.ids = Some(ids);
-        Ok((graph, backbuffer))
+        let backbuffers: Vec<ResourceId> = graph.resources.iter().enumerate().filter(|(_, r)| r.class == ResourceClass::Backbuffer).map(|(i, _)| ResourceId(i as u32)).collect();
+        match self.output {
+            TerrainOutput::Present => anyhow::ensure!(backbuffers.len() == 1, "the graph declares {} Backbuffer resources; presenting needs one", backbuffers.len()),
+            TerrainOutput::Readback => anyhow::ensure!(backbuffers.is_empty(), "an offscreen graph declares no Backbuffer"),
+        }
+        self.wiring = Some(Wiring { resources });
+        Ok((graph, backbuffers.first().copied()))
     }
 
     fn prepare(&mut self, slot: usize) -> Result<()> {
@@ -337,50 +413,65 @@ impl RenderApp for TerrainApp {
             };
             units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
         }
+        if let Some(state) = self.module.as_mut().filter(|m| !m.failed) {
+            let mut input = FrameInput {
+                width: self.extent.width,
+                height: self.extent.height,
+                frame: state.frames,
+                units: self.unit_renderer.as_ref().map_or(0, |u| u.rows(slot)),
+                time: state.module.loaded.elapsed().as_secs_f32(),
+                flags: view.module_flags,
+                view_proj: params.view_proj.to_cols_array(),
+                ..FrameInput::default()
+            };
+            input.camera[..3].copy_from_slice(&params.cam_pos.to_array());
+            let result = state.module.frame(&input).and_then(|frame| {
+                anyhow::ensure!(frame.uniforms.len() == state.uniform_bytes, "`frame` returned {} uniform bytes; the fullscreen programs declare {}", frame.uniforms.len(), state.uniform_bytes);
+                Ok(frame)
+            });
+            match result {
+                Ok(frame) => {
+                    for (program, offset) in state.programs.iter_mut().flatten() {
+                        let n = program.uniform_bytes as usize;
+                        program.write_uniforms(slot, &frame.uniforms[*offset..*offset + n]);
+                    }
+                    state.frame = frame;
+                }
+                Err(error) => {
+                    state.failed = true;
+                    state.frame = ModuleFrame::default();
+                    self.module_status.lock().unwrap_or_else(|p| p.into_inner()).errors.push(format!("render module stopped (its last graph keeps rendering): {error:#}"));
+                }
+            }
+            state.frames += 1;
+        }
         self.last_slot = slot;
         Ok(())
     }
 
     fn external(&self, resource: ResourceId, slot: usize) -> Option<Binding> {
-        let (renderer, ids) = (self.renderer.as_ref()?, self.ids.as_ref()?);
-        if let (Some([instances, visible, draws, counts]), Some(units)) = (ids.units, self.unit_renderer.as_ref()) {
-            if resource == counts {
-                return Some(Binding::Buffer(units.counts(slot)));
+        let lib = (*self.wiring.as_ref()?.resources.get(resource.index())?)?;
+        let units = || self.unit_renderer.as_ref();
+        let offscreen = || self.offscreen.as_ref();
+        Some(match lib {
+            LibraryResource::TerrainLeaves => Binding::Buffer(self.renderer.as_ref()?.leaves()),
+            LibraryResource::TerrainIndirect => Binding::Buffer(self.renderer.as_ref()?.indirect()),
+            LibraryResource::UnitInstances => Binding::Buffer(units()?.instances(slot)),
+            LibraryResource::UnitVisible => Binding::Buffer(units()?.visible()),
+            LibraryResource::UnitIndirect => Binding::Buffer(units()?.indirect()),
+            LibraryResource::UnitCounts => Binding::Buffer(units()?.counts(slot)),
+            LibraryResource::ReadbackTarget => {
+                let o = offscreen()?;
+                Binding::Image(ImageBinding { image: o.image.image, view: o.image.view, format: READBACK_FORMAT, extent: o.extent, range: o.image.range(), identity: (0xAE7 << 40) | 10 })
             }
-            if resource == instances {
-                return Some(Binding::Buffer(units.instances(slot)));
+            LibraryResource::ReadbackBuffer => {
+                let o = offscreen()?;
+                Binding::Buffer(BufferBinding { buffer: o.buffer.buffer, offset: 0, size: o.buffer.size, identity: (0xAE7 << 40) | 11 })
             }
-            if resource == visible {
-                return Some(Binding::Buffer(units.visible()));
-            }
-            if resource == draws {
-                return Some(Binding::Buffer(units.indirect()));
-            }
-        }
-        if resource == ids.leaves {
-            return Some(Binding::Buffer(renderer.leaves()));
-        }
-        if resource == ids.indirect {
-            return Some(Binding::Buffer(renderer.indirect()));
-        }
-        let offscreen = self.offscreen.as_ref()?;
-        if Some(resource) == ids.target {
-            return Some(Binding::Image(ImageBinding {
-                image: offscreen.image.image,
-                view: offscreen.image.view,
-                format: READBACK_FORMAT,
-                extent: offscreen.extent,
-                range: offscreen.image.range(),
-                identity: (0xAE7 << 40) | 10,
-            }));
-        }
-        if Some(resource) == ids.readback {
-            return Some(Binding::Buffer(BufferBinding { buffer: offscreen.buffer.buffer, offset: 0, size: offscreen.buffer.size, identity: (0xAE7 << 40) | 11 }));
-        }
-        None
+        })
     }
 
-    fn recorder(&mut self) -> &mut dyn Recorder<TerrainPass> {
+    fn recorder(&mut self) -> &mut dyn Recorder<ScenePass> {
         self
     }
 
@@ -397,6 +488,15 @@ impl RenderApp for TerrainApp {
     }
 
     fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
+        if let Some(state) = self.module.take() {
+            for (mut program, _) in state.programs.into_iter().flatten() {
+                program.destroy(gpu);
+            }
+        }
+        if self.sampler != vk::Sampler::null() {
+            unsafe { gpu.device.destroy_sampler(self.sampler, None) };
+            self.sampler = vk::Sampler::null();
+        }
         if let Some(mut units) = self.unit_renderer.take() {
             units.destroy(gpu);
         }
@@ -423,38 +523,290 @@ impl TerrainApp {
     }
 }
 
-impl Recorder<TerrainPass> for TerrainApp {
-    fn clear_color(&self, _pass: &TerrainPass, _resource: ResourceId) -> [f32; 4] {
+impl Recorder<ScenePass> for TerrainApp {
+    fn skip(&self, pass: &ScenePass) -> bool {
+        self.module.as_ref().is_some_and(|m| m.frame.is_disabled(pass.program))
+    }
+
+    fn clear_color(&self, _pass: &ScenePass, _resource: ResourceId) -> [f32; 4] {
         SKY
     }
 
-    fn clear_depth(&self, _pass: &TerrainPass, _resource: ResourceId) -> (f32, u32) {
+    fn clear_depth(&self, _pass: &ScenePass, _resource: ResourceId) -> (f32, u32) {
         (0.0, 0) // reverse-Z
     }
 
-    fn record(&mut self, pass: &TerrainPass, ctx: &PassContext<'_>) -> Result<()> {
-        let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
-        match pass {
-            TerrainPass::Lod => renderer.record_lod(ctx, self.update_lod),
-            TerrainPass::Draw => renderer.record_draw(ctx, self.wireframe),
-            TerrainPass::UnitsReset | TerrainPass::UnitsCull | TerrainPass::UnitsDraw | TerrainPass::UnitsCount => {
-                let units = self.unit_renderer.as_ref().context("unit renderer not created")?;
-                match pass {
-                    TerrainPass::UnitsReset => units.record_reset(ctx),
-                    TerrainPass::UnitsCull => units.record_cull(ctx),
-                    TerrainPass::UnitsDraw => units.record_draw(ctx),
-                    _ => units.record_count(ctx),
-                }
+    fn record(&mut self, pass: &ScenePass, ctx: &PassContext<'_>) -> Result<()> {
+        let units = || self.unit_renderer.as_ref().context("unit renderer not created");
+        match &pass.work {
+            PassWork::Library(lib) => match lib {
+                LibraryPass::TerrainLod => self.renderer.as_ref().context("terrain renderer not created")?.record_lod(ctx, self.update_lod),
+                LibraryPass::TerrainDraw => self.renderer.as_ref().context("terrain renderer not created")?.record_draw(ctx, self.wireframe),
+                LibraryPass::UnitsReset => units()?.record_reset(ctx),
+                LibraryPass::UnitsCull => units()?.record_cull(ctx),
+                LibraryPass::UnitsDraw => units()?.record_draw(ctx),
+                LibraryPass::UnitsCount => units()?.record_count(ctx),
+                LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
+                LibraryPass::HostRead | LibraryPass::Present => {}
+            },
+            PassWork::Fullscreen { sampled } => {
+                let state = self.module.as_ref().context("fullscreen pass without a module")?;
+                let (program, _) = state.programs.get(pass.program as usize).and_then(Option::as_ref).context("fullscreen program missing")?;
+                let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
+                program.record(ctx, &images, self.sampler)?;
             }
-            TerrainPass::UnitsCountRead => {}
-            TerrainPass::Copy => {
-                let ids = self.ids.as_ref().context("not declared")?;
-                let image = ctx.image(ids.target.context("no target")?)?;
-                let buffer = ctx.buffer(ids.readback.context("no readback")?)?;
+            PassWork::Readback { image, buffer } => {
+                let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
                 crate::demo::record_readback(ctx, image, buffer);
             }
-            TerrainPass::HostRead | TerrainPass::Present => {}
         }
         Ok(())
+    }
+}
+
+/// How a graph's pass payload is wired, before checks.
+#[derive(Clone, Copy, Debug)]
+pub enum ScenePassSource {
+    Library(LibraryPass),
+    /// A fullscreen program; checked and built by the caller.
+    Fullscreen,
+}
+
+/// The scene's graph as the engine declares it natively: the terrain, the
+/// units when the scene has them, and present or readback. Library buffers
+/// are declared with size 0 ([`crate::library::resolve`] sizes them). A
+/// render module that declares the same graph gets the same bake.
+pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<LibraryPass> {
+    let (width, height) = (env.extent.width, env.extent.height);
+    let mut graph = FrameGraph::new();
+    let leaves = library_buffer(&mut graph, LibraryResource::TerrainLeaves);
+    let indirect = library_buffer(&mut graph, LibraryResource::TerrainIndirect);
+    let depth = graph.image("depth", ImageDesc::depth_2d(env.depth_format, width, height, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT), ResourceClass::Transient);
+    let target = match output {
+        TerrainOutput::Present => graph.image("target", ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer),
+        TerrainOutput::Readback => graph.image(
+            LibraryResource::ReadbackTarget.name(),
+            ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC),
+            ResourceClass::External,
+        ),
+    };
+    graph
+        .pass("terrain lod", PassKind::Compute, LibraryPass::TerrainLod)
+        .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
+        .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
+        .id();
+    graph
+        .pass("terrain", PassKind::Graphics, LibraryPass::TerrainDraw)
+        .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+        .access(indirect, Role::IndirectBuffer)
+        .color(target, LoadOp::Clear)
+        .depth(depth, LoadOp::Clear)
+        .id();
+    if env.units {
+        let instances = library_buffer(&mut graph, LibraryResource::UnitInstances);
+        let visible = library_buffer(&mut graph, LibraryResource::UnitVisible);
+        let draws = library_buffer(&mut graph, LibraryResource::UnitIndirect);
+        graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
+        graph
+            .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+            .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
+            .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
+        // Declared after the terrain draw: a second writer of the target
+        // and the depth buffer, ordered after it.
+        graph
+            .pass("units", PassKind::Graphics, LibraryPass::UnitsDraw)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(draws, Role::IndirectBuffer)
+            .color(target, LoadOp::Load)
+            .depth(depth, LoadOp::Load)
+            .id();
+        let counts = library_buffer(&mut graph, LibraryResource::UnitCounts);
+        graph.pass("units count", PassKind::Transfer, LibraryPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
+        graph.pass("units count read", PassKind::Transfer, LibraryPass::HostRead).access(counts, Role::HostRead).root().id();
+    }
+    match output {
+        TerrainOutput::Present => {
+            graph.pass("present", PassKind::Present, LibraryPass::Present).present(target).root().id();
+        }
+        TerrainOutput::Readback => {
+            let readback = library_buffer(&mut graph, LibraryResource::ReadbackBuffer);
+            graph.pass("copy", PassKind::Transfer, LibraryPass::ReadbackCopy).access(target, Role::TransferSrc).discard(readback, Role::TransferDst).id();
+            graph.pass("host read", PassKind::Transfer, LibraryPass::HostRead).access(readback, Role::HostRead).root().id();
+        }
+    }
+    graph
+}
+
+/// A library buffer as a graph declares it: `External`, size 0.
+pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> ResourceId {
+    graph.buffer(r.name(), BufferDesc { size: 0, usage: vk::BufferUsageFlags::empty() }, ResourceClass::External)
+}
+
+impl TerrainApp {
+    /// Load `wasm` and wire its declaration for `env`.
+    fn load_module(&mut self, wasm: &[u8], env: &LibraryEnv) -> Result<ModuleState> {
+        let engine = self.engine.get_or_insert_with(crate::module::engine).clone();
+        let mut module = RenderModule::load(&engine, wasm)?;
+        let d = self.declare_module(&mut module, env)?;
+        Ok(ModuleState {
+            module,
+            declared_for: (env.extent, env.color_format),
+            graph: d.graph,
+            resources: d.resources,
+            programs: d.programs,
+            uniform_bytes: d.uniform_bytes,
+            frame: ModuleFrame::default(),
+            failed: false,
+            frames: 0,
+        })
+    }
+
+    /// Destroy programs a replaced declaration used, once the GPU is done
+    /// with them (a reload or resize: waiting for idle is fine there).
+    fn retire(&self, programs: Vec<Option<(FullscreenProgram, usize)>>) {
+        let programs: Vec<_> = programs.into_iter().flatten().collect();
+        if programs.is_empty() {
+            return;
+        }
+        if let Some(gpu) = &self.gpu {
+            gpu.wait_idle();
+            for (mut program, _) in programs {
+                program.destroy(gpu);
+            }
+        }
+    }
+
+    /// The module's graph for `env`, decoded and wired, with its fullscreen
+    /// programs reflected, checked and built.
+    fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
+        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 };
+        let declared = module
+            .declare(env.extent.width, env.extent.height, env.color_format.as_raw() as u32, flags)?
+            .with_context(|| format!("the module declines a {}x{} {:?} target", env.extent.width, env.extent.height, env.color_format))?;
+        let graph = ae_framegraph::descriptor::decode(&declared.graph).map_err(|e| anyhow::anyhow!("graph declaration: {e}"))?;
+        let programs = ProgramTable::decode(&declared.programs).map_err(|e| anyhow::anyhow!("program table: {e}"))?;
+        let (graph, wiring) = self.wire(graph, env, |&payload| {
+            let program = programs.get(payload as usize).with_context(|| format!("payload {payload} names no program (the table has {})", programs.len()))?;
+            match *program {
+                Program::Library(name) => LibraryPass::from_name(name).map(|lib| (payload, ScenePassSource::Library(lib))).with_context(|| format!("no library pass `{name}`")),
+                Program::Fullscreen { .. } => Ok((payload, ScenePassSource::Fullscreen)),
+            }
+        })?;
+        // Build each fullscreen program for the one pass that runs it (its
+        // descriptor sets are per frame slot, rewritten when the pass
+        // records, so two passes cannot share them in one frame).
+        let gpu = self.gpu.as_ref().context("not created")?;
+        let mut built: Vec<Option<(FullscreenProgram, usize)>> = (0..programs.len()).map(|_| None).collect();
+        let mut shapes: Vec<Option<(Vec<vk::Format>, usize)>> = vec![None; programs.len()];
+        let mut runner: Vec<Option<&str>> = vec![None; programs.len()];
+        let result = (|| -> Result<usize> {
+            for pass in &graph.passes {
+                let PassWork::Fullscreen { sampled } = &pass.record.work else { continue };
+                let formats: Vec<vk::Format> = pass
+                    .color_attachments()
+                    .map(|i| match graph.resources[i.resource.index()].desc {
+                        ae_framegraph::ResourceDesc::Image(image) => image.format,
+                        ae_framegraph::ResourceDesc::Buffer(_) => vk::Format::UNDEFINED,
+                    })
+                    .collect();
+                let slot = pass.record.program as usize;
+                if let Some(first) = runner[slot] {
+                    let label = match programs[slot] {
+                        Program::Fullscreen { label, .. } => label,
+                        Program::Library(name) => name,
+                    };
+                    anyhow::bail!("passes `{first}` and `{}` both run fullscreen program {slot} (`{label}`); a fullscreen program runs in one pass (push it once per pass)", pass.name);
+                }
+                runner[slot] = Some(&pass.name);
+                shapes[slot] = Some((formats, sampled.len()));
+            }
+            let mut offset = 0;
+            for (slot, program) in programs.iter().enumerate() {
+                let Program::Fullscreen { label, spirv, uniform_bytes } = *program else { continue };
+                let Some((formats, sampled)) = &shapes[slot] else { continue };
+                built[slot] = Some((FullscreenProgram::new(gpu, label, spirv, uniform_bytes, *sampled, formats, self.frames_in_flight)?, offset));
+                offset += uniform_bytes as usize;
+            }
+            Ok(offset)
+        })();
+        match result {
+            Ok(uniform_bytes) => Ok(ModuleGraph { graph, resources: wiring.resources, programs: built, uniform_bytes }),
+            Err(error) => {
+                for (mut program, _) in built.into_iter().flatten() {
+                    program.destroy(gpu);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// What the library needs to agree with for `target`.
+    fn env(&self, target: TargetInfo) -> Result<LibraryEnv> {
+        let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
+        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some() })
+    }
+
+    /// Size the library resources of `graph`, check its library passes and
+    /// turn its payloads into [`ScenePass`]es.
+    fn wire<R>(&self, mut graph: FrameGraph<R>, env: &LibraryEnv, source: impl Fn(&R) -> Result<(u32, ScenePassSource)>) -> Result<(FrameGraph<ScenePass>, Wiring)> {
+        let units = self.unit_renderer.as_ref();
+        let terrain = self.renderer.as_ref();
+        let offscreen = self.offscreen.as_ref();
+        let resources = library::resolve(&mut graph, env, |r| match r {
+            LibraryResource::TerrainLeaves => terrain.map(|t| t.leaves_desc()),
+            LibraryResource::TerrainIndirect => terrain.map(|t| t.indirect_desc()),
+            LibraryResource::UnitInstances => units.map(|u| u.instances_desc()),
+            LibraryResource::UnitVisible => units.map(|u| u.visible_desc()),
+            LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
+            LibraryResource::UnitCounts => units.map(|u| u.counts_desc()),
+            LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc { size: o.buffer.size, usage: vk::BufferUsageFlags::TRANSFER_DST }),
+            LibraryResource::ReadbackTarget => None,
+        })?;
+        if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {
+            anyhow::bail!("`readback.target` needs an offscreen target of the graph's extent (create_offscreen)");
+        }
+        let mut passes = Vec::with_capacity(graph.passes.len());
+        for (index, pass) in graph.passes.iter().enumerate() {
+            let (program, source) = source(&pass.record).with_context(|| format!("pass `{}`", pass.name))?;
+            let work = match source {
+                ScenePassSource::Library(lib) => {
+                    library::check(&graph, index, lib, &resources, env)?;
+                    match lib {
+                        LibraryPass::ReadbackCopy => {
+                            let image = pass.intents.iter().find(|i| i.role == Role::TransferSrc).map(|i| i.resource).context("readback image")?;
+                            let buffer = pass.intents.iter().find(|i| resources[i.resource.index()] == Some(LibraryResource::ReadbackBuffer)).map(|i| i.resource).context("readback buffer")?;
+                            PassWork::Readback { image, buffer }
+                        }
+                        lib => PassWork::Library(lib),
+                    }
+                }
+                ScenePassSource::Fullscreen => {
+                    let name = &pass.name;
+                    anyhow::ensure!(pass.kind == PassKind::Graphics, "fullscreen pass `{name}` must be a Graphics pass");
+                    let mut sampled = Vec::new();
+                    for intent in &pass.intents {
+                        let r = &graph.resources[intent.resource.index()];
+                        match intent.role {
+                            Role::ColorAttachment(_) => {}
+                            Role::Sampled(ShaderStage::Fragment) if r.desc.is_image() => sampled.push(intent.resource),
+                            role => anyhow::bail!("fullscreen pass `{name}` uses `{}` as {role:?}; it takes colour attachments and fragment-sampled images", r.name),
+                        }
+                    }
+                    anyhow::ensure!(pass.color_attachments().count() > 0, "fullscreen pass `{name}` has no colour attachment");
+                    PassWork::Fullscreen { sampled }
+                }
+            };
+            passes.push(ScenePass { program, work });
+        }
+        let graph = FrameGraph {
+            resources: graph.resources,
+            passes: graph.passes.into_iter().zip(passes).map(|(p, record)| ae_framegraph::Pass { name: p.name, kind: p.kind, scope: p.scope, intents: p.intents, conditional: p.conditional, record }).collect(),
+            roots: graph.roots,
+            plan_version: graph.plan_version,
+        };
+        Ok((graph, Wiring { resources }))
     }
 }

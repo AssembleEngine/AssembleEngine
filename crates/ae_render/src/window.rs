@@ -54,6 +54,7 @@ pub mod keys {
     pub const PLUS: u32 = 1 << 4;
     pub const MINUS: u32 = 1 << 5;
     pub const P: u32 = 1 << 6;
+    pub const V: u32 = 1 << 7;
 }
 
 /// Movement keys currently held (WASD or arrows pan, Q/E orbit, R/F tilt,
@@ -175,6 +176,7 @@ impl SdlWindow {
                         sdl::SDLK_G => keys::G,
                         sdl::SDLK_C => keys::C,
                         sdl::SDLK_P => keys::P,
+                        sdl::SDLK_V => keys::V,
                         sdl::SDLK_EQUALS | sdl::SDLK_PLUS | sdl::SDLK_KP_PLUS => keys::PLUS,
                         sdl::SDLK_MINUS | sdl::SDLK_KP_MINUS => keys::MINUS,
                         _ => 0,

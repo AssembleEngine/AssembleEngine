@@ -370,46 +370,67 @@ fn render_main<A: RenderApp>(
     result
 }
 
-/// Drive `app` for `frames` frames without a window or swapchain (tests,
-/// offscreen captures). The app's graph must not contain a backbuffer.
-pub fn run_headless<A: RenderApp>(
-    gpu: &Arc<GpuDevice>,
-    app: &mut A,
+/// Drives an app offscreen in steps, keeping one executor (so rebakes
+/// across steps are counted and only happen when the topology changes).
+pub struct Headless<P> {
+    gpu: Arc<GpuDevice>,
+    executor: Executor<P>,
     target: TargetInfo,
-    frames: usize,
-    config: ExecutorConfig,
-) -> Result<ExecutorStats> {
-    let mut executor: Executor<A::Pass> = Executor::new(gpu.clone(), config)?;
-    app.create(gpu, target.format, config.frames_in_flight)?;
-    let mut last = None;
-    for _ in 0..frames {
-        let (graph, backbuffer) = app.declare(target)?;
-        anyhow::ensure!(backbuffer.is_none(), "headless graphs have no backbuffer");
-        if executor.set_graph(graph)? {
-            app.on_rebake()?;
+    last: Option<crate::executor::FrameToken>,
+}
+
+impl<P> Headless<P> {
+    /// Create the executor and the app's GPU objects.
+    pub fn new<A: RenderApp<Pass = P>>(gpu: &Arc<GpuDevice>, app: &mut A, target: TargetInfo, config: ExecutorConfig) -> Result<Self> {
+        let executor = Executor::new(gpu.clone(), config)?;
+        app.create(gpu, target.format, config.frames_in_flight)?;
+        Ok(Self { gpu: gpu.clone(), executor, target, last: None })
+    }
+
+    /// Render `frames` frames.
+    pub fn frames<A: RenderApp<Pass = P>>(&mut self, app: &mut A, frames: usize) -> Result<()> {
+        for _ in 0..frames {
+            let (graph, backbuffer) = app.declare(self.target)?;
+            anyhow::ensure!(backbuffer.is_none(), "headless graphs have no backbuffer");
+            if self.executor.set_graph(graph)? {
+                app.on_rebake()?;
+            }
+            let token = self.executor.begin_frame()?;
+            app.frame_stats(&self.executor.stats());
+            app.prepare(token.slot)?;
+            let externals: Vec<Option<Binding>> = (0..self.executor.graph().resources.len() as u32).map(|index| app.external(ResourceId(index), token.slot)).collect();
+            self.executor.execute(token, app.recorder(), &|resource| externals.get(resource.index()).copied().flatten(), &[], &[])?;
+            self.last = Some(token);
         }
-        let token = executor.begin_frame()?;
-        app.frame_stats(&executor.stats());
-        app.prepare(token.slot)?;
-        let externals: Vec<Option<Binding>> = (0..executor.graph().resources.len() as u32)
-            .map(|index| app.external(ResourceId(index), token.slot))
-            .collect();
-        executor.execute(
-            token,
-            app.recorder(),
-            &|resource| externals.get(resource.index()).copied().flatten(),
-            &[],
-            &[],
-        )?;
-        last = Some(token);
+        Ok(())
     }
-    if let Some(token) = last {
-        executor.wait(token)?;
+
+    /// Wait until everything submitted has finished (readbacks are then
+    /// valid).
+    pub fn wait(&mut self) -> Result<()> {
+        if let Some(token) = self.last.take() {
+            self.executor.wait(token)?;
+        }
+        self.gpu.wait_idle();
+        Ok(())
     }
-    gpu.wait_idle();
-    let stats = executor.stats();
-    drop(executor);
-    Ok(stats)
+
+    pub fn stats(&self) -> ExecutorStats {
+        self.executor.stats()
+    }
+
+    /// Wait, then drop the executor; its statistics.
+    pub fn finish(mut self) -> Result<ExecutorStats> {
+        self.wait()?;
+        Ok(self.executor.stats())
+    }
+}
+
+/// Render `frames` frames offscreen (see [`Headless`]) and wait for them.
+pub fn run_headless<A: RenderApp>(gpu: &Arc<GpuDevice>, app: &mut A, target: TargetInfo, frames: usize, config: ExecutorConfig) -> Result<ExecutorStats> {
+    let mut headless = Headless::new(gpu, app, target, config)?;
+    headless.frames(app, frames)?;
+    headless.finish()
 }
 
 fn executor_wait_semaphore<R>(executor: &Executor<R>, token: crate::executor::FrameToken) -> vk::Semaphore {

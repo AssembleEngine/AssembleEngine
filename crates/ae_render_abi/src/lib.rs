@@ -25,6 +25,8 @@
 //! in order. `payload` is opaque to the graph: the render module's own pass
 //! handle, returned to it when the pass is recorded.
 
+pub mod module;
+
 pub const MAGIC: u32 = u32::from_le_bytes(*b"AERG");
 pub const VERSION: u32 = 1;
 

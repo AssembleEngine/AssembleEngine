@@ -4,8 +4,15 @@
 //! ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X]
 //!           [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo]
 //!           [--frames-in-flight N] [--units N] [--workers N] [--ticks N]
-//!           [--capture FILE.ppm]
+//!           [--render-module NAME|FILE.wasm] [--capture FILE.ppm]
 //! ```
+//!
+//! `--render-module` takes the frame graph from a render module: an
+//! in-repo one (`render/<NAME>`: `default`, the engine's own graph from
+//! WASM; `post`, with a colour grade and a vignette V toggles) or a
+//! `.wasm` file. Its sources (or the file) are watched: an edit rebuilds it
+//! and the running client swaps it in at the next frame, or keeps the old
+//! one and prints why.
 //!
 //! Shows the terrain of the M2 crossing maps (`water`, the default, or
 //! `land`; `--map-cells` as in `ae-headless`, default 2560 = pathsim's full
@@ -26,7 +33,7 @@
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` more or less
 //! detail, T wireframe, L colour by LOD depth, G fog, C freeze the LOD,
-//! P print the camera, Esc quits.
+//! P print the camera, V toggle render module flag bit 0, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -38,6 +45,7 @@
 //! the layer reported anything.
 
 mod sim;
+mod watch;
 
 use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_services::nav::Map;
@@ -78,12 +86,13 @@ struct Options {
     workers: usize,
     /// Sim ticks before a capture.
     ticks: u64,
+    render_module: Option<String>,
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--capture FILE.ppm]";
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--capture FILE.ppm]";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300 };
+    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None };
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -111,6 +120,7 @@ fn parse() -> Result<Options> {
             "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
             "--ticks" => o.ticks = value("--ticks", &mut args)?.parse().context("--ticks")?,
+            "--render-module" => o.render_module = Some(value("--render-module", &mut args)?),
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
             "-h" | "--help" => {
@@ -172,7 +182,7 @@ fn nav_heightmap(terrain: &Terrain, relief: f32) -> (Heightmap, f32, f32, Option
     for v in &mut data {
         *v = (*v - lo) / scale;
     }
-    let water = (terrain.water_level != NO_WATER).then(|| terrain.water_level as f32 * 0.1 * relief);
+    let water = (terrain.water_level != NO_WATER).then_some(terrain.water_level as f32 * 0.1 * relief);
     (Heightmap { width, height, data }, scale, lo, water)
 }
 
@@ -270,6 +280,9 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
             }
         };
     }
+    if events.pressed & keys::V != 0 {
+        view.module_flags ^= 1;
+    }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;
         println!("--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)", c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau);
@@ -295,6 +308,9 @@ fn capture(source: Arc<TerrainSource>, o: &Options, path: &str) -> Result<ExitCo
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
     let mut app = TerrainApp::new(source, TerrainOutput::Readback);
+    if let Some(name) = &o.render_module {
+        app = app.with_module(ae_render::module::build(name)?);
+    }
     let mut sim_note = String::new();
     if let Some(s) = sim_options(o) {
         let started = Instant::now();
@@ -365,8 +381,10 @@ fn run(o: Options) -> Result<ExitCode> {
     }
     let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
     let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false };
-    let mut terrain: Option<(Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>)> = None;
+    type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
+    let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
+    let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
@@ -375,6 +393,11 @@ fn run(o: Options) -> Result<ExitCode> {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));
                 sim_thread = Some(sim::SimThread::start(s, feed));
+            }
+            if let Some(name) = &o.render_module {
+                let wasm = ae_render::module::build(name)?;
+                app = app.with_module(wasm.clone());
+                module = Some((watch::ModuleWatch::start(name.clone(), wasm, app.module_reload()), app.module_status()));
             }
             place_camera(&app, o.camera);
             terrain = Some((app.view(), app.stats()));
@@ -391,6 +414,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut last = Instant::now();
     let mut sample = (Instant::now(), 0u64);
     let mut step = 0;
+    let mut module_errors = 0;
     loop {
         let events = window.pump();
         thread.handle_events(&events);
@@ -432,12 +456,30 @@ fn run(o: Options) -> Result<ExitCode> {
                 None => String::new(),
             };
             let detail = detail + &sim;
+            let detail = match &module {
+                Some((_, status)) => {
+                    let s = status.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    for error in &s.errors[module_errors.min(s.errors.len())..] {
+                        eprintln!("{error}");
+                    }
+                    module_errors = s.errors.len();
+                    format!("{detail} | module {} (loads {})", o.render_module.as_deref().unwrap_or(""), s.loads)
+                }
+                None => detail,
+            };
             window.set_title(&format!("AssemblyEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
         }
         std::thread::sleep(Duration::from_millis(2));
     }
     let stats = thread.stop();
+    if let Some((_, status)) = &module {
+        let s = status.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for error in &s.errors[module_errors.min(s.errors.len())..] {
+            eprintln!("{error}");
+        }
+        println!("render module: {} loads, {} errors", s.loads, s.errors.len());
+    }
     if let Some(t) = sim_thread {
         let s = t.stop().context("sim thread")?;
         if s.ready {

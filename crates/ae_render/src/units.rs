@@ -426,3 +426,35 @@ impl UnitRenderer {
         self.indirect.destroy(gpu);
     }
 }
+
+/// The cull of `units_cull.comp` on the CPU, for tests: per row of `stream`
+/// (all rows; the GPU sees at most the capacity), the smallest signed
+/// distance of the unit's bounding sphere to the outside of a frustum plane
+/// (`>= 0`: kept), the plane it is (`0..6`, as [`frustum_planes`]) and the
+/// sphere's radius (a kept unit with a margin below it has its centre
+/// outside the view).
+/// `ground(x, y, class)` is the height the unit stands at; positions are
+/// interpolated with `alpha` as the shader does.
+pub fn cull_margins(stream: &InstanceStream, frame: &UnitFrame, min_pixels: f32, alpha: f32, ground: impl Fn(f32, f32, u32) -> f32) -> Vec<(f32, usize, f32)> {
+    let planes = frustum_planes(frame.view_proj);
+    let f = |a: usize, r: usize| f32::from_bits(stream.columns[a][r]);
+    (0..stream.len())
+        .map(|r| {
+            let (x, y) = (f(2, r) + (f(0, r) - f(2, r)) * alpha, f(3, r) + (f(1, r) - f(3, r)) * alpha);
+            let class = stream.columns[7][r].min(MAX_CLASSES as u32 - 1);
+            let pos = Vec3::new(x, ground(x, y, class), y);
+            let radius = f(6, r);
+            let pixels = 2.0 * radius * frame.proj_scale / pos.distance(frame.cam_pos).max(1e-3);
+            let size = radius * (min_pixels / pixels.max(1e-6)).max(1.0);
+            let centre = pos + Vec3::new(0.0, 0.4 * size, 0.0);
+            let reach = 1.6 * size;
+            let (margin, plane) = planes
+                .iter()
+                .enumerate()
+                .map(|(k, p)| (Vec3::new(p[0], p[1], p[2]).dot(centre) + p[3] + reach, k))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap();
+            (margin, plane, reach)
+        })
+        .collect()
+}

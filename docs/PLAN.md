@@ -774,11 +774,91 @@ Units (the 10k-unit instance stream):
   (cargo and the `wasm32-wasip1-threads` target, as `ae-headless`); a sim failure is printed when
   it happens and shown in the title, and `--units 0` runs without the sim.
 
-Next in M3: the render module ABI, reflection and hot reload (the units and terrain passes become
-passes a render module declares), then material tilesets (procedural placeholder textures until a
-texture source is chosen) replacing the material palette, and `TerrainChanged` patches reaching the
-render heightfield. The GPU bench (`ae-client --bench`, JSON for `bench-diff`) is still to be
-written.
+Unit culling tests (`cargo test -p ae_render --test gpu -- --ignored`): `ae_render::units::cull_margins`
+is the cull shader's test on the CPU (same sphere, minimum-size enlargement and planes).
+`units_cull_matches_the_cpu_reference` scatters 3,000 units (some 6 km away and under a unit across)
+around an oblique camera, leaving out those within half a world unit of a plane, and the GPU keeps
+exactly the units the CPU keeps (416). The set includes units culled by each of the four side planes
+(620+ each), 65 kept with their centre outside the view, and 23 kept only because they are drawn at the
+minimum pixel size. A stream longer than the capacity uploads and culls `capacity` rows. Checked by
+breaking the shader: testing the centre only (351 kept) or ignoring the minimum size (387) both fail it.
+
+Render modules (the M3 exit item "topology hot-reload without restart"):
+- Pass library (`ae_render::library`): the terrain and unit passes, readback copy, host read and
+  present are library passes by name (`terrain.lod`, `units.draw`, ...), each with the library
+  resources it needs and the roles it uses them in (`LibraryPass::requires`), and for the draws one
+  colour and one depth attachment in the formats the library's pipelines target. Library resources
+  (`terrain.leaves`, `units.instances`, `readback.buffer`, ...) belong to the host, which alone knows
+  their sizes: a graph declares them `External` with size 0 and the host fills in size and usage
+  before baking (`resolve`). `check` rejects a library pass of the wrong kind, missing a resource or
+  role, using anything else, or drawing into the wrong formats, and a library resource of the wrong
+  class or kind; errors name the pass and the resource (unit tests break the native graph in each of
+  these ways). The native scene (`TerrainApp`) now declares its graph through the library
+  (`native_graph`); all GPU tests passed unchanged across the refactor.
+- Module contract (`ae_render_abi::module`, wire format documented there): a module is a WASM module
+  with its own memory and no imports, exporting `ae_render_version`, `ae_render_declare(width,
+  height, color_format, flags)` (the graph declaration plus a program table: per payload, a library
+  pass by name or a fullscreen program with its SPIR-V and uniform size), `ae_render_input` (where
+  the host writes `FrameInput`: extent, frame, time, view-projection, camera, unit count, host
+  flags) and `ae_render_frame` (a bitset of disabled programs, whose conditional passes are skipped,
+  and every fullscreen program's uniform block). `declare` runs at load, on reload and when the
+  target changes, `frame` every frame. Topology changes rebake (the signature); a skipped pass does
+  not. The program table is its own record, so the graph descriptor and its fuzz test are
+  unchanged. Rust modules use `sdk/ae-render-sdk` (`RenderModule` trait, `render_module!` writes the
+  exports); they build for `wasm32-unknown-unknown` (`ae_render::module::build`, output in
+  `target/render-modules`).
+- Host (`ae_render::module`, `TerrainApp::with_module`): wasmtime 45 (the workspace's), default
+  config; what the module returns is copied out with bounds checks, decoded, validated, and wired
+  through the library. `tests/module.rs`: the in-repo `render/default` module declares the native
+  graph (same signature, same bake, same library pass at every position, for both outputs with and
+  without units); modules that import something, have the wrong version, lack exports, return
+  pointers outside their memory or trap are rejected with messages saying so.
+- Fullscreen programs (`ae_render::fullscreen`): a module's own fragment shader over the engine's
+  fullscreen triangle into the pass's colour attachments (straight-alpha blending, so overlays
+  blend). The SPIR-V is reflected with `rspirv` and checked against the pass before a pipeline is
+  made: set 0 binding 0 the uniform block (declared size between the block's end and its std140
+  16-byte rounding), bindings 1.. a combined image sampler per `Sampled` intent in order, nothing
+  else (a storage buffer fails with "the pass declares no storage access"), no push constants, one
+  output per colour attachment. Unit test on fixture shaders checks every rule.
+- Reload: the client (or a test) puts new module bytes in `TerrainApp::module_reload`; at the next
+  frame the scene loads, declares and wires it and swaps it in (old fullscreen pipelines destroyed
+  after a device idle), or keeps the running module and records the error (`module_status`). A trap in
+  `frame` stops calling the module; its last graph keeps rendering. `render/post` is a second
+  module: the scene into an intermediate image, a colour grade (fullscreen program) into the target,
+  and a vignette (conditional fullscreen program) enabled by host flag bit 0.
+- Checked on the GPU (validation on, 0 messages): `the_default_module_renders_like_the_native_graph`
+  (terrain and 400 units, 16 frames: byte-identical pixels and unit counts);
+  `render_modules_reload_while_running`, one executor: default, then post (bakes 1 → 2, the grade
+  changes most of the picture), the vignette flag (no rebake; corners 201.6 → 97.6, centre 186.2 →
+  186.2), garbage bytes (rejected, post keeps rendering the same picture), then a module serving
+  the default graph that traps in `frame` (installed, bakes → 3, stopped, its graph renders like the
+  default module's). Between the last two, a graph running one fullscreen program in two passes is
+  rejected naming both passes (a program's descriptor sets are per frame slot and rewritten when its
+  pass records, so a second pass in the same frame would update a set already bound).
+- `ae-client --render-module NAME|FILE.wasm` watches the module's sources (or file), rebuilds on
+  change and reloads; V toggles flag bit 0. Topology swap through the present path, windowed, with
+  validation: a `.wasm` file replaced (by `mv`) with the post module and back while `--exercise`
+  resized and minimized (24 s, 21 swapchain recreates, 3,000 units): 3 loads, 0 errors, 0
+  validation messages. Live run with validation (`--render-module post
+  --exercise`, 26 s, 23 swapchain recreates, 2,000 units): an edit to the grade reloaded, a syntax
+  error printed the compiler error while the running module stayed, the revert reloaded; 0
+  validation messages. GPU over the army view: grade 0.14 ms at 1280x720 (profiling with
+  validation; noisy as noted above).
+- `cargo test --workspace` now also needs the `wasm32-unknown-unknown` target (the tests build
+  `render/default` and `render/post`): part of the open CI gating issue with `glslc` and SDL3.
+- Fullscreen pipelines always blend (straight alpha). A first write with `DontCare` into a float
+  target could blend with undefined contents (NaN × 0); today's targets are 8-bit sRGB. Give programs
+  a blend switch before float targets.
+- `FrameInput`'s padding became `flags` with the contract still at version 1 (no modules outside the
+  repository exist yet).
+- Not done: shader reflection covers fullscreen programs only (library passes are engine code);
+  multi-threaded recording; module draw sources (`InstanceStream` bindings for module shaders); a
+  module cannot yet declare compute programs; no epoch/fuel watchdog on the module (an infinite loop
+  in `frame` hangs the render thread; trusted, like the sim module).
+
+Next in M3: material tilesets (procedural placeholder textures until a texture source is chosen)
+replacing the material palette, `TerrainChanged` patches reaching the render heightfield, the GPU
+bench (`ae-client --bench`, JSON for `bench-diff`), and threaded recording.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
