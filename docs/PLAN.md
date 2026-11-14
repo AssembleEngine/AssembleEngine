@@ -1177,6 +1177,8 @@ add 0.84 ms, so the full copy-layer step for two observers is 2.4 ms.
   plan lists them under native services); fog does not hide the units' own shadows or decals,
   which do not exist yet.
 
+M4 is complete with the caveats above. Next is M5 (lockstep and replay).
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 
