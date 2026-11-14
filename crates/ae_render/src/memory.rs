@@ -33,6 +33,12 @@ fn subresource(desc: &ImageDesc) -> vk::ImageSubresourceRange {
 
 impl OwnedImage {
     pub fn new(gpu: &GpuDevice, desc: ImageDesc, name: &str) -> Result<Self> {
+        Self::with_view(gpu, desc, vk::ImageViewType::TYPE_2D, name)
+    }
+
+    /// With a view of `view_type` over every mip and layer (`TYPE_2D_ARRAY`
+    /// for a `sampler2DArray`, even with one layer).
+    pub fn with_view(gpu: &GpuDevice, desc: ImageDesc, view_type: vk::ImageViewType, name: &str) -> Result<Self> {
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
@@ -71,7 +77,7 @@ impl OwnedImage {
         unsafe { gpu.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }?;
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .format(desc.format)
             .subresource_range(subresource(&desc));
         let view = unsafe { gpu.device.create_image_view(&view_info, None) }?;

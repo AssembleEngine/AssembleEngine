@@ -21,6 +21,7 @@
 
 use super::camera::Camera;
 use super::heightmap::{Heightmap, Pyramid};
+use super::tileset::Tileset;
 use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, Wireframe};
 use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
@@ -96,6 +97,10 @@ pub struct TerrainView {
     pub frozen: Option<LodView>,
     /// Passed to the render module every frame ([`FrameInput::flags`]).
     pub module_flags: u32,
+    /// Shade with the tileset if the app has one ([`TerrainApp::with_tileset`]).
+    pub tileset: bool,
+    /// The tileset's blend-weight debug view.
+    pub weights: bool,
 }
 
 /// One pass of the scene's graph: the program it came from (its payload;
@@ -182,6 +187,7 @@ pub struct TerrainApp {
     output: TerrainOutput,
     renderer: Option<TerrainRenderer>,
     units: Option<UnitsSetup>,
+    tileset: Option<Arc<Tileset>>,
     unit_renderer: Option<UnitRenderer>,
     /// `(rows, visible)` of the last completed frame with units.
     unit_counts: Arc<Mutex<(u32, u32)>>,
@@ -205,7 +211,7 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0 };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -213,6 +219,7 @@ impl TerrainApp {
             output,
             renderer: None,
             units: None,
+            tileset: None,
             unit_renderer: None,
             unit_counts: Arc::default(),
             last_slot: 0,
@@ -230,6 +237,14 @@ impl TerrainApp {
             update_lod: true,
             wireframe: Wireframe::Off,
         }
+    }
+
+    /// Shade the terrain with `tileset` (its layers are uploaded when the
+    /// renderer is made; the map supplies only heights and material ids,
+    /// so one tileset serves any map). Without one, the material palette.
+    pub fn with_tileset(mut self, tileset: Arc<Tileset>) -> Self {
+        self.tileset = Some(tileset);
+        self
     }
 
     /// Draw the units of `setup.feed` on the terrain.
@@ -334,6 +349,8 @@ impl TerrainApp {
             wireframe: view.wireframe,
             lod_colors: view.lod_colors,
             fog: view.fog,
+            tileset: view.tileset,
+            weights: view.weights,
         }
     }
 }
@@ -378,7 +395,7 @@ impl RenderApp for TerrainApp {
         }
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }

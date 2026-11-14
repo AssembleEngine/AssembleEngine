@@ -74,23 +74,33 @@ pub fn buffer(gpu: &GpuDevice, bytes: &[u8], usage: vk::BufferUsageFlags, name: 
 /// `width >> i` by `height >> i`, tightly packed), left in
 /// `SHADER_READ_ONLY_OPTIMAL`.
 pub fn image(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, mips: &[&[u8]], name: &str) -> Result<OwnedImage> {
-    let desc = ImageDesc { mip_levels: mips.len() as u32, ..ImageDesc::color_2d(format, width, height, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST) };
-    let target = OwnedImage::new(gpu, desc, name)?;
-    let bytes: Vec<u8> = mips.concat();
+    image_layers(gpu, format, width, height, &[mips.to_vec()], vk::ImageViewType::TYPE_2D, name)
+}
+
+/// A sampled 2D (array) colour image: `layers[l][m]` is mip `m` of layer
+/// `l` (every layer the same mip count), with a view of `view_type`, left
+/// in `SHADER_READ_ONLY_OPTIMAL`.
+pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, layers: &[Vec<&[u8]>], view_type: vk::ImageViewType, name: &str) -> Result<OwnedImage> {
+    let mip_levels = layers.first().map_or(1, Vec::len) as u32;
+    anyhow::ensure!(!layers.is_empty() && layers.iter().all(|l| l.len() as u32 == mip_levels), "{name}: every layer needs the same mips");
+    let desc = ImageDesc { mip_levels, layers: layers.len() as u32, ..ImageDesc::color_2d(format, width, height, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST) };
+    let target = OwnedImage::with_view(gpu, desc, view_type, name)?;
+    // Regions at 16-byte offsets (a multiple of any texel size here).
+    let mut bytes = Vec::new();
+    let mut regions = Vec::new();
+    for (layer, mips) in layers.iter().enumerate() {
+        for (level, mip) in mips.iter().enumerate() {
+            bytes.resize(bytes.len().next_multiple_of(16), 0);
+            regions.push(
+                vk::BufferImageCopy::default()
+                    .buffer_offset(bytes.len() as u64)
+                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level as u32, base_array_layer: layer as u32, layer_count: 1 })
+                    .image_extent(vk::Extent3D { width: (width >> level).max(1), height: (height >> level).max(1), depth: 1 }),
+            );
+            bytes.extend_from_slice(mip);
+        }
+    }
     let mut source = staging(gpu, &bytes, "staging")?;
-    let mut offset = 0u64;
-    let regions: Vec<vk::BufferImageCopy> = mips
-        .iter()
-        .enumerate()
-        .map(|(level, mip)| {
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(offset)
-                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level as u32, base_array_layer: 0, layer_count: 1 })
-                .image_extent(vk::Extent3D { width: (width >> level).max(1), height: (height >> level).max(1), depth: 1 });
-            offset += mip.len() as u64;
-            region
-        })
-        .collect();
     let range = target.range();
     let copied = one_shot(gpu, |cmd| unsafe {
         let to_dst = [vk::ImageMemoryBarrier2::default()

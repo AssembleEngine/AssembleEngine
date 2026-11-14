@@ -753,6 +753,153 @@ fn terrain_edits_reach_the_heightfield() {
     assert_clean(&gpu);
 }
 
+/// A 64 x 64-cell map (8 m cells) from `ground(x, y)` and `material(x, y)`
+/// seen from straight above its centre at `distance`, rendered offscreen with `tileset`
+/// (and its weights view if `weights`): the pixels and a world → pixel
+/// projection.
+fn tileset_scene(
+    gpu: &Arc<GpuDevice>,
+    ground: impl Fn(usize, usize) -> f32,
+    material: impl Fn(usize, usize) -> u8,
+    tileset: Option<Arc<ae_render::terrain::tileset::Tileset>>,
+    weights: bool,
+    distance: f32,
+) -> (Vec<u8>, impl Fn(f32, f32, f32) -> (f32, f32)) {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::{Vec2, Vec4};
+    let cells = (64usize, 64usize);
+    let (heightmap, scale, offset) = Heightmap::from_cells(cells, &ground, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, None);
+    let materials = (0..cells.1).flat_map(|y| (0..cells.0).map(move |x| (x, y))).map(|(x, y)| material(x, y)).collect();
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: Some(materials) });
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+    if let Some(t) = tileset {
+        app = app.with_tileset(t);
+    }
+    let camera = {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(256.0, 256.0);
+        view.camera.pitch = 1.55;
+        view.camera.distance = distance;
+        view.fog = false;
+        view.weights = weights;
+        view.camera
+    };
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    app.create_offscreen(gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    run_headless(gpu, &mut app, target, 16, ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default() }).unwrap();
+    let pixels = app.readback().unwrap();
+    if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+        ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(format!("{dir}/tileset-{}.ppm", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)), ppm).unwrap();
+    }
+    ae_render::thread::RenderApp::destroy(&mut app, gpu);
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let project = move |x: f32, y: f32, h: f32| {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+    };
+    (pixels, project)
+}
+
+/// The pixel's nearest colour among `colors` (sRGB bytes).
+fn nearest(p: &[u8], colors: &[[u8; 3]]) -> usize {
+    let d = |c: &[u8; 3]| (0..3).map(|i| (p[i] as i32 - c[i] as i32).pow(2)).sum::<i32>();
+    (0..colors.len()).min_by_key(|&i| d(&colors[i])).unwrap()
+}
+
+fn srgb_bytes(c: [f32; 3]) -> [u8; 3] {
+    c.map(|v| ((if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }) * 255.0).round() as u8)
+}
+
+/// Per screen row in `rows`, the first column from `start` rightwards
+/// whose pixel is closer to `to` than to `from`.
+fn switch_columns(pixels: &[u8], rows: std::ops::Range<u32>, start: u32, from: [u8; 3], to: [u8; 3]) -> Vec<u32> {
+    rows.filter_map(|v| (start..320u32).find(|&u| nearest(&pixels[((v * 320 + u) * 4) as usize..], &[from, to]) == 1)).collect()
+}
+
+fn spread(columns: &[u32]) -> u32 {
+    columns.iter().max().unwrap() - columns.iter().min().unwrap()
+}
+
+/// The tileset's two-level blending, measured in its weights view from
+/// straight above. Material boundary: grass cells left of x = 32, sand
+/// right of it; with the tileset the boundary meanders and frays (the
+/// switch column varies across rows by many pixels) but stays within a
+/// band of the cell boundary as wide as the warp plus the bilinear cell;
+/// with the palette the same boundary is a straight line. Cliffs: a ramp
+/// that steepens past the cliff threshold between two flats shows the
+/// cliff layer where it is steep and grass on the flats, with an irregular
+/// edge.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn tileset_boundaries_are_irregular_and_bounded() {
+    use ae_render::terrain::tileset;
+    let gpu = gpu();
+    let t = Arc::new(tileset::temperate(64));
+    // LAYER_COLORS in terrain.frag: grass (layer 0), sand (2), rock (3).
+    let (grass, sand, rock) = (srgb_bytes([0.10, 0.75, 0.10]), srgb_bytes([0.95, 0.85, 0.25]), srgb_bytes([0.55, 0.55, 0.60]));
+
+    let split = |x: usize, _: usize| if x < 32 { 0 } else { 2 };
+    // Zoomed in on the boundary: about 14 px per cell.
+    let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, split, Some(t.clone()), true, 200.0);
+    let rows = 4..236;
+    let start = project(200.0, 256.0, 50.0).0.max(0.0) as u32;
+    let cols = switch_columns(&pixels, rows.clone(), start, grass, sand);
+    assert_eq!(cols.len(), rows.len(), "every row crosses from grass to sand");
+    // The boundary is at x = 256 (between cell centres 31.5 and 32.5);
+    // allowed: the warp (2 cells) plus half a cell each side, plus a
+    // pixel.
+    let reach = 8.0 * (t.warp.0 + 0.5);
+    let (lo, hi) = (project(256.0 - reach, 256.0, 50.0).0 - 1.0, project(256.0 + reach, 256.0, 50.0).0 + 1.0);
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    eprintln!("tileset boundary columns {}..={} over {} rows (band {lo:.0}..{hi:.0})", cols.iter().min().unwrap(), cols.iter().max().unwrap(), cols.len());
+    // Row to row it frays (the height blend), not only bends.
+    let jumps = cols.windows(2).filter(|w| w[0].abs_diff(w[1]) >= 2).count();
+    eprintln!("{jumps} rows jump 2+ px from the row above");
+    assert!(jumps >= 4, "{jumps} rows jump 2+ px from the row above");
+    let cell_px = project(264.0, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0;
+    assert!(spread(&cols) as f32 >= cell_px, "the boundary meanders over a cell ({cell_px:.1} px) or more: spread {}", spread(&cols));
+    assert!(cols.iter().all(|&c| (lo..=hi).contains(&(c as f32))), "and stays in its band");
+
+    // The palette: a straight boundary (grass and sand palette colours).
+    let (pixels, _) = tileset_scene(&gpu, |_, _| 50.0, split, None, false, 200.0);
+    let cols = switch_columns(&pixels, rows.clone(), start, srgb_bytes([0.23, 0.33, 0.12]), srgb_bytes([0.60, 0.54, 0.38]));
+    eprintln!("palette boundary columns {}..={}", cols.iter().min().unwrap(), cols.iter().max().unwrap());
+    assert!(spread(&cols) <= 1, "the palette's boundary is straight: spread {}", spread(&cols));
+
+    // A ramp that steepens: flat at 0 for x < 16 cells, then h = (x −
+    // 16)² / 4 m to x = 48 (slope 0 → 2), flat on top. The slope passes
+    // the cliff thresholds (1 − n.y = 0.18 .. 0.42) between about x = 27
+    // and x = 38, a band the detail tilt and the height blend can fray.
+    let ramp = |x: usize, _: usize| (x.clamp(16, 48) - 16).pow(2) as f32 * 0.25;
+    let (pixels, project) = tileset_scene(&gpu, ramp, |_, _| 0, Some(t.clone()), true, 620.0);
+    let class = |x: f32, y: f32, h: f32| {
+        let (u, v) = project(x, y, h);
+        nearest(&pixels[((v as u32 * 320 + u as u32) * 4) as usize..], &[grass, rock])
+    };
+    for y in [160.0, 256.0, 352.0] {
+        assert_eq!(class(64.0, y, 0.0), 0, "grass on the low flat");
+        assert_eq!(class(360.0, y, 196.0), 1, "rock where the ramp is steep");
+        assert_eq!(class(456.0, y, 256.0), 0, "grass on the top flat");
+    }
+    // Where the ramp turns to rock, the switch column varies along it.
+    let (top, bottom) = (project(160.0, 96.0, 0.0).1 as u32, project(160.0, 416.0, 0.0).1 as u32);
+    let cols = switch_columns(&pixels, top.min(bottom)..top.max(bottom), project(64.0, 256.0, 0.0).0 as u32, grass, rock);
+    let cell_px = project(264.0, 256.0, 100.0).0 - project(256.0, 256.0, 100.0).0;
+    eprintln!("cliff edge columns {}..={} over {} rows ({cell_px:.1} px per cell)", cols.iter().min().unwrap(), cols.iter().max().unwrap(), cols.len());
+    assert!(spread(&cols) as f32 >= cell_px, "the cliff edge is irregular over a cell or more: spread {}", spread(&cols));
+    assert_clean(&gpu);
+}
+
 /// A flat map (ground at 50, 1024 world units square), units from `rows`
 /// `(x, y, radius, class)`, rendered offscreen for a few frames from
 /// `camera`; returns `(rows uploaded, units the GPU cull kept)` and the

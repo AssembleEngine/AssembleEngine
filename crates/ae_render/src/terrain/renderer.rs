@@ -21,6 +21,7 @@
 
 use super::heightmap::{Heightmap, PYRAMID_BASE_LEVEL, Pyramid};
 use super::leb::{self, Cbt};
+use super::tileset::{TILESET_UBO_BYTES, Tileset, TilesetUbo};
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -91,6 +92,12 @@ pub struct FrameParams {
     pub wireframe: Wireframe,
     pub lod_colors: bool,
     pub fog: bool,
+    /// Shade with the material tileset (when the renderer has one) instead
+    /// of the palette.
+    pub tileset: bool,
+    /// With the tileset: show each pixel's layer blend weights as flat
+    /// colours, unlit (a debug view).
+    pub weights: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,7 +171,14 @@ pub struct TerrainRenderer {
     pyramid_img: OwnedImage,
     error_img: OwnedImage,
     material_img: OwnedImage,
-    samplers: [vk::Sampler; 2],
+    /// Tileset albedo + height and normal arrays (1x1 placeholders without
+    /// a tileset), and its table.
+    tile_albedo: OwnedImage,
+    tile_normal: OwnedImage,
+    tile_ubo: OwnedBuffer,
+    has_tileset: bool,
+    /// Nearest clamp, linear clamp, trilinear repeat (tilesets).
+    samplers: [vk::Sampler; 3],
 }
 
 /// Texels to rewrite after the terrain changed (see
@@ -204,6 +218,7 @@ impl TerrainRenderer {
         pyramid: &Pyramid,
         info: TerrainInfo,
         materials: Option<&[u8]>,
+        tileset: Option<&Tileset>,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -261,6 +276,25 @@ impl TerrainRenderer {
             Some(m) => upload::image(gpu, vk::Format::R8_UINT, info.cells.0, info.cells.1, &[m], "terrain materials")?,
             None => upload::image(gpu, vk::Format::R8_UINT, 1, 1, &[&[0]], "terrain materials")?,
         };
+        let array = vk::ImageViewType::TYPE_2D_ARRAY;
+        let (tile_albedo, tile_normal, tile_table) = match tileset {
+            Some(t) => {
+                t.validate().map_err(anyhow::Error::msg)?;
+                let albedo: Vec<Vec<&[u8]>> = t.layers.iter().map(|l| l.albedo.iter().map(Vec::as_slice).collect()).collect();
+                let normal: Vec<Vec<&[u8]>> = t.layers.iter().map(|l| l.normal.iter().map(Vec::as_slice).collect()).collect();
+                (
+                    upload::image_layers(gpu, vk::Format::R8G8B8A8_SRGB, t.size, t.size, &albedo, array, "tileset albedo")?,
+                    upload::image_layers(gpu, vk::Format::R8G8_UNORM, t.size, t.size, &normal, array, "tileset normals")?,
+                    t.ubo(),
+                )
+            }
+            None => (
+                upload::image_layers(gpu, vk::Format::R8G8B8A8_SRGB, 1, 1, &[vec![&[0u8; 4][..]]], array, "tileset albedo")?,
+                upload::image_layers(gpu, vk::Format::R8G8_UNORM, 1, 1, &[vec![&[128u8, 128][..]]], array, "tileset normals")?,
+                TilesetUbo::default(),
+            ),
+        };
+        let tile_ubo = upload::buffer(gpu, &bytes_of(&tile_table)[..TILESET_UBO_BYTES], vk::BufferUsageFlags::UNIFORM_BUFFER, "tileset table")?;
 
         let make_sampler = |filter: vk::Filter| unsafe {
             device.create_sampler(
@@ -275,7 +309,20 @@ impl TerrainRenderer {
                 None,
             )
         };
-        let samplers = [make_sampler(vk::Filter::NEAREST)?, make_sampler(vk::Filter::LINEAR)?];
+        let repeat = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .max_lod(vk::LOD_CLAMP_NONE),
+                None,
+            )
+        }?;
+        let samplers = [make_sampler(vk::Filter::NEAREST)?, make_sampler(vk::Filter::LINEAR)?, repeat];
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
@@ -291,14 +338,17 @@ impl TerrainRenderer {
                 b(7, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(8, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(9, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(10, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(11, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(12, vk::DescriptorType::UNIFORM_BUFFER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
             let n = frames_in_flight as u32;
             let sizes = [
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 4 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 6 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -312,6 +362,8 @@ impl TerrainRenderer {
                     image(samplers[1], height_img.view),
                     image(samplers[0], error_img.view),
                     image(samplers[0], material_img.view),
+                    image(samplers[2], tile_albedo.view),
+                    image(samplers[2], tile_normal.view),
                 ];
                 let mut writes: Vec<vk::WriteDescriptorSet> = infos
                     .iter()
@@ -330,6 +382,8 @@ impl TerrainRenderer {
                             .image_info(info),
                     );
                 }
+                let table = [vk::DescriptorBufferInfo { buffer: tile_ubo.buffer, offset: 0, range: vk::WHOLE_SIZE }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(12).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&table));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -372,6 +426,10 @@ impl TerrainRenderer {
             pyramid_img,
             error_img,
             material_img,
+            tile_albedo,
+            tile_normal,
+            tile_ubo,
+            has_tileset: tileset.is_some(),
             samplers,
         })
     }
@@ -389,6 +447,10 @@ impl TerrainRenderer {
     /// renderer.
     pub fn height_texture(&self) -> (vk::ImageView, vk::Sampler) {
         (self.height_img.view, self.samplers[1])
+    }
+
+    pub fn has_tileset(&self) -> bool {
+        self.has_tileset
     }
 
     pub fn info(&self) -> &TerrainInfo {
@@ -443,7 +505,11 @@ impl TerrainRenderer {
             cfg: [
                 self.max_depth,
                 self.max_depth - 5,
-                p.lod_colors as u32 | if p.wireframe == Wireframe::Triangles { 2 } else { 0 } | if i.has_materials { 8 } else { 0 },
+                p.lod_colors as u32
+                    | if p.wireframe == Wireframe::Triangles { 2 } else { 0 }
+                    | if i.has_materials { 8 } else { 0 }
+                    | if self.has_tileset && p.tileset { 16 } else { 0 }
+                    | if self.has_tileset && p.tileset && p.weights { 32 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
@@ -566,6 +632,9 @@ impl TerrainRenderer {
         self.pyramid_img.destroy(gpu);
         self.error_img.destroy(gpu);
         self.material_img.destroy(gpu);
+        self.tile_albedo.destroy(gpu);
+        self.tile_normal.destroy(gpu);
+        self.tile_ubo.destroy(gpu);
     }
 }
 

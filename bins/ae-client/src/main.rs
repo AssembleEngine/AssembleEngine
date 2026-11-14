@@ -54,6 +54,7 @@ use ae_render::demo::DemoApp;
 use ae_render::swapchain::PresentPolicy;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, lod_view};
 use ae_render::terrain::edit::TerrainEditor;
+use ae_render::terrain::tileset::{self, Tileset};
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
 use ae_render::thread::{GpuRenderConfig, GpuRenderThread};
@@ -90,12 +91,17 @@ struct Options {
     ticks: u64,
     render_module: Option<String>,
     quake: u8,
+    /// Start in the tileset's blend-weight view.
+    weights: bool,
+    /// Material tileset name, `None` for the palette.
+    tileset: Option<String>,
+    tileset_size: u32,
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--capture FILE.ppm]";
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--capture FILE.ppm]";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0 };
+    let mut o = Options { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false };
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -124,6 +130,16 @@ fn parse() -> Result<Options> {
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
             "--ticks" => o.ticks = value("--ticks", &mut args)?.parse().context("--ticks")?,
             "--render-module" => o.render_module = Some(value("--render-module", &mut args)?),
+            "--tileset" => {
+                let name = value("--tileset", &mut args)?;
+                o.tileset = match name.as_str() {
+                    "none" => None,
+                    n if ae_render::terrain::tileset::NAMES.contains(&n) => Some(name),
+                    n => bail!("--tileset {n:?}: expected one of {:?} or none", ae_render::terrain::tileset::NAMES),
+                };
+            }
+            "--tileset-size" => o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?,
+            "--weights" => o.weights = true,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
@@ -207,6 +223,32 @@ fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> 
     Ok((TerrainSource { heightmap, pyramid, info, materials }, nav))
 }
 
+/// The material tileset of `--tileset`, generated (procedural layers).
+fn tileset(o: &Options) -> Result<Option<Arc<Tileset>>> {
+    let Some(name) = &o.tileset else { return Ok(None) };
+    anyhow::ensure!(o.tileset_size.is_power_of_two() && o.tileset_size >= 4, "--tileset-size must be a power of two of at least 4");
+    let started = Instant::now();
+    let t = tileset::by_name(name, o.tileset_size).context("unknown tileset")?;
+    eprintln!(
+        "tileset {}: {} layers of {}², {:.1} MB with mips, generated in {:.2} s",
+        t.name,
+        t.layers.len(),
+        t.size,
+        t.bytes() as f64 / (1 << 20) as f64,
+        started.elapsed().as_secs_f32()
+    );
+    Ok(Some(Arc::new(t)))
+}
+
+/// Apply the tileset options to a new app.
+fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) -> TerrainApp {
+    if let Some(t) = tileset {
+        app = app.with_tileset(t);
+    }
+    app.view().lock().unwrap().weights = o.weights;
+    app
+}
+
 /// Resize, minimize, restore on a fixed schedule (seconds after start).
 fn exercise(window: &mut SdlWindow, started: Instant, step: &mut usize) {
     const STEPS: [f32; 6] = [0.8, 1.6, 2.4, 3.0, 3.6, 4.2];
@@ -267,6 +309,12 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     if events.pressed & keys::V != 0 {
         view.module_flags ^= 1;
     }
+    if events.pressed & keys::M != 0 {
+        view.tileset = !view.tileset;
+    }
+    if events.pressed & keys::B != 0 {
+        view.weights = !view.weights;
+    }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;
         println!("--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)", c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau);
@@ -291,7 +339,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     use ae_render::thread::{RenderApp, TargetInfo, run_headless};
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+    let mut app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Readback), tileset(o)?, o);
     if let Some(name) = &o.render_module {
         app = app.with_module(ae_render::module::build(name)?);
     }
@@ -401,7 +449,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
-            let mut app = TerrainApp::new(source.clone(), TerrainOutput::Present);
+            let mut app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o);
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));

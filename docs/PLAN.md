@@ -910,9 +910,44 @@ Terrain edits on screen (`TerrainChanged` reaching the render heightfield):
   the graph). The CBT re-refines over the following frames; nothing forces the edited area to split
   at once.
 
-Next in M3: material tilesets (procedural placeholder textures until a texture source is chosen)
-replacing the material palette, the GPU bench (`ae-client --bench`, JSON for `bench-diff`), and
-threaded recording.
+Material tilesets (the proposal above; full write-up with captures, texture formats, settings and
+numbers in [docs/tilesets.md](tilesets.md)):
+- `ae_render::terrain::tileset`: a tileset is up to 8 tileable layers (albedo + height in an
+  `R8G8B8A8_SRGB` array, normals in an `R8G8_UNORM` array, full mips), a table from the 8 gameplay
+  material ids to a ground and a cliff layer, and per-layer (tile size, normal strength, projection)
+  and per-set (cliff slope range, blend depth, detail tilt, boundary warp, macro variation)
+  settings. Two procedural placeholder sets, `temperate` and `desert`, 7 layers each, from periodic
+  gradient and cellular noise (14 MB at 512², generated in 0.06 s on 24 threads).
+- Shader (`terrain.frag`, `tileset()`): ground layers planar, cliff layers duoplanar, `Triplanar`
+  layers triplanar, with sign-matched uv/tangent flips and whiteout normal blending; every sample
+  uses `textureGrad`. Two-level blending: broad masks (bilinear material cells looked up through a
+  noise warp, so boundaries cross the 8 m grid; a cliff mask from the slope tilted by the ground's
+  detail normals), then a height blend over the five candidates. A weights debug view shows the
+  blend as flat layer colours.
+- The tileset is not part of the map: `TerrainApp::with_tileset(Arc<Tileset>)`, optional; without
+  it the shader's palette path is unchanged, and `--tileset none` captures are byte-identical to
+  before (water and generated maps). `ae-client --tileset temperate|desert|none` (default
+  temperate), `--tileset-size`, `--weights`; M toggles tileset/palette, B the weights view.
+- Plumbing: `OwnedImage::with_view` (2D-array views), `upload::image_layers` (layers × mips, 16-byte
+  staging offsets), a trilinear REPEAT sampler, bindings 10–12 (pool sizes raised).
+- Checked: tiling, unit normals, determinism and table validation (unit tests; the tiling measure
+  fails on a broken edge); GPU test `tileset_boundaries_are_irregular_and_bounded` (a material
+  boundary meanders 15 px and frays in 66 of 232 rows inside its allowed band, the palette's is
+  straight; a steepening ramp shows rock where steep, grass on the flats, irregular edge; removing
+  the warp or the height blend fails it); 0 validation messages in the tests and in windowed runs
+  (with 10k units and a quake, the weights view on the generated map, and under the `post` render
+  module). The M/B keys were not pressed in a run (no key injection), and no check has looked at a
+  terrain edit under a tileset (it reads the same textures the edits update).
+- Cost (terrain draw, 1280x720): 0.17–0.19 ms with a tileset vs 0.05–0.08 ms with the palette on the
+  water map, 0.34–0.38 ms over cliffs. Sampling a corner's layer once when corners share it, and the
+  cliff layer only where the mask is non-zero, halved it; doing the reuse by runtime index into the
+  tap array had made it slower (0.43 ms overview), constant indices fixed that.
+- Not done: detail-normal signs on cliffs checked by eye from opposite yaws only; procedural
+  textures only (no import, no anisotropic filtering); maps without materials use slot 0 everywhere
+  (the palette's snow and dry bands are gone with a tileset); no runtime tileset swap; one tile per
+  layer (macro variation only, no stochastic tiling).
+
+Next in M3: the GPU bench (`ae-client --bench`, JSON for `bench-diff`), and threaded recording.
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

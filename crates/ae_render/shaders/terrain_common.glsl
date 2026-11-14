@@ -16,6 +16,8 @@
 #define FLAG_WIRE_TRIS 2u
 #define FLAG_WIRE_QUADS 4u
 #define FLAG_MATERIALS 8u
+#define FLAG_TILESET 16u
+#define FLAG_WEIGHTS 32u
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 viewProj;
