@@ -2436,10 +2436,13 @@ fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::partic
 /// * two puffs of different sizes crossing in depth, one metre a frame:
 ///   the largest change between consecutive frames (popping), and the
 ///   error, for each method.
+/// * the same, as a volume (each fragment its sphere's chord; overlapping
+///   chords mixed as media), against the flat layers in the cluster.
 /// The numbers are printed; the assertions hold what was measured: the
-/// centre sort is close to exact in the cluster, and the exact per-pixel
+/// centre sort is close to exact in the cluster, the exact per-pixel
 /// order pops about as much as the sort when the two cross (the moments,
-/// whose depth warp follows the frame's particle range, pop more: 372).
+/// whose depth warp follows the frame's particle range, pop more: 372),
+/// and the volume does not pop.
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_order_independence() {
@@ -2464,7 +2467,7 @@ fn particles_order_independence() {
     let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
     camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
     let eye = camera.eye(|_| ground);
-    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference];
+    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume];
     let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
     let none = render_particles(&gpu, &source, camera, extent, None);
     // Per pixel the reference changes: mean and largest channel error.
@@ -2514,7 +2517,9 @@ fn particles_order_independence() {
     let covered = reference.chunks(4).zip(none.chunks(4)).filter(|(a, b)| a[..3] != b[..3]).count();
     let (sorted_mean, sorted_worst) = error(&images[0], reference);
     let (moments_mean, moments_worst) = error(&images[1], reference);
-    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}");
+    let (volume_mean, volume_worst) = error(&images[3], reference);
+    assert_eq!(magenta(&images[3]), 0, "the volume overflows its lists");
+    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}");
     // Emitted in reverse: the order-independent methods give the same frame.
     let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
     for (m, image) in modes.iter().zip(&images) {
@@ -2536,7 +2541,7 @@ fn particles_order_independence() {
     let dir = (red - eye).normalize();
     let side = dir.cross(Vec3::Y).normalize() * 3.0;
     let steps: Vec<f32> = (0..=28).map(|i| i as f32 - 14.0).collect();
-    let mut frames: Vec<Vec<Vec<u8>>> = vec![Vec::new(); 3];
+    let mut frames: Vec<Vec<Vec<u8>>> = vec![Vec::new(); modes.len()];
     for &t in &steps {
         let blue = red + side + dir * t;
         let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: blue.to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
@@ -2569,7 +2574,7 @@ fn particles_order_independence() {
         println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the reference mean {mean:.2} max {max}");
         pops.push((worst, jumps));
     }
-    for k in 0..3 {
+    for k in 0..modes.len() {
         assert_eq!(frames[k].iter().map(|f| magenta(f)).sum::<usize>(), 0);
     }
     // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
@@ -2580,6 +2585,11 @@ fn particles_order_independence() {
     // jump comes from blending particles as flat layers, whatever the order.
     let (sorted_pop, reference_pop) = (pops[0], pops[2]);
     assert!(reference_pop.0 > 80.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
+    // Measured: the volume (puffs mixed by how much of their thickness
+    // overlaps) changes by 7 at most between frames, no pixel by over 40.
+    let volume_pop = pops[3];
+    assert!(volume_pop.0 < 20.0 && volume_pop.1 == 0, "the volume pops: {volume_pop:?}");
+    assert!(volume_mean < 3.0, "a volume of separate puffs differs from their layers: {volume_mean}");
     assert_clean(&gpu);
 }
 

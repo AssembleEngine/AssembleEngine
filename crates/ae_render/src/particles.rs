@@ -293,6 +293,21 @@ pub enum ParticleBlend {
     /// depth and blended. For tests (needs `fragmentStoresAndAtomics`; a
     /// list of [`REFERENCE_LAYERS`] per pixel, magenta past that).
     Reference,
+    /// Exact, as a volume: every fragment's span (its sphere's chord along
+    /// the pixel's depth, capped at the scene) stored per pixel; the spans
+    /// cut the depth into intervals, each integrated as the media covering
+    /// it (extinction `-ln(1 - a) / length`, colour and emission per
+    /// metre). Overlapping puffs mix by how much of their thickness
+    /// overlaps. For tests, as [`ParticleBlend::Reference`].
+    Volume,
+}
+
+impl ParticleBlend {
+    /// Stores every fragment per pixel ([`ParticleBlend::Reference`],
+    /// [`ParticleBlend::Volume`]).
+    pub fn lists(self) -> bool {
+        matches!(self, Self::Reference | Self::Volume)
+    }
 }
 
 /// Fragments per pixel in [`ParticleBlend::Reference`].
@@ -455,7 +470,7 @@ impl ParticleRenderer {
         ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
         ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
         ensure!(setup.blend == ParticleBlend::Sorted || setup.downscale == 2, "{:?} particles need downscale 2", setup.blend);
-        ensure!(setup.blend != ParticleBlend::Reference || gpu.fragment_stores, "the particles' reference needs fragmentStoresAndAtomics");
+        ensure!(!setup.blend.lists() || gpu.fragment_stores, "the particles' reference needs fragmentStoresAndAtomics");
         if setup.blend == ParticleBlend::Moments {
             for format in MOMENT_FORMATS {
                 let features = unsafe { gpu.instance.instance.get_physical_device_format_properties(gpu.physical, format) }.optimal_tiling_features;
@@ -603,6 +618,10 @@ impl ParticleRenderer {
                 particle_pipeline(spirv!("particles_reference.frag"), &[], Blend::Off).context("particle reference pipeline")?,
                 fullscreen(spirv!("particles_reference_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle reference resolve pipeline")?,
             ],
+            ParticleBlend::Volume => vec![
+                particle_pipeline(spirv!("particles_volume.frag"), &[], Blend::Off).context("particle volume pipeline")?,
+                fullscreen(spirv!("particles_volume_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle volume resolve pipeline")?,
+            ],
         };
         let caster_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
         let caster = pipeline::graphics_pipeline(
@@ -688,7 +707,7 @@ impl ParticleRenderer {
                     targets.moments.push(image(*format, name)?);
                 }
             }
-            if self.blend == ParticleBlend::Reference {
+            if self.blend.lists() {
                 let pixels = half.width as u64 * half.height as u64;
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
                 targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: pixels * 4, usage }, MemoryLocation::GpuOnly, "particle reference counts")?);
@@ -994,7 +1013,7 @@ impl ParticleRenderer {
         };
         unsafe {
             device.cmd_end_rendering(cmd);
-            if self.blend == ParticleBlend::Reference {
+            if self.blend.lists() {
                 device.cmd_fill_buffer(cmd, half.reference[0].buffer, 0, vk::WHOLE_SIZE, 0);
             }
             // The scene depth's farthest per 2x2 block.
@@ -1029,7 +1048,7 @@ impl ParticleRenderer {
                     fullscreen(self.oit[2]);
                     device.cmd_end_rendering(cmd);
                 }
-                ParticleBlend::Reference => {
+                ParticleBlend::Reference | ParticleBlend::Volume => {
                     let (counts, fragments) = (half.reference[0].buffer, half.reference[1].buffer);
                     let stores = (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
                     buffer_barrier(counts, (vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE), stores);
