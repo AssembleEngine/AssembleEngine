@@ -1728,8 +1728,8 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     a 64k pool only 8 workgroups. With 4 blocks it takes about 42 µs; 1 and 2 blocks were slower,
     because the scatter's prefix walks every workgroup.
 - **Not done yet:**
-  - The OIT candidates measured against an exact reference: moment-based, tile-binned, froxel
-    smoke.
+  - Order independence: measured below ("order independence measured"); the next step is
+    volumetric smoke and dust.
   - Particles are not shaded by the units' shadow map.
   - Fog of war does not dim them (their emitters are only where the observer sees).
   - Effects are not in the content catalogue.
