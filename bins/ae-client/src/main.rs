@@ -26,7 +26,8 @@
 //! sun's shadows over the ground, the units and the water; `--no-shadows`
 //! turns them off. Units that die where the observer sees explode
 //! (particles: flash, fire, sparks, smoke; X sets one off at the camera
-//! target, `--explode N` sets off N around it before a capture;
+//! target, `--explode N` sets off N around it before a capture, each only
+//! where the observer sees: an explosion is seen whole or not at all;
 //! `--no-particles` turns them off; they draw at half resolution,
 //! `--particles-full` at full) and leave a scar on the ground (a decal,
 //! relit by its normal map, its centre glowing like hot metal for up to
@@ -476,15 +477,18 @@ fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas,
     Ok((atlas, scars))
 }
 
-/// `count` explosions scattered around `target` (seeded; `--explode`, X).
-fn explode_around(effects: &sim::Effects, target: Vec2, count: u32, seed: u32) {
+/// `count` explosions scattered around `target` (seeded; `--explode`, X),
+/// each only where the observer sees (as deaths): how many went off.
+fn explode_around(effects: &sim::Effects, target: Vec2, count: u32, seed: u32) -> u32 {
+    let mut seen = 0;
     for k in 0..count {
         let h = (seed ^ k.wrapping_mul(0x9e37_79b9)).wrapping_mul(0x85eb_ca6b);
         let spread = if count > 1 { 120.0 } else { 0.0 };
         let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * spread, ((h >> 16) as f32 / 65535.0 - 0.5) * spread);
         let scale = 0.8 + (h % 7) as f32 * 0.2;
-        effects.explode(target.x + dx, target.y + dz, scale, h);
+        seen += u32::from(effects.explode_if_seen(target.x + dx, target.y + dz, scale, h));
     }
+    seen
 }
 
 /// Apply the tileset options to a new app.
@@ -625,6 +629,10 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         for _ in 0..o.ticks {
             sim.tick()?;
         }
+        // `--explode` only where the observer sees, as deaths.
+        if let (Some(feed), Some((los, grid))) = (&effects_feed, sim.sight()) {
+            feed.set_sight(los, grid);
+        }
         let ticked = started.elapsed() - built;
         if let (Some(update), Some(mut shown)) = (ground.take(), nav) {
             let t = Instant::now();
@@ -673,7 +681,10 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     place_camera(&app, o.camera);
     if let Some(feed) = &effects_feed {
         let target = app.view().lock().unwrap().camera.target;
-        explode_around(feed, target, o.explode, 1);
+        let seen = explode_around(feed, target, o.explode, 1);
+        if seen < o.explode {
+            eprintln!("--explode: {} of {} out of sight", o.explode - seen, o.explode);
+        }
     }
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
@@ -802,7 +813,9 @@ fn run(o: Options) -> Result<ExitCode> {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
             steer(&window, &events, &mut view, source, dt, &sim_speed);
             if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
-                explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32);
+                if explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0 {
+                    println!("X: the camera target is out of sight; no explosion");
+                }
             }
             // The exercise keeps particles alive through its resizes.
             if let Some(feed) = effects_feed.as_ref().filter(|_| o.exercise && last_boom.elapsed().as_secs_f32() >= 1.0) {

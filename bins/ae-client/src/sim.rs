@@ -312,8 +312,16 @@ impl Sim {
         }
         self.last_units = now;
         if let Some(v) = &self.view {
-            self.last_los = Some(v.pipeline.coverage.los[v.observer[0].ally as usize].clone());
+            let los = v.pipeline.coverage.los[v.observer[0].ally as usize].clone();
+            effects.set_sight(los.clone(), v.pipeline.coverage.grid);
+            self.last_los = Some(los);
         }
+    }
+
+    /// The observer's line of sight in the last view, and its grid.
+    pub fn sight(&self) -> Option<(Bits, SensorGrid)> {
+        let v = self.view.as_ref()?;
+        Some((v.pipeline.coverage.los[v.observer[0].ally as usize].clone(), v.pipeline.coverage.grid))
     }
 
     /// Rows of each state in the last view: own, seen, blip, ghost.
@@ -462,6 +470,9 @@ pub struct Effects {
     /// The atlas layers scars are picked from (by the explosion's seed) and
     /// how each blends; empty: the generated scorch mark.
     pub scars: Vec<(u32, Blend)>,
+    /// The observer's line of sight as of the last tick (the sim sets it);
+    /// `None`: everything is seen (no observer, or no sim).
+    sight: Mutex<Option<(Bits, SensorGrid)>>,
 }
 
 /// The damage an explosion of size `scale` stands for in Recoil's terms,
@@ -471,6 +482,32 @@ pub struct Effects {
 pub const DAMAGE_PER_SCALE: f32 = 250.0;
 
 impl Effects {
+    /// Whether the observer sees world `(x, z)`: an explosion is seen
+    /// whole (flash, fire, smoke, scar, glow) or not at all.
+    pub fn sees(&self, x: f32, z: f32) -> bool {
+        match &*self.sight.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some((los, grid)) => {
+                let (cx, cy) = grid.cell(x, z);
+                los.get(cx, cy)
+            }
+            None => true,
+        }
+    }
+
+    pub fn set_sight(&self, los: Bits, grid: SensorGrid) {
+        *self.sight.lock().unwrap_or_else(|p| p.into_inner()) = Some((los, grid));
+    }
+
+    /// [`Self::explode`] if the observer sees `(x, z)` (explosions set off
+    /// by hand: X, `--explode`); whether it went off.
+    pub fn explode_if_seen(&self, x: f32, z: f32, scale: f32, seed: u32) -> bool {
+        let seen = self.sees(x, z);
+        if seen {
+            self.explode(x, z, scale, seed);
+        }
+        seen
+    }
+
     /// An explosion of size `scale` on the ground at world `(x, z)`.
     pub fn explode(&self, x: f32, z: f32, scale: f32, seed: u32) {
         if let Some(feed) = &self.particles {
@@ -743,7 +780,7 @@ mod tests {
         assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
         assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
         // One explosion: flash, fire, sparks, smoke, and a scorch mark.
-        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), scars: Vec::new() };
+        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), ..Effects::default() };
         effects.explode(20.0, 20.0, 1.0, sites[0].3);
         let bursts = effects.particles.as_ref().unwrap().take_all();
         assert_eq!(bursts.len(), 4, "flash, fire, sparks, smoke: {bursts:?}");
@@ -753,6 +790,23 @@ mod tests {
         assert_eq!(decals[0].pos, [20.0, 20.0]);
         assert!(decals[0].glow > 0.5 && decals[0].glow_life > 0.0 && decals[0].layer == layer::SCORCH, "{:?}", decals[0]);
         assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
+    }
+
+    /// An explosion set off by hand is seen whole or not at all: where the
+    /// observer sees, particles and a scar; elsewhere neither.
+    #[test]
+    fn explosions_by_hand_go_off_only_in_sight() {
+        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), ..Effects::default() };
+        assert!(effects.sees(500.0, 500.0), "no observer: everything is seen");
+        let grid = SensorGrid::new(100.0, 100.0, 10.0);
+        let mut los = Bits::new(grid.width, grid.height);
+        los.set(2, 3);
+        effects.set_sight(los, grid);
+        assert!(!effects.explode_if_seen(55.0, 55.0, 1.0, 7));
+        assert!(effects.particles.as_ref().unwrap().take_all().is_empty() && effects.decals.as_ref().unwrap().take().is_empty());
+        assert!(effects.explode_if_seen(25.0, 35.0, 1.0, 7));
+        assert_eq!(effects.particles.as_ref().unwrap().take_all().len(), 4);
+        assert_eq!(effects.decals.as_ref().unwrap().take().len(), 1);
     }
 
     #[test]

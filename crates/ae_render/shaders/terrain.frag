@@ -301,9 +301,9 @@ void main() {
         glow *= 1.0 - smoothstep(0.0, 1.0, depth);
     }
 
-    // Emissive: after the light and the shadows. The fog of war dims it as
-    // it dims the scar under it (an explosion set off out of sight, X,
-    // still shows its scar, so its glow too).
+    // Emissive: after the light and the shadows. Explosions go off only in
+    // sight (the client's rule); if the spot falls out of sight while it
+    // glows, the fog of war dims the glow as it dims the scar under it.
     color += glow;
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
