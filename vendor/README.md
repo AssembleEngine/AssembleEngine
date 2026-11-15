@@ -15,9 +15,13 @@ Other local changes to the crate: standalone `Cargo.toml` (workspace inheritance
   arrays use them; everything else keeps using `ecs_os_*`. The engine points the column allocator at guest memory,
   so only component data is guest-writable (design §2, §7). Entity-id arrays stay on the host heap; the engine
   copies them into a read scratch buffer per chunk.
+- `0002-c23-const-string-search.patch`: keep `strchr`/`strrchr` results const-correct when compiled as C23
+  (the GCC default), where those functions preserve the constness of their argument. The casts are only where
+  Flecs intentionally edits mutable parser token buffers.
 
 ## Updating Flecs
 1. Copy `distr/flecs.c`, `distr/flecs.h` from upstream into `flecs-upstream/` and `flecs_ecs_sys/src/`.
-2. `cd flecs_ecs_sys/src && patch -p1 < ../../patches/0001-column-allocator.patch` (resolve any drift, regenerate the patch).
+2. `cd flecs_ecs_sys/src && for p in ../../patches/*.patch; do patch -p1 < "$p"; done` (resolve any drift,
+   regenerate the affected patch).
 3. Regenerate bindings once: add feature `regenerate_binding` to the dependency in `Cargo.toml`, `cargo build`, remove it.
 4. `cargo test`; debug and release digests must match; expect digests to change when entity-id allocation changes.
