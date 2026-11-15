@@ -2643,7 +2643,7 @@ fn decals_wrap_over_cliffs() {
     let stripes = (0..size * size).map(|i| if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] }).collect();
     let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes] });
     let half = 12.0f32;
-    let decal = |x: f32, z: f32| Decal { pos: [x, z], half: [half, half], angle: 0.0, layer: 0, opacity: 1.0, fade_in: 0.0 };
+    let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
     // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32).
     let centres = [(64.0f32, 32.0f32), (66.0, 96.0), (24.0, 64.0)];
     let centre_y = [30.0f32, 10.0, 36.0];
@@ -2654,6 +2654,11 @@ fn decals_wrap_over_cliffs() {
         None,
         Empty,
         On,
+        /// Placed at the first frame (time 0) to live 0.05 s: gone by the
+        /// last (7 / 60 s).
+        Expired,
+        /// Halfway through a 1 s fade-out at the last frame.
+        Fading,
     }
     let render = |decals: Decals| -> Vec<u8> {
         let mut columns: [Vec<u32>; 8] = Default::default();
@@ -2666,8 +2671,16 @@ fn decals_wrap_over_cliffs() {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
-            if decals == Decals::On {
-                feed.place_all(&centres.map(|(x, z)| decal(x, z)));
+            let life = match decals {
+                Decals::Expired => Some((0.05, 0.0)),
+                Decals::Fading => Some((7.0 / 60.0 + 0.5, 1.0)),
+                _ => None,
+            };
+            if decals != Decals::Empty {
+                feed.place_all(&centres.map(|(x, z)| match life {
+                    Some((life, fade_out)) => Decal { life, fade_out, ..decal(x, z) },
+                    None => decal(x, z),
+                }));
             }
             app = app.with_decals(DecalsSetup { feed, capacity: 64, atlas: Some(atlas.clone()) });
         }
@@ -2696,9 +2709,12 @@ fn decals_wrap_over_cliffs() {
     let none = render(Decals::None);
     let empty = render(Decals::Empty);
     let on = render(Decals::On);
+    let expired = render(Decals::Expired);
+    let fading = render(Decals::Fading);
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
     assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "decals made but none placed draw as none");
+    assert_eq!(none.iter().zip(&expired).filter(|(a, b)| a != b).count(), 0, "decals past their life draw as none");
 
     // A point's distance from decal k's centre, as the shader fades it
     // (square in plan, rounded in the vertical; 1 at the edge).
@@ -2752,6 +2768,23 @@ fn decals_wrap_over_cliffs() {
         assert!(hi > 2.0 * lo.max(1.0), "{name}: no stripes (luma {lo:.0}..{hi:.0})");
         assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
     }
+
+    // Halfway through the fade-out: every painted sample of the segments
+    // between none and full (the median at a quarter to three quarters of
+    // the way, in sRGB bytes).
+    let mut between: Vec<f32> = segments
+        .iter()
+        .flat_map(|(_, points)| points.iter())
+        .filter_map(|&(p, _)| pixel(p))
+        .filter(|&i| (luma(&on, i) - luma(&none, i)).abs() > 20.0)
+        .map(|i| (luma(&fading, i) - luma(&none, i)) / (luma(&on, i) - luma(&none, i)))
+        .collect();
+    between.sort_by(f32::total_cmp);
+    let median = between[between.len() / 2];
+    println!("fading: {} samples, {:.2}..{:.2} of the way, median {median:.2}", between.len(), between[0], between[between.len() - 1]);
+    assert!(between.len() > 300 && (0.25..0.75).contains(&median), "{} samples, median {median}", between.len());
+    let inside = between.iter().filter(|&&f| f > 0.05 && f < 0.95).count();
+    assert!(inside * 10 >= between.len() * 9, "{inside} of {} samples between none and full", between.len());
 
     // The ground on a 0.5 m grid: outside every decal's 3D extent (with a
     // margin of a few pixels) it is unchanged.

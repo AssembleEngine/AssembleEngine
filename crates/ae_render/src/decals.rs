@@ -26,8 +26,10 @@
 //!   decals.
 //!
 //! Decals come from a [`DecalFeed`] (the client fills it from what the
-//! observer sees, as the particles' bursts). They stay until evicted: one
-//! seen once stays as last seen under the fog.
+//! observer sees, as the particles' bursts). A decal lives
+//! [`Decal::life`] seconds (0: until evicted), fading out over its last
+//! [`Decal::fade_out`]; it ends under the fog too, so a mark seen once may
+//! be gone when the fog lifts.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -36,6 +38,9 @@ use std::sync::{Arc, Mutex};
 pub const GRID_CELL: f32 = 32.0;
 /// Largest bounding radius of a decal (metres); bigger ones are scaled down.
 pub const MAX_RADIUS: f32 = GRID_CELL;
+/// Seconds a scorch mark lives (Recoil's scars: 0.5 to 60 s by the
+/// explosion's damage, times the decal level setting).
+pub const SCORCH_LIFE: f32 = 60.0;
 /// Most decals one binning cell lists (the newest are kept).
 pub const MAX_PER_CELL: usize = 255;
 /// Header words before the decals.
@@ -65,13 +70,25 @@ pub struct Decal {
     pub opacity: f32,
     /// Seconds to fade in from placement (0: at once).
     pub fade_in: f32,
+    /// Seconds it lives from placement (0: until evicted). It is removed
+    /// when its life ends, under the fog too.
+    pub life: f32,
+    /// Seconds it fades out over at the end of its life (0: it vanishes;
+    /// longer than `life`: it starts partly faded).
+    pub fade_out: f32,
 }
 
 impl Decal {
-    /// A scorch mark of `radius` metres at `pos`, rotated by `seed`.
+    /// A scorch mark of `radius` metres at `pos`, rotated by `seed`: it
+    /// lives [`SCORCH_LIFE`] seconds, fading out over the last third.
     pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
         let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
-        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4 }
+        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0 }
+    }
+
+    /// A decal that stays until evicted, at full opacity at once.
+    pub fn permanent(pos: [f32; 2], half: [f32; 2], angle: f32, layer: u32) -> Self {
+        Self { pos, half, angle, layer, opacity: 1.0, fade_in: 0.0, life: 0.0, fade_out: 0.0 }
     }
 
     /// Bounding radius in plan.
@@ -269,6 +286,8 @@ struct Placed {
     n_buckets: u8,
     /// Centre x, z and bounding radius in plan.
     bounds: [f32; 3],
+    /// When its life ends (0: never).
+    end: f32,
 }
 
 /// The live decals, oldest first, and a version bumped by every change.
@@ -305,7 +324,11 @@ impl DecalSet {
         let d = &decal;
         let (s, c) = d.angle.sin_cos();
         let fade = if d.fade_in > 0.0 { 1.0 / d.fade_in } else { 0.0 };
-        let words = [d.pos[0], d.pos[1], d.half[0].max(1e-3), d.half[1].max(1e-3), c, s, d.layer as f32, d.opacity, time, fade, 0.0, 0.0].map(f32::to_bits);
+        // The end of its life, and 1 / its fade-out (0: lives until evicted;
+        // no fade-out: a step a microsecond wide).
+        let end = if d.life > 0.0 { time + d.life } else { 0.0 };
+        let fade_out = if d.life > 0.0 { 1.0 / d.fade_out.max(1e-6) } else { 0.0 };
+        let words = [d.pos[0], d.pos[1], d.half[0].max(1e-3), d.half[1].max(1e-3), c, s, d.layer as f32, d.opacity, time, fade, end, fade_out].map(f32::to_bits);
         // The buckets of the distinct cells it touches (two of its cells
         // may share a bucket: listed once).
         let mask = buckets(self.capacity as u32) - 1;
@@ -323,8 +346,17 @@ impl DecalSet {
                 }
             }
         }
-        self.live.push_back(Placed { words, buckets: list, n_buckets: n as u8, bounds: [d.pos[0], d.pos[1], r] });
+        self.live.push_back(Placed { words, buckets: list, n_buckets: n as u8, bounds: [d.pos[0], d.pos[1], r], end });
         self.version += 1;
+    }
+
+    /// Remove the decals whose life has ended by `time`.
+    pub fn expire(&mut self, time: f32) {
+        let before = self.live.len();
+        self.live.retain(|p| p.end <= 0.0 || p.end > time);
+        if self.live.len() != before {
+            self.version += 1;
+        }
     }
 
     /// Whether any decal's box (its square in plan, `heights` in the
@@ -394,7 +426,7 @@ mod tests {
     use super::*;
 
     fn decal(x: f32, z: f32, r: f32) -> Decal {
-        Decal { pos: [x, z], half: [r, r], angle: 0.0, layer: 0, opacity: 1.0, fade_in: 0.0 }
+        Decal::permanent([x, z], [r, r], 0.0, 0)
     }
 
     /// The decals listed in the bucket of world cell `(x, z)`.
@@ -442,6 +474,28 @@ mod tests {
         assert_eq!(listed(&words, 3, 0, 0), vec![0, 1]);
         assert_eq!(listed(&words, 3, 5, 5), vec![2]);
         assert_eq!(set.version, 4);
+    }
+
+    #[test]
+    fn decals_expire_at_the_end_of_their_life() {
+        let mut set = DecalSet::new(4);
+        set.insert(decal(0.0, 0.0, 4.0), 0.0);
+        set.insert(Decal { life: 2.0, fade_out: 0.5, ..decal(1.0, 0.0, 4.0) }, 1.0);
+        set.insert(Decal { life: 1.0, ..decal(2.0, 0.0, 4.0) }, 1.0);
+        let words = set.encode().to_vec();
+        let at = |i: usize, k: usize| f32::from_bits(words[HEADER_WORDS + i * DECAL_WORDS + k]);
+        assert_eq!((at(0, 10), at(0, 11)), (0.0, 0.0), "permanent");
+        assert_eq!((at(1, 10), at(1, 11)), (3.0, 2.0), "ends at 3, fades over 0.5 s");
+        assert_eq!(at(2, 10), 2.0);
+        assert!(at(2, 11) >= 1e5, "no fade-out: a step");
+        let v = set.version;
+        set.expire(1.9);
+        assert_eq!((set.live.len(), set.version), (3, v), "nothing ended yet");
+        set.expire(2.0);
+        assert_eq!((set.live.len(), set.version), (2, v + 1));
+        set.expire(3.5);
+        assert_eq!(set.live.len(), 1);
+        assert_eq!(set.live[0].bounds[0], 0.0, "the permanent one stays");
     }
 
     #[test]

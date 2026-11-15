@@ -3,7 +3,8 @@
 //
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
 // bits, decal capacity), the decals (12 words each: centre x, z, half-sizes
-// x, z, cos, sin, layer, opacity, start time, 1 / fade-in, 0, 0), one word
+// x, z, cos, sin, layer, opacity, start time, 1 / fade-in, end time (0:
+// none), 1 / fade-out (0: none)), one word
 // per bucket of the spatial hash of world cells (first index << 8 | count),
 // the indices.
 
@@ -58,7 +59,7 @@ vec3 applyDecals(vec3 albedo, vec3 P, vec3 dPdx, vec3 dPdy, vec3 n) {
         vec2 dxz = P.xz - a.xy;
         vec2 qp = vec2(dot(dxz, ax), dot(dxz, az)) * inv;
         if (max(abs(qp.x), abs(qp.y)) >= 1.0 || b.z >= layers) continue;
-        vec4 f = decalFloats(at + 8u);  // start, 1 / fade-in
+        vec4 f = decalFloats(at + 8u);  // start, 1 / fade-in, end, 1 / fade-out
         float dy = P.y - sampleHeight(a.xy / u.map.w);
         // Rounded in the vertical, the height scaled by the smaller half.
         float r = length(vec2(max(abs(qp.x), abs(qp.y)), dy * max(inv.x, inv.y)));
@@ -76,6 +77,7 @@ vec3 applyDecals(vec3 albedo, vec3 P, vec3 dPdx, vec3 dPdy, vec3 n) {
         if (w.x > 0.0) s += w.x * decalTap(vec2(sx * q.y * inv.x, q.z), vec2(sx * qx.y * inv.x, qx.z), vec2(sx * qy.y * inv.x, qy.z), b.z);
         if (w.z > 0.0) s += w.z * decalTap(vec2(q.x, sz * q.y * inv.y), vec2(qx.x, sz * qx.y * inv.y), vec2(qy.x, sz * qy.y * inv.y), b.z);
         float fade = f.y > 0.0 ? clamp((time - f.x) * f.y, 0.0, 1.0) : 1.0;
+        if (f.w > 0.0) fade *= clamp((f.z - time) * f.w, 0.0, 1.0);
         float opacity = b.w * fade * (1.0 - smoothstep(0.85, 1.0, r));
         albedo = albedo * (1.0 - s.a * opacity) + s.rgb * opacity;
     }

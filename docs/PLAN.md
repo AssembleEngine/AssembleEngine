@@ -1608,7 +1608,7 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
 
 The rest of M7, in order: particles, then particles' coloured shadows, then decals (then the
 stretch goal, volumetric smoke). Stop for a context compaction after each. All three are done
-(below); the stretch goal is next.
+(below). Next is the goal of decals that look like Recoil's scars, then the stretch goal.
 
 Particles (plan):
 - Goal: a strong system, not a demo. It must handle tens of thousands of live particles and
@@ -1945,8 +1945,8 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
 - **Inside the terrain's draw** (`ae_render::decals`, `terrain_decals.glsl`): no pass, no library
   resource, no graph change; the goldens, the modules and the graph files are unchanged. Units and
   the water are never painted.
-  - A decal (`Decal`: centre x, z, half-sizes, rotation, atlas layer, opacity, fade-in) is placed
-    through a `DecalFeed`; the app stamps its start time. `TerrainApp::with_decals` keeps a ring of
+  - A decal (`Decal`: centre x, z, half-sizes, rotation, atlas layer, opacity, fade-in, life,
+    fade-out) is placed through a `DecalFeed`; the app stamps its start time. `TerrainApp::with_decals` keeps a ring of
     `DecalsSetup::capacity` (the oldest goes first) across renderer re-creation.
   - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
   - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
@@ -2003,11 +2003,27 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     prints this; it does not assert it.
   - Within one cell either side of a step, the heightmap normal leans gradually, so the
     projections blend and a stripe smears there. Real cliffs span several cells.
-  - Decals are permanent until evicted: there is no time-out, so a decal seen once stays as last
-    seen under the fog.
+  - The plan had a decal seen once stay as last seen under the fog. Decals now have a time to live
+    (below), and they end under the fog too.
 - **Client:** every explosion (deaths the observer sees, X, `--explode`) leaves a scorch mark of
   3.5 x scale metres through `sim::Effects`, which carries both feeds. Capacity is 1024;
   `--no-decals` turns them off.
+- **Time to live** (added after the first commit):
+  - `Decal::life` (0: until evicted) and `Decal::fade_out`; the shader fades the opacity over the
+    last `fade_out` seconds, and the app drops a decal once its life ends (`DecalSet::expire`,
+    each frame). A fade-out longer than the life starts the decal partly faded.
+  - Scorch marks live 60 s (`SCORCH_LIFE`) and fade over their last 20 s. Recoil's scars live
+    0.5 to 60 s, scaled by the explosion's damage and the decal level setting, with alpha
+    decaying over the whole life.
+  - Fixed on the way: the shader's time came from `u.water.w`, which was 0 on a map without
+    water, so neither the fade-in nor the fade-out ran there. It is now the time on every map;
+    the water code reads it only when the map has water.
+  - Tests:
+    - Decals placed at time 0 to live 0.05 s draw exactly as none by the last frame (7/60 s).
+    - Decals halfway through a 1 s fade-out land a median 0.55 of the way from none to full
+      (1092 samples, sRGB bytes; all between 0.33 and 0.70).
+    - Before the time fix they were at 1.00.
+    - A unit test covers the expiry and the encoded end times.
 - **Cost** (`--bench all --label m7-decals` against `m7-particle-shadows`; `bench-diff`: 109 of
   110 metrics unchanged):
   - `battle` (two explosions a frame, so about 700 scorch marks live around the view): the terrain
@@ -2028,6 +2044,52 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
   - A decal's height and normal come from the heightmap, not the LOD mesh. Where a coarse mesh
     sits off the heightmap, the decal follows the drawn surface (its world position) but blends
     its projections by the heightmap's normal.
+
+M7 goal (after decals, before the stretch goal): decals that look like Recoil's scars.
+- **Textures.** Recoil's scars, `~/RecoilEngine/cont/base/bitmaps/bitmaps/scars/`:
+  - `scar1.tga` (1024²) and `scar2.tga` (512², RLE), each with a `_normal` map;
+  - RGBA, 8-bit alpha. In the normal maps, rgb is the tangent-space normal and alpha is the glow
+    (heat) mask (`normVal.w`).
+  - Load them into the decal atlas, replacing or joining the generated scorch and crater. The
+    licence must allow it, or use them only as a reference for our own; check before shipping.
+  - The atlas gains a second array, the normals with the glow mask, sampled with the same
+    gradients.
+- **Shading**, from Recoil's fragment shader
+  (`cont/base/springcontent/shaders/GLSL/GroundDecalsFragProg.glsl`):
+  - **Relit by its normal map.** A TBN built from the ground's normal and the decal's rotation
+    axis (Gram–Schmidt), the decal normal `TBN * (n * 2 - 1)`, and `NdotL` with the sun times
+    the ground's shadow, plus ambient.
+    - Here: blend the decal's normal into the terrain's shading normal by its alpha, so the hills'
+      and units' shadows, fog and vision still apply in one place.
+    - In our triplanar projection each axis needs its own tangent frame, as the tileset's
+      `project()` already builds.
+  - **Colour mixed with the ground.** For explosions Recoil uses `2 * decal * ground` (its
+    minimap diffuse), so a scar darkens whatever is under it instead of painting one colour.
+    Compare that with the current replace.
+  - **Glow.** Each scar has a glow and a glow life (default 2 s, decaying linearly), with an
+    "overglow" flicker near full (`+0.2 * |sin(0.02 frame)|`).
+    - It is weighted toward the centre (`smoothstep(0.9, 0.1, d / r)^7`), killed under shallow
+      water, and coloured by black-body temperature (`BlackBody(mask * mix(1, 3700, glow))`)
+      added to the lit colour.
+    - Here it is emissive: add it after lighting, untouched by the sun and shadows. It should
+      also not be dimmed as much by fog of war, or shown at all in cells not in sight.
+    - Optionally, a glow colour map instead of the black body (Recoil's `scarGlowColorMap`).
+  - **Shaping.** Explosion scars are cut by an ellipsoid (`EllipsoidRedunction`) and by
+    `dot(decal up, N)^exp` (`vDotElimExp`), which removes them from steep faces. Ours wrap over
+    cliffs on purpose; keep that, but compare.
+- **Life.** Recoil sets life, alpha and glow from the explosion's damage and radius:
+  - alpha `clamp(2 * damage / 255, 0.8, 1)`;
+  - life `clamp(3 * damage, 15, 1800)` frames at 30 fps, times the decal level setting;
+  - glow `clamp(2 * damage / 255, 0, 1)`.
+  Scale ours from the explosion's scale the same way.
+- **Cost.** A second atlas sample and a TBN per projection, on top of the 37 µs `battle` already
+  pays. Check `bench-diff` on the terrain pass; the glow could be its own specialization or skipped
+  once every glow has ended.
+- **Test:**
+  - a glowing decal brightens its centre in shadow;
+  - the glow is gone after its life, and the frame then equals the same decal without glow;
+  - a normal-mapped decal lit from opposite sun directions differs where its normal map tilts;
+  - the existing decal test is unchanged.
 
 M7 stretch goal (after decals): volumetric smoke and dust.
 - Why: the order-independence measurement showed that particles blended as flat layers pop when

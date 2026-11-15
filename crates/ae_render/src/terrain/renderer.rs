@@ -689,7 +689,8 @@ impl TerrainRenderer {
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
             water: match i.water_level {
                 Some(level) => [level, 1.0, 0.08, p.time],
-                None => [0.0, 0.0, 0.0, 0.0],
+                // The time still: decals fade by it.
+                None => [0.0, 0.0, 0.0, p.time],
             },
             vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
             unit_shadow,

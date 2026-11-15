@@ -653,6 +653,7 @@ impl RenderApp for TerrainApp {
             for decal in setup.feed.take() {
                 set.insert(decal, params.time);
             }
+            set.expire(params.time);
             if self.decals_written.len() <= slot {
                 self.decals_written.resize(slot + 1, None);
             }

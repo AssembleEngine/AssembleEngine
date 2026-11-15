@@ -36,7 +36,7 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     uvec4 cfg;           // x: CBT max depth D, y: T = D-5, z: flags, w: draw-list capacity
     vec4 fog;            // rgb: fog colour, w: density
     vec4 water;          // x: water surface height (world), y: 1 if the map has water, z: extinction per unit depth,
-                         // w: animation time (s)
+                         // w: animation time (s; also without water)
     vec4 vision;         // vision grid: x,y size in cells, z: cell size, w: u32 words per row
     // The units' shadow cascades (src/shadow.rs, unit_shadows.glsl).
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
