@@ -2225,10 +2225,17 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - Resolve: the light and transmittance at the scene's depth, trilinear (four columns, two
     boundaries).
 - **Froxels, measured against the volume:**
-  - Cluster: 6.4 (max 55); over 8x8 blocks (the columns' size here), 4.5. What remains after
-    averaging is aliasing: a puff smaller than a column is caught or missed by its centre ray (the
-    fire loses its small bright puffs).
+  - Cluster: 6.4 (max 55); over 8x8 blocks (the columns' size here), 4.5. Averaging does not take
+    all of it out. Part is aliasing: a puff smaller than a column is caught or missed by its
+    centre ray (the fire loses its small bright puffs). Part is the resolve's bilinear spreading
+    each column over its neighbours' blocks: the crossing, whose puffs are 16 and 26 m, still
+    shows 3.8 over blocks.
   - Crossing: pops 10 (0 over 40), 5.6 (max 42); over blocks 3.8.
+  - Apart (25 m in front and behind): the swap is 66, against the volume's 116. The order holds;
+    the blur lowers the peak.
+  - Stretched (a dim near puff at a third of the distance, a range of about 3 to 1, slices about
+    5.5 m thick at the pair): pops 10, 3.0 from the volume; apart still 66.
+  - A puff half in the ground (the volume caps it exactly): 1.4 (max 16).
   - Emitted in reverse: identical.
   - Columns of 2 pixels: cluster 2.3, crossing 2.0, but 447 µs; worse than the slices on both.
 - **Froxels, cost** (`bench battle`; `m7-vol-froxels`): 17 µs sim + 181 µs draw, against sorted
@@ -2239,7 +2246,9 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - Columns stored per column first: the integration's accesses did not coalesce (about 210 µs
     for empty bins); slice-major, about 130.
   - 64 slices: 266 µs. Clearing and integrating the grid is most of the fixed cost, so halving the
-    slices took 85 µs off; the test's numbers did not change (the screen-plane blur dominates).
+    slices took 85 µs off. The test's numbers did not change, stretched or not: at its scale the
+    screen-plane blur dominates. Not measured: the battle's range (camera 900 m away) makes
+    slices of tens of metres, where nearby puffs blend as one medium, out of order.
   - Of the 181 µs: about 32 the passes every half-resolution blend has (depth, composite), 65 the
     scatter, the rest clearing (7.5 MB), the puffs and the integration.
 - **Choice:** the sort stays the default.
@@ -2250,8 +2259,11 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
     the volume in the cluster, the sort 1.7).
   - Neither is worth it while the popping is a short flicker as puffs cross. If it shows in play,
     froxels for smoke and dust (sparks, fire and flashes sorted, over them) is the cheaper
-    route; it would need a few rays per column, or a filter over the columns, against the
-    aliasing.
+    route, with work first:
+    - a few rays per column, or a filter over the columns, against the aliasing;
+    - the slices' thickness at the battle's range checked (a test at that scale);
+    - dust on the ground checked in play: the scene's depth falls inside a slice, so a buried
+      puff fades by where the ground lies in it, and that shifts as the frame's range moves.
 
 ### M0 risk spikes
 

@@ -2678,6 +2678,74 @@ fn particles_order_independence() {
     // by a column's centre ray.
     let (froxels_pop, froxels_error) = (pops[5], against_volume[5]);
     assert!(froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0, "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}");
+
+    // Stretched: the same with a dim near puff (at a third of the pair's
+    // distance: a depth range about three to one, as the battle bench's), so
+    // the froxels' slices, spread over the frame's range, are thicker; and a
+    // puff half in the ground.
+    let mut stretched_effects = effects.clone();
+    stretched_effects.push(still_effect([0.5, 0.5, 0.5, 0.2], 30.0, false));
+    stretched_effects.push(still_effect([0.6, 0.5, 0.4, 0.7], 20.0, false));
+    let horizontal = Vec3::new(dir.x, 0.0, dir.z).normalize();
+    let near = Burst { pos: (eye + (Vec3::new(128.0, ground, 128.0) - eye) * 0.35).to_array(), ground: false, effect: 2, count: 1, scale: 0.4, seed: 3 };
+    let buried = Burst { pos: (red - side * 8.0 - horizontal * 30.0 + Vec3::Y * (ground - red.y)).to_array(), ground: false, effect: 3, count: 1, scale: 1.0, seed: 4 };
+    let stretched_modes = [ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels];
+    let mut stretched: Vec<Vec<Vec<u8>>> = vec![Vec::new(); stretched_modes.len()];
+    for &t in &steps {
+        let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }, near, buried];
+        for (k, &m) in stretched_modes.iter().enumerate() {
+            stretched[k].push(render(&bursts, &stretched_effects, m));
+        }
+    }
+    if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+        for (m, frames) in stretched_modes.iter().zip(&stretched) {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(frames[14].chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("particles-stretched-{m:?}.ppm")), ppm).unwrap();
+        }
+    }
+    for (k, m) in stretched_modes.iter().enumerate() {
+        let (worst, jumps) = pop(&stretched[k]);
+        let errors: Vec<(f32, u8)> = stretched[k].iter().zip(&stretched[0]).map(|(a, r)| error(a, r)).collect();
+        let mean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
+        let max = errors.iter().map(|e| e.1).max().unwrap_or(0);
+        let blocks: Vec<(f32, f32)> = stretched[k].iter().zip(&stretched[0]).map(|(a, r)| block_error(a, r)).collect();
+        let bmean = blocks.iter().map(|e| e.0).sum::<f32>() / blocks.len() as f32;
+        println!("stretched crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); against the volume mean {mean:.2} max {max}, in 8x8 blocks mean {bmean:.2}");
+        // Measured: the froxels pop by 10, 3.0 from the volume (as many
+        // slices or twice as many).
+        assert!(worst < 20.0 && jumps == 0 && mean < 6.0, "stretched crossing, {m:?}: pop {worst} ({jumps}), against the volume {mean}");
+    }
+    // The buried puff alone (no pair), against the volume, which caps it at
+    // the ground exactly.
+    let alone: Vec<Vec<u8>> = stretched_modes.iter().map(|&m| render(&[near, buried], &stretched_effects, m)).collect();
+    for (k, m) in stretched_modes.iter().enumerate() {
+        let (mean, max) = error(&alone[k], &alone[0]);
+        let (bmean, bmax) = block_error(&alone[k], &alone[0]);
+        println!("buried puff, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
+        // Measured: the froxels 1.4 (max 16).
+        assert!(mean < 3.0, "buried puff, {m:?} against the volume: {mean}");
+    }
+    // Apart: the froxels keep the order, stretched or not (the volume: 116).
+    for (what, extra) in [("", None), (", stretched", Some(near))] {
+        let swaps: Vec<u8> = [ParticleBlend::Volume, ParticleBlend::Froxels]
+            .iter()
+            .map(|&m| {
+                let apart: Vec<Vec<u8>> = [-25.0f32, 25.0]
+                    .iter()
+                    .map(|&t| {
+                        let mut bursts = vec![Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
+                        bursts.extend(extra);
+                        render(&bursts, &stretched_effects, m)
+                    })
+                    .collect();
+                apart[0].iter().zip(&apart[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0)
+            })
+            .collect();
+        println!("apart{what}: the largest change between blue in front and behind, volume {}, froxels {}", swaps[0], swaps[1]);
+        // Measured: 66 either way (the columns' blur lowers the peak).
+        assert!(swaps[1] > 50, "apart{what}, the froxels lose the order: {}", swaps[1]);
+    }
     assert_clean(&gpu);
 }
 
