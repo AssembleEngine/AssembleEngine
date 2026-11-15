@@ -29,10 +29,10 @@
 //! target, `--explode N` sets off N around it before a capture;
 //! `--no-particles` turns them off; they draw at half resolution,
 //! `--particles-full` at full) and leave a scar on the ground (a decal,
-//! relit by its normal map, its centre glowing for two seconds;
-//! `--no-decals`). The scars are generated, or Recoil's with `--scars DIR`
-//! (its `cont/base/bitmaps/bitmaps/scars`: GPL, read at run time, not
-//! shipped).
+//! relit by its normal map, its centre glowing like hot metal for up to
+//! two seconds; `--no-decals`). The scars are Recoil's
+//! (`assets/decals/scars`; `--scars DIR` for another set, `--scars
+//! generated` for the engine's generated scorch mark).
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -149,8 +149,8 @@ struct Options {
     particles: bool,
     /// Scorch marks where explosions go off (`--no-decals`).
     decals: bool,
-    /// A directory with Recoil's scars (`--scars DIR`), used instead of the
-    /// generated scorch mark.
+    /// The scars' directory (`--scars DIR`; `generated`: the generated
+    /// scorch mark); [`BUNDLED_SCARS`] when `None`.
     scars: Option<String>,
     /// Particles at full resolution (`--particles-full`), not half.
     particles_full: bool,
@@ -188,7 +188,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -434,13 +434,18 @@ fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects
     if o.decals {
         let feed = Arc::new(ae_render::decals::DecalFeed::default());
         let mut setup = ae_render::decals::DecalsSetup::new(feed.clone(), DECALS);
-        if let Some(dir) = &o.scars {
+        let dir = match o.scars.as_deref() {
+            Some("generated") => None,
+            Some(dir) => Some(dir),
+            None => Some(BUNDLED_SCARS),
+        };
+        if let Some(dir) = dir {
             match recoil_scars(std::path::Path::new(dir)) {
                 Ok((atlas, scars)) => {
                     setup.atlas = Some(Arc::new(atlas));
                     effects.scars = scars;
                 }
-                Err(e) => eprintln!("--scars {dir}: {e:#}; using the generated scorch mark"),
+                Err(e) => eprintln!("scars from {dir}: {e:#}; using the generated scorch mark"),
             }
         }
         app = app.with_decals(setup);
@@ -449,6 +454,9 @@ fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects
     let any = effects.particles.is_some() || effects.decals.is_some();
     (app, any.then(|| Arc::new(effects)))
 }
+
+/// Recoil's scars, in the repository (`assets/decals/scars`).
+const BUNDLED_SCARS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/decals/scars");
 
 /// The generated atlas at 512² with Recoil's two scars added (scar1's
 /// normal map has green down the image, scar2's up), and the scars'

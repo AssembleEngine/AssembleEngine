@@ -78,8 +78,9 @@ pub struct Decal {
     /// Seconds it fades out over at the end of its life (0: it vanishes;
     /// longer than `life`: it starts partly faded).
     pub fade_out: f32,
-    /// Glow at placement, 0..1: the atlas's glow mask lit as hot metal,
-    /// fading linearly to nothing over `glow_life` seconds.
+    /// Glow at placement, 0..1: the atlas's glow mask lit as hot metal.
+    /// It falls by 1 every `glow_life` seconds (Recoil's decay: a glow of
+    /// 0.5 ends halfway through), and the fade-in does not dim it.
     pub glow: f32,
     pub glow_life: f32,
     pub blend: Blend,
@@ -566,8 +567,8 @@ impl DecalSet {
         // no fade-out: a step a microsecond wide).
         let end = if d.life > 0.0 { time + d.life } else { 0.0 };
         let fade_out = if d.life > 0.0 { 1.0 / d.fade_out.max(1e-6) } else { 0.0 };
-        // The glow's end and 1 / its life (0: no glow).
-        let (glow_end, glow_inv) = if d.glow > 0.0 && d.glow_life > 0.0 { (time + d.glow_life, 1.0 / d.glow_life) } else { (0.0, 0.0) };
+        // 1 / the glow's life (0: no glow).
+        let glow_inv = if d.glow > 0.0 && d.glow_life > 0.0 { 1.0 / d.glow_life } else { 0.0 };
         let blend = match d.blend {
             Blend::Replace => 0.0,
             Blend::Modulate => 1.0,
@@ -586,7 +587,7 @@ impl DecalSet {
             end,
             fade_out,
             d.glow.clamp(0.0, 1.0),
-            glow_end,
+            0.0,
             glow_inv,
             blend,
         ]
@@ -888,18 +889,15 @@ mod tests {
         }
     }
 
-    /// Recoil's scars (`~/RecoilEngine/cont/base/bitmaps/bitmaps/scars`, or
-    /// `AE_SCARS`): scar1's normal map has green down the image, scar2's
-    /// up; loaded as the client loads them, both take the atlas's
-    /// convention. Skipped when the files are not there.
+    /// Recoil's scars (`assets/decals/scars`): scar1's normal map has
+    /// green down the image, scar2's up; loaded as the client loads them,
+    /// both take the atlas's convention.
     #[test]
     fn recoil_scars_load_into_one_convention() {
-        let dir = std::env::var("AE_SCARS").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("RecoilEngine/cont/base/bitmaps/bitmaps/scars"));
-        let read = |name: &str| std::fs::read(dir.join(name)).ok().map(|b| read_tga(&b).unwrap());
-        let (Some(c1), Some(n1), Some(c2), Some(n2)) = (read("scar1.tga"), read("scar1_normal.tga"), read("scar2.tga"), read("scar2_normal.tga")) else {
-            println!("no scars in {}: skipped", dir.display());
-            return;
-        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
+        let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
+        let (c1, n1, c2, n2) = (read("scar1.tga"), read("scar1_normal.tga"), read("scar2.tga"), read("scar2_normal.tga"));
+        assert_eq!((c1.width, n1.width, c2.width, n2.width), (1024, 1024, 512, 512));
         let mut atlas = default_atlas().resized(256);
         let l1 = atlas.add_layer(&c1, Some((&n1, false))).unwrap() as usize;
         let l2 = atlas.add_layer(&c2, Some((&n2, true))).unwrap() as usize;

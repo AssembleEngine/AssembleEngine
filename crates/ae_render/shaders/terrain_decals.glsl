@@ -4,8 +4,8 @@
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
 // bits, decal capacity), the decals (16 words each: centre x, z, half-sizes
 // x, z, cos, sin, layer, opacity, start time, 1 / fade-in, end time (0:
-// none), 1 / fade-out (0: none), glow, glow end time, 1 / glow life (0: no
-// glow), blend (0 replace, 1 modulate)), one word
+// none), 1 / fade-out (0: none), glow, 0, 1 / glow life (0: no glow),
+// blend (0 replace, 1 modulate)), one word
 // per bucket of the spatial hash of world cells (first index << 8 | count),
 // the indices.
 
@@ -101,7 +101,7 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
         vec2 qp = vec2(dot(dxz, ax), dot(dxz, az)) * inv;
         if (max(abs(qp.x), abs(qp.y)) >= 1.0 || b.z >= layers) continue;
         vec4 f = decalFloats(at + 8u);   // start, 1 / fade-in, end, 1 / fade-out
-        vec4 g = decalFloats(at + 12u);  // glow, glow end, 1 / glow life, blend
+        vec4 g = decalFloats(at + 12u);  // glow, 0, 1 / glow life, blend
         float dy = P.y - sampleHeight(a.xy / u.map.w);
         // Rounded in the vertical, the height scaled by the smaller half.
         float r = length(vec2(max(abs(qp.x), abs(qp.y)), dy * max(inv.x, inv.y)));
@@ -132,21 +132,28 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
             s += w.z * t;
             sn += w.z * vec4(m.xyz * t.a, m.w);
         }
-        float fade = f.y > 0.0 ? clamp((time - f.x) * f.y, 0.0, 1.0) : 1.0;
-        if (f.w > 0.0) fade *= clamp((f.z - time) * f.w, 0.0, 1.0);
-        float opacity = b.w * fade * (1.0 - smoothstep(0.85, 1.0, r));
+        // The fade-in leaves the glow alone (the explosion's flash covers
+        // it; Recoil's scars fade in alpha only, over 6 frames).
+        float fadeIn = f.y > 0.0 ? clamp((time - f.x) * f.y, 0.0, 1.0) : 1.0;
+        float shown = b.w * (1.0 - smoothstep(0.85, 1.0, r));
+        if (f.w > 0.0) shown *= clamp((f.z - time) * f.w, 0.0, 1.0);
+        float opacity = shown * fadeIn;
         float keep = 1.0 - s.a * opacity;
         vec3 colour = g.w > 0.5 ? o.albedo * MODULATE * s.rgb : s.rgb;
         o.albedo = o.albedo * keep + colour * opacity;
         o.normal = o.normal * keep + sn.xyz * opacity;
         o.glow *= keep;
-        float heat = g.z > 0.0 ? g.x * clamp((g.y - time) * g.z, 0.0, 1.0) : 0.0;
+        // Recoil's decay: the glow less the time since placement over the
+        // glow life (a weaker glow ends sooner).
+        float heat = g.z > 0.0 ? g.x - (time - f.x) * g.z : 0.0;
         if (heat > 0.0) {
             heat += smoothstep(0.75, 1.0, heat) * 0.2 * abs(sin(0.6 * time));
-            // Held to the centre by the 3D distance (round, as Recoil's).
-            heat *= pow(smoothstep(0.9, 0.1, length(vec3(qp, dy * max(inv.x, inv.y)))), 7.0);
+            // Held to the centre by the 3D distance (round), over Recoil's
+            // half-diagonal sqrt(hx^2 + hz^2 + height^2), the height here
+            // the smaller half.
+            heat *= pow(smoothstep(0.9, 0.1, length(vec3(qp, dy * max(inv.x, inv.y))) * 0.57735), 7.0);
             vec3 e = blackBody(sn.w * mix(1.0, 3700.0, heat)) * heat;
-            o.glow += pow(min(e, vec3(16.0)), vec3(2.2)) * s.a * opacity;
+            o.glow += pow(min(e, vec3(16.0)), vec3(2.2)) * s.a * shown;
         }
     }
     o.normal = normalize(o.normal);

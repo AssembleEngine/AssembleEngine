@@ -2092,11 +2092,11 @@ M7 goal (after decals, before the stretch goal): decals that look like Recoil's 
   - the existing decal test is unchanged.
 
 Recoil's scars (results):
-- **Licence.** Recoil is GPL (v2 or later); this repository is MIT. The scars are therefore
-  not copied in: `--scars DIR` reads them at run time from Recoil's
-  `cont/base/bitmaps/bitmaps/scars`, and the engine's generated scorch and crater gained their
-  own normal maps (from generated heights) and, for the scorch, a glow mask. Vendoring them
-  (scar2's commit is by the same author as this repository's) is the owner's decision.
+- **Licence.** Recoil is GPL; the scars' rights holder (this repository's owner) allowed their
+  use, so they are in `assets/decals/scars` (scar1 re-encoded run-length, the same pixels) and
+  the client uses them by default (`--scars DIR` for another set, `--scars generated` for the
+  engine's). The generated scorch and crater gained their own normal maps (from generated
+  heights) and, for the scorch, a glow mask.
 - **Textures.**
   - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
   - `DecalAtlas::add_layer` resamples to the atlas's size (box when shrinking, bilinear when
@@ -2120,17 +2120,18 @@ Recoil's scars (results):
     `2 * decal * ground` in gamma space with our linear albedo. The generated scorch keeps
     `Replace`, as it was drawn for it.
   - **Glow**, as Recoil's: the glow mask as a black body at `mask * mix(1, 3700, heat)`, heat
-    fading linearly over the glow life, the overglow flicker (`0.2 |sin(0.6 t)|` near full),
-    `smoothstep(0.9, 0.1, d)^7` of the 3D distance from the centre (round). Its gamma-space
+    the glow less the time since placement over the glow life (a weaker glow ends sooner), the
+    overglow flicker (`0.2 |sin(0.6 t)|` near full), `smoothstep(0.9, 0.1, d)^7` of the 3D
+    distance from the centre over the half-diagonal (round). The fade-in does not dim it. Its gamma-space
     colour is made linear (`^2.2`) and added after lighting: untouched by the sun and shadows,
     put out by water within a metre, and shown only in sight (not remembered under the fog).
     Brightness goes as temperature^4, so a glow is near its end by half its life, as Recoil's.
   - **Not done:** the ellipsoid and `dot(up, N)^exp` shaping (ours wrap over cliffs on purpose),
     the glow colour map, the water absorption of the scar's colour.
 - **Life from size.** `Decal::scar` applies Recoil's damage rules: opacity
-  `clamp(2 damage / 255, 0.8, 1)`, glow `clamp(2 damage / 255, 0, 1)` for 2 s
-  (`SCAR_GLOW_LIFE`). The client takes damage as 100 x the explosion's scale (deaths: scale
-  `radius / 6`, 0.6 to 3). Life stays `SCORCH_LIFE` (60 s; Recoil's `clamp(3 damage, 15, 1800)`
+  `clamp(2 damage / 255, 0.8, 1)`, glow `clamp(2 damage / 255, 0, 1)` falling by 1 over 2 s
+  (`SCAR_GLOW_LIFE`). The client takes damage as 250 x the explosion's scale (deaths: scale
+  `radius / 6`, 0.6 to 3), so every death glows fully. Life stays `SCORCH_LIFE` (60 s; Recoil's `clamp(3 damage, 15, 1800)`
   frames would be 15 s at scale 1 without its decal level setting).
 - **Tests:**
   - GPU `decals_relit_modulated_and_glowing`, on a plateau whose west cliff faces the sun:
@@ -2141,14 +2142,20 @@ Recoil's scars (results):
       the green channel's sign and the other side projection;
     - modulate: sRGB 0.5 leaves 1.000 of the ground, 0.25 leaves 0.513;
     - a glow in the hill's shadow: the centre 80 → 172 luma, orange (255, 144, 92), held to
-      the centre; past its life, byte-identical to the same decal without glow.
+      the centre; 170 while the decal fades in (0.4 s, read at 0.12 s); past its life,
+      byte-identical to the same decal without glow.
   - `decals_wrap_over_cliffs` unchanged; unit tests for the TGA reader, resampling, the
     conventions, and the client's scar.
 - **Cost** (`--bench all --label m7-scars` against `m7-decals`; 109 of 110 metrics unchanged):
   `battle`'s terrain pass 216 → 225 µs (+4 %, within its tolerance) for the second sample per
   projection, the tangent frames and the glow. The one flagged metric is `battle`'s particle
-  shadows (39 → 43 µs), a pass decals do not touch. The bench uses the generated atlas
-  (128², now with normals and glow), not Recoil's.
+  shadows (39 → 43 µs), a pass decals do not touch. With Recoil's scars as the default
+  (512² atlas, modulate) and the glow fix, `m7-scars-2`: 110 of 110 unchanged, terrain 224 µs.
+- **Fixed after the first commit:** no glow showed in a game. Deaths (scale 0.6 to 0.8) made
+  damage 60 to 80, so glow 0.5 to 0.65, and brightness goes as about heat^5 (3 % at the start);
+  the 0.4 s fade-in dimmed it further, and by the capture (1 s) it was gone. Now deaths glow
+  fully, the fade-in leaves the glow alone, the decay and spread are Recoil's. The glow is at
+  its brightest for the first half second; by 1 s it is about 3 %, as in Recoil.
 
 M7 stretch goal (after decals): volumetric smoke and dust.
 - Why: the order-independence measurement showed that particles blended as flat layers pop when

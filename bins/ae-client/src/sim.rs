@@ -465,9 +465,10 @@ pub struct Effects {
 }
 
 /// The damage an explosion of size `scale` stands for in Recoil's terms,
-/// which set a scar's opacity and glow (`Decal::scar`): about 200 for a
-/// unit of radius 12 (scale 2), so the bigger deaths glow fully.
-pub const DAMAGE_PER_SCALE: f32 = 100.0;
+/// which set a scar's opacity and glow (`Decal::scar`; full from 128): 150
+/// for the smallest death (scale 0.6), so every unit's death glows fully,
+/// as a unit's death explosion does in Recoil.
+pub const DAMAGE_PER_SCALE: f32 = 250.0;
 
 impl Effects {
     /// An explosion of size `scale` on the ground at world `(x, z)`.

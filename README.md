@@ -69,9 +69,9 @@ toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow ma
 shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
 smoke) sorted back to front and faded softly into the ground (X sets one off, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`); smoke and
 dust cast coloured shadows on the ground, the units and the water (with the units' shadows). Each
-explosion leaves a scar, a decal the terrain's shader paints and wraps over cliff edges, relit
-by its normal map, its centre glowing like hot metal for two seconds (`--no-decals`; Recoil's scar
-textures with `--scars DIR`, read at run time, as they are GPL). Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
+explosion leaves a scar (Recoil's, in `assets/decals/scars`), a decal the terrain's shader paints
+and wraps over cliff edges, relit by its normal map, its centre glowing like hot metal for up to two
+seconds (`--no-decals`; `--scars generated` for the engine's own scorch mark). Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

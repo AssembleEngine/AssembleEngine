@@ -2841,8 +2841,8 @@ fn decals_wrap_over_cliffs() {
 ///   quarter grey (sRGB 0.25) halves it (in sRGB bytes), Recoil's
 ///   `2 * decal * ground`.
 /// * Glow: a glowing decal in the hill's shadow brightens its centre and
-///   reddens it; once its glow life is over the frame equals the same decal
-///   without glow.
+///   reddens it, also while the decal fades in; once its glow life is
+///   over the frame equals the same decal without glow.
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn decals_relit_modulated_and_glowing() {
@@ -2966,6 +2966,9 @@ fn decals_relit_modulated_and_glowing() {
     let dark = render(&[glowing(0.0, 0.0)], east);
     let lit = render(&[glowing(1.0, 100.0)], east);
     let ended = render(&[glowing(1.0, 0.05)], east);
+    // Fading in over 0.4 s (as the client's scars), read at 0.12 s: the
+    // glow is not dimmed by it.
+    let fading_in = render(&[Decal { fade_in: 0.4, ..glowing(1.0, 100.0) }], east);
     let centre = pixel(&east, Vec3::new(glow_at.0, 10.0, glow_at.1)).expect("glow in view");
     let sunny = pixel(&east, Vec3::new(112.0, 10.0, glow_at.1)).expect("sunlit ground in view");
     let (d, l) = (luma(&dark, centre), luma(&lit, centre));
@@ -2976,5 +2979,8 @@ fn decals_relit_modulated_and_glowing() {
     let rim = pixel(&east, Vec3::new(glow_at.0 + 5.0, 10.0, glow_at.1)).unwrap();
     assert!(luma(&lit, rim) - luma(&dark, rim) < (l - d) * 0.25, "glow not held to the centre");
     assert_eq!(dark.iter().zip(&ended).filter(|(a, b)| a != b).count(), 0, "a glow past its life still shows");
+    let f = luma(&fading_in, centre);
+    println!("glow while fading in: centre {f:.0}");
+    assert!(f > l - 12.0, "the fade-in dims the glow: {f} against {l}");
     assert_clean(&gpu);
 }
