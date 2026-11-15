@@ -41,6 +41,8 @@ pub const MAX_RADIUS: f32 = GRID_CELL;
 /// Seconds a scorch mark lives (Recoil's scars: 0.5 to 60 s by the
 /// explosion's damage, times the decal level setting).
 pub const SCORCH_LIFE: f32 = 60.0;
+/// Seconds a scar glows (Recoil's default glow TTL, 60 frames).
+pub const SCAR_GLOW_LIFE: f32 = 2.0;
 /// Most decals one binning cell lists (the newest are kept).
 pub const MAX_PER_CELL: usize = 255;
 /// Header words before the decals.
@@ -102,6 +104,16 @@ impl Decal {
     pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
         let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
         Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
+    }
+
+    /// An explosion's scar on atlas layer `layer`, as Recoil sets one from
+    /// the explosion's `damage` (`GroundDecalHandler`): opacity
+    /// `clamp(2 damage / 255, 0.8, 1)`, glow `clamp(2 damage / 255, 0, 1)`
+    /// for [`SCAR_GLOW_LIFE`] seconds. It lives [`SCORCH_LIFE`] (Recoil:
+    /// `clamp(3 damage, 15, 1800)` frames times the decal level setting).
+    pub fn scar(pos: [f32; 2], radius: f32, seed: u32, damage: f32, layer: u32, blend: Blend) -> Self {
+        let k = 2.0 * damage / 255.0;
+        Self { layer, blend, opacity: k.clamp(0.8, 1.0), glow: k.clamp(0.0, 1.0), glow_life: SCAR_GLOW_LIFE, ..Self::scorch(pos, radius, seed) }
     }
 
     /// A decal that stays until evicted, at full opacity at once.
@@ -223,6 +235,54 @@ impl DecalAtlas {
             .collect()
     }
 
+    /// The atlas at `size`² texels per layer ([`resample`]).
+    pub fn resized(&self, size: u32) -> Self {
+        let from = self.size;
+        let colour = |l: &Vec<[f32; 4]>| resample(l, from, size, false);
+        Self { size, layers: self.layers.iter().map(colour).collect(), normals: self.normals.iter().map(|l| resample(l, from, size, true)).collect() }
+    }
+
+    /// Add a layer from 8-bit images, rows top first (as [`read_tga`]
+    /// returns them; the top row is the decal's -z edge), resampled to the
+    /// atlas's size: `colour` sRGB with straight alpha, `normals` a tangent
+    /// normal map (rgb, x right) with the glow mask in alpha and whether
+    /// its green points up the image (OpenGL style; flipped to the atlas's
+    /// convention, green down the rows). Returns the layer.
+    pub fn add_layer(&mut self, colour: &Image, normals: Option<(&Image, bool)>) -> Result<u32, String> {
+        let linear = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let square = |img: &Image| -> Result<(), String> {
+            if img.width != img.height || !img.width.is_power_of_two() {
+                return Err(format!("decal image {}x{} is not a power-of-two square", img.width, img.height));
+            }
+            Ok(())
+        };
+        square(colour)?;
+        let texels: Vec<[f32; 4]> = colour.texels.iter().map(|t| [linear(t[0]), linear(t[1]), linear(t[2]), t[3] as f32 / 255.0]).collect();
+        let layer = self.layers.len() as u32;
+        let normal_layer = match normals {
+            Some((img, up)) => {
+                square(img)?;
+                let unorm = |c: u8| c as f32 / 255.0 * 2.0 - 1.0;
+                let ys = if up { -1.0 } else { 1.0 };
+                Some(resample(&img.texels.iter().map(|t| [unorm(t[0]), ys * unorm(t[1]), unorm(t[2]), t[3] as f32 / 255.0]).collect::<Vec<_>>(), img.width, self.size, true))
+            }
+            None => None,
+        };
+        // Normals for every layer once any layer has them.
+        let flat = || vec![[0.0, 0.0, 1.0, 0.0]; (self.size * self.size) as usize];
+        if normal_layer.is_some() && self.normals.is_empty() {
+            self.normals = (0..self.layers.len()).map(|_| flat()).collect();
+        }
+        if !self.normals.is_empty() {
+            self.normals.push(normal_layer.unwrap_or_else(flat));
+        }
+        self.layers.push(resample(&texels, colour.width, self.size, false));
+        Ok(layer)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.size.is_power_of_two() {
             return Err(format!("decal atlas size {} is not a power of two", self.size));
@@ -244,9 +304,97 @@ impl DecalAtlas {
     }
 }
 
+/// An 8-bit RGBA image, rows top first.
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub texels: Vec<[u8; 4]>,
+}
+
+/// Decode a 32-bit TGA (uncompressed or run-length encoded, either row
+/// order), as Recoil's scars are stored.
+pub fn read_tga(bytes: &[u8]) -> Result<Image, String> {
+    let header = bytes.get(..18).ok_or("TGA: short header")?;
+    let (id_len, kind, bpp, descriptor) = (header[0] as usize, header[2], header[16], header[17]);
+    let (width, height) = (u16::from_le_bytes([header[12], header[13]]) as u32, u16::from_le_bytes([header[14], header[15]]) as u32);
+    if header[1] != 0 || !(kind == 2 || kind == 10) || bpp != 32 {
+        return Err(format!("TGA: only 32-bit true colour is read (colour map {}, type {kind}, {bpp} bits)", header[1]));
+    }
+    let n = (width * height) as usize;
+    let mut data = bytes.get(18 + id_len..).ok_or("TGA: short data")?;
+    let mut bgra: Vec<[u8; 4]> = Vec::with_capacity(n);
+    let texel = |d: &[u8]| -> Result<[u8; 4], String> { d.get(..4).map(|t| [t[2], t[1], t[0], t[3]]).ok_or_else(|| "TGA: data ends early".to_string()) };
+    while bgra.len() < n {
+        if kind == 2 {
+            bgra.push(texel(data)?);
+            data = &data[4..];
+            continue;
+        }
+        let (&c, rest) = data.split_first().ok_or("TGA: data ends early")?;
+        let count = (c & 127) as usize + 1;
+        if c & 128 != 0 {
+            let t = texel(rest)?;
+            bgra.extend(std::iter::repeat_n(t, count));
+            data = &rest[4..];
+        } else {
+            for k in 0..count {
+                bgra.push(texel(&rest[4 * k..])?);
+            }
+            data = &rest[4 * count..];
+        }
+    }
+    bgra.truncate(n);
+    // Bit 5: rows top first; otherwise bottom first.
+    if descriptor & 32 == 0 {
+        bgra = bgra.chunks(width as usize).rev().flatten().copied().collect();
+    }
+    Ok(Image { width, height, texels: bgra })
+}
+
+/// A square layer of `from`² texels at `to`²: box-filtered when shrinking
+/// by a whole factor, bilinear otherwise; `normals` renormalizes xyz.
+pub fn resample(texels: &[[f32; 4]], from: u32, to: u32, normals: bool) -> Vec<[f32; 4]> {
+    let (f, t) = (from as usize, to as usize);
+    let at = |x: usize, y: usize| texels[y.min(f - 1) * f + x.min(f - 1)];
+    let mut out: Vec<[f32; 4]> = (0..t * t)
+        .map(|i| {
+            let (x, y) = (i % t, i / t);
+            if f >= t && f % t == 0 {
+                let k = f / t;
+                let mut sum = [0.0f32; 4];
+                for dy in 0..k {
+                    for dx in 0..k {
+                        let s = at(x * k + dx, y * k + dy);
+                        (0..4).for_each(|c| sum[c] += s[c]);
+                    }
+                }
+                sum.map(|c| c / (k * k) as f32)
+            } else {
+                let (u, v) = (((x as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0), ((y as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0));
+                let (x0, y0, fx, fy) = (u as usize, v as usize, u.fract(), v.fract());
+                let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+                std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+            }
+        })
+        .collect();
+    if normals {
+        for n in &mut out {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-6 {
+                (0..3).for_each(|c| n[c] /= len);
+            } else {
+                *n = [0.0, 0.0, 1.0, n[3]];
+            }
+        }
+    }
+    out
+}
+
 /// The engine's decals ([`layer`]), 128² each: a scorch mark (charred
-/// centre, a burnt brown ring, a ragged edge) and a crater (a dark pit, a
-/// pale rim of thrown-up earth).
+/// centre, a burnt brown ring, a ragged edge; a shallow rough hollow whose
+/// centre can glow) and a crater (a dark pit, a pale rim of thrown-up
+/// earth, in relief).
 pub fn default_atlas() -> DecalAtlas {
     const SIZE: usize = 128;
     fn hash(x: i32, y: i32, octave: i32) -> f32 {
@@ -306,7 +454,33 @@ pub fn default_atlas() -> DecalAtlas {
         let alpha = 1.0 - smooth(0.7, 0.95, rr);
         [colour[0], colour[1], colour[2], alpha]
     });
-    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals: Vec::new() }
+    // Relief: the scorch a shallow blast hollow, rough with cinders; the
+    // crater a pit inside a raised rim. Normals from the heights (in
+    // texels of depth per texel), and the scorch's glow mask: its centre,
+    // cracked by the noise.
+    let scorch_height = |u: f32, v: f32, r: f32| -2.5 * (1.0 - smooth(0.0, 0.7, r)) + 2.0 * fbm(u * 2.0, v * 2.0, 3);
+    let crater_height = |u: f32, v: f32, r: f32| {
+        let rr = r + (fbm(u, v, 7) - 0.5) * 0.18;
+        -5.0 * (1.0 - smooth(0.2, 0.55, rr)) + 3.0 * smooth(0.45, 0.6, rr) * (1.0 - smooth(0.6, 0.9, rr))
+    };
+    let normals = |height: &dyn Fn(f32, f32, f32) -> f32, glow: &dyn Fn(f32, f32, f32) -> f32| -> Vec<[f32; 4]> {
+        let h = |x: f32, y: f32| {
+            let (u, v) = (x / SIZE as f32, y / SIZE as f32);
+            height(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0))
+        };
+        (0..SIZE * SIZE)
+            .map(|i| {
+                let (x, y) = ((i % SIZE) as f32 + 0.5, (i / SIZE) as f32 + 0.5);
+                let (dx, dy) = ((h(x + 1.0, y) - h(x - 1.0, y)) * 0.5, (h(x, y + 1.0) - h(x, y - 1.0)) * 0.5);
+                let len = (dx * dx + dy * dy + 1.0).sqrt();
+                let (u, v) = (x / SIZE as f32, y / SIZE as f32);
+                [-dx / len, -dy / len, 1.0 / len, glow(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0))]
+            })
+            .collect()
+    };
+    let scorch_glow = |u: f32, v: f32, r: f32| ((1.0 - smooth(0.05, 0.6, r)) * (0.35 + 0.8 * fbm(u * 1.5, v * 1.5, 11))).clamp(0.0, 0.85);
+    let normals = vec![normals(&scorch_height, &scorch_glow), normals(&crater_height, &|_, _, _| 0.0)];
+    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals }
 }
 
 pub struct DecalsSetup {
@@ -620,6 +794,120 @@ mod tests {
         assert_eq!(mips[0].len(), 2);
         assert_eq!(mips[0][1], vec![255, 0, 0, 191]);
         assert!(default_atlas().validate().is_ok());
+    }
+
+    /// A 32-bit TGA of `texels` (rows top first), run-length encoded or
+    /// not, stored top or bottom row first.
+    fn tga(width: u16, texels: &[[u8; 4]], rle: bool, top_first: bool) -> Vec<u8> {
+        let height = (texels.len() / width as usize) as u16;
+        let mut out = vec![0, 0, if rle { 10 } else { 2 }, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        out.extend(width.to_le_bytes());
+        out.extend(height.to_le_bytes());
+        out.extend([32, if top_first { 8 | 32 } else { 8 }]);
+        let rows: Vec<&[[u8; 4]]> = if top_first { texels.chunks(width as usize).collect() } else { texels.chunks(width as usize).rev().collect() };
+        let bgra = |t: &[u8; 4]| [t[2], t[1], t[0], t[3]];
+        for row in rows {
+            if rle {
+                // A run of the first texel, then the rest raw.
+                out.push(128);
+                out.extend(bgra(&row[0]));
+                out.push(row.len() as u8 - 2);
+                row[1..].iter().for_each(|t| out.extend(bgra(t)));
+            } else {
+                row.iter().for_each(|t| out.extend(bgra(t)));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tga_reads_raw_and_run_length_either_row_order() {
+        let texels: Vec<[u8; 4]> = (0..16u8).map(|i| [i, 2 * i, 3 * i, 255 - i]).collect();
+        for rle in [false, true] {
+            for top_first in [false, true] {
+                let img = read_tga(&tga(4, &texels, rle, top_first)).unwrap();
+                assert_eq!((img.width, img.height), (4, 4));
+                assert_eq!(img.texels, texels, "rle {rle}, top first {top_first}");
+            }
+        }
+        assert!(read_tga(&tga(4, &texels, false, true)[..40]).is_err());
+    }
+
+    #[test]
+    fn layers_are_resampled_and_normals_take_the_atlas_convention() {
+        let mut atlas = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: Vec::new() };
+        // 4x4 colour, mid grey: box-filtered to 2x2, linear.
+        let grey = Image { width: 4, height: 4, texels: vec![[188, 188, 188, 255]; 16] };
+        // A normal map leaning up the image (green 1, OpenGL style), glow 0.5.
+        let up = Image { width: 4, height: 4, texels: vec![[128, 255, 128, 128]; 16] };
+        let layer = atlas.add_layer(&grey, Some((&up, true))).unwrap();
+        assert_eq!(layer, 1);
+        assert!((atlas.layers[1][0][0] - 0.5).abs() < 0.01 && atlas.layers[1][3][3] == 1.0);
+        // Earlier layers get flat normals; the new one leans down the rows
+        // (the atlas's +v) once flipped, renormalized.
+        assert_eq!(atlas.normals[0], vec![[0.0, 0.0, 1.0, 0.0]; 4]);
+        let n = atlas.normals[1][0];
+        assert!(n[1] < -0.7 && (n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.0).abs() < 1e-4 && (n[3] - 0.5).abs() < 0.01, "{n:?}");
+        let down = atlas.add_layer(&grey, Some((&up, false))).unwrap();
+        assert!(atlas.normals[down as usize][0][1] > 0.7);
+        assert!(atlas.validate().is_ok());
+        // Bilinear when growing: a ramp stays monotonic.
+        let ramp: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
+        let big = resample(&ramp, 2, 4, false);
+        assert!(big[0][0] <= big[1][0] && big[1][0] <= big[2][0] && big[2][0] <= big[3][0] && big[3][0] > big[0][0]);
+        assert!(DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: vec![] }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
+    }
+
+    /// A normal map's handedness from its own curl: with y down the rows,
+    /// d(nx)/dy and d(ny)/dx agree when green points down the rows.
+    fn curl_sign(n: &[[f32; 4]], size: usize, alpha: &[[f32; 4]]) -> f32 {
+        let at = |x: usize, y: usize| n[y * size + x];
+        let (mut sum, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+        for y in 1..size - 1 {
+            for x in 1..size - 1 {
+                if alpha[y * size + x][3] < 0.3 {
+                    continue;
+                }
+                let a = (at(x, y + 1)[0] - at(x, y - 1)[0]) as f64;
+                let b = (at(x + 1, y)[1] - at(x - 1, y)[1]) as f64;
+                sum += a * b;
+                na += a * a;
+                nb += b * b;
+            }
+        }
+        (sum / (na * nb).sqrt().max(1e-12)) as f32
+    }
+
+    #[test]
+    fn default_atlas_normals_follow_the_atlas_convention() {
+        let atlas = default_atlas();
+        let opaque = vec![[0.0, 0.0, 0.0, 1.0]; (atlas.size * atlas.size) as usize];
+        for k in 0..2 {
+            let c = curl_sign(&atlas.normals[k], atlas.size as usize, &opaque);
+            assert!(c > 0.5, "layer {k}: {c}");
+        }
+    }
+
+    /// Recoil's scars (`~/RecoilEngine/cont/base/bitmaps/bitmaps/scars`, or
+    /// `AE_SCARS`): scar1's normal map has green down the image, scar2's
+    /// up; loaded as the client loads them, both take the atlas's
+    /// convention. Skipped when the files are not there.
+    #[test]
+    fn recoil_scars_load_into_one_convention() {
+        let dir = std::env::var("AE_SCARS").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("RecoilEngine/cont/base/bitmaps/bitmaps/scars"));
+        let read = |name: &str| std::fs::read(dir.join(name)).ok().map(|b| read_tga(&b).unwrap());
+        let (Some(c1), Some(n1), Some(c2), Some(n2)) = (read("scar1.tga"), read("scar1_normal.tga"), read("scar2.tga"), read("scar2_normal.tga")) else {
+            println!("no scars in {}: skipped", dir.display());
+            return;
+        };
+        let mut atlas = default_atlas().resized(256);
+        let l1 = atlas.add_layer(&c1, Some((&n1, false))).unwrap() as usize;
+        let l2 = atlas.add_layer(&c2, Some((&n2, true))).unwrap() as usize;
+        atlas.validate().unwrap();
+        let size = atlas.size as usize;
+        let (s1, s2) = (curl_sign(&atlas.normals[l1], size, &atlas.layers[l1]), curl_sign(&atlas.normals[l2], size, &atlas.layers[l2]));
+        println!("curl after loading: scar1 {s1:.2}, scar2 {s2:.2}");
+        assert!(s1 > 0.3 && s2 > 0.3, "scar1 {s1}, scar2 {s2}");
     }
 
     /// `cargo test --release -p ae_render --lib decal_encode_time -- --ignored --nocapture`

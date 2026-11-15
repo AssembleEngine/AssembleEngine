@@ -12,7 +12,7 @@ use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
-use ae_render::decals::{Decal, DecalFeed};
+use ae_render::decals::{Blend, Decal, DecalFeed, layer};
 use ae_render::particles::{ParticleFeed, explosion};
 use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
 use ae_sensors::{Bits, SensorGrid};
@@ -454,12 +454,20 @@ fn deaths(last: &[(u64, f32, f32, f32)], now: &[(u64, f32, f32, f32)], seen: imp
 }
 
 /// Where explosions go: the particles (flash, fire, sparks, smoke) and a
-/// scorch mark on the ground, each when the client draws them.
+/// scar on the ground, each when the client draws them.
 #[derive(Debug, Default)]
 pub struct Effects {
     pub particles: Option<Arc<ParticleFeed>>,
     pub decals: Option<Arc<DecalFeed>>,
+    /// The atlas layers scars are picked from (by the explosion's seed) and
+    /// how each blends; empty: the generated scorch mark.
+    pub scars: Vec<(u32, Blend)>,
 }
+
+/// The damage an explosion of size `scale` stands for in Recoil's terms,
+/// which set a scar's opacity and glow (`Decal::scar`): about 200 for a
+/// unit of radius 12 (scale 2), so the bigger deaths glow fully.
+pub const DAMAGE_PER_SCALE: f32 = 100.0;
 
 impl Effects {
     /// An explosion of size `scale` on the ground at world `(x, z)`.
@@ -468,7 +476,11 @@ impl Effects {
             feed.emit_all(&explosion([x, 1.0, z], true, scale, seed));
         }
         if let Some(feed) = &self.decals {
-            feed.place(Decal::scorch([x, z], 3.5 * scale, seed));
+            let (layer, blend) = match self.scars.len() {
+                0 => (layer::SCORCH, Blend::Replace),
+                n => self.scars[(seed >> 7) as usize % n],
+            };
+            feed.place(Decal::scar([x, z], 3.5 * scale, seed, DAMAGE_PER_SCALE * scale, layer, blend));
         }
     }
 }
@@ -730,7 +742,7 @@ mod tests {
         assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
         assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
         // One explosion: flash, fire, sparks, smoke, and a scorch mark.
-        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()) };
+        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), scars: Vec::new() };
         effects.explode(20.0, 20.0, 1.0, sites[0].3);
         let bursts = effects.particles.as_ref().unwrap().take_all();
         assert_eq!(bursts.len(), 4, "flash, fire, sparks, smoke: {bursts:?}");
@@ -738,6 +750,7 @@ mod tests {
         let decals = effects.decals.as_ref().unwrap().take();
         assert_eq!(decals.len(), 1);
         assert_eq!(decals[0].pos, [20.0, 20.0]);
+        assert!(decals[0].glow > 0.5 && decals[0].glow_life > 0.0 && decals[0].layer == layer::SCORCH, "{:?}", decals[0]);
         assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
     }
 

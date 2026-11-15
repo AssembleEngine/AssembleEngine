@@ -28,8 +28,11 @@
 //! (particles: flash, fire, sparks, smoke; X sets one off at the camera
 //! target, `--explode N` sets off N around it before a capture;
 //! `--no-particles` turns them off; they draw at half resolution,
-//! `--particles-full` at full) and leave a scorch mark on the ground (a
-//! decal; `--no-decals`).
+//! `--particles-full` at full) and leave a scar on the ground (a decal,
+//! relit by its normal map, its centre glowing for two seconds;
+//! `--no-decals`). The scars are generated, or Recoil's with `--scars DIR`
+//! (its `cont/base/bitmaps/bitmaps/scars`: GPL, read at run time, not
+//! shipped).
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -146,6 +149,9 @@ struct Options {
     particles: bool,
     /// Scorch marks where explosions go off (`--no-decals`).
     decals: bool,
+    /// A directory with Recoil's scars (`--scars DIR`), used instead of the
+    /// generated scorch mark.
+    scars: Option<String>,
     /// Particles at full resolution (`--particles-full`), not half.
     particles_full: bool,
     /// `--particle-blend sorted|moments` (comparison; sorted by default).
@@ -178,11 +184,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, decals: true, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -230,6 +236,7 @@ fn parse() -> Result<Options> {
             "--no-shadows" => o.shadows = false,
             "--no-particles" => o.particles = false,
             "--no-decals" => o.decals = false,
+            "--scars" => o.scars = Some(value("--scars", &mut args)?),
             "--particles-full" => o.particles_full = true,
             "--particle-blend" => {
                 o.particle_blend = match value("--particle-blend", &mut args)?.as_str() {
@@ -426,11 +433,39 @@ fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects
     }
     if o.decals {
         let feed = Arc::new(ae_render::decals::DecalFeed::default());
-        app = app.with_decals(ae_render::decals::DecalsSetup::new(feed.clone(), DECALS));
+        let mut setup = ae_render::decals::DecalsSetup::new(feed.clone(), DECALS);
+        if let Some(dir) = &o.scars {
+            match recoil_scars(std::path::Path::new(dir)) {
+                Ok((atlas, scars)) => {
+                    setup.atlas = Some(Arc::new(atlas));
+                    effects.scars = scars;
+                }
+                Err(e) => eprintln!("--scars {dir}: {e:#}; using the generated scorch mark"),
+            }
+        }
+        app = app.with_decals(setup);
         effects.decals = Some(feed);
     }
     let any = effects.particles.is_some() || effects.decals.is_some();
     (app, any.then(|| Arc::new(effects)))
+}
+
+/// The generated atlas at 512² with Recoil's two scars added (scar1's
+/// normal map has green down the image, scar2's up), and the scars'
+/// layers, blended as Recoil blends explosion scars (modulate).
+fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas, Vec<(u32, ae_render::decals::Blend)>)> {
+    use ae_render::decals::{Blend, default_atlas, read_tga};
+    let read = |name: &str| -> Result<ae_render::decals::Image> {
+        let path = dir.join(name);
+        read_tga(&std::fs::read(&path).with_context(|| path.display().to_string())?).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+    };
+    let mut atlas = default_atlas().resized(512);
+    let mut scars = Vec::new();
+    for (name, green_up) in [("scar1", false), ("scar2", true)] {
+        let layer = atlas.add_layer(&read(&format!("{name}.tga"))?, Some((&read(&format!("{name}_normal.tga"))?, green_up))).map_err(anyhow::Error::msg)?;
+        scars.push((layer, Blend::Modulate));
+    }
+    Ok((atlas, scars))
 }
 
 /// `count` explosions scattered around `target` (seeded; `--explode`, X).

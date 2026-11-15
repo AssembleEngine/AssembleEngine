@@ -2834,7 +2834,9 @@ fn decals_wrap_over_cliffs() {
 ///   flat normals. At angle 0 the plateau leans away from the sun (darker)
 ///   and the face, its side projection unfolded downward, leans up toward
 ///   it (brighter); turned by pi both reverse. A sign error in either
-///   projection's tangent fails one of the four.
+///   projection's tangent fails one of the four. A decal leaning toward
+///   +v turned by pi / 2 lights as the one leaning +x turned by pi (the
+///   green channel's sign, on the top and the other side projection).
 /// * Modulate: a mid-grey (sRGB 0.5) decal leaves the ground as it is; a
 ///   quarter grey (sRGB 0.25) halves it (in sRGB bytes), Recoil's
 ///   `2 * decal * ground`.
@@ -2873,15 +2875,15 @@ fn decals_relit_modulated_and_glowing() {
 
     // Layers: 0 grey leaning toward +u; 1 grey, flat, glow mask 0.6 (Recoil's
     // scars peak at 0.67 and 0.95); 2 sRGB
-    // 0.5; 3 sRGB 0.25 (both flat).
+    // 0.5; 3 sRGB 0.25 (both flat); 4 grey leaning toward +v.
     let size = 32u32;
     let texels = (size * size) as usize;
     let linear = |s: f32| ((s + 0.055) / 1.055).powf(2.4);
     let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
     let lean = 0.5f32.atan();
-    let layers = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25))];
+    let layers = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25)), grey(0.3)];
     let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
-    let normals = vec![vec![[lean.sin(), 0.0, lean.cos(), 0.0]; texels], vec![[0.0, 0.0, 1.0, 0.6]; texels], flat.clone(), flat];
+    let normals = vec![vec![[lean.sin(), 0.0, lean.cos(), 0.0]; texels], vec![[0.0, 0.0, 1.0, 0.6]; texels], flat.clone(), flat, vec![[0.0, lean.sin(), lean.cos(), 0.0]; texels]];
     let atlas = Arc::new(DecalAtlas { size, layers, normals });
     let half = 12.0f32;
     let edge = (42.0f32, 64.0f32);
@@ -2937,12 +2939,16 @@ fn decals_relit_modulated_and_glowing() {
     let flat = render(&[at_edge(1, 0.0)], west);
     let lean0 = render(&[at_edge(0, 0.0)], west);
     let lean_pi = render(&[at_edge(0, std::f32::consts::PI)], west);
+    // Leaning toward +v, turned by pi / 2: its +v is the world's -x, as
+    // the decal leaning +x turned by pi (the green channel's sign).
+    let lean_v = render(&[at_edge(4, std::f32::consts::FRAC_PI_2)], west);
     let none = render(&[], west);
     for (name, points, sign) in [("plateau", &top, -1.0f32), ("face", &face, 1.0)] {
-        let (f, a, b) = (median(lumas(&flat, points)), median(lumas(&lean0, points)), median(lumas(&lean_pi, points)));
-        println!("relit {name}: flat {f:.0}, leaning +x {a:.0}, turned by pi {b:.0} ({} samples)", lumas(&flat, points).len());
+        let (f, a, b, v) = (median(lumas(&flat, points)), median(lumas(&lean0, points)), median(lumas(&lean_pi, points)), median(lumas(&lean_v, points)));
+        println!("relit {name}: flat {f:.0}, leaning +x {a:.0}, turned by pi {b:.0}, leaning +v turned by pi/2 {v:.0} ({} samples)", lumas(&flat, points).len());
         assert!(lumas(&flat, points).len() > 80, "{name} out of view");
         assert!(sign * (a - f) > 8.0 && sign * (f - b) > 8.0, "{name}: flat {f}, angle 0 {a}, angle pi {b}");
+        assert!((v - b).abs() < 6.0, "{name}: leaning +v at pi / 2 {v}, leaning +x at pi {b}");
     }
 
     // Modulate on the plateau and the face.

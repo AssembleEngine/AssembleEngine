@@ -1608,7 +1608,7 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
 
 The rest of M7, in order: particles, then particles' coloured shadows, then decals (then the
 stretch goal, volumetric smoke). Stop for a context compaction after each. All three are done
-(below). Next is the goal of decals that look like Recoil's scars, then the stretch goal.
+(below), and so is the goal of decals that look like Recoil's scars. Next is the stretch goal.
 
 Particles (plan):
 - Goal: a strong system, not a demo. It must handle tens of thousands of live particles and
@@ -2090,6 +2090,65 @@ M7 goal (after decals, before the stretch goal): decals that look like Recoil's 
   - the glow is gone after its life, and the frame then equals the same decal without glow;
   - a normal-mapped decal lit from opposite sun directions differs where its normal map tilts;
   - the existing decal test is unchanged.
+
+Recoil's scars (results):
+- **Licence.** Recoil is GPL (v2 or later); this repository is MIT. The scars are therefore
+  not copied in: `--scars DIR` reads them at run time from Recoil's
+  `cont/base/bitmaps/bitmaps/scars`, and the engine's generated scorch and crater gained their
+  own normal maps (from generated heights) and, for the scorch, a glow mask. Vendoring them
+  (scar2's commit is by the same author as this repository's) is the owner's decision.
+- **Textures.**
+  - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
+  - `DecalAtlas::add_layer` resamples to the atlas's size (box when shrinking, bilinear when
+    growing). The client's atlas with scars is 512² (the generated layers grown).
+  - The atlas gained `normals` (empty: flat), a second array (binding 19, UNORM; mips average
+    and renormalize the normal, average the mask).
+  - The two scars disagree: scar1's normal map has green down the image, scar2's up (its own
+    curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x downsample).
+    `add_layer` takes the convention per file and flips to the atlas's (green toward the
+    decal's +z, down the rows). A unit test loads both when they are present: after loading,
+    both curls are positive (0.83 and 0.73), as the generated layers'.
+- **Record**: 16 words, adding glow, glow end, 1 / glow life and the blend.
+- **Shading** (`terrain_decals.glsl`; `applyDecals` returns albedo, normal and glow):
+  - **Relit by its normal map.** Each projection's tangents are the world gradients of its u
+    and v (top: the decal's x and z; the side projections: up, signed as the unfolding, and the
+    other axis), Gram–Schmidt against the heightmap normal. The decal's normal replaces the
+    shading normal by its alpha (a flat map leaves the heightmap's normal: the scar covers the
+    tileset's detail). It changes N·L and the sky term only; the units' shadow lookup keeps the
+    ground's normal.
+  - **Blend::Modulate** (the client's Recoil scars): `ground * 2^2.2 * decal`, Recoil's
+    `2 * decal * ground` in gamma space with our linear albedo. The generated scorch keeps
+    `Replace`, as it was drawn for it.
+  - **Glow**, as Recoil's: the glow mask as a black body at `mask * mix(1, 3700, heat)`, heat
+    fading linearly over the glow life, the overglow flicker (`0.2 |sin(0.6 t)|` near full),
+    `smoothstep(0.9, 0.1, d)^7` of the 3D distance from the centre (round). Its gamma-space
+    colour is made linear (`^2.2`) and added after lighting: untouched by the sun and shadows,
+    put out by water within a metre, and shown only in sight (not remembered under the fog).
+    Brightness goes as temperature^4, so a glow is near its end by half its life, as Recoil's.
+  - **Not done:** the ellipsoid and `dot(up, N)^exp` shaping (ours wrap over cliffs on purpose),
+    the glow colour map, the water absorption of the scar's colour.
+- **Life from size.** `Decal::scar` applies Recoil's damage rules: opacity
+  `clamp(2 damage / 255, 0.8, 1)`, glow `clamp(2 damage / 255, 0, 1)` for 2 s
+  (`SCAR_GLOW_LIFE`). The client takes damage as 100 x the explosion's scale (deaths: scale
+  `radius / 6`, 0.6 to 3). Life stays `SCORCH_LIFE` (60 s; Recoil's `clamp(3 damage, 15, 1800)`
+  frames would be 15 s at scale 1 without its decal level setting).
+- **Tests:**
+  - GPU `decals_relit_modulated_and_glowing`, on a plateau whose west cliff faces the sun:
+    - normals leaning +u on the cliff's top edge: the plateau 167 → 131 (leaning away from
+      the sun) and the face 167 → 183 (unfolded downward, leaning up), reversed when turned by
+      pi (183 and 128);
+    - normals leaning +v turned by pi / 2 light as +u turned by pi (184 and 129), which checks
+      the green channel's sign and the other side projection;
+    - modulate: sRGB 0.5 leaves 1.000 of the ground, 0.25 leaves 0.513;
+    - a glow in the hill's shadow: the centre 80 → 172 luma, orange (255, 144, 92), held to
+      the centre; past its life, byte-identical to the same decal without glow.
+  - `decals_wrap_over_cliffs` unchanged; unit tests for the TGA reader, resampling, the
+    conventions, and the client's scar.
+- **Cost** (`--bench all --label m7-scars` against `m7-decals`; 109 of 110 metrics unchanged):
+  `battle`'s terrain pass 216 → 225 µs (+4 %, within its tolerance) for the second sample per
+  projection, the tangent frames and the glow. The one flagged metric is `battle`'s particle
+  shadows (39 → 43 µs), a pass decals do not touch. The bench uses the generated atlas
+  (128², now with normals and glow), not Recoil's.
 
 M7 stretch goal (after decals): volumetric smoke and dust.
 - Why: the order-independence measurement showed that particles blended as flat layers pop when
