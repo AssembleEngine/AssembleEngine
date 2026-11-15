@@ -2641,7 +2641,7 @@ fn decals_wrap_over_cliffs() {
     const STRIPES: f32 = 8.0;
     let size = 64u32;
     let stripes = (0..size * size).map(|i| if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] }).collect();
-    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes] });
+    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes], normals: Vec::new() });
     let half = 12.0f32;
     let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
     // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32).

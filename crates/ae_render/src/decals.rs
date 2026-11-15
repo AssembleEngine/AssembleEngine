@@ -46,7 +46,7 @@ pub const MAX_PER_CELL: usize = 255;
 /// Header words before the decals.
 const HEADER_WORDS: usize = 4;
 /// Words per decal.
-const DECAL_WORDS: usize = 12;
+const DECAL_WORDS: usize = 16;
 /// Cells a decal lists in at most.
 const CELLS_PER_DECAL: usize = 9;
 
@@ -76,6 +76,24 @@ pub struct Decal {
     /// Seconds it fades out over at the end of its life (0: it vanishes;
     /// longer than `life`: it starts partly faded).
     pub fade_out: f32,
+    /// Glow at placement, 0..1: the atlas's glow mask lit as hot metal,
+    /// fading linearly to nothing over `glow_life` seconds.
+    pub glow: f32,
+    pub glow_life: f32,
+    pub blend: Blend,
+}
+
+/// How a decal's colour meets the ground's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blend {
+    /// Its colour over the ground's, by its alpha.
+    #[default]
+    Replace,
+    /// The ground's colour times the decal's (as Recoil's explosion scars,
+    /// `2 * decal * ground` in gamma space): mid grey (sRGB 0.5) leaves
+    /// the ground as it is, darker chars it, so a scar darkens whatever it
+    /// lands on instead of painting one colour.
+    Modulate,
 }
 
 impl Decal {
@@ -83,12 +101,12 @@ impl Decal {
     /// lives [`SCORCH_LIFE`] seconds, fading out over the last third.
     pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
         let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
-        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0 }
+        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
     }
 
     /// A decal that stays until evicted, at full opacity at once.
     pub fn permanent(pos: [f32; 2], half: [f32; 2], angle: f32, layer: u32) -> Self {
-        Self { pos, half, angle, layer, opacity: 1.0, fade_in: 0.0, life: 0.0, fade_out: 0.0 }
+        Self { pos, half, angle, layer, opacity: 1.0, fade_in: 0.0, life: 0.0, fade_out: 0.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
     }
 
     /// Bounding radius in plan.
@@ -119,12 +137,17 @@ impl DecalFeed {
     }
 }
 
-/// The decals' textures: square layers of `size`² texels, straight
-/// (not premultiplied) linear RGBA, row-major; mips are made from them.
+/// The decals' textures: square layers of `size`² texels, row-major, the
+/// first row at the decal's -z edge; mips are made from them.
 #[derive(Clone, Debug)]
 pub struct DecalAtlas {
     pub size: u32,
+    /// Straight (not premultiplied) linear RGBA.
     pub layers: Vec<Vec<[f32; 4]>>,
+    /// Layer for layer, the tangent-space normal (x toward the decal's +x,
+    /// y toward its +z, the first rows' side being -z; z out of the ground;
+    /// each -1..1) and the glow mask (0..1). Empty: flat, no glow.
+    pub normals: Vec<Vec<[f32; 4]>>,
 }
 
 impl DecalAtlas {
@@ -165,6 +188,41 @@ impl DecalAtlas {
             .collect()
     }
 
+    /// Each layer's normals and glow mask as RGBA8 UNORM mips (normal
+    /// `n * 0.5 + 0.5`): normals averaged and renormalized, the mask
+    /// averaged. Flat, no glow, when [`Self::normals`] is empty.
+    pub(crate) fn normal_mips(&self) -> Vec<Vec<Vec<u8>>> {
+        let flat = vec![[0.0, 0.0, 1.0, 0.0]; (self.size * self.size) as usize];
+        let encode = |c: f32| ((c.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+        (0..self.layers.len())
+            .map(|i| {
+                let mut level = self.normals.get(i).unwrap_or(&flat).clone();
+                let mut side = self.size as usize;
+                let mut mips = Vec::new();
+                loop {
+                    mips.push(level.iter().flat_map(|t| [encode(t[0]), encode(t[1]), encode(t[2]), (t[3].clamp(0.0, 1.0) * 255.0).round() as u8]).collect());
+                    if side == 1 {
+                        break;
+                    }
+                    let half = side / 2;
+                    level = (0..half * half)
+                        .map(|i| {
+                            let (x, y) = (i % half * 2, i / half * 2);
+                            let texels = [level[y * side + x], level[y * side + x + 1], level[(y + 1) * side + x], level[(y + 1) * side + x + 1]];
+                            let sum = |k: usize| texels.iter().map(|t| t[k]).sum::<f32>();
+                            let n = [sum(0), sum(1), sum(2)];
+                            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                            let n = if len > 1e-6 { n.map(|c| c / len) } else { [0.0, 0.0, 1.0] };
+                            [n[0], n[1], n[2], sum(3) * 0.25]
+                        })
+                        .collect();
+                    side = half;
+                }
+                mips
+            })
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !self.size.is_power_of_two() {
             return Err(format!("decal atlas size {} is not a power of two", self.size));
@@ -172,9 +230,15 @@ impl DecalAtlas {
         if self.layers.is_empty() {
             return Err("decal atlas has no layers".into());
         }
+        if !self.normals.is_empty() && self.normals.len() != self.layers.len() {
+            return Err(format!("decal atlas has {} normal layers for {} colour layers", self.normals.len(), self.layers.len()));
+        }
         let texels = (self.size * self.size) as usize;
-        match self.layers.iter().position(|l| l.len() != texels) {
-            Some(i) => Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.layers[i].len())),
+        if let Some(i) = self.layers.iter().position(|l| l.len() != texels) {
+            return Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.layers[i].len()));
+        }
+        match self.normals.iter().position(|l| l.len() != texels) {
+            Some(i) => Err(format!("decal atlas normal layer {i} has {} texels, not {texels}", self.normals[i].len())),
             None => Ok(()),
         }
     }
@@ -242,7 +306,7 @@ pub fn default_atlas() -> DecalAtlas {
         let alpha = 1.0 - smooth(0.7, 0.95, rr);
         [colour[0], colour[1], colour[2], alpha]
     });
-    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater] }
+    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals: Vec::new() }
 }
 
 pub struct DecalsSetup {
@@ -328,7 +392,31 @@ impl DecalSet {
         // no fade-out: a step a microsecond wide).
         let end = if d.life > 0.0 { time + d.life } else { 0.0 };
         let fade_out = if d.life > 0.0 { 1.0 / d.fade_out.max(1e-6) } else { 0.0 };
-        let words = [d.pos[0], d.pos[1], d.half[0].max(1e-3), d.half[1].max(1e-3), c, s, d.layer as f32, d.opacity, time, fade, end, fade_out].map(f32::to_bits);
+        // The glow's end and 1 / its life (0: no glow).
+        let (glow_end, glow_inv) = if d.glow > 0.0 && d.glow_life > 0.0 { (time + d.glow_life, 1.0 / d.glow_life) } else { (0.0, 0.0) };
+        let blend = match d.blend {
+            Blend::Replace => 0.0,
+            Blend::Modulate => 1.0,
+        };
+        let words = [
+            d.pos[0],
+            d.pos[1],
+            d.half[0].max(1e-3),
+            d.half[1].max(1e-3),
+            c,
+            s,
+            d.layer as f32,
+            d.opacity,
+            time,
+            fade,
+            end,
+            fade_out,
+            d.glow.clamp(0.0, 1.0),
+            glow_end,
+            glow_inv,
+            blend,
+        ]
+        .map(f32::to_bits);
         // The buckets of the distinct cells it touches (two of its cells
         // may share a bucket: listed once).
         let mask = buckets(self.capacity as u32) - 1;
@@ -527,7 +615,7 @@ mod tests {
     fn atlas_mips_reach_one_texel_and_ignore_transparent_colour() {
         let mut layer = vec![[1.0, 0.0, 0.0, 1.0]; 4];
         layer[3] = [0.0, 0.0, 1.0, 0.0];
-        let atlas = DecalAtlas { size: 2, layers: vec![layer] };
+        let atlas = DecalAtlas { size: 2, layers: vec![layer], normals: Vec::new() };
         let mips = atlas.mips();
         assert_eq!(mips[0].len(), 2);
         assert_eq!(mips[0][1], vec![255, 0, 0, 191]);

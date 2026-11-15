@@ -2,9 +2,10 @@
 // Needs terrain_common.glsl (u, sampleHeight).
 //
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
-// bits, decal capacity), the decals (12 words each: centre x, z, half-sizes
+// bits, decal capacity), the decals (16 words each: centre x, z, half-sizes
 // x, z, cos, sin, layer, opacity, start time, 1 / fade-in, end time (0:
-// none), 1 / fade-out (0: none)), one word
+// none), 1 / fade-out (0: none), glow, glow end time, 1 / glow life (0: no
+// glow), blend (0 replace, 1 modulate)), one word
 // per bucket of the spatial hash of world cells (first index << 8 | count),
 // the indices.
 
@@ -14,6 +15,8 @@ layout(constant_id = 1) const bool DECALS = false;
 
 layout(std430, set = 0, binding = 17) readonly buffer DecalBuf { uint decalWords[]; };
 layout(set = 0, binding = 18) uniform sampler2DArray decalAtlas;
+// Layer for layer: the tangent-space normal (n * 0.5 + 0.5) and the glow mask.
+layout(set = 0, binding = 19) uniform sampler2DArray decalNormals;
 
 vec4 decalFloats(uint at) {
     return uintBitsToFloat(uvec4(decalWords[at], decalWords[at + 1u], decalWords[at + 2u], decalWords[at + 3u]));
@@ -41,14 +44,14 @@ vec3 applyDecals(vec3 albedo, vec3 P, vec3 dPdx, vec3 dPdy, vec3 n) {
     uint mask = decalWords[0];
     float cellSize = uintBitsToFloat(decalWords[2]);
     ivec2 c = ivec2(floor(P.xz / cellSize));
-    uint bucketsAt = 4u + 12u * decalWords[3];
+    uint bucketsAt = 4u + 16u * decalWords[3];
     uint indexAt = bucketsAt + mask + 1u;
     uint entry = decalWords[bucketsAt + ((uint(c.x) * 73856093u ^ uint(c.y) * 19349663u) & mask)];
     uint first = entry >> 8u, count = entry & 255u;
     float time = u.water.w;
     float layers = float(textureSize(decalAtlas, 0).z);
     for (uint i = 0u; i < count; i++) {
-        uint at = 4u + 12u * decalWords[indexAt + first + i];
+        uint at = 4u + 16u * decalWords[indexAt + first + i];
         vec4 a = decalFloats(at);       // centre x, z, half x, half z
         vec4 b = decalFloats(at + 4u);  // cos, sin, layer, opacity
         // Decal frame, scaled to -1..1 over the half-sizes (x, z): outside
