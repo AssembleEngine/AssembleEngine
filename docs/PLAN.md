@@ -1606,6 +1606,125 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
   behind the same `shadows.map` / `shadows.draw` contract. No contact hardening; the water and
   units shaders keep the lookup compiled in (they exist only with units or water).
 
+The rest of M7, in order: particles, then particles' coloured shadows, then decals. Stop for a
+context compaction after each.
+
+Particles (plan):
+- Goal: a strong system, not a demo. It must handle tens of thousands of live particles and
+  overlapping explosions over a battle, blend without visible popping, and cost nothing when
+  nothing burns.
+- Measured starting point. `~/particles`: 100k particles in one fire-and-smoke column, 1280x720,
+  this machine.
+  - Mode 1 (GPU radix sort by centre depth, instanced quads, premultiplied "over"): 24.5 ms.
+  - Mode 3 (3DGS-style tile-binned compute blend, front to back with early-out): 67.9 ms.
+  - Mode 2 (LBVH, exact front-to-back per pixel): 101.3 ms.
+  - `~/wavelet_tr` (Haar-wavelet OIT, 16 coefficients): poor with many overlapping layers, and
+    slow.
+  - Under heavy overlap, exact per-pixel ordering costs 3–4x. Approximations with a fixed number
+    of terms per pixel (wavelets, moments, weighted blended) break down exactly there. The cost
+    is fill rate, not sorting.
+- Two blend classes, separated by the effect's definition:
+  - *Emissive* (fire, sparks, flashes, glows) is additive. It is order independent by
+    construction, so it needs no sort.
+  - *Media* (smoke, dust, steam) is premultiplied "over" and needs an order. That is where order
+    independence matters.
+- Media start as mode 1:
+  - **Sort.** The GPU radix sort (`~/particles` `radix_*.comp`) orders particles by centre depth.
+    The key breaks ties by particle index, so equal depths never swap between frames.
+  - **Soft edges.** Each quad fades over a per-particle thickness against the scene depth. This
+    hides the cut where a quad meets the ground or a unit.
+  - **Fill rate.** Draw into a reduced-resolution target (half, then measured) and upsample it
+    over the scene, with a depth-aware filter on a min/max-downsampled scene depth.
+- Candidates for media, each measured against an exact per-pixel reference (mode 2 style, tests
+  only) for error and cost before the design is fixed:
+  - moment-based OIT (4 power moments);
+  - mode 3 at reduced resolution;
+  - a froxel volume for large smoke (Hillaire, Frostbite 2015). It is order independent,
+    integrates with the distance fog, and can give the sun's transmittance through smoke.
+  - Keep whichever wins on both.
+- **Simulation.** On the GPU: a compute pass, a ring buffer, and emitters uploaded each frame.
+  - Emitters come from the observer's view stream (shots, hits, deaths, burning units), so fog
+    of war hides them.
+  - Visual only: not deterministic, not in the digest.
+  - Lighting: the sun times the hill and unit shadows, looked up once per particle at its centre;
+    sky light; fog of war dims particles as it dims units.
+- **Library contract**, like the units':
+  - passes `particles.sim` (compute) and `particles.draw` (graphics, depth read);
+  - library buffers `particles.*`;
+  - `DECLARE_PARTICLES`, and `when: particles` in graph files;
+  - new goldens, both modules, and both graph files.
+- **Bench.** A new `--bench` scene with a battle's worth of explosions. The existing scenes must be
+  unchanged: no particles means no pass.
+- **GPU tests** (validation on):
+  - Shuffling the emissive particles' submission order gives a byte-identical image.
+  - A blue smoke particle in front of a red one shows blue, whatever the order they were emitted
+    in.
+  - The soft fade leaves no hard line on the ground.
+  - Particles in hidden cells are not drawn.
+
+Particles' coloured shadows (plan):
+- **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";
+  `ProjectileDrawer::DrawShadowTransparent` and `ProjFXFragShadowProg.glsl` implement it.
+  - The shadow map gets a colour target, cleared to white.
+  - After the opaque casters, the particles flagged `castShadow` are drawn depth-tested against the
+    opaque depth, without writing it.
+  - They blend multiplicatively: `dst *= 1 - a + rgb*a`.
+  - Receivers multiply the sun by the depth test times that colour.
+- **Here:**
+  - library image `shadows.color` (RGBA16F, laid out like `shadows.map`);
+  - written by a library pass `shadows.particles` after `shadows.draw`;
+  - only for effects flagged to cast (smoke, dust; not sparks).
+- **Recoil's colour has no depth.** Receivers above the smoke, nearer the sun, are tinted too, for
+  example a unit flying over a smoke column.
+  - Here alpha keeps the depth of the particle nearest the sun, with blend op MAX for alpha and
+    multiply for colour.
+  - A receiver is tinted only if it lies farther from the sun than that particle.
+  - A receiver between two smoke layers is tinted fully. That is accepted.
+- **Cost.** The colour read goes inside the lookup that `UNIT_SHADOWS` already gates. Check it
+  with `bench-diff` on the terrain pass: the lookup's mere presence once cost that pass 18 %.
+- **When the map exists.** Today `DECLARE_SHADOWS` comes only with units. With particles, the map
+  and the colour target exist when shadows are on and there are units *or* particles.
+  `shadows.draw` still needs units. `receives()` and `check_shadows` cover `shadows.color` too.
+- **Test:**
+  - A smoke column between the sun and the ground tints the ground in its shadow by the smoke's
+    colour.
+  - A unit above the smoke is not tinted.
+  - Sparks cast nothing.
+  - Shadows switched off are byte-identical to none.
+
+Decals (plan):
+- **Recoil projects decals through boxes** (`rts/Rendering/Env/Decals/GroundDecalHandler.cpp`,
+  `GroundDecalsFragProg.glsl`). A volume per decal reads the scene depth and reconstructs the
+  position. Its vertical extent has to be guessed:
+  - too small, and the decal is cut on slopes;
+  - too large, and it paints whatever else is in the box: units, or the far side of a cliff.
+- **Here the receivers are known.** The terrain applies decals in its own shader (forward decals),
+  so there is no volume.
+  - The heightfield has one surface per xz, so a decal is a footprint: centre, half-size,
+    rotation, a layer in a decal atlas, a fade, and a start time.
+  - Units never apply decals, so they are never painted.
+- **Binning.** A world-space 2D grid (cells of tens of metres) lists the decals touching each cell.
+  It is updated when decals change; the terrain fragment loops over its cell's list.
+  - A specialization constant compiles all of it out when there are no decals.
+  - Check it with `bench-diff` on the terrain pass.
+- **Corners and cliffs.** A top-down projection stretches a decal down a cliff face. Instead:
+  - Project the decal three ways around its centre, as triplanar texturing does, weighted by
+    the surface normal with constant-overlap weights (see `docs/antitiling.md`).
+  - The side projections take v from the height relative to the decal's centre, so a decal across
+    a cliff's edge or into its foot wraps onto both faces.
+  - The footprint's mask fades with 3D distance.
+- **Spawn.** Sim events (explosions leave scorch marks; deaths; building footprints) come through
+  the observer's stream.
+  - A fixed capacity: the oldest is evicted first.
+  - A decal seen once stays as last seen under fog, like the explored terrain.
+- **GPU test** (a step heightmap: a plateau with a cliff; one decal across the top edge, the convex
+  corner, and one at the foot, the concave corner):
+  - both faces of each corner are painted;
+  - the texel stretch on the cliff face stays within 1.5x of the flat ground's;
+  - the ground outside the footprints is byte-identical;
+  - a unit standing in a footprint is not painted;
+  - no decals is byte-identical to before.
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |
@@ -1624,6 +1743,20 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
 - From M1: `ae-headless` digest runs in CI on Linux x86-64, Windows x86-64, Linux aarch64.
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
+
+## Later improvements
+
+- **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
+  - What: one very large virtual shadow map; pages are allocated only where the view needs them,
+    and cached while nothing in them moves.
+  - It replaces the units' cascades (M7) behind the same `shadows.map` / `shadows.draw` contract.
+  - The particles' coloured shadows need a colour page for each depth page.
+- **Anti-tiling of the terrain's material tilesets**
+  - What: sample each texture twice, rotated and offset by hashed seeds, with a variance-preserving
+    blend around its mean colour.
+  - It also brings triplanar weights with a constant overlap, and normals combined by RNM.
+  - The supplied example, kept verbatim, and implementation notes (mip seams from the UV jumps,
+    sample cost, gating per layer) are in `docs/antitiling.md`.
 
 ## Not yet researched
 
