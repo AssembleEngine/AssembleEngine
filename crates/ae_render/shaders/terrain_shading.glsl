@@ -7,12 +7,15 @@
 layout(set = 0, binding = 14) uniform sampler2D sunShadowTex;
 // The units' shadow map (src/shadow.rs; a 1x1 stand-in when off).
 layout(set = 0, binding = 15) uniform sampler2DShadow unitShadowTex;
+// The particles' coloured shadows (a 1x1 stand-in when off).
+layout(set = 0, binding = 16) uniform sampler2D particleShadowTex;
 
 #include "unit_shadows.glsl"
 
-// Sunlight reaching world point p (normal n) past the units.
-float unitSunAt(vec3 p, vec3 n) {
-    return unitShadowAt(unitShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n);
+// Sunlight reaching world point p (normal n) past the units; `tint` past
+// the particles.
+float unitSunAt(vec3 p, vec3 n, out vec3 tint) {
+    return unitShadowAt(unitShadowTex, particleShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n, tint);
 }
 
 // Sunlight reaching height `y` over world point `xz` past the hills: 1 lit,

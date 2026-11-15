@@ -1,6 +1,7 @@
 #version 460
 // One invocation per pool slot: age and move a live particle, and append
-// its sort key when it is in view. Key: far-to-near depth (16 bits, log
+// its sort key when it is in view (and, with flags.z, its slot to the
+// coloured shadows' casters when it is not emissive, in view or not). Key: far-to-near depth (16 bits, log
 // scale from the near plane) above the slot (16 bits): unique, so the
 // sorted order does not depend on the order of the appends.
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -31,6 +32,9 @@ void main() {
     particles[i] = p;
     if (p.posAge.w >= p.velLife.w) {
         return;
+    }
+    if (u.flags.z != 0u && physics.z < 0.5) {
+        keys[u.pool.x + atomicAdd(cmd.casterCount, 1u)] = i;
     }
     float t = p.posAge.w / p.velLife.w;
     vec4 shape = u.effects[e + 2u];

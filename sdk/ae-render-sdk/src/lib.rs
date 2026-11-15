@@ -16,7 +16,7 @@
 //! ae_render_sdk::render_module!(Scene);
 //! ```
 
-pub use ae_render_abi::module::{FrameInput, Program, ProgramTable, SHADOW_MAP_NAME, shadow_map_spec};
+pub use ae_render_abi::module::{FrameInput, PARTICLE_SHADOW_NAME, Program, ProgramTable, SHADOW_MAP_NAME, particle_shadow_spec, shadow_map_spec};
 pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 pub use ae_render_abi as abi;
 
@@ -61,7 +61,13 @@ pub struct DeclareEnv {
     /// `particles.indirect` library buffers exist. `particles.draw` samples
     /// the depth buffer (`sampled:fragment`, so declare it with sampled
     /// usage) and blends into one colour attachment, after everything
-    /// opaque and the water.
+    /// opaque and the water. With `shadows` too, the particles' coloured
+    /// shadows can be declared: the `shadows.color` library image
+    /// ([`particle_shadow_spec`], `External`), written by the
+    /// `shadows.particles` library pass (`color:clear`; `particles.state`
+    /// and `particles.keys` read in the vertex stage, `particles.indirect`
+    /// as an indirect buffer) and sampled
+    /// (`sampled:fragment`) by every pass that samples `shadows.map`.
     pub particles: bool,
 }
 

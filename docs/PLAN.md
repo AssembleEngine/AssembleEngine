@@ -1606,8 +1606,8 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
   behind the same `shadows.map` / `shadows.draw` contract. No contact hardening; the water and
   units shaders keep the lookup compiled in (they exist only with units or water).
 
-The rest of M7, in order: particles, then particles' coloured shadows, then decals. Stop for a
-context compaction after each.
+The rest of M7, in order: particles, then particles' coloured shadows, then decals (then the
+stretch goal, volumetric smoke). Stop for a context compaction after each.
 
 Particles (plan):
 - Goal: a strong system, not a demo. It must handle tens of thousands of live particles and
@@ -1728,9 +1728,10 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     a 64k pool only 8 workgroups. With 4 blocks it takes about 42 µs; 1 and 2 blocks were slower,
     because the scatter's prefix walks every workgroup.
 - **Not done yet:**
-  - Order independence: measured below ("order independence measured"); the next step is
-    volumetric smoke and dust.
-  - Particles are not shaded by the units' shadow map.
+  - Order independence: measured below ("order independence measured"); volumetric smoke and
+    dust is the stretch goal at the end of M7.
+  - Particles are not shaded by the units' shadow map (they cast coloured shadows since; see
+    "Particles' coloured shadows").
   - Fog of war does not dim them (their emitters are only where the observer sees).
   - Effects are not in the content catalogue.
   - No continuous emitters (burning wrecks, dust behind moving units).
@@ -1800,11 +1801,8 @@ Particles, order independence measured (`cargo test -p ae_render --test gpu part
 - **Cost** (`bench battle`): moments 17 µs sim (no sort), 552 µs draw, against sorted 59 + 86 µs
   (`m7-oit-moments`, `m7-oit-sorted`). The sorted path is unchanged.
 - **Kept:** the sort for everything. Moments and the reference stay as comparison modes.
-- **Next** (a change of direction, for smoke and dust): a volumetric reference (each fragment's
-  front and back, intervals integrated with summed extinction and emission), checked to pop well
-  below 116, then candidates against it: the froxel volume (Hillaire 2015) for smoke and dust, and
-  a per-pixel thickness-aware blend. Small emissive particles (sparks, flashes) stay sorted
-  billboards.
+- **Next:** volumetric smoke and dust, moved to a stretch goal at the end of M7 ("M7 stretch
+  goal", after decals).
 
 Particles' coloured shadows (plan):
 - **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";
@@ -1835,6 +1833,79 @@ Particles' coloured shadows (plan):
   - A unit above the smoke is not tinted.
   - Sparks cast nothing.
   - Shadows switched off are byte-identical to none.
+
+Particles' coloured shadows (`cargo test -p ae_render --test gpu particles_cast -- --ignored --nocapture`):
+- **Stored as optical depth, not a multiplied colour.** Recoil multiplies a target cleared to
+  white by `1 - a + rgb a`. Here each caster adds `-ln(1 - a (1 - rgb))` per channel (blend
+  ONE/ONE) into a target cleared to 0, and receivers take `exp(-sum)`: the same product, order
+  independent, and the graph clears to 0 (`clear_color` is per pass; this one returns 0).
+  - Alpha keeps, by blend op MAX (new `Blend::AdditiveMaxAlpha`), the depth toward the sun of the
+    caster's sphere surface facing the sun **over that texel** (centre + `sqrt(1 - r²)` radii), not
+    one value per particle. A receiver is tinted only beyond it, over a 2 m fade.
+  - The plan's single "depth of the particle nearest the sun" failed the test: ground just up-sun
+    of a low puff lies within its disc as the sun sees it and below its top, though no sun ray from
+    it crosses the puff, and was tinted.
+  - No depth test against `shadows.map`: receivers already multiply by the opaque test, and the
+    alpha depth handles the order.
+- **Contract.**
+  - Library image `shadows.color` (`particle_shadow_spec`: RGBA16F, the cascades side by side at a
+    quarter of `shadows.map`'s resolution, 1152x384).
+  - Library pass `shadows.particles`: `color:clear`; it reads `particles.state` and `particles.keys`
+    in the vertex stage and takes `particles.indirect` as an indirect buffer.
+  - A graph that declares `shadows.color` also declares `shadows.map` (its cascades), has a
+    `shadows.particles` pass write it, and every receiver samples it (`check_shadows`, `check`).
+  - No new declare flag: modules declare it with `shadows` and `particles`; graph files take
+    `when: particle_shadows`. Both modules, both graph files, the SDK and the ABI do.
+  - The particles golden changes: the sim now runs before the shadow pass (it is the only writer
+    of the state the pass reads, so the bake orders it first). The other goldens are unchanged.
+- **Casters.** Every live particle that is not emissive, in view or not (off-screen smoke shades
+  the view).
+  - The simulation lists their slots after the visible keys (the keys buffer is now twice the
+    capacity). The second draw command in `particles.indirect` (32 bytes in, a 4-vertex strip per
+    instance) draws them into each cascade.
+  - Drawing every pool slot instead cost 148 µs in `battle`, nearly all vertex work.
+  - The cascades reach the particles' uniforms through `ParticleFrame::unit_shadows`.
+- **Receivers.**
+  - `unitShadowAt` also returns the tint (terrain binding 16, units binding 7, water through the
+    terrain's set). It reads inside the `UNIT_SHADOWS`-gated cascade loop, only while
+    `axes[0].w` is set (`Cascades::tinted`: the graph draws the colour this frame).
+  - The colour is clamped half a texel inside its cascade, since the depth map's 1.5-texel margin
+    is under one colour texel.
+  - The target (3.5 MB) exists whenever the units' map does, with or without particles; a 1x1
+    stand-in otherwise.
+- **Test** `particles_cast_coloured_shadows` (flat map, one unit, still effects, validation on):
+  - Orange smoke 25 m up tints the 301 ground points deep in its shadow: red 1.00, green 0.86, blue
+    0.77 of the unlit-by-smoke frame (sRGB bytes; the sky's light is not tinted).
+  - The ground clear of the shadow is byte-identical (91,040 points).
+  - The same puff off screen (no point within 1.6 radii in view) tints its 302 points in view.
+  - The same puff emissive casts nothing.
+  - A puff buried just under the unit (829 ground points within its disc as the sun sees it)
+    leaves the frame byte-identical to no particles.
+  - Shadows switched off are byte-identical to no shadows.
+  - Each check fails when broken: no tint; no depth test; one depth per particle (the plan's);
+    emissive particles casting; casters taken from the camera's list (0 of 302).
+  - All 21 GPU tests pass with validation. So do the client captures with explosions (native,
+    the post module, both graph files), the bench, and 12 s of `--exercise` (11 swapchain
+    recreations): 0 messages.
+- **Cost** (`--bench all --label m7-particle-shadows` against `m7-particles`; `bench-diff`: 0
+  regressed):
+  - `battle` (about 40k live particles): the new pass is 40 µs.
+    - It was 80 µs at half resolution: the pass is bound by rasterising big smoke quads (56 µs
+      with every fragment discarded). Strips instead of 6-vertex lists saved about 10 µs at
+      quarter resolution and nothing at half.
+  - Idle (particles on, nothing burning): 3 µs, the clear.
+  - The terrain pass, within `bench-diff`'s tolerance but consistently, +0.7 to +3.5 % (2–6 µs) in
+    the four scenes with unit shadows (army, orbit, overview; battle, where it samples). Scenes
+    without unit shadows are unchanged.
+- **Not done:**
+  - Without units there is no shadow map, so smoke casts nothing (the plan wanted the map with
+    units *or* particles). The client always has units.
+  - Particles do not receive shadows (neither the units' nor each other's).
+  - The cascades snap to whole texels of the depth map, a quarter of a colour texel, so as the
+    camera pans the smoke's shadow is rasterised at another sub-texel offset (a slight shimmer;
+    the smoke moves anyway).
+  - A unit under smoke is tinted by the same lookup but not tested; the water's glints are tinted
+    too, also untested.
 
 Decals (plan):
 - **Recoil projects decals through boxes** (`rts/Rendering/Env/Decals/GroundDecalHandler.cpp`,
@@ -1868,6 +1939,17 @@ Decals (plan):
   - the ground outside the footprints is byte-identical;
   - a unit standing in a footprint is not painted;
   - no decals is byte-identical to before.
+
+M7 stretch goal (after decals): volumetric smoke and dust.
+- Why: the order-independence measurement showed that particles blended as flat layers pop when
+  they cross (116 per channel), whatever the order; treating smoke as a volume, overlapping puffs
+  mixed by how much of their thickness overlaps, changes smoothly as they pass through each other.
+- First a volume version of the reference: each fragment's front and back (the back capped at the
+  scene depth), split into intervals, extinction `-ln(1 - a) / length` and emission per metre
+  summed. Check that it pops well below 116, so the measure is proven.
+- Then measure against it: a 3D volume grid in camera space (froxels, Hillaire, Frostbite 2015)
+  and a per-pixel blend that accounts for thickness.
+- Sparks, fire and flashes stay sorted, since they are small and additive.
 
 ### M0 risk spikes
 

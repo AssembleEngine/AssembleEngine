@@ -11,11 +11,17 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 frustum[6];  // normalised planes, inside >= 0
     vec4 step;        // dt, time, 1/width, 1/height
     uvec4 pool;       // capacity, spawn records, spawn total, ring head
-    uvec4 flags;      // x & 1: hills' shadows; y: find the visible depth range (moments)
+    uvec4 flags;      // x & 1: hills' shadows; y: find the visible depth range (moments); z: list the shadow casters
     vec4 map;         // cell size, 1/(corners x), 1/(corners y)
     vec4 height;      // scale, offset, water level, has water
     vec4 sun;         // xyz direction
     vec4 fog;         // rgb, density (0 = off)
+    // The units' shadow cascades (src/shadow.rs CascadeUniforms), for the
+    // particles' coloured shadows: the light's axes; per cascade centre
+    // x, y, depth origin; per cascade 1/half-size x, y, 1/depth range.
+    vec4 shadowAxes[3];
+    vec4 shadowOrigin[3];
+    vec4 shadowScale[3];
     // Per effect, five vec4s (EffectDef::words): colour at birth, colour at
     // death, (size birth, size death, life min, life max), (speed min,
     // speed max, up, spread), (gravity, drag, emissive, fade in).
@@ -37,10 +43,17 @@ struct Particle {
 #define PARTICLES_ACCESS readonly
 #endif
 layout(std430, set = 0, binding = 1) PARTICLES_ACCESS buffer State { Particle particles[]; };
+// The visible particles' sort keys, then from u.pool.x the slots of the
+// coloured shadows' casters (live, not emissive; unsorted).
 layout(std430, set = 0, binding = 2) PARTICLES_ACCESS buffer Keys { uint keys[]; };
 // The draw's indirect arguments, then this frame's range of the visible
-// particles' view depths (float bits: positive floats order as uints).
-layout(std430, set = 0, binding = 3) PARTICLES_ACCESS buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; uint depthMin; uint depthMax; } cmd;
+// particles' view depths (float bits: positive floats order as uints),
+// then (32 bytes in) the coloured shadows' indirect arguments.
+layout(std430, set = 0, binding = 3) PARTICLES_ACCESS buffer Indirect {
+    uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance;
+    uint depthMin; uint depthMax; uint pad0; uint pad1;
+    uint casterVertexCount; uint casterCount; uint casterFirstVertex; uint casterFirstInstance;
+} cmd;
 
 struct Spawn {
     vec4 posScale;

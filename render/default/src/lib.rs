@@ -5,7 +5,7 @@
 //! declares natively (`ae_render::terrain::app::native_graph`), which the
 //! host's tests check pass for pass.
 
-use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, SHADOW_MAP_NAME, ShaderStage, render_module, shadow_map_spec, vk};
+use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, shadow_map_spec, vk};
 
 #[derive(Default)]
 struct Scene;
@@ -32,6 +32,9 @@ impl RenderModule for Scene {
         let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts"].map(|name| library(&mut g, name)));
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
         let particles = env.particles.then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
+        // The particles' coloured shadows, with the map.
+        let tint = (map.is_some() && particles.is_some()).then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
+        let maps = [map, tint];
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
@@ -43,6 +46,17 @@ impl RenderModule for Scene {
             let shadows = p.library("shadows.draw");
             g.pass("shadows", PassKind::Graphics, shadows).access(instances, Role::StorageBufferRead(ShaderStage::Vertex)).depth(map, LoadOp::Clear).id();
         }
+        // The particles' coloured shadows: this frame's particles (the
+        // simulation, declared later, is their state's only writer).
+        if let (Some([state, keys, draws]), Some(tint)) = (particles, tint) {
+            let shadows = p.library("shadows.particles");
+            g.pass("particle shadows", PassKind::Graphics, shadows)
+                .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .color(tint, LoadOp::Clear)
+                .id();
+        }
         let draw = p.library("terrain.draw");
         receive(
             g.pass("terrain", PassKind::Graphics, draw)
@@ -50,7 +64,7 @@ impl RenderModule for Scene {
                 .access(indirect, Role::IndirectBuffer)
                 .color(target, LoadOp::Clear)
                 .depth(depth, LoadOp::Clear),
-            map,
+            maps,
         )
         .id();
         if let Some([instances, visible, draws, counts]) = units {
@@ -70,7 +84,7 @@ impl RenderModule for Scene {
                     .access(draws, Role::IndirectBuffer)
                     .color(target, LoadOp::Load)
                     .depth(depth, LoadOp::Load),
-                map,
+                maps,
             )
             .id();
             let count = p.library("units.count");
@@ -80,7 +94,7 @@ impl RenderModule for Scene {
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth), map).id();
+            receive(g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth), maps).id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
@@ -110,12 +124,12 @@ impl RenderModule for Scene {
     }
 }
 
-/// A receiver samples the units' shadow map when the graph has it.
-fn receive(pass: PassWriter<'_>, map: Option<ResourceRef>) -> PassWriter<'_> {
-    match map {
-        Some(map) => pass.sampled(map, ShaderStage::Fragment),
-        None => pass,
+/// A receiver samples the shadow maps the graph has.
+fn receive(mut pass: PassWriter<'_>, maps: [Option<ResourceRef>; 2]) -> PassWriter<'_> {
+    for map in maps.into_iter().flatten() {
+        pass = pass.sampled(map, ShaderStage::Fragment);
     }
+    pass
 }
 
 render_module!(Scene);

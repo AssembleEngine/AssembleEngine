@@ -1,7 +1,7 @@
 #version 460
 // One invocation per particle spawned this frame: finds its burst and
 // writes the ring slot after the head. Invocation 0 also zeroes the
-// instance count the simulation appends to.
+// instance counts the simulation appends to.
 #define PARTICLES_WRITE
 #include "particles_common.glsl"
 
@@ -18,6 +18,10 @@ void main() {
         cmd.firstInstance = 0u;
         cmd.depthMin = 0x7f7fffffu;
         cmd.depthMax = 0u;
+        cmd.casterVertexCount = 4u;
+        cmd.casterCount = 0u;
+        cmd.casterFirstVertex = 0u;
+        cmd.casterFirstInstance = 0u;
     }
     if (t >= u.pool.z) {
         return;

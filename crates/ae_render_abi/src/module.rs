@@ -81,6 +81,26 @@ pub fn shadow_map_spec() -> crate::ImageSpec {
     crate::ImageSpec::depth_2d(SHADOW_MAP_FORMAT, SHADOW_MAP_WIDTH, SHADOW_MAP_HEIGHT, 0x4 | 0x20)
 }
 
+/// The particles' coloured shadows (`shadows.color`), in a scene whose
+/// units cast shadows ([`DECLARE_SHADOWS`]) and that has particles
+/// ([`DECLARE_PARTICLES`]): laid out like `shadows.map` (the same cascades
+/// side by side) at a quarter of its resolution, smoke being soft. RGB: the
+/// optical depth of the particles between the sun and each texel, per
+/// channel (cleared to 0, summed); A: the depth toward the sun of the
+/// particle nearest the sun (kept by a max). Written by the
+/// `shadows.particles` library pass (`color:clear`; `particles.state` and
+/// `particles.keys` read in the vertex stage, `particles.indirect` as an
+/// indirect buffer). A graph that declares it also
+/// declares `shadows.map`, and every receiver samples both.
+pub const PARTICLE_SHADOW_FORMAT: u32 = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
+pub const PARTICLE_SHADOW_WIDTH: u32 = SHADOW_MAP_WIDTH / 4;
+pub const PARTICLE_SHADOW_HEIGHT: u32 = SHADOW_MAP_HEIGHT / 4;
+pub const PARTICLE_SHADOW_NAME: &str = "shadows.color";
+pub fn particle_shadow_spec() -> crate::ImageSpec {
+    // Usage: sampled (0x4) | colour attachment (0x10).
+    crate::ImageSpec::color_2d(PARTICLE_SHADOW_FORMAT, PARTICLE_SHADOW_WIDTH, PARTICLE_SHADOW_HEIGHT, 0x4 | 0x10)
+}
+
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
 pub const PROGRAM_VERSION: u32 = 1;
 const PROGRAM_HEADER_WORDS: usize = 4;

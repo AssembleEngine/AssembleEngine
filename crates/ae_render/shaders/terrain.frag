@@ -258,7 +258,9 @@ void main() {
     // shadow heights and the units' feet are measured against), not the
     // LOD mesh's height. The darker one wins (they are the same sun).
     vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
-    float diff = max(dot(n, L), 0.0) * min(sunAt(ground.xz, ground.y), unitSunAt(ground, n));
+    vec3 tint;
+    float units = unitSunAt(ground, n, tint);
+    vec3 diff = max(dot(n, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * n.y));
 

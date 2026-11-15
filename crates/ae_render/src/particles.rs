@@ -30,6 +30,13 @@
 //! bilinear where the four nearest texels' depths match the pixel's and
 //! the nearest-depth texel across an edge (no smoke bleeding onto a unit or
 //! a cliff in front of it). All of it records inside the `particles` pass.
+//!
+//! With the units' shadow map, the particles also cast coloured shadows
+//! ([`crate::shadow`]): the `shadows.particles` pass draws every live
+//! particle that is not emissive (smoke, dust) from the sun into
+//! `shadows.color`, optical depth per channel summed and the nearest
+//! particle's depth kept by a max, and the terrain, the units and the
+//! water multiply their sunlight by what it lets through.
 
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, ImageBinding, PassContext};
@@ -56,6 +63,8 @@ const SORT_BLOCKS: u32 = 4;
 const SORT_WORKGROUP: u32 = 256;
 const SORT_BINS: u64 = 256;
 const VERTICES: u32 = 6;
+/// Byte offset of the coloured shadows' draw in the indirect buffer.
+const CASTER_DRAW: u64 = 32;
 /// The puff texture's side (texels).
 const PUFF: usize = 128;
 
@@ -331,6 +340,9 @@ pub struct ParticleFrame {
     pub fog: [f32; 4],
     /// Shade smoke by the hills' shadows (when the terrain has them).
     pub shadows: bool,
+    /// The units' shadow cascades when the graph draws the particles'
+    /// coloured shadows this frame (else the pass draws nothing).
+    pub unit_shadows: Option<crate::shadow::Cascades>,
 }
 
 #[repr(C)]
@@ -346,12 +358,14 @@ struct FrameUbo {
     step: [f32; 4],
     /// capacity, spawn records, spawn total, ring head.
     pool: [u32; 4],
-    /// flags (1: hills' shadows), find the depth range (moments), 0, 0.
+    /// flags (1: hills' shadows), find the depth range (moments), list
+    /// the shadow casters, 0.
     flags: [u32; 4],
     map: [f32; 4],
     height: [f32; 4],
     sun: [f32; 4],
     fog: [f32; 4],
+    shadow: crate::shadow::CascadeUniforms,
     effects: [[[f32; 4]; 5]; MAX_EFFECTS],
 }
 
@@ -422,6 +436,11 @@ pub struct ParticleRenderer {
     /// [`ParticleBlend::Moments`]: generate, shade, resolve.
     /// [`ParticleBlend::Reference`]: store, resolve. Else empty.
     oit: Vec<vk::Pipeline>,
+    /// The coloured shadows: set 0 and the cascade as a push constant.
+    caster_layout: vk::PipelineLayout,
+    caster: vk::Pipeline,
+    /// Per slot: the frame draws the coloured shadows.
+    casting: Vec<bool>,
 }
 
 impl ParticleRenderer {
@@ -442,11 +461,12 @@ impl ParticleRenderer {
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         // Zeroed: every slot starts dead (life 0).
         let state = upload::buffer(gpu, &vec![0u8; (capacity as u64 * STATE_BYTES) as usize], storage, "particle state")?;
-        let keys = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: storage }, MemoryLocation::GpuOnly, "particle keys")?;
+        // The visible keys, then the coloured shadows' casters.
+        let keys = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 8, usage: storage }, MemoryLocation::GpuOnly, "particle keys")?;
         let keys_tmp = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: storage }, MemoryLocation::GpuOnly, "particle keys (sort)")?;
         let groups = Self::sort_groups(capacity);
         let histograms = OwnedBuffer::new(gpu, BufferDesc { size: groups as u64 * SORT_BINS * 4, usage: storage }, MemoryLocation::GpuOnly, "particle sort histograms")?;
-        let indirect = upload::buffer(gpu, pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0]), Self::indirect_usage(), "particle indirect")?;
+        let indirect = upload::buffer(gpu, pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0, 4, 0, 0, 0]), Self::indirect_usage(), "particle indirect")?;
         let ubos = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: size_of::<FrameUbo>() as u64, usage: vk::BufferUsageFlags::UNIFORM_BUFFER }, MemoryLocation::CpuToGpu, "particle frame"))
             .collect::<Result<Vec<_>>>()?;
@@ -486,7 +506,7 @@ impl ParticleRenderer {
             let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
             let set_layout = pipeline::set_layout(
                 device,
-                &[(vk::DescriptorType::UNIFORM_BUFFER, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (image, all), (image, all)],
+                &[(vk::DescriptorType::UNIFORM_BUFFER, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (image, all), (image, all), (image, all)],
             )?;
             // Set 1 of the draws: the depth, the puff; the moments' four
             // targets; the reference's counts and fragments.
@@ -501,7 +521,7 @@ impl ParticleRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 10 * n },
-                vk::DescriptorPoolSize { ty: image, descriptor_count: 17 * n },
+                vk::DescriptorPoolSize { ty: image, descriptor_count: 18 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(4 * n).pool_sizes(&sizes), None)?;
             let allocate = |layout: vk::DescriptorSetLayout| {
@@ -532,6 +552,9 @@ impl ParticleRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(image).image_info(&shadow));
                 let height = [vk::DescriptorImageInfo { sampler: height_sampler, image_view: height_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(image).image_info(&height));
+                // The puff again, for the coloured shadows (bound with set 0
+                // alone: set 1 is rewritten when the draw records).
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(9).descriptor_type(image).image_info(&shape));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, depth_layout, pipeline_layout, desc_pool, sets, depth_sets, half_sets, composite_layout, composite_pipeline_layout, composite_sets)
@@ -575,6 +598,20 @@ impl ParticleRenderer {
                 fullscreen(spirv!("particles_reference_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle reference resolve pipeline")?,
             ],
         };
+        let caster_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
+        let caster = pipeline::graphics_pipeline(
+            device,
+            &GraphicsDesc {
+                vertex: spirv!("particles_shadow.vert"),
+                fragment: spirv!("particles_shadow.frag"),
+                layout: caster_layout,
+                color_formats: &[crate::shadow::color_format()],
+                depth: None,
+                topology: vk::PrimitiveTopology::TRIANGLE_STRIP,
+                blend: Blend::AdditiveMaxAlpha,
+            },
+        )
+        .context("particle shadow pipeline")?;
         Ok(Self {
             capacity,
             info: *terrain.info(),
@@ -618,6 +655,9 @@ impl ParticleRenderer {
             composite,
             blend: setup.blend,
             oit,
+            caster_layout,
+            caster,
+            casting: vec![false; frames_in_flight],
         })
     }
 
@@ -761,13 +801,15 @@ impl ParticleRenderer {
             frustum: frustum_planes(frame.view_proj),
             step: [dt, self.sim_time, 1.0 / frame.extent.width.max(1) as f32, 1.0 / frame.extent.height.max(1) as f32],
             pool: [self.capacity, records.len() as u32, total, head],
-            flags: [(frame.shadows && self.shadows) as u32, (self.blend == ParticleBlend::Moments) as u32, 0, 0],
+            flags: [(frame.shadows && self.shadows) as u32, (self.blend == ParticleBlend::Moments) as u32, frame.unit_shadows.is_some() as u32, 0],
             map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, 0.0],
             height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
             sun: crate::terrain::sun::direction().extend(0.0).to_array(),
             fog: frame.fog,
+            shadow: crate::shadow::Cascades::uniforms(frame.unit_shadows.as_ref()),
             effects,
         };
+        self.casting[slot] = frame.unit_shadows.is_some();
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
         }
@@ -819,6 +861,32 @@ impl ParticleRenderer {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.scatter);
                 device.cmd_dispatch(cmd, groups, 1, 1);
                 barrier();
+            }
+        }
+    }
+
+    /// Every live particle that is not emissive into each cascade of the
+    /// coloured shadows (nothing when idle or when the frame draws none:
+    /// the target stays cleared), from the casters the simulation listed.
+    /// Records inside a graphics pass that reads [`Self::state`] and
+    /// [`Self::keys`] in the vertex stage, [`Self::indirect`] as an
+    /// indirect buffer, and has `shadows.color` as its one colour
+    /// attachment, cleared to 0.
+    pub fn record_shadows(&self, ctx: &PassContext<'_>) {
+        if !self.active[ctx.slot] || !self.casting[ctx.slot] {
+            return;
+        }
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let side = ae_render_abi::module::PARTICLE_SHADOW_HEIGHT;
+        unsafe {
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.caster);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.caster_layout, 0, &[self.sets[ctx.slot]], &[]);
+            for k in 0..crate::shadow::CASCADES as u32 {
+                let viewport = vk::Viewport { x: (k * side) as f32, y: 0.0, width: side as f32, height: side as f32, min_depth: 0.0, max_depth: 1.0 };
+                device.cmd_set_viewport(cmd, 0, &[viewport]);
+                device.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: (k * side) as i32, y: 0 }, extent: vk::Extent2D { width: side, height: side } }]);
+                device.cmd_push_constants(cmd, self.caster_layout, vk::ShaderStageFlags::VERTEX, 0, &k.to_le_bytes());
+                device.cmd_draw_indirect(cmd, self.indirect.buffer, CASTER_DRAW, 1, 0);
             }
         }
     }
@@ -993,13 +1061,14 @@ impl ParticleRenderer {
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
-            for &p in [self.spawn, self.sim, self.histogram, self.scatter, self.draw, self.depth_down, self.composite].iter().chain(&self.oit) {
+            for &p in [self.spawn, self.sim, self.histogram, self.scatter, self.draw, self.depth_down, self.composite, self.caster].iter().chain(&self.oit) {
                 device.destroy_pipeline(p, None);
             }
             device.destroy_sampler(self.depth_sampler, None);
             device.destroy_sampler(self.puff_sampler, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_pipeline_layout(self.composite_pipeline_layout, None);
+            device.destroy_pipeline_layout(self.caster_layout, None);
             device.destroy_descriptor_pool(self.desc_pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_descriptor_set_layout(self.depth_layout, None);

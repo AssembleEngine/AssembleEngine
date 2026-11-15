@@ -53,6 +53,8 @@ pub enum Blend {
     Premultiplied,
     /// `src + dst` (colour and alpha): sums in any order.
     Additive,
+    /// Colour `src + dst`, alpha `max(src, dst)`: both in any order.
+    AdditiveMaxAlpha,
 }
 
 pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Result<vk::Pipeline> {
@@ -81,12 +83,12 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
     let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let attachment = vec![vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(desc.blend != Blend::Off)
-        .src_color_blend_factor(if matches!(desc.blend, Blend::Premultiplied | Blend::Additive) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
-        .dst_color_blend_factor(if desc.blend == Blend::Additive { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
+        .src_color_blend_factor(if matches!(desc.blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
+        .dst_color_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
         .color_blend_op(vk::BlendOp::ADD)
         .src_alpha_blend_factor(vk::BlendFactor::ONE)
-        .dst_alpha_blend_factor(if desc.blend == Blend::Additive { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-        .alpha_blend_op(vk::BlendOp::ADD)
+        .dst_alpha_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
+        .alpha_blend_op(if desc.blend == Blend::AdditiveMaxAlpha { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
         .color_write_mask(vk::ColorComponentFlags::RGBA);
         desc.color_formats.len()];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);

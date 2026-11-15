@@ -29,7 +29,8 @@
 //!
 //! * **Resources** are declared in file order. `library`: an engine library
 //!   buffer by its name (`External`, size 0; the host sizes it), or the
-//!   units' shadow map `shadows.map` (its fixed spec). `image`:
+//!   units' shadow map `shadows.map` or the particles' coloured shadows
+//!   `shadows.color` (their fixed specs). `image`:
 //!   the target's size times `scale` (default 1), `format` a Vulkan format
 //!   name or `target` (the target's colour format), `usage` flag names,
 //!   `class` `transient` (default) or `persistent`. `output`: the image the
@@ -57,8 +58,9 @@
 //!   can sample `shadows.map` only where the map exists.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
 //!   `readback`, `present`, `water`, `no_water`, `shadows` or `no_shadows`
-//!   (the units cast shadows), `particles` or `no_particles`, to exist only
-//!   in such scenes.
+//!   (the units cast shadows), `particles` or `no_particles`, or
+//!   `particle_shadows` (both shadows and particles), to exist only in
+//!   such scenes.
 
 use crate::module::{Declared, ModuleFrame};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
@@ -126,6 +128,9 @@ enum When {
     NoShadows,
     Particles,
     NoParticles,
+    /// The particles cast coloured shadows: units that cast shadows and
+    /// particles.
+    ParticleShadows,
 }
 
 impl When {
@@ -143,6 +148,7 @@ impl When {
             Some(When::NoShadows) => !shadows,
             Some(When::Particles) => flags & DECLARE_PARTICLES != 0,
             Some(When::NoParticles) => flags & DECLARE_PARTICLES == 0,
+            Some(When::ParticleShadows) => shadows && flags & DECLARE_PARTICLES != 0,
         }
     }
 }
@@ -392,6 +398,8 @@ impl GraphFile {
                     ensure!(r.format.is_none() && r.usage.is_empty() && r.class.is_none() && r.scale.is_none(), "{}: a library resource takes no format, usage, class or scale", at());
                     if r.name == ae_render_abi::module::SHADOW_MAP_NAME {
                         g.image(&r.name, ae_render_abi::module::shadow_map_spec(), Class::External)
+                    } else if r.name == ae_render_abi::module::PARTICLE_SHADOW_NAME {
+                        g.image(&r.name, ae_render_abi::module::particle_shadow_spec(), Class::External)
                     } else {
                         g.buffer(&r.name, 0, 0, Class::External)
                     }

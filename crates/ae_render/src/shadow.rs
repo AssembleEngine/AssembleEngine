@@ -16,6 +16,18 @@
 //! as the main view's reverse-Z), so a receiver is lit where its depth is
 //! at least the stored one. Receivers pick the first cascade that holds
 //! them; past the last the shadows fade out.
+//!
+//! The particles' coloured shadows (`shadows.color`, written by
+//! `shadows.particles`, [`crate::particles`]) share the cascades at a
+//! quarter of the resolution (384 texels a side: rasterising big smoke
+//! quads is the pass's cost, and smoke shadows are soft). Per texel: the
+//! particles' optical depth per channel (summed, so in any order) and, in
+//! alpha, the depth toward the sun of the sunward surface of the particle
+//! nearest the sun (kept by a max). A receiver farther from the sun than
+//! that surface multiplies its sunlight by `exp(-optical depth)`; one
+//! nearer the sun (a unit above the smoke) is not tinted. Recoil (after
+//! WickedEngine) multiplies a colour cleared to white instead, which is
+//! the same product, but keeps no depth.
 
 use crate::device::GpuDevice;
 use crate::executor::ImageBinding;
@@ -39,16 +51,25 @@ pub const SLICES: [f32; CASCADES] = [0.95, 1.55, 2.8];
 pub const CASTER_REACH: f32 = 400.0;
 
 const IDENTITY: u64 = (0xAE7 << 40) | (3 << 32);
+const IDENTITY_COLOR: u64 = (0xAE7 << 40) | (3 << 32) | 1;
 
 pub fn format() -> vk::Format {
     vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32)
 }
 
-/// The shadow map image (or a 1x1 stand-in, so receivers always have one
-/// to bind) and the comparison sampler receivers read it with.
+/// The particles' coloured shadows' format.
+pub fn color_format() -> vk::Format {
+    vk::Format::from_raw(m::PARTICLE_SHADOW_FORMAT as i32)
+}
+
+/// The shadow map image and the particles' coloured shadows (or 1x1
+/// stand-ins, so receivers always have them to bind), the comparison
+/// sampler receivers read the map with and the linear one for the colour.
 pub struct ShadowMap {
     image: OwnedImage,
     sampler: vk::Sampler,
+    color: OwnedImage,
+    color_sampler: vk::Sampler,
     real: bool,
 }
 
@@ -60,20 +81,21 @@ impl ShadowMap {
         let (w, h) = if real { (m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT) } else { (1, 1) };
         let desc = ImageDesc::depth_2d(format(), w, h, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
         let image = OwnedImage::new(gpu, desc, "unit shadow map")?;
-        let range = image.range();
-        let handle = image.image;
-        upload::one_shot(gpu, |cmd| {
-            let barrier = vk::ImageMemoryBarrier2::default()
+        let (cw, ch) = if real { (m::PARTICLE_SHADOW_WIDTH, m::PARTICLE_SHADOW_HEIGHT) } else { (1, 1) };
+        let color_desc = ImageDesc::color_2d(color_format(), cw, ch, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+        let color = OwnedImage::new(gpu, color_desc, "particle shadows")?;
+        let to_sampled = |handle, range| {
+            vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::NONE)
                 .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image(handle)
-                .subresource_range(range);
-            let barriers = [barrier];
-            unsafe { gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&barriers)) };
-        })?;
+                .subresource_range(range)
+        };
+        let barriers = [to_sampled(image.image, image.range()), to_sampled(color.image, color.range())];
+        upload::one_shot(gpu, |cmd| unsafe { gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&barriers)) })?;
         let info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -85,7 +107,8 @@ impl ShadowMap {
             .compare_op(vk::CompareOp::GREATER_OR_EQUAL)
             .max_lod(0.0);
         let sampler = unsafe { gpu.device.create_sampler(&info, None) }?;
-        Ok(Self { image, sampler, real })
+        let color_sampler = unsafe { gpu.device.create_sampler(&info.compare_enable(false), None) }?;
+        Ok(Self { image, sampler, color, color_sampler, real })
     }
 
     /// Whether this is the full map (else the 1x1 stand-in).
@@ -98,15 +121,34 @@ impl ShadowMap {
         (self.image.view, self.sampler)
     }
 
+    /// The coloured shadows' view and linear sampler (contents meaningful
+    /// only in a frame whose cascades are [`Cascades::tinted`]).
+    pub fn color_texture(&self) -> (vk::ImageView, vk::Sampler) {
+        (self.color.view, self.color_sampler)
+    }
+
     /// The `shadows.map` library image.
     pub fn binding(&self) -> ImageBinding {
-        let d = &self.image.desc;
-        ImageBinding { image: self.image.image, view: self.image.view, format: d.format, extent: vk::Extent2D { width: d.width, height: d.height }, range: self.image.range(), identity: IDENTITY }
+        Self::bind(&self.image, IDENTITY)
+    }
+
+    /// The `shadows.color` library image.
+    pub fn color_binding(&self) -> ImageBinding {
+        Self::bind(&self.color, IDENTITY_COLOR)
+    }
+
+    fn bind(image: &OwnedImage, identity: u64) -> ImageBinding {
+        let d = &image.desc;
+        ImageBinding { image: image.image, view: image.view, format: d.format, extent: vk::Extent2D { width: d.width, height: d.height }, range: image.range(), identity }
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
-        unsafe { gpu.device.destroy_sampler(self.sampler, None) };
+        unsafe {
+            gpu.device.destroy_sampler(self.sampler, None);
+            gpu.device.destroy_sampler(self.color_sampler, None);
+        }
         self.image.destroy(gpu);
+        self.color.destroy(gpu);
     }
 }
 
@@ -126,13 +168,17 @@ pub struct Cascades {
     pub origin: [Vec3; CASCADES],
     /// Per cascade: 1 / half-size (x, y), 1 / depth range.
     pub scale: [Vec3; CASCADES],
+    /// The particles' coloured shadows are drawn this frame (receivers
+    /// read them).
+    pub tinted: bool,
 }
 
 /// The cascades as the shaders' uniforms (`unit_shadows.glsl`), `std140`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CascadeUniforms {
-    /// Right, up, toward the sun (`w` 0).
+    /// Right, up, toward the sun; `axes[0].w` 1 when the particles'
+    /// coloured shadows are drawn ([`Cascades::tinted`]).
     axes: [[f32; 4]; 3],
     /// Per cascade: centre x, y, depth origin; `w` the world texel size.
     origin: [[f32; 4]; CASCADES],
@@ -145,7 +191,7 @@ impl Cascades {
     pub fn uniforms(cascades: Option<&Cascades>) -> CascadeUniforms {
         let Some(c) = cascades else { return CascadeUniforms::default() };
         CascadeUniforms {
-            axes: c.axes.map(|a| a.extend(0.0).to_array()),
+            axes: std::array::from_fn(|k| c.axes[k].extend(if k == 0 && c.tinted { 1.0 } else { 0.0 }).to_array()),
             origin: std::array::from_fn(|k| c.origin[k].extend(c.texel[k]).to_array()),
             scale: std::array::from_fn(|k| c.scale[k].extend(1.0).to_array()),
         }
@@ -169,7 +215,7 @@ pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun:
     let sun = sun.normalize();
     let (right, up) = light_basis(sun);
     let diagonal = tan_half.0 * tan_half.0 + tan_half.1 * tan_half.1;
-    let mut out = Cascades { matrices: [Mat4::IDENTITY; CASCADES], texel: [0.0; CASCADES], axes: [right, up, sun], origin: [Vec3::ZERO; CASCADES], scale: [Vec3::ZERO; CASCADES] };
+    let mut out = Cascades { matrices: [Mat4::IDENTITY; CASCADES], texel: [0.0; CASCADES], axes: [right, up, sun], origin: [Vec3::ZERO; CASCADES], scale: [Vec3::ZERO; CASCADES], tinted: false };
     let mut near = 0.0f32;
     for (k, slice) in SLICES.iter().enumerate() {
         let far = slice * focus;

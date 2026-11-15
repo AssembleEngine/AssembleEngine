@@ -415,6 +415,7 @@ impl TerrainRenderer {
                 b(13, vk::DescriptorType::STORAGE_BUFFER),
                 b(14, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(15, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(16, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
@@ -422,7 +423,7 @@ impl TerrainRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 8 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 9 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -465,6 +466,9 @@ impl TerrainRenderer {
                 let (view, sampler) = unit_shadow_map.texture();
                 let units = image(sampler, view);
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(15).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&units));
+                let (view, sampler) = unit_shadow_map.color_texture();
+                let tint = image(sampler, view);
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(16).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&tint));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)

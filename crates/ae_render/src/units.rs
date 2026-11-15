@@ -218,6 +218,7 @@ impl UnitRenderer {
         let (height_view, height_sampler) = terrain.height_texture();
         let (shadow_view, shadow_sampler) = terrain.shadow_texture();
         let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
+        let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
@@ -229,6 +230,7 @@ impl UnitRenderer {
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
+                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                 ],
             )?;
             // The caster's push constant: the cascade it draws.
@@ -237,7 +239,7 @@ impl UnitRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 3 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 4 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -259,6 +261,8 @@ impl UnitRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
                 let units = [vk::DescriptorImageInfo { sampler: unit_shadow_sampler, image_view: unit_shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&units));
+                let tint = [vk::DescriptorImageInfo { sampler: tint_sampler, image_view: tint_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&tint));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)

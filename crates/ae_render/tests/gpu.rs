@@ -2036,6 +2036,185 @@ fn units_cast_shadows() {
     assert_clean(&gpu);
 }
 
+/// The particles' coloured shadows (`shadows.particles` into
+/// `shadows.color`), on flat ground with one unit (the units' map, and so
+/// the colour target, exist only with units), still test effects:
+/// * Orange smoke 25 m up tints the ground in its shadow: green and blue
+///   drop well below red there (the sky light, not tinted, stays).
+/// * The ground away from the shadow and from the puff on screen is
+///   byte-identical to no particles.
+/// * A puff buried just under the unit and the ground, all of them nearer
+///   the sun than it although within its disc as the sun sees it, leaves
+///   the frame byte-identical to no particles (the depth in alpha).
+/// * The same puff off screen still tints its shadow in view (the casters
+///   are every live particle, not the camera's list).
+/// * The same puff emissive (fire, sparks) casts nothing.
+/// * Shadows switched off with smoke draw as no shadows at all.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn particles_cast_coloured_shadows() {
+    use ae_render::particles::{Burst, ParticleBlend, ParticleFeed, ParticlesSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::terrain::sun;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 1.3, ..camera };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let eye = camera.eye(|_| ground);
+    let pixel = |p: Vec3| -> Option<usize> {
+        let clip = view_proj * p.extend(1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+    let sun_dir = sun::direction();
+    // Distance from sphere centre `c` to the ray from `o` along `d`
+    // (infinite when the centre is behind it).
+    let ray_gap = |o: Vec3, d: Vec3, c: Vec3| {
+        let d = d.normalize();
+        let t = (c - o).dot(d);
+        if t <= 0.0 { f32::INFINITY } else { (c - o - d * t).length() }
+    };
+
+    // The unit at the target; the smoke's shadow centred 30 m from it.
+    let unit = (128.0f32, 128.0f32, 1.0f32, 0.0f32, 6.0f32);
+    let radius = 10.0f32;
+    let shadow_at = Vec3::new(150.0, ground, 150.0);
+    let smoke_at = shadow_at + sun_dir * (25.0 / sun_dir.y);
+    // Buried under the unit: its sunward surface 0.5 m under the ground.
+    let buried_at = Vec3::new(unit.0, ground - radius - 0.5, unit.1);
+    let effects = vec![still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, false), still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, true)];
+    let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: 3 };
+
+    let render = |bursts: Option<&[Burst]>, shadows: bool, view_shadows: bool, name: &str| -> Vec<u8> {
+        let mut columns: [Vec<u32>; 8] = Default::default();
+        let (x, z, hx, hz, r) = unit;
+        for (k, word) in [x, z, x, z, hx, hz, r].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+            columns[k].push(word);
+        }
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        if shadows {
+            app = app.with_shadows();
+        }
+        if let Some(bursts) = bursts {
+            let feed = Arc::new(ParticleFeed::default());
+            feed.emit_all(bursts);
+            app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects: effects.clone(), downscale: 2, blend: ParticleBlend::Sorted });
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+            view.shadows = view_shadows;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        run.frames(&mut app, 8).unwrap();
+        run.wait().unwrap();
+        run.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("particle-shadows-{name}.ppm")), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let plain = render(None, true, true, "plain");
+    let smoke = render(Some(&[one(smoke_at, 0)]), true, true, "smoke");
+    let sparks = render(Some(&[one(smoke_at, 1)]), true, true, "emissive");
+    let buried = render(Some(&[one(buried_at, 0)]), true, true, "buried");
+    // Off screen, its shadow on screen: the first place up-sun of the
+    // target where no point within 1.6 radii of its centre is in view
+    // (clear of the simulation's frustum test, which keeps a sphere
+    // touching the view).
+    let up_sun = Vec3::new(sun_dir.x, 0.0, sun_dir.z).normalize();
+    let sphere: Vec<Vec3> = (0..27).filter(|&k| k != 13).map(|k| Vec3::new((k % 3) as f32 - 1.0, (k / 3 % 3) as f32 - 1.0, (k / 9) as f32 - 1.0).normalize() * 1.6 * radius).collect();
+    let unseen_at = (0..400)
+        .map(|t| Vec3::new(camera.target.x, ground, camera.target.y) + up_sun * t as f32 + sun_dir * (25.0 / sun_dir.y))
+        .find(|&c| sphere.iter().all(|&d| pixel(c + d).is_none()))
+        .expect("an off-screen place");
+    let unseen = render(Some(&[one(unseen_at, 0)]), true, true, "unseen");
+    let off = render(Some(&[one(smoke_at, 0)]), true, false, "off");
+    let never = render(Some(&[one(smoke_at, 0)]), false, true, "never");
+
+    // The ground on a 0.5 m grid, away from the unit and from the puff as
+    // the camera sees it: deep in the smoke's shadow (the sun ray through
+    // its inner 40 %), or clear of it (outside 1.6 radii).
+    let (mut deep, mut clear, mut under, mut deep_unseen) = (Vec::new(), Vec::new(), 0, Vec::new());
+    let light = |p: Vec3| p - sun_dir * p.dot(sun_dir);
+    for iz in 0..=400 {
+        for ix in 0..=400 {
+            let p = Vec3::new(28.0 + ix as f32 * 0.5, ground + 0.01, 28.0 + iz as f32 * 0.5);
+            let Some(i) = pixel(p) else { continue };
+            if (Vec2::new(p.x, p.z) - Vec2::new(unit.0, unit.1)).length() < 2.0 * unit.4 {
+                continue;
+            }
+            if ray_gap(p, sun_dir, unseen_at) < 0.4 * radius {
+                deep_unseen.push(i);
+            }
+            // Within the buried puff's disc as the sun sees it.
+            if (light(p) - light(buried_at)).length() < 0.9 * radius {
+                under += 1;
+            }
+            if ray_gap(eye, p - eye, smoke_at) < 1.6 * radius {
+                continue;
+            }
+            let gap = ray_gap(p, sun_dir, smoke_at);
+            if gap < 0.4 * radius {
+                deep.push(i);
+            } else if gap > 1.6 * radius {
+                clear.push(i);
+            }
+        }
+    }
+    println!(
+        "{} ground points deep in the smoke's shadow, {} clear of it, {under} within the buried puff's disc, {} deep in the off-screen smoke's shadow",
+        deep.len(),
+        clear.len(),
+        deep_unseen.len()
+    );
+    assert!(deep.len() > 200 && clear.len() > 20000 && under > 300 && deep_unseen.len() > 100, "{} deep, {} clear, {under} under, {} unseen", deep.len(), clear.len(), deep_unseen.len());
+
+    let ratio = |on: &[u8], i: usize, c: usize| on[i + c] as f32 / plain[i + c].max(1) as f32;
+    // Orange smoke: red passes, blue least (green between); in sRGB bytes,
+    // with the sky's light untinted.
+    let tinted = deep.iter().filter(|&&i| ratio(&smoke, i, 2) < 0.9 * ratio(&smoke, i, 0) && ratio(&smoke, i, 2) < ratio(&smoke, i, 1) && ratio(&smoke, i, 1) < ratio(&smoke, i, 0)).count();
+    let mean = |c: usize| deep.iter().map(|&i| ratio(&smoke, i, c)).sum::<f32>() / deep.len() as f32;
+    println!("smoke's shadow: mean ratio to no particles r {:.2} g {:.2} b {:.2}; {tinted} of {} tinted", mean(0), mean(1), mean(2), deep.len());
+    assert!(tinted * 10 >= deep.len() * 9, "the smoke's shadow is not tinted: {tinted} of {}", deep.len());
+    assert!(mean(0) > 0.95 && mean(2) < 0.85, "the smoke lets red through and stops blue: r {:.2} b {:.2}", mean(0), mean(2));
+    let bluer = deep_unseen.iter().filter(|&&i| ratio(&unseen, i, 2) < 0.9 * ratio(&unseen, i, 0)).count();
+    println!("off-screen smoke: {bluer} of {} tinted", deep_unseen.len());
+    assert!(bluer * 10 >= deep_unseen.len() * 9, "smoke off screen does not shade the view: {bluer} of {}", deep_unseen.len());
+    let changed = |frame: &[u8], points: &[usize]| points.iter().filter(|&&i| frame[i..i + 3] != plain[i..i + 3]).count();
+    assert_eq!(changed(&smoke, &clear), 0, "the ground clear of the smoke's shadow changes");
+    assert_eq!(changed(&sparks, &deep) + changed(&sparks, &clear), 0, "an emissive puff casts a shadow");
+    let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+    assert_eq!(differing(&plain, &buried), 0, "a puff under the ground tints what is above it");
+    assert_eq!(differing(&off, &never), 0, "shadows switched off draw as no shadows");
+    assert_clean(&gpu);
+}
+
 /// Particles (`particles.sim` + `particles.draw`) on flat ground, with
 /// static test effects (no motion, long lives):
 /// * A blue puff in front of a red one on the same line of sight shows
