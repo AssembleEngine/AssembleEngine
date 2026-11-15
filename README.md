@@ -63,8 +63,9 @@ terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M4 progress".
 M7 (render effects) has started with water: on maps with water, `ae-client` draws a water surface
 over the terrain and units (a `water.draw` library pass that render modules can wire too): analytic
 waves that fade into roughness with distance, sky reflection by fresnel, sun glints, shore foam, fog of
-war, and caustics on the ground under it; O toggles it, `--no-water` leaves it out. Shadows, particles
-and decals are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
+war, and caustics on the ground under it; O toggles it, `--no-water` leaves it out. The hills cast the
+sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
+toggles, `--no-shadows`). The units' own shadows, particles and decals are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
@@ -159,6 +160,7 @@ cargo run --release -p ae-client -- --units 0                            # terra
 cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (N: vignette)
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
 cargo run --release -p ae-client -- --units 0 --camera 10700,12800,350,2.5,0.45   # the lake by the causeway: waves, glints, foam (O: water)
+cargo run --release -p ae-client -- --map generated --units 0          # mountains and mesas casting the sun's shadows (H: shadows)
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged

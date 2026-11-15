@@ -6,7 +6,9 @@
 //! (see [`crate::units`]).
 //!
 //! With water ([`TerrainApp::with_water`], on a map with a water level), a
-//! water surface pass follows, blending over the terrain and units.
+//! water surface pass follows, blending over the terrain and units. With
+//! shadows ([`TerrainApp::with_shadows`]) the hills shade the terrain, the
+//! units and the water.
 //!
 //! The graph is the engine's own ([`native_graph`]) or a render module's
 //! ([`TerrainApp::with_module`]): the module declares resources and passes
@@ -24,6 +26,7 @@
 
 use super::camera::Camera;
 use super::heightmap::{Heightmap, Pyramid};
+use super::sun;
 use super::tileset::Tileset;
 use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, VisionGrid, Wireframe};
 use crate::device::GpuDevice;
@@ -112,6 +115,8 @@ pub struct TerrainView {
     /// clock since the app was made when presenting, the frame index / 60
     /// when reading back (deterministic captures and tests).
     pub time: Option<f32>,
+    /// Shade by the hills' shadows, if the app has them ([`TerrainApp::with_shadows`]).
+    pub shadows: bool,
 }
 
 /// One observer's vision for the terrain: line of sight now and cells ever
@@ -256,6 +261,8 @@ pub struct TerrainApp {
     water: bool,
     /// The water is drawn this frame (`view.water`).
     water_on: bool,
+    /// Shadows (opt-in): the hills' ([`super::sun`]).
+    shadows: bool,
     /// Frames prepared, and when the app was made (animation time).
     frames: u64,
     started: Instant,
@@ -263,7 +270,7 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -292,6 +299,7 @@ impl TerrainApp {
             wireframe: Wireframe::Off,
             water: false,
             water_on: false,
+            shadows: false,
             frames: 0,
             started: Instant::now(),
         }
@@ -301,6 +309,14 @@ impl TerrainApp {
     /// with a water level; on a map without one this does nothing.
     pub fn with_water(mut self) -> Self {
         self.water = self.source.info.water_level.is_some();
+        self
+    }
+
+    /// Shade by the sun's shadows: the hills' over the terrain, the units
+    /// and the water (a heightfield computed when the renderer is made and
+    /// kept up to date by terrain edits).
+    pub fn with_shadows(mut self) -> Self {
+        self.shadows = true;
         self
     }
 
@@ -430,6 +446,7 @@ impl TerrainApp {
             vision: view.vision && self.vision.is_some(),
             water: view.water && self.water,
             time,
+            shadows: view.shadows && self.shadows,
         }
     }
 }
@@ -474,7 +491,9 @@ impl RenderApp for TerrainApp {
         }
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), color, DEPTH_FORMAT, frames_in_flight).context("terrain renderer")?;
+        let shadows = self.shadows.then(|| sun::shadow_heights(&s.heightmap, s.info.cell_size, s.info.height_scale, s.info.height_offset, sun::direction()));
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), color, DEPTH_FORMAT, frames_in_flight)
+            .context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }
@@ -574,6 +593,7 @@ impl RenderApp for TerrainApp {
                 cam_pos: params.cam_pos,
                 proj_scale: view.camera.proj_scale(self.extent.height as f32),
                 fog: fog(&self.source.info, params.fog),
+                shadows: params.shadows,
             };
             units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
         }

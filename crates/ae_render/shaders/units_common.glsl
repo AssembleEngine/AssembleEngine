@@ -23,7 +23,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 height;      // scale, offset, water level, has water
     vec4 sun;         // xyz direction; w = minimum unit size in pixels
     vec4 fog;         // rgb, density (0 = off)
-    uvec4 counts;     // instances, capacity
+    uvec4 counts;     // instances, capacity, flags (1: hills' shadows)
     vec4 classes[MAX_CLASSES]; // rgb; w = 1: floats on the water surface
 } u;
 
@@ -37,6 +37,18 @@ layout(std430, set = 0, binding = 2) readonly buffer Visible { uint visible[]; }
 #endif
 
 layout(set = 0, binding = 4) uniform sampler2D heightTex;
+// Shadow heights (src/terrain/sun.rs), world units; used when counts.z & 1.
+layout(set = 0, binding = 5) uniform sampler2D sunShadowTex;
+
+// Sunlight reaching world point p past the hills (terrain_shading.glsl's
+// sunAt with the units' uniforms).
+float sunAt(vec3 p) {
+    if ((u.counts.z & 1u) == 0u) {
+        return 1.0;
+    }
+    float s = textureLod(sunShadowTex, (p.xz / u.map.x + 0.5) * u.map.yz, 0.0).r;
+    return 1.0 - smoothstep(0.0, max(1.0, 0.8 * u.map.x), s - p.y);
+}
 
 float attrf(uint a, uint i) { return uintBitsToFloat(inst.words[a * u.counts.y + i]); }
 uint attru(uint a, uint i) { return inst.words[a * u.counts.y + i]; }

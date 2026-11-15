@@ -133,6 +133,8 @@ pub struct FrameParams {
     pub water: bool,
     /// Animation time in seconds (waves, foam, caustics).
     pub time: f32,
+    /// Shade by the hills' shadows (when the renderer has them).
+    pub shadows: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -214,6 +216,9 @@ pub struct TerrainRenderer {
     tile_normal: OwnedImage,
     tile_ubo: OwnedBuffer,
     has_tileset: bool,
+    /// World shadow height per corner ([`super::sun`]); 1x1 without shadows.
+    shadow_img: OwnedImage,
+    has_shadows: bool,
     /// Per slot: line-of-sight and explored bit planes (host-visible;
     /// 16 bytes without a vision grid).
     vision_bufs: Vec<OwnedBuffer>,
@@ -234,11 +239,13 @@ pub struct TerrainUpdate {
     pub pyramid: Vec<upload::Region>,
     pub errors: Vec<upload::Region>,
     pub materials: Vec<upload::Region>,
+    /// Shadow heights ([`super::sun`]).
+    pub shadows: Vec<upload::Region>,
 }
 
 impl TerrainUpdate {
     pub fn bytes(&self) -> usize {
-        [&self.heights, &self.pyramid, &self.errors, &self.materials].iter().flat_map(|r| r.iter()).map(|r| r.bytes.len()).sum()
+        [&self.heights, &self.pyramid, &self.errors, &self.materials, &self.shadows].iter().flat_map(|r| r.iter()).map(|r| r.bytes.len()).sum()
     }
 }
 
@@ -261,6 +268,7 @@ impl TerrainRenderer {
         materials: Option<&[u8]>,
         tileset: Option<&Tileset>,
         vision: Option<VisionGrid>,
+        shadows: Option<&[f32]>,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -321,6 +329,13 @@ impl TerrainRenderer {
         let material_img = match materials {
             Some(m) => upload::image(gpu, vk::Format::R8_UINT, info.cells.0, info.cells.1, &[m], "terrain materials")?,
             None => upload::image(gpu, vk::Format::R8_UINT, 1, 1, &[&[0]], "terrain materials")?,
+        };
+        let shadow_img = match shadows {
+            Some(s) => {
+                anyhow::ensure!(s.len() == heightmap.data.len(), "one shadow height per corner");
+                upload::image(gpu, vk::Format::R32_SFLOAT, heightmap.width as u32, heightmap.height as u32, &[slice_bytes(s)], "terrain shadow heights")?
+            }
+            None => upload::image(gpu, vk::Format::R32_SFLOAT, 1, 1, &[&[0; 4]], "terrain shadow heights")?,
         };
         let array = vk::ImageViewType::TYPE_2D_ARRAY;
         let (tile_albedo, tile_normal, tile_table) = match tileset {
@@ -388,6 +403,7 @@ impl TerrainRenderer {
                 b(11, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(12, vk::DescriptorType::UNIFORM_BUFFER),
                 b(13, vk::DescriptorType::STORAGE_BUFFER),
+                b(14, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
@@ -395,7 +411,7 @@ impl TerrainRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 6 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 7 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -412,6 +428,7 @@ impl TerrainRenderer {
                     image(samplers[2], tile_albedo.view),
                     image(samplers[2], tile_normal.view),
                 ];
+                let shadow = image(samplers[1], shadow_img.view);
                 let mut writes: Vec<vk::WriteDescriptorSet> = infos
                     .iter()
                     .enumerate()
@@ -433,6 +450,7 @@ impl TerrainRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(12).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&table));
                 let planes = [vk::DescriptorBufferInfo { buffer: vision_bufs[slot].buffer, offset: 0, range: vk::WHOLE_SIZE }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&planes));
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(14).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -499,6 +517,8 @@ impl TerrainRenderer {
             tile_normal,
             tile_ubo,
             has_tileset: tileset.is_some(),
+            shadow_img,
+            has_shadows: shadows.is_some(),
             vision_bufs,
             vision,
             samplers,
@@ -509,7 +529,11 @@ impl TerrainRenderer {
     /// frame in flight samples them); waits for the copy.
     pub fn apply(&mut self, gpu: &GpuDevice, update: &TerrainUpdate) -> Result<()> {
         let materials: &[upload::Region] = if self.info.has_materials { &update.materials } else { &[] };
-        upload::update_images(gpu, &[(&self.height_img, &update.heights), (&self.pyramid_img, &update.pyramid), (&self.error_img, &update.errors), (&self.material_img, materials)])
+        let shadows: &[upload::Region] = if self.has_shadows { &update.shadows } else { &[] };
+        upload::update_images(
+            gpu,
+            &[(&self.height_img, &update.heights), (&self.pyramid_img, &update.pyramid), (&self.error_img, &update.errors), (&self.material_img, materials), (&self.shadow_img, shadows)],
+        )
     }
 
     /// The height texture (one corner per texel, normalised: world height =
@@ -518,6 +542,18 @@ impl TerrainRenderer {
     /// renderer.
     pub fn height_texture(&self) -> (vk::ImageView, vk::Sampler) {
         (self.height_img.view, self.samplers[1])
+    }
+
+    /// The shadow height texture ([`super::sun`]; world heights, one corner
+    /// per texel like [`Self::height_texture`]) with its bilinear sampler;
+    /// 1x1 when the renderer has no shadows. Lives as long as the renderer.
+    pub fn shadow_texture(&self) -> (vk::ImageView, vk::Sampler) {
+        (self.shadow_img.view, self.samplers[1])
+    }
+
+    /// Whether it was made with the hills' shadows.
+    pub fn has_shadows(&self) -> bool {
+        self.has_shadows
     }
 
     pub fn has_tileset(&self) -> bool {
@@ -572,7 +608,7 @@ impl TerrainRenderer {
             lod: [p.tau, p.lod_view.proj_scale, 4.0, 0.7],
             map: [i.cells.0 as f32, i.cells.1 as f32, i.root_cells as f32, i.cell_size],
             height: [i.height_scale, i.height_offset, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32],
-            sun: Vec3::new(-0.5, 0.55, 0.35).normalize().extend(0.0).to_array(),
+            sun: super::sun::direction().extend(0.0).to_array(),
             cfg: [
                 self.max_depth,
                 self.max_depth - 5,
@@ -582,7 +618,8 @@ impl TerrainRenderer {
                     | if self.has_tileset && p.tileset { 16 } else { 0 }
                     | if self.has_tileset && p.tileset && p.weights { 32 } else { 0 }
                     | if self.vision.is_some() && p.vision { 64 } else { 0 }
-                    | if self.water.is_some() && p.water { 128 } else { 0 },
+                    | if self.water.is_some() && p.water { 128 } else { 0 }
+                    | if self.has_shadows && p.shadows { 256 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
@@ -744,6 +781,7 @@ impl TerrainRenderer {
         self.tile_albedo.destroy(gpu);
         self.tile_normal.destroy(gpu);
         self.tile_ubo.destroy(gpu);
+        self.shadow_img.destroy(gpu);
     }
 }
 

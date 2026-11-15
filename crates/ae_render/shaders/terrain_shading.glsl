@@ -1,5 +1,21 @@
 // Shading helpers shared by the terrain and the water surface (both
-// include terrain_common.glsl first): fog of war, distance fog, noise.
+// include terrain_common.glsl first): the hills' shadows, fog of war,
+// distance fog, noise.
+
+// Shadow heights (src/terrain/sun.rs): per heightmap corner, the highest
+// point above it that the terrain toward the sun shades (world units).
+layout(set = 0, binding = 14) uniform sampler2D sunShadowTex;
+
+// Sunlight reaching height `y` over world point `xz` past the hills: 1 lit,
+// 0 in shadow, over a metre or so (a third of a cell on coarse maps) of
+// depth into the shadow. With FLAG_SHADOWS off, 1.
+float sunAt(vec2 xz, float y) {
+    if ((u.cfg.z & FLAG_SHADOWS) == 0u) {
+        return 1.0;
+    }
+    float s = textureLod(sunShadowTex, (xz / u.map.w + 0.5) * u.height.zw, 0.0).r;
+    return 1.0 - smoothstep(0.0, max(1.0, 0.8 * u.map.w), s - y);
+}
 
 // Vision (fog of war): two bit planes over the vision grid, line of sight
 // then explored, rows of u.vision.w words.

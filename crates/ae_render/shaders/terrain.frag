@@ -252,7 +252,9 @@ void main() {
     }
 
     vec3 L = normalize(u.sun.xyz);
-    float diff = max(dot(n, L), 0.0);
+    // On the ground, against the ground as the heights texture has it (the
+    // mesh's LOD error would read as shadow on convex slopes).
+    float diff = max(dot(n, L), 0.0) * sunAt(inWorld.xz, sampleHeight(inWorld.xz / u.map.w));
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * n.y));
 

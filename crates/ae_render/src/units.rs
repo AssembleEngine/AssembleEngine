@@ -133,6 +133,8 @@ pub struct UnitFrame {
     pub proj_scale: f32,
     /// Fog colour (linear) and density; density 0 turns fog off.
     pub fog: [f32; 4],
+    /// Shade by the hills' shadows (when the terrain has them).
+    pub shadows: bool,
 }
 
 #[repr(C)]
@@ -154,6 +156,8 @@ pub struct UnitRenderer {
     info: TerrainInfo,
     classes: [[f32; 4]; MAX_CLASSES],
     min_pixels: f32,
+    /// The terrain has shadow heights to shade the units by.
+    shadows: bool,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
@@ -200,6 +204,7 @@ impl UnitRenderer {
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (height_view, height_sampler) = terrain.height_texture();
+        let (shadow_view, shadow_sampler) = terrain.shadow_texture();
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
@@ -209,6 +214,7 @@ impl UnitRenderer {
                     (vk::DescriptorType::STORAGE_BUFFER, all),
                     (vk::DescriptorType::STORAGE_BUFFER, all),
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
+                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                 ],
             )?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], 0, vk::ShaderStageFlags::empty())?;
@@ -216,7 +222,7 @@ impl UnitRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -234,6 +240,8 @@ impl UnitRenderer {
                     })
                     .collect();
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image));
+                let shadow = [vk::DescriptorImageInfo { sampler: shadow_sampler, image_view: shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -257,6 +265,7 @@ impl UnitRenderer {
             info: *terrain.info(),
             classes,
             min_pixels: setup.min_pixels,
+            shadows: terrain.has_shadows(),
             set_layout,
             pipeline_layout,
             desc_pool,
@@ -359,9 +368,9 @@ impl UnitRenderer {
             frustum: frustum_planes(frame.view_proj),
             map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, alpha],
             height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
-            sun: Vec3::new(-0.5, 0.55, 0.35).normalize().extend(self.min_pixels).to_array(),
+            sun: crate::terrain::sun::direction().extend(self.min_pixels).to_array(),
             fog: frame.fog,
-            counts: [self.rows(slot), self.capacity, 0, 0],
+            counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, 0],
             classes: self.classes,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {

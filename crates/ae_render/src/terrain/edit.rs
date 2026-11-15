@@ -1,5 +1,5 @@
 //! Terrain edits on the render side: a CPU copy of the heightmap, error
-//! pyramid and materials that takes changed cells and produces the
+//! pyramid, materials and shadow heights that takes changed cells and produces the
 //! [`TerrainUpdate`] the renderer applies (texture regions only, so a
 //! small edit uploads a few kilobytes).
 //!
@@ -7,18 +7,22 @@
 //! [`Heightmap::from_cells`] builds them at load: corners average the
 //! cells around them, normalised with the map's load-time scale and offset
 //! (an edit may leave [0, 1]; the textures are float), so an edited map
-//! has the same heights and pyramid as one built from scratch with the
-//! same scale and offset.
+//! has the same heights, pyramid and shadows as one built from scratch with
+//! the same scale and offset. The shadow regions reach past the edit, as
+//! far away from the sun as its shadow (old or new) can fall.
 
 use super::app::TerrainSource;
 use super::heightmap::{Heightmap, PYRAMID_BASE_LEVEL, Pyramid, Rect};
 use super::renderer::{TerrainInfo, TerrainUpdate};
+use super::sun;
 use crate::upload::Region;
 
 pub struct TerrainEditor {
     heightmap: Heightmap,
     pyramid: Pyramid,
     materials: Option<Vec<u8>>,
+    /// Shadow heights ([`super::sun`]), kept in step with the heights.
+    shadow: Vec<f32>,
     info: TerrainInfo,
 }
 
@@ -38,7 +42,9 @@ impl TerrainEditor {
     pub fn new(source: &TerrainSource) -> Self {
         let heightmap = Heightmap { width: source.heightmap.width, height: source.heightmap.height, data: source.heightmap.data.clone() };
         let pyramid = Pyramid { root_cells: source.pyramid.root_cells, levels: source.pyramid.levels.clone(), errors: source.pyramid.errors.clone() };
-        Self { heightmap, pyramid, materials: source.materials.clone(), info: source.info }
+        let i = source.info;
+        let shadow = sun::shadow_heights(&heightmap, i.cell_size, i.height_scale, i.height_offset, sun::direction());
+        Self { heightmap, pyramid, materials: source.materials.clone(), shadow, info: source.info }
     }
 
     pub fn heightmap(&self) -> &Heightmap {
@@ -47,6 +53,11 @@ impl TerrainEditor {
 
     pub fn pyramid(&self) -> &Pyramid {
         &self.pyramid
+    }
+
+    /// Shadow heights of the current terrain ([`super::sun::shadow_heights`]).
+    pub fn shadow(&self) -> &[f32] {
+        &self.shadow
     }
 
     pub fn materials(&self) -> Option<&[u8]> {
@@ -82,8 +93,10 @@ impl TerrainEditor {
             }
         }
         let change = self.pyramid.update(&self.heightmap, scale, offset, &corners);
+        let shadowed = sun::update(&mut self.shadow, &self.heightmap, self.info.cell_size, scale, offset, sun::direction(), &corners);
         let mut update = TerrainUpdate { version, ..TerrainUpdate::default() };
         update.heights = corners.iter().map(|&r| region(0, r, w, &self.heightmap.data)).collect();
+        update.shadows = shadowed.iter().map(|&r| region(0, r, w, &self.shadow)).collect();
         for (i, rects) in change.levels.iter().enumerate() {
             let side = self.pyramid.root_cells >> (PYRAMID_BASE_LEVEL as usize + i);
             update.pyramid.extend(rects.iter().map(|&r| region(i as u32, r, side, &self.pyramid.levels[i])));
@@ -144,6 +157,8 @@ mod tests {
             assert_eq!(bits(&editor.heightmap().data), bits(&fresh.heightmap.data), "heights after {rect:?}");
             assert_eq!(editor.pyramid().levels, fresh.pyramid.levels);
             assert_eq!(editor.pyramid().errors, fresh.pyramid.errors);
+            let i = fresh.info;
+            assert_eq!(editor.shadow(), sun::shadow_heights(&fresh.heightmap, i.cell_size, i.height_scale, i.height_offset, sun::direction()));
             // The height region is the cells' corners.
             let r = &update.heights[0];
             assert_eq!((r.x, r.y, r.width, r.height), (rect.0 as u32, rect.1 as u32, (rect.2 - rect.0 + 2) as u32, (rect.3 - rect.1 + 2) as u32));

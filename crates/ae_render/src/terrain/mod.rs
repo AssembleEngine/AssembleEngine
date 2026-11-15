@@ -8,6 +8,7 @@
 //!   and the error pyramid behind the LOD metric;
 //! - `camera`: the RTS orbit camera (reverse-Z infinite projection);
 //! - `edit`: terrain edits after load (texture regions, incremental pyramid);
+//! - `sun`: the sun's direction and the hills' shadows (shadow heights);
 //! - `tileset`: material tilesets (reusable surface layers, procedural for now);
 //! - `renderer`: GPU resources, the LOD compute sequence and the draw;
 //! - `app`: the terrain as a frame graph [`RenderApp`](crate::thread::RenderApp).
@@ -18,4 +19,5 @@ pub mod edit;
 pub mod heightmap;
 pub mod leb;
 pub mod renderer;
+pub mod sun;
 pub mod tileset;

@@ -10,7 +10,7 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     vec3 n = normalize(inNormal);
-    float diff = max(dot(n, normalize(u.sun.xyz)), 0.0);
+    float diff = max(dot(n, normalize(u.sun.xyz)), 0.0) * sunAt(inWorld);
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = inColor * (vec3(1.0, 0.95, 0.85) * 1.4 * diff + sky * (0.35 + 0.25 * n.y));
     float dist = distance(inWorld, u.camPos.xyz);

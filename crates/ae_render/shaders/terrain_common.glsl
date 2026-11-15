@@ -20,6 +20,7 @@
 #define FLAG_WEIGHTS 32u
 #define FLAG_VISION 64u
 #define FLAG_WATER 128u   // the water surface is drawn (terrain: caustics under it)
+#define FLAG_SHADOWS 256u // shade by the hills' shadows (sunShadowTex)
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 viewProj;

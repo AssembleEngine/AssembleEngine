@@ -970,7 +970,7 @@ fn cull_on_gpu(
     let counts = app.last_unit_counts().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
     let view = lod_view(&source, &cam, extent.width, extent.height);
-    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4] };
+    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4], shadows: false };
     (counts, stream, frame)
 }
 
@@ -1675,3 +1675,176 @@ fn water_covers_the_low_ground_only() {
     assert!(moved * 5 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
     assert_clean(&gpu);
 }
+
+/// The hills' shadows (`TerrainApp::with_shadows`): on a flat map with two
+/// towers, one in view and one whose footprint is off screen, the ground
+/// the CPU heightfield ([`ae_render::terrain::sun`]) puts in shadow darkens,
+/// the off-screen tower's shadow included; sunlit ground does not change;
+/// a unit in a tower's shadow darkens and one in the sun does not; shadows
+/// made but switched off draw exactly as none.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn hills_shade_away_from_the_sun() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::edit::TerrainEditor;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::terrain::sun;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    let (n, cell, scale) = (129usize, 8.0f32, 100.0f32);
+    // Corner rectangles of the towers (90 m over ground at 10 m).
+    let towers = [(60usize, 60usize, 67usize, 67usize), (TOWER_B.0, TOWER_B.1, TOWER_B.2, TOWER_B.3)];
+    let tall = |x: usize, y: usize| towers.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| if tall(i % n, i / n) { 1.0 } else { 0.1 }).collect() };
+    let shadow = sun::shadow_heights(&heightmap, cell, scale, 0.0, sun::direction());
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    // A unit in the first tower's shadow, one in the sun.
+    let shaded_unit = (590.0f32, 450.0f32);
+    let sunny_unit = (430.0f32, 600.0f32);
+
+    #[derive(Clone, Copy)]
+    struct Run {
+        shadows: bool,
+        view_shadows: bool,
+        /// Then level tower A by a terrain edit.
+        level_a: bool,
+    }
+    let mut camera = None;
+    let mut render = |r: Run| -> Vec<u8> {
+        let mut columns: [Vec<u32>; 8] = Default::default();
+        for &(x, y) in &[shaded_unit, sunny_unit] {
+            for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 6.0f32.to_bits(), 0].into_iter().enumerate() {
+                columns[a].push(word);
+            }
+        }
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+        let classes = vec![UnitClass { color: [0.9, 0.9, 0.9], floats: false }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        if r.shadows {
+            app = app.with_shadows();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(CAMERA.0, CAMERA.1);
+            view.camera.pitch = 0.75;
+            view.camera.distance = CAMERA.2;
+            view.fog = false;
+            view.shadows = r.view_shadows;
+            camera = Some(view.camera);
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        run.frames(&mut app, 12).unwrap();
+        if r.level_a {
+            // Cells 60..=66 hold tower A's corners (60..=67) only.
+            let mut editor = TerrainEditor::new(&source);
+            let update = editor.edit(2, &[(59, 59, 67, 67)], |x, y| if (TOWER_B.0..TOWER_B.2).contains(&x) && (TOWER_B.1..TOWER_B.3).contains(&y) { 100.0 } else { 10.0 }, |_, _| 0).unwrap();
+            assert!(!update.shadows.is_empty(), "the edit rewrites shadow heights");
+            app.terrain_edits().lock().unwrap().pending.push(update);
+            run.frames(&mut app, 12).unwrap();
+        }
+        run.wait().unwrap();
+        run.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            let name = format!("shadows-{}{}{}.ppm", r.shadows as u8, r.view_shadows as u8, r.level_a as u8);
+            std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let plain = render(Run { shadows: false, view_shadows: true, level_a: false });
+    let switched_off = render(Run { shadows: true, view_shadows: false, level_a: false });
+    let on = render(Run { shadows: true, view_shadows: true, level_a: false });
+    let leveled_plain = render(Run { shadows: false, view_shadows: true, level_a: true });
+    let leveled = render(Run { shadows: true, view_shadows: true, level_a: true });
+
+    let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
+    let at = |x: f32, y: f32, h: f32| -> Option<usize> {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+    // The off-screen tower: none of it in view.
+    let (bx0, by0, bx1, by1) = towers[1];
+    for x in bx0..=bx1 + 1 {
+        for y in by0..=by1 + 1 {
+            for h in [10.0, 100.0] {
+                assert!(at(x as f32 * cell - 4.0, y as f32 * cell - 4.0, h).is_none(), "tower B at corner {x},{y} height {h} is in view");
+            }
+        }
+    }
+    // Flat ground at corner resolution, sorted by the CPU heightfield:
+    // lit (no shadow within two corners) or deep in shadow (all four
+    // corners of the cell at least 8 m under the shadow height), clear of
+    // the towers and the units.
+    let s = |x: usize, y: usize| shadow[y * n + x] - 10.0;
+    let near_unit = |x: f32, y: f32| [shaded_unit, sunny_unit].iter().any(|&(ux, uy)| (x - ux).abs() < 24.0 && (y - uy).abs() < 24.0);
+    let near_tower = |x: usize, y: usize| towers.iter().any(|&(x0, y0, x1, y1)| x + 3 >= x0 && x <= x1 + 3 && y + 3 >= y0 && y <= y1 + 3);
+    let (mut lit, mut shaded, mut shaded_b) = (Vec::new(), Vec::new(), Vec::new());
+    for y in 3..n - 4 {
+        for x in 3..n - 4 {
+            let (wx, wy) = (x as f32 * cell + 4.0, y as f32 * cell + 4.0);
+            if near_tower(x, y) || near_unit(wx, wy) {
+                continue;
+            }
+            let Some(i) = at(wx, wy, 10.0) else { continue };
+            if (x - 2..=x + 3).all(|cx| (y - 2..=y + 3).all(|cy| s(cx, cy) == 0.0)) {
+                lit.push(i);
+            } else if [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().all(|&(cx, cy)| s(cx, cy) > 8.0) {
+                // Whose shadow: B's lies at smaller x than A's footprint.
+                if x < 60 { shaded_b.push(i) } else { shaded.push(i) }
+            }
+        }
+    }
+    println!("{} lit, {} shaded by tower A, {} by tower B (off screen)", lit.len(), shaded.len(), shaded_b.len());
+    assert!(lit.len() > 300 && shaded.len() > 20 && shaded_b.len() > 20, "{} lit, {} shaded, {} shaded by B", lit.len(), shaded.len(), shaded_b.len());
+
+    let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    let off_bytes = plain.iter().zip(&switched_off).filter(|(a, b)| a != b).count();
+    assert_eq!(off_bytes, 0, "shadows switched off draw as none");
+    let changed = lit.iter().filter(|&&i| rgb(&plain, i) != rgb(&on, i)).count();
+    assert_eq!(changed, 0, "sunlit ground changes");
+    for (name, points) in [("tower A", &shaded), ("tower B (off screen)", &shaded_b)] {
+        let darker = points.iter().filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i)).count();
+        println!("{name}: {darker} of {} shaded points a quarter darker or more", points.len());
+        assert!(darker * 10 >= points.len() * 9, "{name}'s shadow: {darker} of {}", points.len());
+    }
+    // The units: their sunlit faces (the top of the dart, 3 m up).
+    let unit_luma = |p: &[u8], (x, y): (f32, f32)| {
+        let i = at(x, y, 13.0).expect("unit in view");
+        luma(p, i)
+    };
+    let (sun_plain, sun_on) = (unit_luma(&plain, sunny_unit), unit_luma(&on, sunny_unit));
+    let (shade_plain, shade_on) = (unit_luma(&plain, shaded_unit), unit_luma(&on, shaded_unit));
+    println!("unit in the sun {sun_plain:.0} -> {sun_on:.0}, in the shadow {shade_plain:.0} -> {shade_on:.0}");
+    assert_eq!(sun_plain, sun_on, "the unit in the sun is unchanged");
+    assert!(shade_on < 0.8 * shade_plain, "the unit in the shadow darkens");
+
+    // Tower A levelled by an edit: its shadow (and the unit's) goes, B's stays.
+    let gone = shaded.iter().filter(|&&i| rgb(&leveled_plain, i) != rgb(&leveled, i)).count();
+    assert_eq!(gone, 0, "tower A's shadow after levelling it");
+    assert_eq!(unit_luma(&leveled_plain, shaded_unit), unit_luma(&leveled, shaded_unit), "the unit after tower A is levelled");
+    let still = shaded_b.iter().filter(|&&i| luma(&leveled, i) < 0.75 * luma(&leveled_plain, i)).count();
+    assert!(still * 10 >= shaded_b.len() * 9, "tower B's shadow after the edit: {still} of {}", shaded_b.len());
+    assert_clean(&gpu);
+}
+
+/// [`hills_shade_away_from_the_sun`]: the off-screen tower (corner
+/// rectangle) and the camera (target x, z, distance).
+const TOWER_B: (usize, usize, usize, usize) = (27, 70, 32, 75);
+const CAMERA: (f32, f32, f32) = (560.0, 520.0, 520.0);

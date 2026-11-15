@@ -1517,6 +1517,54 @@ Water (`cargo test -p ae_render --test gpu water -- --ignored`):
   with the camera below it); one water level per map (the nav terrain has one); foam is thin on the
   crossing map's steep banks; the colours are tuned by eye on a few captures.
 
+The hills' shadows (`cargo test -p ae_render --lib sun`, `cargo test -p ae_render --test gpu hills -- --ignored`):
+- The plan's "cascaded shadows" split in two. The terrain's shadows are not a shadow map: the sun
+  is fixed and the terrain is a heightfield, so `terrain::sun` computes per heightmap corner the
+  *shadow height*, the highest point above it that terrain toward the sun shades (`S(p) = max over
+  t of H(p + t d) - t tan(e)`), and every receiver compares its height with it. Exact at every
+  distance, no depth bias or acne, no cascades, and view-independent: hills off screen or behind
+  the camera cast into the view (a shadow map drawn from `terrain.leaves` would not, the draw list
+  being culled and refined for the main camera). The units' own shadows (casters that move) are
+  the next step, a shadow map of the units only.
+- On the CPU, exactly: each corner marches toward the sun one cell at a time over the bilinear
+  heights and stops when even the map's highest point could not rise above what it found, rows
+  split over threads; 51 ms for the crossing map's 2561² corners, on the render thread when the
+  renderer is made. A first version swept the map once against the light
+  (`S(p) = max(H(p), S(p + s d) - s tan(e))`, interpolating between rows): O(n), but the
+  interpolation diffuses thin ridges' shadows away (a 3-corner tower's lost half its height over
+  10 steps; the unit test caught it). Terrain edits keep it current: `TerrainEditor` holds the
+  shadow heights and `sun::update` recomputes the edited rectangles and as far away from the sun
+  as any shadow can reach (5 ms for a 10x10 edit on the crossing map, mostly scanning for the
+  height range); `TerrainUpdate::shadows` carries the regions (unit test: equal to a recompute
+  from scratch; the editor's test: equal to a map built from the edited cells).
+- Receivers: an R32F texture (binding 14 of the terrain set, binding 5 of the units'), flag 256
+  (`FLAG_SHADOWS`) and `counts.z` bit 0 for the units. The terrain compares against the bilinear
+  height at the pixel, not the mesh's height (the LOD error would read as shadow on convex
+  slopes); units and the water surface against their own height. Light fades over 0.8 cell of
+  depth into the shadow (the edge follows the corners, so a sharp edge shows their staircase).
+  Shadows dim the sun's term only (sky light stays); on the water they take the glints, and the
+  caustics under it go with the ground's sun term. One sun for every pass: `sun::direction()`
+  (the terrain and units had each their own copy of it).
+- Opt-in like water: `TerrainApp::with_shadows()`, `TerrainView::shadows` per frame; `ae-client`
+  on by default, `--no-shadows`, H toggles. No graph change (no new pass or resource; the goldens
+  are unchanged).
+- GPU test `hills_shade_away_from_the_sun` (flat map, two 90 m towers, one in view and one whose
+  every corner is off screen, a unit in a shadow and one in the sun, validation on): shadows made
+  but switched off are byte-identical to none; 0 of 7,132 sunlit ground points change; 23 of 24
+  points in the in-view tower's shadow and 32 of 32 in the off-screen tower's lose a quarter of
+  their brightness or more; the shaded unit darkens (251 to 134), the sunlit one is unchanged;
+  after a terrain edit levels the first tower its shadow is gone (0 points differ from no shadows)
+  and the other's remains. Making the shader's lookup return 1 fails it, as does dropping the
+  edit's shadow regions in `TerrainRenderer::apply`. All 17 GPU tests pass with validation;
+  `--quake 60` with shadows (an edit at run time) and the generated map's mountains, 0 messages.
+- Cost (`--bench all --label m7-hill-shadows` against `m7-water`): the terrain draw +3–5 % in five
+  scenes (5–13 µs: two more texture reads per pixel) and +20 % in `palette` (45 to 54 µs, the
+  cheapest terrain shader, flagged by `bench-diff`); 85 of 86 metrics unchanged.
+- Not done: the units' own shadows (next); the shadow edge is a cell soft whatever the distance
+  to the caster (no contact hardening); the sun is fixed (a moving sun would recompute, 51 ms);
+  `TerrainApp::create` builds the textures from the load-time map, so a renderer made again after
+  edits loses them (as the heights did already).
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |

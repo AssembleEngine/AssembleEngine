@@ -97,7 +97,7 @@ void main() {
     // unresolved waves make the surface rough (energy kept roughly level).
     float specPow = mix(900.0, 60.0, rough);
     float spec = pow(max(dot(R, L), 0.0), specPow) * (specPow / 300.0);
-    vec3 glint = SUN_COLOR * spec * SUN_GLINT * (0.25 + fresnel);
+    vec3 glint = SUN_COLOR * spec * SUN_GLINT * (0.25 + fresnel) * sunAt(P.xz, P.y);
 
     // Premultiplied: alpha is how much of what lies under the surface it
     // hides; the glints are added light.
