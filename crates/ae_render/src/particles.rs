@@ -96,7 +96,8 @@ pub struct EffectDef {
     pub gravity: f32,
     /// Velocity lost per second (exponential).
     pub drag: f32,
-    /// Adds light (alpha 0) instead of covering.
+    /// Adds light (alpha 0) instead of covering. Emissive effects cast no
+    /// coloured shadow; the others (smoke, dust) do.
     pub emissive: bool,
     /// Fades in over this fraction of the life (0: born at full opacity).
     pub fade_in: f32,

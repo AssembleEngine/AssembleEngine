@@ -1859,7 +1859,7 @@ Particles' coloured shadows (`cargo test -p ae_render --test gpu particles_cast 
   - The particles golden changes: the sim now runs before the shadow pass (it is the only writer
     of the state the pass reads, so the bake orders it first). The other goldens are unchanged.
 - **Casters.** Every live particle that is not emissive, in view or not (off-screen smoke shades
-  the view).
+  the view). `EffectDef::emissive` decides it; there is no separate cast flag.
   - The simulation lists their slots after the visible keys (the keys buffer is now twice the
     capacity). The second draw command in `particles.indirect` (32 bytes in, a 4-vertex strip per
     instance) draws them into each cascade.
