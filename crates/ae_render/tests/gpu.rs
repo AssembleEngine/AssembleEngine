@@ -2467,7 +2467,7 @@ fn particles_order_independence() {
     let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
     camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
     let eye = camera.eye(|_| ground);
-    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume];
+    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices];
     let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
     let none = render_particles(&gpu, &source, camera, extent, None);
     // Per pixel the reference changes: mean and largest channel error.
@@ -2519,6 +2519,20 @@ fn particles_order_independence() {
     let (moments_mean, moments_worst) = error(&images[1], reference);
     let (volume_mean, volume_worst) = error(&images[3], reference);
     assert_eq!(magenta(&images[3]), 0, "the volume overflows its lists");
+    if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+        for (m, image) in modes.iter().zip(&images) {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(image.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("particles-cluster-{m:?}.ppm")), ppm).unwrap();
+        }
+    }
+    for (k, m) in modes.iter().enumerate() {
+        let (mean, max) = error(&images[k], &images[3]);
+        println!("cluster, {m:?} against the volume: mean {mean:.2} max {max}");
+    }
+    // Measured: the slices 0.57 (max 10) from the volume; the layers 1.6.
+    let (slices_mean, slices_max) = error(&images[4], &images[3]);
+    assert!(slices_mean < 1.2 && slices_max < 30, "cluster, the slices against the volume: mean {slices_mean} max {slices_max}");
     println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}");
     // Emitted in reverse: the order-independent methods give the same frame.
     let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
@@ -2565,13 +2579,37 @@ fn particles_order_independence() {
         }
         (worst, jumps)
     };
+    // Apart (25 m in front, 25 m behind: the chords never overlap) the
+    // volume is the layers' "over", and the order shows: it keeps depth
+    // order, it is not smooth by ignoring it.
+    let apart: Vec<[Vec<u8>; 2]> = [-25.0f32, 25.0]
+        .iter()
+        .map(|&t| {
+            let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
+            [render(&bursts, &effects, ParticleBlend::Reference), render(&bursts, &effects, ParticleBlend::Volume)]
+        })
+        .collect();
+    for (t, [layers, volume]) in [-25, 25].iter().zip(&apart) {
+        let (mean, max) = error(volume, layers);
+        println!("apart ({t} m): volume against the layers mean {mean:.2} max {max}");
+        assert!(mean < 1.0 && max <= 8, "apart, the volume is not the layers' over: mean {mean} max {max}");
+    }
+    let swap = apart[0][1].iter().zip(&apart[1][1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    println!("apart: the volume's largest change between blue in front and behind {swap}");
+    assert!(swap > 100, "the volume loses the order: {swap}");
+
     let mut pops = Vec::new();
+    let mut against_volume = Vec::new();
     for (k, m) in modes.iter().enumerate() {
         let (worst, jumps) = pop(&frames[k]);
         let errors: Vec<(f32, u8)> = frames[k].iter().zip(&frames[2]).map(|(a, r)| error(a, r)).collect();
         let mean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
         let max = errors.iter().map(|e| e.1).max().unwrap_or(0);
-        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the reference mean {mean:.2} max {max}");
+        let errors: Vec<(f32, u8)> = frames[k].iter().zip(&frames[3]).map(|(a, r)| error(a, r)).collect();
+        let vmean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
+        let vmax = errors.iter().map(|e| e.1).max().unwrap_or(0);
+        against_volume.push((vmean, vmax));
+        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the layers mean {mean:.2} max {max}, against the volume mean {vmean:.2} max {vmax}");
         pops.push((worst, jumps));
     }
     for k in 0..modes.len() {
@@ -2590,6 +2628,10 @@ fn particles_order_independence() {
     let volume_pop = pops[3];
     assert!(volume_pop.0 < 20.0 && volume_pop.1 == 0, "the volume pops: {volume_pop:?}");
     assert!(volume_mean < 3.0, "a volume of separate puffs differs from their layers: {volume_mean}");
+    // Measured: the slices pop by 6, and stay within 0.19 (max 7) of the
+    // volume.
+    let (slices_pop, slices_error) = (pops[4], against_volume[4]);
+    assert!(slices_pop.0 < 20.0 && slices_pop.1 == 0 && slices_error.0 < 1.0 && slices_error.1 < 30, "crossing, the slices: pop {slices_pop:?}, against the volume {slices_error:?}");
     assert_clean(&gpu);
 }
 

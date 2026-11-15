@@ -55,6 +55,8 @@ pub enum Blend {
     Additive,
     /// Colour `src + dst`, alpha `max(src, dst)`: both in any order.
     AdditiveMaxAlpha,
+    /// `max(src, dst)` (colour and alpha).
+    Max,
 }
 
 pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Result<vk::Pipeline> {
@@ -85,10 +87,10 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         .blend_enable(desc.blend != Blend::Off)
         .src_color_blend_factor(if matches!(desc.blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
         .dst_color_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-        .color_blend_op(vk::BlendOp::ADD)
+        .color_blend_op(if desc.blend == Blend::Max { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
         .src_alpha_blend_factor(vk::BlendFactor::ONE)
         .dst_alpha_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-        .alpha_blend_op(if desc.blend == Blend::AdditiveMaxAlpha { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
+        .alpha_blend_op(if matches!(desc.blend, Blend::AdditiveMaxAlpha | Blend::Max) { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
         .color_write_mask(vk::ColorComponentFlags::RGBA);
         desc.color_formats.len()];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);

@@ -300,7 +300,18 @@ pub enum ParticleBlend {
     /// metre). Overlapping puffs mix by how much of their thickness
     /// overlaps. For tests, as [`ParticleBlend::Reference`].
     Volume,
+    /// Thickness-aware, unsorted: a first pass finds each pixel's depth
+    /// range of particles (nearest front, farthest back); a second adds
+    /// each particle's optical depth and light into [`SLICES`] equal slices
+    /// of that range, by how much of each its chord covers; a resolve
+    /// integrates the slices front to back, each a homogeneous medium. A
+    /// lone puff comes out as blended; overlapping ones mix by thickness,
+    /// continuously.
+    Slices,
 }
+
+/// Depth slices per pixel in [`ParticleBlend::Slices`].
+pub const SLICES: usize = 4;
 
 impl ParticleBlend {
     /// Stores every fragment per pixel ([`ParticleBlend::Reference`],
@@ -320,6 +331,8 @@ struct HalfTargets {
     color: OwnedImage,
     /// The farthest scene depth of each 2x2 block (R32F, reverse-Z).
     depth: OwnedImage,
+    /// [`ParticleBlend::Slices`]: the range (RG32F), the slices
+    /// (RGBA16F each).
     /// [`ParticleBlend::Moments`]: b0 (R32F), b1..b4 (RGBA32F), the media
     /// and the emissive sums (RGBA16F).
     moments: Vec<OwnedImage>,
@@ -340,6 +353,7 @@ impl HalfTargets {
     }
 }
 
+const SLICE_FORMATS: [vk::Format; 1 + SLICES] = [vk::Format::R32G32_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
 const MOMENT_FORMATS: [vk::Format; 4] = [vk::Format::R32_SFLOAT, vk::Format::R32G32B32A32_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
 
 const HALF_COLOR: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -471,11 +485,14 @@ impl ParticleRenderer {
         ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
         ensure!(setup.blend == ParticleBlend::Sorted || setup.downscale == 2, "{:?} particles need downscale 2", setup.blend);
         ensure!(!setup.blend.lists() || gpu.fragment_stores, "the particles' reference needs fragmentStoresAndAtomics");
-        if setup.blend == ParticleBlend::Moments {
-            for format in MOMENT_FORMATS {
-                let features = unsafe { gpu.instance.instance.get_physical_device_format_properties(gpu.physical, format) }.optimal_tiling_features;
-                ensure!(features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND), "{format:?} cannot be blended into (moment-based particles)");
-            }
+        let formats: &[vk::Format] = match setup.blend {
+            ParticleBlend::Moments => &MOMENT_FORMATS,
+            ParticleBlend::Slices => &SLICE_FORMATS,
+            _ => &[],
+        };
+        for &format in formats {
+            let features = unsafe { gpu.instance.instance.get_physical_device_format_properties(gpu.physical, format) }.optimal_tiling_features;
+            ensure!(features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND), "{format:?} cannot be blended into ({:?} particles)", setup.blend);
         }
         let device = &gpu.device;
         let capacity = setup.capacity;
@@ -530,9 +547,10 @@ impl ParticleRenderer {
                 &[(vk::DescriptorType::UNIFORM_BUFFER, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (image, all), (image, all), (image, all)],
             )?;
             // Set 1 of the draws: the depth, the puff; the moments' four
-            // targets; the reference's counts and fragments.
+            // targets or the slices' five; the reference's counts and
+            // fragments.
             let f = vk::ShaderStageFlags::FRAGMENT;
-            let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f)])?;
+            let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f)])?;
             // The sort's push constant: shift, direction.
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout], 8, vk::ShaderStageFlags::COMPUTE)?;
             let fragment = vk::ShaderStageFlags::FRAGMENT;
@@ -542,7 +560,7 @@ impl ParticleRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 10 * n },
-                vk::DescriptorPoolSize { ty: image, descriptor_count: 18 * n },
+                vk::DescriptorPoolSize { ty: image, descriptor_count: 20 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(4 * n).pool_sizes(&sizes), None)?;
             let allocate = |layout: vk::DescriptorSetLayout| {
@@ -617,6 +635,11 @@ impl ParticleRenderer {
             ParticleBlend::Reference => vec![
                 particle_pipeline(spirv!("particles_reference.frag"), &[], Blend::Off).context("particle reference pipeline")?,
                 fullscreen(spirv!("particles_reference_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle reference resolve pipeline")?,
+            ],
+            ParticleBlend::Slices => vec![
+                particle_pipeline(spirv!("particles_slices_range.frag"), &SLICE_FORMATS[..1], Blend::Max).context("particle slices range pipeline")?,
+                particle_pipeline(spirv!("particles_slices.frag"), &SLICE_FORMATS[1..], Blend::Additive).context("particle slices pipeline")?,
+                fullscreen(spirv!("particles_slices_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle slices resolve pipeline")?,
             ],
             ParticleBlend::Volume => vec![
                 particle_pipeline(spirv!("particles_volume.frag"), &[], Blend::Off).context("particle volume pipeline")?,
@@ -707,6 +730,11 @@ impl ParticleRenderer {
                     targets.moments.push(image(*format, name)?);
                 }
             }
+            if self.blend == ParticleBlend::Slices {
+                for (format, name) in SLICE_FORMATS.iter().zip(["particle slice range", "particle slice 0", "particle slice 1", "particle slice 2", "particle slice 3"]) {
+                    targets.moments.push(image(*format, name)?);
+                }
+            }
             if self.blend.lists() {
                 let pixels = half.width as u64 * half.height as u64;
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
@@ -733,7 +761,7 @@ impl ParticleRenderer {
             writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(2 + i as u32).descriptor_type(image).image_info(info));
         }
         for (i, info) in buffer_infos.iter().enumerate() {
-            writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(6 + i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(info));
+            writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(7 + i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(info));
         }
         unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
         self.half[slot] = Some(targets);
@@ -1044,6 +1072,24 @@ impl ParticleRenderer {
                     draw_particles(self.oit[1]);
                     device.cmd_end_rendering(cmd);
                     barrier(&[to_sampled(m[2].image), to_sampled(m[3].image)]);
+                    begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
+                    fullscreen(self.oit[2]);
+                    device.cmd_end_rendering(cmd);
+                }
+                ParticleBlend::Slices => {
+                    let m = &half.moments;
+                    barrier(&[to_sampled(half.depth.image), to_attachment(m[0].image)]);
+                    begin(&[m[0].view], half.extent, vk::AttachmentLoadOp::CLEAR);
+                    draw_particles(self.oit[0]);
+                    device.cmd_end_rendering(cmd);
+                    let slices: Vec<_> = m[1..].iter().map(|s| to_attachment(s.image)).chain([to_sampled(m[0].image)]).collect();
+                    barrier(&slices);
+                    let views: Vec<_> = m[1..].iter().map(|s| s.view).collect();
+                    begin(&views, half.extent, vk::AttachmentLoadOp::CLEAR);
+                    draw_particles(self.oit[1]);
+                    device.cmd_end_rendering(cmd);
+                    let sampled: Vec<_> = m[1..].iter().map(|s| to_sampled(s.image)).collect();
+                    barrier(&sampled);
                     begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
                     fullscreen(self.oit[2]);
                     device.cmd_end_rendering(cmd);

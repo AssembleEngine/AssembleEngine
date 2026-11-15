@@ -2172,6 +2172,42 @@ M7 stretch goal (after decals): volumetric smoke and dust.
   and a per-pixel blend that accounts for thickness.
 - Sparks, fire and flashes stay sorted, since they are small and additive.
 
+Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles_order -- --ignored
+--nocapture`; the order test now runs five blends):
+- **Volume reference** (`ParticleBlend::Volume`, tests only, the reference's lists):
+  - Each fragment stores its sphere's chord along the pixel's view depth.
+  - The resolve caps every back at the scene and cuts the depth at every span's ends. In each
+    interval, the spans covering it sum extinction `-ln(1 - a) / L` and light per metre
+    (scattered `rgb / a` times extinction; emissive `rgb / L`), integrated exactly front to back.
+  - A lone puff comes out as blended.
+- **It is right, and it does not pop:**
+  - Crossing: the largest change between frames is 7 (0 pixel-frames over 40), against 116 for
+    the sort and for the exact layers.
+  - Apart (25 m in front and behind, chords disjoint): within 0.02–0.08 of the layers (max 3), and
+    the two frames differ by 116. It keeps the depth order; it is not smooth by ignoring it.
+  - Cluster: 1.75 (max 31) from the layers. Emitted in reverse: identical.
+  - Scored against it now: the sort 1.66 (max 22) in the cluster, 1.62 (max 70) in the crossing.
+- **Slices** (`ParticleBlend::Slices`, `--particle-blend slices`), the per-pixel blend that accounts
+  for thickness. Three passes at half resolution, no sort:
+  - Range: each pixel's nearest front (as a reciprocal) and farthest back, max-blended (RG32F).
+  - Slices: four equal slices of that range (RGBA16F each, additive). Each fragment adds its
+    light and optical depth to each slice, by the length of its chord inside.
+  - Resolve: each slice is a homogeneous medium, front to back.
+  - A lone puff is exact whatever the slicing. Overlapping puffs mix within a slice, continuously.
+  - Bug found on the way: corners outside a puff's circle had chord length 0, so the light per
+    metre was infinite and multiplying by an overlap of 0 gave NaN in the sums. The chord helper now
+    returns a length of 1 when empty.
+- **Slices, measured against the volume:**
+  - Cluster: 0.57 (max 10).
+  - Crossing: pops 6 (0 over 40), 0.19 (max 7).
+  - Emitted in reverse: identical.
+- **Cost** (`bench battle`, about 40k particles; `m7-vol-sorted`, `m7-vol-slices`): slices 16 µs sim
+  (no sort) + 494 µs draw, against sorted 58 + 82 µs. About the moments' cost (552 µs) for an
+  answer an order of magnitude closer.
+- **Next:**
+  - Froxels (a 3D grid in camera space, Hillaire), measured the same way.
+  - Then choose: the sort stays the default unless a volume method's cost comes down.
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |
