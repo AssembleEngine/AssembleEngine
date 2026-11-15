@@ -351,7 +351,7 @@ fn depth_stencil_and_multiple_targets() {
 fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usize) {
     use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role};
     use ae_render::executor::{PassContext, Recorder, SharedRecorder};
-    use ae_render::pipeline::{self, DepthState, GraphicsDesc};
+    use ae_render::pipeline::{self, Blend, DepthState, GraphicsDesc};
 
     const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
     const SIZE: u32 = 32;
@@ -441,7 +441,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
     let vertex = include_bytes!(concat!(env!("OUT_DIR"), "/test_rect.vert.spv"));
     let make = |fragment: &[u8], formats: &[vk::Format], write| {
         let depth = Some(DepthState { format: depth_format, write, compare: vk::CompareOp::LESS });
-        let desc = GraphicsDesc { vertex, fragment, layout, color_formats: formats, depth, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend: false };
+        let desc = GraphicsDesc { vertex, fragment, layout, color_formats: formats, depth, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend: Blend::Off };
         pipeline::graphics_pipeline(device, &desc).unwrap()
     };
     let mrt = make(include_bytes!(concat!(env!("OUT_DIR"), "/test_mrt.frag.spv")), &[FORMAT, FORMAT], true);
@@ -1294,7 +1294,7 @@ fn render_modules_reload_while_running() {
 fn parallel_recording_matches_serial() {
     use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role};
     use ae_render::executor::{PassContext, Recorder, SharedRecorder};
-    use ae_render::pipeline::{self, GraphicsDesc};
+    use ae_render::pipeline::{self, Blend, GraphicsDesc};
 
     const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
     const SIZE: u32 = 64;
@@ -1382,7 +1382,7 @@ fn parallel_recording_matches_serial() {
             color_formats: &[FORMAT],
             depth: None,
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-            blend: false,
+            blend: Blend::Off,
         };
         let pipe = pipeline::graphics_pipeline(device, &desc).unwrap();
         let color = ImageDesc::color_2d(FORMAT, SIZE, SIZE, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
@@ -1511,5 +1511,167 @@ fn vision_shades_the_terrain() {
     let unseen = luma(&empty, 190, 250, 40, 100).min(luma(&empty, 190, 250, 140, 200));
     assert!((unseen - dark).abs() < 1.0, "before any vision frame, ground reads as never seen ({unseen:.1} vs {dark:.1})");
     assert!(luma(&empty, 70, 140, 40, 200) < 0.7 * lit_left, "and the left is not lit");
+    assert_clean(&gpu);
+}
+
+/// The water surface (M7): a flat map, its left half 20 m above the water,
+/// its right half 20 m under it with an island rising 35 m out of it, a
+/// land unit on the left and a ship on the right, seen from 40° up.
+/// * With water added but switched off, the picture is byte-identical to
+///   the scene without water.
+/// * With water on, every land point is unchanged, the island's top
+///   included, though from this angle water lies behind its far edge (the
+///   depth test keeps the surface behind the terrain), and nearly every
+///   water point changes.
+/// * The ship, above the plane, keeps its class colour.
+/// * Out of sight (fog of war on the water half), what the surface adds
+///   is dimmed with the ground under it.
+/// * The waves move: half a second later only water points change.
+///
+/// Turning the water pipeline's depth test off fails the land check (the
+/// island's far edge; over land itself the waterline fade leaves nothing to
+/// see).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn water_covers_the_low_ground_only() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, VisionFeed, VisionFrame, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::{TerrainInfo, VisionGrid};
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    let n = 129;
+    let island = |cx: usize, cz: usize| (88..=100).contains(&cx) && (88..=100).contains(&cz);
+    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| if i % n < 64 { 0.8 } else if island(i % n, i / n) { 0.95 } else { 0.4 }).collect() };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let grid = VisionGrid { width: 32, height: 32, cell_size: 32.0 };
+    let land_unit = (250.0f32, 512.0f32);
+    let ship = (760.0f32, 512.0f32);
+
+    #[derive(Clone, Copy)]
+    struct Run {
+        water: bool,
+        view_water: bool,
+        vision: bool,
+        frames: usize,
+    }
+    let mut camera = None;
+    let mut render = |r: Run| -> Vec<u8> {
+        let mut columns: [Vec<u32>; 8] = Default::default();
+        for (&(x, y), class) in [land_unit, ship].iter().zip(0u32..) {
+            for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 8.0f32.to_bits(), class].into_iter().enumerate() {
+                columns[a].push(word);
+            }
+        }
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+        let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: true }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        if r.water {
+            app = app.with_water();
+        }
+        if r.vision {
+            // Line of sight over the land half only; the water half never seen.
+            let mut los = vec![0u64; grid.words()];
+            for y in 0..grid.height as usize {
+                los[y * grid.stride()] = (1u64 << 16) - 1;
+            }
+            let feed = Arc::new(VisionFeed::new(grid));
+            feed.publish(Arc::new(VisionFrame { tick: 1, los, explored: vec![0; grid.words()] }));
+            app = app.with_vision(feed);
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 0.7;
+            view.camera.distance = 1100.0;
+            view.fog = false;
+            view.water = r.view_water;
+            camera = Some(view.camera);
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, r.frames, config).unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            let name = format!("water-{}{}{}-{}.ppm", r.water as u8, r.view_water as u8, r.vision as u8, r.frames);
+            std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let base = Run { water: false, view_water: true, vision: false, frames: 12 };
+    let plain = render(base);
+    let switched_off = render(Run { water: true, view_water: false, ..base });
+    let on = render(Run { water: true, ..base });
+    let later = render(Run { water: true, frames: 42, ..base });
+    let fogged_plain = render(Run { vision: true, ..base });
+    let fogged = render(Run { water: true, vision: true, ..base });
+
+    let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
+    let at = |x: f32, y: f32, h: f32| -> Option<usize> {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+    // Points on the land (clear of the cliff and the land unit) and on the
+    // water (clear of the cliff's foot and the ship).
+    let near = |x: f32, y: f32, (ux, uy): (f32, f32)| (x - ux).abs() < 40.0 && (y - uy).abs() < 40.0;
+    let points = |xs: std::ops::RangeInclusive<u32>, ys: std::ops::RangeInclusive<u32>, step: usize, h: f32, unit: (f32, f32)| -> Vec<usize> {
+        let mut out = Vec::new();
+        for x in xs.step_by(step) {
+            for y in ys.clone().step_by(step) {
+                let (x, y) = (x as f32, y as f32);
+                // Clear of the unit and of the island and its slopes.
+                if !near(x, y, unit) && !((x - 752.0).abs() < 64.0 && (y - 752.0).abs() < 64.0) {
+                    out.extend(at(x, y, h));
+                }
+            }
+        }
+        out
+    };
+    let mut land = points(16..=480, 16..=1008, 16, 80.0, land_unit);
+    let mut top = Vec::new();
+    for x in (712..=792).step_by(8) {
+        for y in (712..=792).step_by(8) {
+            top.extend(at(x as f32, y as f32, 95.0));
+        }
+    }
+    assert!(top.len() > 60, "{} island points in view", top.len());
+    land.extend(top);
+    let water = points(560..=1008, 16..=1008, 16, 60.0, ship);
+    assert!(land.len() > 300 && water.len() > 300, "{} land and {} water points in view", land.len(), water.len());
+    let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
+    let changed = |a: &[u8], b: &[u8], at: &[usize]| at.iter().filter(|&&i| rgb(a, i) != rgb(b, i)).count();
+    let mean_diff = |a: &[u8], b: &[u8], at: &[usize]| at.iter().map(|&i| (0..3).map(|c| (a[i + c] as f64 - b[i + c] as f64).abs()).sum::<f64>()).sum::<f64>() / at.len() as f64;
+
+    let off_bytes = plain.iter().zip(&switched_off).filter(|(a, b)| a != b).count();
+    assert_eq!(off_bytes, 0, "water switched off draws as no water");
+    assert_eq!(changed(&plain, &on, &land), 0, "land points under the water surface");
+    let wet = changed(&plain, &on, &water);
+    println!("water: {wet} of {} water points changed; mean difference {:.1}", water.len(), mean_diff(&plain, &on, &water));
+    assert!(wet * 10 >= water.len() * 9, "the surface covers the water: {wet} of {}", water.len());
+
+    let ship_at = at(ship.0, ship.1, 61.0).expect("the ship is in view");
+    let [r, g, b] = rgb(&on, ship_at).map(|c| c as i32);
+    assert!(b > 2 * r && b > 2 * g, "the ship keeps its colour over the water: {r} {g} {b}");
+
+    assert_eq!(changed(&fogged_plain, &fogged, &land), 0, "land in sight: unchanged by the water");
+    let (lit, unseen) = (mean_diff(&plain, &on, &water), mean_diff(&fogged_plain, &fogged, &water));
+    println!("what the surface adds: {lit:.1} in sight, {unseen:.1} never seen");
+    assert!(unseen < 0.6 * lit, "out of sight the surface's share is dimmed: {unseen:.1} vs {lit:.1}");
+
+    assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
+    let moved = changed(&on, &later, &water);
+    assert!(moved * 5 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
     assert_clean(&gpu);
 }

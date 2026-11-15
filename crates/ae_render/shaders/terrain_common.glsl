@@ -19,6 +19,7 @@
 #define FLAG_TILESET 16u
 #define FLAG_WEIGHTS 32u
 #define FLAG_VISION 64u
+#define FLAG_WATER 128u   // the water surface is drawn (terrain: caustics under it)
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4 viewProj;
@@ -33,7 +34,8 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 sun;            // xyz: direction to the sun
     uvec4 cfg;           // x: CBT max depth D, y: T = D-5, z: flags, w: draw-list capacity
     vec4 fog;            // rgb: fog colour, w: density
-    vec4 water;          // x: water surface height (world), y: 1 if the map has water, z: extinction per unit depth
+    vec4 water;          // x: water surface height (world), y: 1 if the map has water, z: extinction per unit depth,
+                         // w: animation time (s)
     vec4 vision;         // vision grid: x,y size in cells, z: cell size, w: u32 words per row
 } u;
 

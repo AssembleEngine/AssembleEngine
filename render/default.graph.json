@@ -24,6 +24,8 @@
     { "name": "units count", "kind": "transfer", "library": "units.count", "when": "units",
       "access": ["units.indirect transfer_src", "units.counts transfer_dst discard"] },
     { "name": "units count read", "kind": "transfer", "library": "host.read", "when": "units", "root": true,
-      "access": ["units.counts host_read"] }
+      "access": ["units.counts host_read"] },
+    { "name": "water", "kind": "graphics", "library": "water.draw", "when": "water",
+      "access": ["target color:load", "depth depth_read"] }
   ]
 }

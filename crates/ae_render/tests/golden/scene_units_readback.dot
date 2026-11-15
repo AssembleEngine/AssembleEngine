@@ -1,0 +1,25 @@
+digraph frame_graph {
+  rankdir=LR;
+  node [shape=box, style=filled];
+  p2 [label="0: units reset\nTransfer", fillcolor="#fff3cd"];
+  p3 [label="1: units cull\nCompute", fillcolor="#d1e7dd"];
+  p5 [label="2: units count\nTransfer", fillcolor="#fff3cd"];
+  p6 [label="3: units count read\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="4: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="5: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p4 [label="6: units\nGraphics", fillcolor="#cfe2ff"];
+  p7 [label="7: copy\nTransfer", fillcolor="#fff3cd"];
+  p8 [label="8: host read\nTransfer", fillcolor="#fff3cd"];
+  p0 -> p1 [label="terrain.leaves"];
+  p0 -> p1 [label="terrain.indirect"];
+  p1 -> p4 [label="depth"];
+  p1 -> p4 [label="readback.target"];
+  p2 -> p3 [label="units.indirect"];
+  p3 -> p4 [label="units.visible"];
+  p3 -> p4 [label="units.indirect"];
+  p3 -> p5 [label="units.indirect"];
+  p4 -> p7 [label="readback.target"];
+  p5 -> p6 [label="units.counts"];
+  p7 -> p8 [label="readback.buffer"];
+  // physical 0 Transient: depth
+}

@@ -198,7 +198,7 @@ mod gpu {
     use crate::device::GpuDevice;
     use crate::executor::{PassContext, Recorder};
     use ae_framegraph::PassId;
-    use crate::pipeline::{self, GraphicsDesc, spirv};
+    use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
     use anyhow::Result;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -262,7 +262,7 @@ mod gpu {
                     color_formats: &[SCENE_FORMAT],
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                    blend: false,
+                    blend: Blend::Off,
                 },
             )?;
             let filter = pipeline::compute_pipeline(device, spirv!("demo_filter.comp"), compute_layout)?;
@@ -275,7 +275,7 @@ mod gpu {
                     color_formats: &[target_format],
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                    blend: false,
+                    blend: Blend::Off,
                 },
             )?;
             let sets_needed = (frames_in_flight * 5) as u32;

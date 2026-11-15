@@ -19,8 +19,10 @@
 //! `land`; `--map-cells` as in `ae-headless`, default 2560 = pathsim's full
 //! map), map-rendering's generated test map (`generated`), or the frame
 //! graph demo (`demo`). The nav heightfield is taken as is: decimetres to
-//! world units (1 unit = 1 m) times `--relief` (default 1); ground under
-//! water is drawn with the water's depth as a tint.
+//! world units (1 unit = 1 m) times `--relief` (default 1). On a map with
+//! water, a water surface (waves, sky reflection, sun glints, shore foam)
+//! is drawn over the ground under it, which is tinted by its depth and lit
+//! by caustics; `--no-water` leaves only the tint.
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -36,7 +38,7 @@
 //! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
 //! terrain detail, T wireframe, L colour by LOD depth, G fog, C freeze the
 //! LOD, P print the camera, V v-sync, N toggle render module flag bit 0,
-//! M tileset, B blend weights, Esc quits.
+//! M tileset, B blend weights, O water surface, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -126,6 +128,8 @@ struct Options {
     quake: u8,
     /// Start in the tileset's blend-weight view.
     weights: bool,
+    /// Draw the water surface on maps with water.
+    water: bool,
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
@@ -152,11 +156,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -200,6 +204,7 @@ fn parse() -> Result<Options> {
             }
             "--tileset-size" => o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?,
             "--weights" => o.weights = true,
+            "--no-water" => o.water = false,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
             "--frames" => o.bench.get_or_insert_with(Default::default).frames = value("--frames", &mut args)?.parse().context("--frames")?,
@@ -364,6 +369,9 @@ fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) ->
     if let Some(t) = tileset {
         app = app.with_tileset(t);
     }
+    if o.water {
+        app = app.with_water();
+    }
     app.view().lock().unwrap().weights = o.weights;
     app
 }
@@ -441,6 +449,9 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     }
     if events.pressed & keys::B != 0 {
         view.weights = !view.weights;
+    }
+    if events.pressed & keys::O != 0 {
+        view.water = !view.water;
     }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;

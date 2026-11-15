@@ -1454,6 +1454,66 @@ played by hand). Next is M7 (water, shadows, particles, decals).
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 
+### M7 progress
+
+Water (`cargo test -p ae_render --test gpu water -- --ignored`):
+- Scope against the plan's `water_ra`: RA3's pass order (wave-particle simulation, planar reflection,
+  refraction copy, underwater pass, the surface, spray) is not ported. What is ported is its
+  surface's composition, cut to what reads at RTS distances: the ground under the water, tinted by
+  its depth (as since M3) and now lit by caustics, is the refraction and underwater part, and the
+  surface blends over it. A deliberate deviation, not `water_ra` done: no planar reflection (the
+  surface reflects an analytic sky), no refraction distortion, no displaced geometry, no wakes, no
+  bubbles or spray. Those would need a reflection pass of the terrain (its LOD is the main
+  camera's) and copies of the scene, and are worth it close up, not at 1–3 km.
+- Library pass `water.draw` (graphics; one colour attachment loaded, the depth buffer as
+  `DepthRead`; no library resources). `Attachments::depth` is now `DepthUse::{Write, Read}`, so
+  `library::check` takes `DepthRead` for the water pass only (and refuses it for the terrain and
+  units, a depth write for the water, and the pass in a scene without water; unit tests).
+  `LibraryEnv::water`; the native graph declares the pass after the units (the target's third
+  writer, the depth buffer's reader). New goldens `scene_units_water_present` and
+  `scene_water_readback`; the existing ones are unchanged.
+- Opt-in like the tileset and vision: `TerrainApp::with_water()` (on a map with a water level),
+  `TerrainView::water` switches it per frame (the pass records nothing; the terrain drops its
+  caustics). `TerrainView::time` (new): animation time, by default the wall clock when presenting
+  and the frame index / 60 when reading back, so captures and tests are deterministic.
+- Render modules: `DECLARE_WATER` (flag bit 2; a module that ignores it draws no water, so the
+  contract stays at version 1), `DeclareEnv::water` in the SDK, `when: water | no_water` in graph
+  files (every file is checked for all eight flag combinations). `render/default` and `render/post`
+  (code and `.graph.json`) declare the water pass; the default module still declares the native
+  graph pass for pass in all eight scenes.
+- The surface (`water.vert`, `water.frag`): one quad at the water level over the map, so the depth
+  test against the terrain and units decides where water shows (keeping early-Z; no shoreline
+  geometry). Eight analytic wave trains from 48 m to 0.75 m (deep-water speeds) shade it; each fades
+  out as it nears three pixels and its slope becomes roughness that widens the sun's highlight
+  (RA3's `rough`), so the glitter neither aliases nor disappears with distance; waves calm in the
+  shallows. Fresnel (Schlick, F0 0.02, floored at 0.06) weights an analytic sky; the sun's glints
+  are added light, hence a new premultiplied blend (`pipeline::Blend::{Off, Straight,
+  Premultiplied}` replaces the bool). Shore foam: crests running in through the last 1.5 m and a
+  line along the waterline, laid on by drifting noise (RA3's `shoreWaves`, by depth instead of a
+  baked travel time). The waterline fades over the first 0.5 m (the mesh and the plane meet there).
+  Fog of war and distance fog apply to the surface's share, so the blend gives the fogged mix of
+  surface and ground. Vision lookup, fog and noise moved to `terrain_shading.glsl`, shared with the
+  terrain.
+- GPU test `water_covers_the_low_ground_only` (flat map, land half 20 m above the water, water half
+  20 m under it, an island 35 m high in it, a land unit and a ship; validation on): water added but
+  switched off is byte-identical to no water; with water, 0 of the land and island points change
+  and 1,661 of 1,678 water points do; the ship keeps its colour; never-seen water gets half of what
+  the surface adds in sight (7.2 vs 14.3); half a second later only water points change. Turning the
+  pipeline's depth test off fails it (the island's far edge: over land the waterline fade alone
+  shows nothing, which the first version of the test, without the island, did not catch). All 16
+  GPU tests pass with validation.
+- `ae-client`: water on by default on wet maps, `--no-water`, O toggles it. With validation: a
+  capture with two teams (fog of war on the lake) and an 8 s windowed `--exercise` (7 swapchain
+  recreates) with 2,000 units, 0 messages.
+- Cost (`ae-client --bench all --label m7-water` against the baseline; the five water-map scenes now
+  draw water): `water` 2–3 µs in the close and army views, 9 µs over the overview, 23 µs in the
+  orbit; 0 of 81 earlier metrics regressed (terrain draw +2–5 %, inside the tolerance).
+- Found on the way: `.gitignore`'s `*.dot` kept the golden plans out of git, so the golden test
+  failed on a fresh checkout; they are now tracked.
+- Not done: everything listed under scope above; no underwater view (the surface is not drawn
+  with the camera below it); one water level per map (the nav terrain has one); foam is thin on the
+  crossing map's steep banks; the colours are tuned by eye on a few captures.
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |

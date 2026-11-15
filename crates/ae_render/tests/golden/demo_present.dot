@@ -1,0 +1,29 @@
+digraph frame_graph {
+  rankdir=LR;
+  node [shape=box, style=filled];
+  p1 [label="0: triangle\nGraphics", fillcolor="#cfe2ff"];
+  p0 [label="1: upload params\nTransfer", fillcolor="#fff3cd"];
+  p2 [label="2: blur_h\nCompute", fillcolor="#d1e7dd"];
+  p3 [label="3: blur_v\nCompute", fillcolor="#d1e7dd"];
+  p4 [label="4: invert\nCompute", fillcolor="#d1e7dd"];
+  p5 [label="5: tint\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="6: composite\nGraphics", fillcolor="#cfe2ff"];
+  p7 [label="7: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p2 [label="params"];
+  p0 -> p3 [label="params"];
+  p0 -> p4 [label="params"];
+  p0 -> p5 [label="params"];
+  p1 -> p2 [label="scene"];
+  p1 -> p4 [label="scene"];
+  p2 -> p3 [label="a1"];
+  p3 -> p6 [label="a2"];
+  p4 -> p5 [label="b1"];
+  p5 -> p6 [label="b2"];
+  p6 -> p7 [label="backbuffer"];
+  // physical 0 Transient: scene
+  // physical 1 Transient: params
+  // physical 2 Transient: a1 -> b1
+  // physical 3 Transient: a2
+  // physical 4 Transient: b2
+  // handoff physical 2: a1 -> b1 at pass 4
+}

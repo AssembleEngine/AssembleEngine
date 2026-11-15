@@ -1,0 +1,11 @@
+digraph frame_graph {
+  rankdir=LR;
+  node [shape=box, style=filled];
+  p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="1: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p2 [label="2: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p1 [label="terrain.leaves"];
+  p0 -> p1 [label="terrain.indirect"];
+  p1 -> p2 [label="target"];
+  // physical 0 Transient: depth
+}

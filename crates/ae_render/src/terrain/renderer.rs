@@ -14,6 +14,10 @@
 //!   depth attachment) reads the draw list as a vertex-stage storage buffer
 //!   and the arguments as an indirect buffer.
 //!
+//! * `record_water` (inside a graphics pass that loads the colour target
+//!   and reads the depth buffer read-only, after everything opaque) draws
+//!   the water surface over the map, when the map has water.
+//!
 //! The tree state lives in buffers the renderer owns, shared by every frame
 //! slot (the subdivision evolves frame to frame); the per-frame uniforms are
 //! one buffer per slot. Static data (sub-mesh, height texture, error
@@ -124,6 +128,11 @@ pub struct FrameParams {
     /// Shade by the vision planes last written (`write_vision`): full in
     /// line of sight, dimmed where explored, dark elsewhere.
     pub vision: bool,
+    /// The water surface is drawn this frame (`record_water`): the terrain
+    /// adds caustics under it.
+    pub water: bool,
+    /// Animation time in seconds (waves, foam, caustics).
+    pub time: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -183,6 +192,8 @@ pub struct TerrainRenderer {
     terrain: vk::Pipeline,
     /// `None` without `fillModeNonSolid`.
     wire: Option<vk::Pipeline>,
+    /// The water surface; `None` on a map without water.
+    water: Option<vk::Pipeline>,
 
     tree: OwnedBuffer,
     bits: OwnedBuffer,
@@ -436,6 +447,25 @@ impl TerrainRenderer {
         } else {
             None
         };
+        let water = match info.water_level {
+            Some(_) => Some(
+                pipeline::graphics_pipeline(
+                    device,
+                    &pipeline::GraphicsDesc {
+                        vertex: spirv!("water.vert"),
+                        fragment: spirv!("water.frag"),
+                        layout: pipeline_layout,
+                        color_formats: &[color_format],
+                        // Reverse-Z; tested against the terrain and units, never written.
+                        depth: Some(pipeline::DepthState { format: depth_format, write: false, compare: vk::CompareOp::GREATER_OR_EQUAL }),
+                        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                        blend: pipeline::Blend::Premultiplied,
+                    },
+                )
+                .context("water pipeline")?,
+            ),
+            None => None,
+        };
 
         Ok(Self {
             max_depth,
@@ -451,6 +481,7 @@ impl TerrainRenderer {
             reduce,
             terrain,
             wire,
+            water,
             tree,
             bits,
             snap,
@@ -550,12 +581,13 @@ impl TerrainRenderer {
                     | if i.has_materials { 8 } else { 0 }
                     | if self.has_tileset && p.tileset { 16 } else { 0 }
                     | if self.has_tileset && p.tileset && p.weights { 32 } else { 0 }
-                    | if self.vision.is_some() && p.vision { 64 } else { 0 },
+                    | if self.vision.is_some() && p.vision { 64 } else { 0 }
+                    | if self.water.is_some() && p.water { 128 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
             water: match i.water_level {
-                Some(level) => [level, 1.0, 0.08, 0.0],
+                Some(level) => [level, 1.0, 0.08, p.time],
                 None => [0.0, 0.0, 0.0, 0.0],
             },
             vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
@@ -668,10 +700,28 @@ impl TerrainRenderer {
         }
     }
 
+    /// Whether this renderer can draw water (the map has a water level).
+    pub fn has_water(&self) -> bool {
+        self.water.is_some()
+    }
+
+    /// Draw the water surface. Records inside a graphics pass with a colour
+    /// attachment of `color_format` (loaded: it blends over the scene) and
+    /// the depth buffer read-only. Nothing on a map without water.
+    pub fn record_water(&self, ctx: &PassContext<'_>) {
+        let Some(water) = self.water else { return };
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        unsafe {
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, water);
+            device.cmd_draw(cmd, 6, 1, 0, 0);
+        }
+    }
+
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
-            for p in [self.prepare, self.update, self.reduce, self.terrain].into_iter().chain(self.wire) {
+            for p in [self.prepare, self.update, self.reduce, self.terrain].into_iter().chain(self.wire).chain(self.water) {
                 device.destroy_pipeline(p, None);
             }
             device.destroy_pipeline_layout(self.pipeline_layout, None);

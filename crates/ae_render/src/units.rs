@@ -25,7 +25,7 @@
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::OwnedBuffer;
-use crate::pipeline::{self, DepthState, GraphicsDesc, spirv};
+use crate::pipeline::{self, Blend, DepthState, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
 use crate::upload;
 use ae_framegraph::BufferDesc;
@@ -248,7 +248,7 @@ impl UnitRenderer {
                 color_formats: &[color_format],
                 depth: Some(DepthState { format: depth_format, write: true, compare: vk::CompareOp::GREATER_OR_EQUAL }),
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                blend: false,
+                blend: Blend::Off,
             },
         )
         .context("unit pipeline")?;

@@ -2,3 +2,5 @@
 /bench/results/*
 !/bench/results/baseline/
 *.dot
+# The frame graph golden plans are test data.
+!crates/ae_render/tests/golden/*.dot

@@ -22,7 +22,7 @@
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
 use crate::memory::OwnedBuffer;
-use crate::pipeline::{self, GraphicsDesc, spirv};
+use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
 use ae_framegraph::BufferDesc;
 use anyhow::{Context as _, Result, bail};
 use ash::vk;
@@ -273,7 +273,7 @@ impl FullscreenProgram {
                     color_formats,
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                    blend: true,
+                    blend: Blend::Straight,
                 },
             )
             .with_context(|| format!("program `{label}` pipeline"))?;

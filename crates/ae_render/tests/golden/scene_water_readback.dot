@@ -1,0 +1,16 @@
+digraph frame_graph {
+  rankdir=LR;
+  node [shape=box, style=filled];
+  p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="1: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p2 [label="2: water\nGraphics", fillcolor="#cfe2ff"];
+  p3 [label="3: copy\nTransfer", fillcolor="#fff3cd"];
+  p4 [label="4: host read\nTransfer", fillcolor="#fff3cd"];
+  p0 -> p1 [label="terrain.leaves"];
+  p0 -> p1 [label="terrain.indirect"];
+  p1 -> p2 [label="depth"];
+  p1 -> p2 [label="readback.target"];
+  p2 -> p3 [label="readback.target"];
+  p3 -> p4 [label="readback.buffer"];
+  // physical 0 Transient: depth
+}

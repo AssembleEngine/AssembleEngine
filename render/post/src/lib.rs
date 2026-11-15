@@ -81,6 +81,10 @@ impl RenderModule for Post {
             let read = p.library("host.read");
             g.pass("units count read", PassKind::Transfer, read).access(counts, Role::HostRead).root().id();
         }
+        if env.water {
+            let water = p.library("water.draw");
+            g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth).id();
+        }
         let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
         g.pass("grade", PassKind::Graphics, grade).sampled(scene, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });

@@ -47,6 +47,8 @@ pub struct DeclareEnv {
     /// Render to the library's `readback.target` and copy it to
     /// `readback.buffer` instead of presenting a `Backbuffer`.
     pub readback: bool,
+    /// The scene draws water: the `water.draw` library pass exists.
+    pub water: bool,
 }
 
 pub struct Declaration {
@@ -104,7 +106,7 @@ pub mod rt {
 
     impl<M: RenderModule> Exports<M> {
         pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> u32 {
-            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0 };
+            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0, water: flags & abi::module::DECLARE_WATER != 0 };
             let Some(d) = self.module.declare(&env) else { return 0 };
             self.declaration = (d.graph.finish(), d.programs.finish());
             let (g, p) = &self.declaration;

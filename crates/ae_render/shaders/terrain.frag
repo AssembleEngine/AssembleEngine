@@ -3,6 +3,7 @@
 // mesh resolution: coarse triangles in flat areas are indistinguishable from fine ones.
 #define GRAPHICS
 #include "terrain_common.glsl"
+#include "terrain_shading.glsl"
 #ifdef BARY
 #extension GL_EXT_fragment_shader_barycentric : require
 #endif
@@ -21,33 +22,6 @@ vec3 hue(float h) {
 
 layout(set = 0, binding = 10) uniform sampler2DArray tileAlbedo; // rgb albedo, a height
 layout(set = 0, binding = 11) uniform sampler2DArray tileNormal; // rg tangent-space normal
-// Vision (fog of war): two bit planes over the vision grid, line of sight
-// then explored, rows of u.vision.w words.
-layout(std430, set = 0, binding = 13) readonly buffer VisionBuf { uint vision[]; };
-
-// 1 in line of sight, 0.5 explored, 0.2 never seen; cells off the grid read
-// as the nearest edge cell (the blend reaches half a cell past the map).
-float visionCell(ivec2 c) {
-    c = clamp(c, ivec2(0), ivec2(u.vision.xy) - 1);
-    uint stride = uint(u.vision.w);
-    uint i = uint(c.y) * stride + uint(c.x) / 32u;
-    uint bit = 1u << (uint(c.x) % 32u);
-    if ((vision[i] & bit) != 0u) {
-        return 1.0;
-    }
-    return (vision[stride * uint(u.vision.y) + i] & bit) != 0u ? 0.5 : 0.2;
-}
-
-// Bilinear over the four nearest cells, so 32 m cells do not show as blocks.
-float visionAt(vec2 world) {
-    vec2 p = world / u.vision.z - 0.5;
-    ivec2 c = ivec2(floor(p));
-    vec2 f = fract(p);
-    float a = mix(visionCell(c), visionCell(c + ivec2(1, 0)), f.x);
-    float b = mix(visionCell(c + ivec2(0, 1)), visionCell(c + ivec2(1, 1)), f.x);
-    return mix(a, b, f.y);
-}
-
 layout(set = 0, binding = 12) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z 1 = triplanar
@@ -129,20 +103,6 @@ Tap cliffTap(uint layer, vec3 P, vec3 dx, vec3 dy, vec3 n) {
         axes = vec3(b.x, 0.0, b.y);
     }
     return project(layer, P, dx, dy, n, axes);
-}
-
-float hash12(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-// Smooth value noise in 0..1.
-float valueNoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    vec2 t = f * f * (3.0 - 2.0 * f);
-    float a = hash12(i), b = hash12(i + vec2(1.0, 0.0)), c = hash12(i + vec2(0.0, 1.0)), d = hash12(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
 const vec3 LAYER_COLORS[8] = vec3[](
@@ -297,9 +257,22 @@ void main() {
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * n.y));
 
     // Ground under water (AssemblyEngine addition): tint by the depth of the
-    // water column until a water pass exists (M7).
+    // water column. This is the part of RA3's underwater pass the water
+    // surface (water.frag) builds on: the surface blends its reflection
+    // over this.
     if (u.water.y > 0.5 && inWorld.y < u.water.x) {
         float depth = u.water.x - inWorld.y;
+        if ((u.cfg.z & FLAG_WATER) != 0u) {
+            // Caustics while the surface is drawn: the sunlight focused by
+            // the waves, two drifting layers of ridged noise whose
+            // product leaves bright threads, fading with depth.
+            vec2 q = inWorld.xz * 0.12;
+            float t = u.water.w;
+            float r0 = 1.0 - abs(valueNoise(q + vec2(t * 0.11, t * 0.07)) * 2.0 - 1.0);
+            float r1 = 1.0 - abs(valueNoise(q * 1.37 + vec2(-t * 0.09, t * 0.12) + 5.3) * 2.0 - 1.0);
+            float caustic = pow(r0 * r1, 6.0) * exp(-depth * 0.18) * smoothstep(0.0, 0.5, depth);
+            color += albedo * vec3(1.0, 0.95, 0.85) * 1.6 * diff * caustic * 0.9;
+        }
         vec3 deep = vec3(0.04, 0.16, 0.24);
         vec3 shallow = vec3(0.16, 0.38, 0.42);
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
@@ -307,15 +280,11 @@ void main() {
     }
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
-        float v = visionAt(inWorld.xz);
-        color *= v;
-        // Out of sight also loses colour, so it reads as remembered, not dark.
-        color = mix(vec3(dot(color, vec3(0.3, 0.59, 0.11))), color, 0.4 + 0.6 * v);
+        color = applyVision(color, inWorld.xz);
     }
 
     float dist = distance(inWorld, u.camPos.xyz);
-    float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
-    color = mix(color, u.fog.rgb, fog);
+    color = mix(color, u.fog.rgb, fogAmount(dist));
 
 #ifdef BARY
     // Wireframe overlay. Sub-mesh triangles are emitted as (v0, apex, v2), so the

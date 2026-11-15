@@ -8,7 +8,7 @@
 //! conditional passes run) for each flag value. No GPU needed.
 
 use ae_render::module::{RenderModule, build, engine};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, FrameInput};
+use ae_render_abi::module::FrameInput;
 use std::path::Path;
 
 fn repo(path: &str) -> String {
@@ -32,7 +32,7 @@ fn graph_files_declare_what_the_modules_declare() {
         let mut file = RenderModule::load(&engine, &file_bytes).unwrap();
         assert!(matches!(file, RenderModule::File(_)) && matches!(wasm, RenderModule::Wasm(_)));
         for (width, height, format) in [(1280, 720, 50), (64, 32, 43), (1, 1, 37)] {
-            for flags in [0, DECLARE_UNITS, DECLARE_READBACK, DECLARE_UNITS | DECLARE_READBACK] {
+            for flags in ae_render::graph_file::SCENE_FLAGS {
                 let want = wasm.declare(width, height, format, flags).unwrap().expect("the module declares");
                 let got = file.declare(width, height, format, flags).unwrap().expect("the file declares");
                 assert!(canonical(&got.graph) == canonical(&want.graph), "{name} {width}x{height} flags {flags}: graph descriptors differ");

@@ -36,9 +36,21 @@ pub struct GraphicsDesc<'a> {
     pub color_formats: &'a [vk::Format],
     pub depth: Option<DepthState>,
     pub topology: vk::PrimitiveTopology,
-    /// Straight alpha blending (`src_alpha, one_minus_src_alpha`) on every
-    /// colour attachment.
-    pub blend: bool,
+    /// Blending on every colour attachment.
+    pub blend: Blend,
+}
+
+/// How a pipeline's output blends with the attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blend {
+    /// Overwrite.
+    Off,
+    /// `src × a + dst × (1 − a)`.
+    Straight,
+    /// `src + dst × (1 − a)`: the shader multiplies by alpha itself, so it
+    /// can also add light (`a` 0 with a colour adds it), which straight
+    /// alpha cannot do in a UNORM target (sources clamp to 1).
+    Premultiplied,
 }
 
 pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Result<vk::Pipeline> {
@@ -66,8 +78,8 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let attachment = vec![vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(desc.blend)
-        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .blend_enable(desc.blend != Blend::Off)
+        .src_color_blend_factor(if desc.blend == Blend::Premultiplied { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
         .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .color_blend_op(vk::BlendOp::ADD)
         .src_alpha_blend_factor(vk::BlendFactor::ONE)

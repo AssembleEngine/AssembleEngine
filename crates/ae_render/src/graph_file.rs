@@ -53,10 +53,11 @@
 //!   only while bit n of the application's flags is set; `root` keeps a
 //!   pass whose results nothing reads.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
-//!   `readback` or `present`, to exist only in such scenes.
+//!   `readback`, `present`, `water` or `no_water`, to exist only in such
+//!   scenes.
 
 use crate::module::{Declared, ModuleFrame};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
@@ -115,19 +116,36 @@ enum When {
     NoUnits,
     Readback,
     Present,
+    Water,
+    NoWater,
 }
 
 impl When {
-    fn holds(when: Option<When>, units: bool, readback: bool) -> bool {
+    fn holds(when: Option<When>, flags: u32) -> bool {
+        let (units, readback, water) = (flags & DECLARE_UNITS != 0, flags & DECLARE_READBACK != 0, flags & DECLARE_WATER != 0);
         match when {
             None => true,
             Some(When::Units) => units,
             Some(When::NoUnits) => !units,
             Some(When::Readback) => readback,
             Some(When::Present) => !readback,
+            Some(When::Water) => water,
+            Some(When::NoWater) => !water,
         }
     }
 }
+
+/// Every combination of the `declare` flags a scene can be asked for.
+pub const SCENE_FLAGS: [u32; 8] = [
+    0,
+    DECLARE_UNITS,
+    DECLARE_READBACK,
+    DECLARE_UNITS | DECLARE_READBACK,
+    DECLARE_WATER,
+    DECLARE_UNITS | DECLARE_WATER,
+    DECLARE_READBACK | DECLARE_WATER,
+    DECLARE_UNITS | DECLARE_READBACK | DECLARE_WATER,
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -317,21 +335,27 @@ impl GraphFile {
         ensure!(spec.resources.iter().filter(|r| r.kind == ResourceKind::Output).count() == 1, "a graph file declares exactly one `output` resource");
         let file = Self { spec, spirv, entries: Vec::new(), loaded: std::time::Instant::now() };
         // Every scene the file can be asked for must declare.
-        for flags in [0, DECLARE_UNITS, DECLARE_READBACK, DECLARE_UNITS | DECLARE_READBACK] {
-            file.build(64, 64, 50, flags).with_context(|| format!("declaring for {}units, {}", if flags & DECLARE_UNITS != 0 { "" } else { "no " }, if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }))?;
+        for flags in SCENE_FLAGS {
+            file.build(64, 64, 50, flags).with_context(|| {
+                format!(
+                    "declaring for {}units, {}water, {}",
+                    if flags & DECLARE_UNITS != 0 { "" } else { "no " },
+                    if flags & DECLARE_WATER != 0 { "" } else { "no " },
+                    if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
+                )
+            })?;
         }
         Ok(file)
     }
 
     fn build(&self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<(Declared, Entries)> {
-        let units = flags & DECLARE_UNITS != 0;
         let readback = flags & DECLARE_READBACK != 0;
         let mut g = GraphBuilder::new();
         let mut table = ProgramTable::new();
         let mut entries = Vec::new();
         let mut refs: BTreeMap<&str, ResourceRef> = BTreeMap::new();
         let mut output = None;
-        for r in self.spec.resources.iter().filter(|r| When::holds(r.when, units, readback)) {
+        for r in self.spec.resources.iter().filter(|r| When::holds(r.when, flags)) {
             let at = || format!("resource `{}`", r.name);
             let reference = match r.kind {
                 ResourceKind::Library => {
@@ -365,7 +389,7 @@ impl GraphFile {
             refs.insert(&r.name, reference);
         }
         let output = output.context("the `output` resource has a `when` that excludes this scene")?;
-        for p in self.spec.passes.iter().filter(|p| When::holds(p.when, units, readback)) {
+        for p in self.spec.passes.iter().filter(|p| When::holds(p.when, flags)) {
             let at = || format!("pass `{}`", p.name);
             let payload = match (&p.library, &p.program) {
                 (Some(name), None) => {

@@ -1,5 +1,6 @@
 //! The default render module: the terrain, then the units over it (sharing
-//! its colour target and depth buffer), then present or readback, all
+//! its colour target and depth buffer), the water surface when the scene
+//! has it, then present or readback, all
 //! from the engine's pass library. It declares the same graph the engine
 //! declares natively (`ae_render::terrain::app::native_graph`), which the
 //! host's tests check pass for pass.
@@ -64,6 +65,10 @@ impl RenderModule for Scene {
             g.pass("units count", PassKind::Transfer, count).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
             let read = p.library("host.read");
             g.pass("units count read", PassKind::Transfer, read).access(counts, Role::HostRead).root().id();
+        }
+        if env.water {
+            let water = p.library("water.draw");
+            g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth).id();
         }
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");

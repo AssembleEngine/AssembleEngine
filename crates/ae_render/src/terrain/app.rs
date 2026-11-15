@@ -5,6 +5,9 @@
 //! reset, cull and draw the units into the same target and depth buffer
 //! (see [`crate::units`]).
 //!
+//! With water ([`TerrainApp::with_water`], on a map with a water level), a
+//! water surface pass follows, blending over the terrain and units.
+//!
 //! The graph is the engine's own ([`native_graph`]) or a render module's
 //! ([`TerrainApp::with_module`]): the module declares resources and passes
 //! from the pass library ([`crate::library`]); the host sizes the library
@@ -30,7 +33,7 @@ use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
 use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
@@ -103,6 +106,12 @@ pub struct TerrainView {
     pub weights: bool,
     /// Shade by the vision feed, if the app has one ([`TerrainApp::with_vision`]).
     pub vision: bool,
+    /// Draw the water surface, if the app has one ([`TerrainApp::with_water`]).
+    pub water: bool,
+    /// Animation time (waves, foam, caustics) in seconds; `None`: wall
+    /// clock since the app was made when presenting, the frame index / 60
+    /// when reading back (deterministic captures and tests).
+    pub time: Option<f32>,
 }
 
 /// One observer's vision for the terrain: line of sight now and cells ever
@@ -243,11 +252,18 @@ pub struct TerrainApp {
     extent: vk::Extent2D,
     update_lod: bool,
     wireframe: Wireframe,
+    /// Draw water (opt-in; only on a map with a water level).
+    water: bool,
+    /// The water is drawn this frame (`view.water`).
+    water_on: bool,
+    /// Frames prepared, and when the app was made (animation time).
+    frames: u64,
+    started: Instant,
 }
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -274,7 +290,18 @@ impl TerrainApp {
             extent: vk::Extent2D { width: 1, height: 1 },
             update_lod: true,
             wireframe: Wireframe::Off,
+            water: false,
+            water_on: false,
+            frames: 0,
+            started: Instant::now(),
         }
+    }
+
+    /// Draw the water surface (a `water.draw` pass after the units) on a map
+    /// with a water level; on a map without one this does nothing.
+    pub fn with_water(mut self) -> Self {
+        self.water = self.source.info.water_level.is_some();
+        self
     }
 
     /// Shade the terrain with `tileset` (its layers are uploaded when the
@@ -379,6 +406,10 @@ impl TerrainApp {
 
     /// The camera matrices of `view` for the current target.
     fn params(&self, view: &TerrainView) -> FrameParams {
+        let time = view.time.unwrap_or_else(|| match self.output {
+            TerrainOutput::Readback => self.frames as f32 / 60.0,
+            TerrainOutput::Present => self.started.elapsed().as_secs_f32(),
+        });
         let aspect = self.extent.width as f32 / self.extent.height.max(1) as f32;
         let mut camera = view.camera;
         camera.ground = self.source.height_at(camera.target);
@@ -397,6 +428,8 @@ impl TerrainApp {
             tileset: view.tileset,
             weights: view.weights,
             vision: view.vision && self.vision.is_some(),
+            water: view.water && self.water,
+            time,
         }
     }
 }
@@ -507,6 +540,8 @@ impl RenderApp for TerrainApp {
         let params = self.params(&view);
         self.update_lod = params.update_lod;
         self.wireframe = params.wireframe;
+        self.water_on = params.water;
+        self.frames += 1;
         let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
         let stats = renderer.read_stats(slot);
         *self.stats.lock().unwrap_or_else(|p| p.into_inner()) = stats;
@@ -685,6 +720,7 @@ impl TerrainApp {
             sampler: self.sampler,
             update_lod: self.update_lod,
             wireframe: self.wireframe,
+            water: self.water_on,
         }
     }
 }
@@ -697,6 +733,7 @@ struct SceneRecorder<'a> {
     sampler: vk::Sampler,
     update_lod: bool,
     wireframe: Wireframe,
+    water: bool,
 }
 
 impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
@@ -711,6 +748,11 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::UnitsCull => units()?.record_cull(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
                 LibraryPass::UnitsCount => units()?.record_count(ctx),
+                LibraryPass::WaterDraw => {
+                    if self.water {
+                        terrain()?.record_water(ctx);
+                    }
+                }
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
@@ -738,7 +780,8 @@ pub enum ScenePassSource {
 }
 
 /// The scene's graph as the engine declares it natively: the terrain, the
-/// units when the scene has them, and present or readback. Library buffers
+/// units when the scene has them, the water surface when it draws water,
+/// and present or readback. Library buffers
 /// are declared with size 0 ([`crate::library::resolve`] sizes them). A
 /// render module that declares the same graph gets the same bake.
 pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<LibraryPass> {
@@ -791,6 +834,11 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         let counts = library_buffer(&mut graph, LibraryResource::UnitCounts);
         graph.pass("units count", PassKind::Transfer, LibraryPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
         graph.pass("units count read", PassKind::Transfer, LibraryPass::HostRead).access(counts, Role::HostRead).root().id();
+    }
+    if env.water {
+        // After the units (a third writer of the target), testing against
+        // the depth they leave without writing it.
+        graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(target, LoadOp::Load).depth_read(depth).id();
     }
     match output {
         TerrainOutput::Present => {
@@ -847,7 +895,7 @@ impl TerrainApp {
     /// The module's graph for `env`, decoded and wired, with its fullscreen
     /// programs reflected, checked and built.
     fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
-        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 };
+        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 };
         let declared = module
             .declare(env.extent.width, env.extent.height, env.color_format.as_raw() as u32, flags)?
             .with_context(|| format!("the module declines a {}x{} {:?} target", env.extent.width, env.extent.height, env.color_format))?;
@@ -911,7 +959,7 @@ impl TerrainApp {
     /// What the library needs to agree with for `target`.
     fn env(&self, target: TargetInfo) -> Result<LibraryEnv> {
         let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
-        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some() })
+        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(), water: self.water && renderer.has_water() })
     }
 
     /// Size the library resources of `graph`, check its library passes and

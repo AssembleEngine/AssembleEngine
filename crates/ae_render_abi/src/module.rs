@@ -15,7 +15,9 @@
 //! `declare` returns the address of four `u32`s: graph pointer and length
 //! (the frame graph declaration, [`crate::GraphBuilder`]), program table
 //! pointer and length ([`ProgramTable`]); 0 if the module cannot render
-//! that target. `flags` holds [`DECLARE_UNITS`] and [`DECLARE_READBACK`].
+//! that target. `flags` holds [`DECLARE_UNITS`], [`DECLARE_READBACK`] and
+//! [`DECLARE_WATER`] (added later; a module that ignores it simply draws no
+//! water).
 //! `frame` returns the address of [`FrameOutput`] as four `u32`s: pointer
 //! and word count of a bitset of *disabled* programs (a conditional pass
 //! whose payload's bit is set is skipped), pointer and length of the
@@ -43,6 +45,9 @@ pub const DECLARE_UNITS: u32 = 1 << 0;
 /// `declare` flag: render to `readback.target` and copy it out, instead of
 /// presenting a `Backbuffer`.
 pub const DECLARE_READBACK: u32 = 1 << 1;
+/// `declare` flag: the scene draws water (the `water.draw` library pass
+/// exists).
+pub const DECLARE_WATER: u32 = 1 << 2;
 
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
 pub const PROGRAM_VERSION: u32 = 1;

@@ -1,5 +1,5 @@
 //! Engine pass library: the passes a scene's graph wires up by name (the
-//! terrain, the units, readback, present), with the resources each needs
+//! terrain, the units, the water surface, readback, present), with the resources each needs
 //! and the roles it uses them in.
 //!
 //! A graph, native or declared by a render module, uses a library pass by
@@ -75,6 +75,9 @@ pub enum LibraryPass {
     UnitsCull,
     UnitsDraw,
     UnitsCount,
+    /// The water surface over the terrain and units: tests against their
+    /// depth read-only and blends into the colour target.
+    WaterDraw,
     /// Copy an image to [`LibraryResource::ReadbackBuffer`].
     ReadbackCopy,
     /// Records nothing: the pass that declares host reads.
@@ -87,17 +90,27 @@ pub enum LibraryPass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attachments {
     pub color: usize,
-    pub depth: bool,
+    pub depth: DepthUse,
+}
+
+/// How a graphics library pass uses the depth buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthUse {
+    /// `DepthAttachment` (any load op): tests and writes.
+    Write,
+    /// `DepthRead`: tests only.
+    Read,
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 9] = [
+    pub const ALL: [LibraryPass; 10] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
         Self::UnitsCull,
         Self::UnitsDraw,
         Self::UnitsCount,
+        Self::WaterDraw,
         Self::ReadbackCopy,
         Self::HostRead,
         Self::Present,
@@ -111,6 +124,7 @@ impl LibraryPass {
             Self::UnitsCull => "units.cull",
             Self::UnitsDraw => "units.draw",
             Self::UnitsCount => "units.count",
+            Self::WaterDraw => "water.draw",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
             Self::Present => "present",
@@ -124,7 +138,7 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod | Self::UnitsCull => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw => PassKind::Graphics,
+            Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -149,14 +163,18 @@ impl LibraryPass {
             ],
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
-            Self::HostRead | Self::Present => &[],
+            Self::WaterDraw | Self::HostRead | Self::Present => &[],
         }
     }
 
     /// Attachments a graphics pass needs (one colour target and the depth
     /// buffer, whose formats the host checks).
     pub fn attachments(self) -> Option<Attachments> {
-        matches!(self, Self::TerrainDraw | Self::UnitsDraw).then_some(Attachments { color: 1, depth: true })
+        match self {
+            Self::TerrainDraw | Self::UnitsDraw => Some(Attachments { color: 1, depth: DepthUse::Write }),
+            Self::WaterDraw => Some(Attachments { color: 1, depth: DepthUse::Read }),
+            _ => None,
+        }
     }
 
     /// Whether it needs the unit renderer.
@@ -189,6 +207,8 @@ pub struct LibraryEnv {
     pub extent: vk::Extent2D,
     /// Units exist in this scene.
     pub units: bool,
+    /// The scene draws water (the renderer has its pipeline).
+    pub water: bool,
 }
 
 /// Library resource of each graph resource (by `ResourceId` index).
@@ -245,6 +265,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     if lib.uses_units() && !env.units {
         return Err(error(format!("pass `{name}` ({}) needs units; this scene has none", lib.name())));
     }
+    if lib == LibraryPass::WaterDraw && !env.water {
+        return Err(error(format!("pass `{name}` (water.draw) needs water; this scene draws none")));
+    }
     let resource = |id: ResourceId| &graph.resources[id.index()];
     for &(needed, role) in lib.requires() {
         if !p.intents.iter().any(|i| map[i.resource.index()] == Some(needed) && i.role == role) {
@@ -266,7 +289,7 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
                     return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target {:?}", r.name, image.format, env.color_format)));
                 }
             }
-            (_, Role::DepthAttachment(_)) if lib.attachments().is_some_and(|a| a.depth) => {
+            (_, Role::DepthAttachment(_)) | (_, Role::DepthRead) if lib.attachments().is_some_and(|a| (a.depth == DepthUse::Read) == (intent.role == Role::DepthRead)) => {
                 depth += 1;
                 if let ResourceDesc::Image(image) = r.desc
                     && image.format != env.depth_format
@@ -281,9 +304,13 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
         }
     }
     if let Some(a) = lib.attachments()
-        && (color != a.color || (depth == 1) != a.depth)
+        && (color != a.color || depth != 1)
     {
-        return Err(error(format!("pass `{name}` ({}) needs {} colour attachment(s) and a depth attachment; it has {color} and {depth}", lib.name(), a.color)));
+        let role = match a.depth {
+            DepthUse::Write => "a depth attachment",
+            DepthUse::Read => "a read-only depth attachment (depth_read)",
+        };
+        return Err(error(format!("pass `{name}` ({}) needs {} colour attachment(s) and {role}; it has {color} and {depth}", lib.name(), a.color)));
     }
     if lib == LibraryPass::ReadbackCopy && p.intents.iter().filter(|i| i.role == Role::TransferSrc).count() != 1 {
         return Err(error(format!("pass `{name}` (readback.copy) copies one image")));
@@ -300,7 +327,7 @@ mod tests {
     use crate::terrain::app::{TerrainOutput, native_graph};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {
@@ -329,6 +356,12 @@ mod tests {
         }
         let no_units = LibraryEnv { units: false, ..env() };
         assert!(wire(native_graph(&no_units, TerrainOutput::Present), &no_units).is_ok());
+        let dry = LibraryEnv { water: false, ..env() };
+        let graph = wire(native_graph(&dry, TerrainOutput::Present), &dry).unwrap();
+        assert!(!graph.passes.iter().any(|p| p.record == LibraryPass::WaterDraw), "no water pass without water");
+        let graph = native_graph(&env(), TerrainOutput::Readback);
+        let (units, water) = (pass(&graph, LibraryPass::UnitsDraw), pass(&graph, LibraryPass::WaterDraw));
+        assert!(water > units, "the water is declared after the units");
     }
 
     #[test]
@@ -378,6 +411,35 @@ mod tests {
         let no_units = LibraryEnv { units: false, ..env() };
         let e = err(base(), &no_units);
         assert!(e.contains("does not exist in this scene") || e.contains("needs units"), "{e}");
+
+        // The water pass writing depth instead of testing it read-only, or
+        // without depth.
+        let mut g = base();
+        let water = pass(&g, LibraryPass::WaterDraw);
+        for intent in &mut g.passes[water].intents {
+            if intent.role == Role::DepthRead {
+                intent.role = Role::DepthAttachment(ae_framegraph::LoadOp::Load);
+            }
+        }
+        let e = err(g, &env());
+        assert!(e.contains("`water`") && e.contains("does not use `depth`"), "{e}");
+        let mut g = base();
+        g.passes[water].intents.retain(|i| i.role != Role::DepthRead);
+        let e = err(g, &env());
+        assert!(e.contains("read-only depth attachment"), "{e}");
+        // The terrain reading depth only.
+        let mut g = base();
+        let draw = pass(&g, LibraryPass::TerrainDraw);
+        for intent in &mut g.passes[draw].intents {
+            if intent.role.is_depth() {
+                intent.role = Role::DepthRead;
+            }
+        }
+        assert!(err(g, &env()).contains("does not use `depth` as DepthRead"));
+        // A water pass in a scene without water.
+        let dry = LibraryEnv { water: false, ..env() };
+        let e = err(base(), &dry);
+        assert!(e.contains("needs water"), "{e}");
 
         // A readback target of the wrong extent.
         let other = LibraryEnv { extent: vk::Extent2D { width: 65, height: 32 }, ..env() };
