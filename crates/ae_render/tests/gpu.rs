@@ -1726,7 +1726,7 @@ fn hills_shade_away_from_the_sun() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
-        let classes = vec![UnitClass { color: [0.9, 0.9, 0.9], floats: false }];
+        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
         if r.shadows {
             app = app.with_shadows();

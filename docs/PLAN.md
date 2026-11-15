@@ -1552,7 +1552,7 @@ The hills' shadows (`cargo test -p ae_render --lib sun`, `cargo test -p ae_rende
   every corner is off screen, a unit in a shadow and one in the sun, validation on): shadows made
   but switched off are byte-identical to none; 0 of 7,132 sunlit ground points change; 23 of 24
   points in the in-view tower's shadow and 32 of 32 in the off-screen tower's lose a quarter of
-  their brightness or more; the shaded unit darkens (251 to 134), the sunlit one is unchanged;
+  their brightness or more; the shaded unit darkens (184 to 97; its colour kept off white so the sunlit one is not clipped), the sunlit one is unchanged;
   after a terrain edit levels the first tower its shadow is gone (0 points differ from no shadows)
   and the other's remains. Making the shader's lookup return 1 fails it, as does dropping the
   edit's shadow regions in `TerrainRenderer::apply`. All 17 GPU tests pass with validation;
