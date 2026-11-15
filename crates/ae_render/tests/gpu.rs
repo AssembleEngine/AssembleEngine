@@ -2047,7 +2047,9 @@ fn units_cast_shadows() {
 ///   strongest contribution (no hard line).
 /// * Particles that have died, and a pool never emitted into, draw exactly
 ///   as no particle renderer at all.
-/// * An explosion of the default effects changes the frame.
+/// * An explosion of the default effects changes the frame, and renders
+///   byte-identically twice (clustered depths: the slot in the key orders
+///   what the depth does not, whatever order the simulation appended in).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_sort_blend_and_soften() {
@@ -2162,5 +2164,10 @@ fn particles_sort_blend_and_soften() {
     let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
     println!("explosion: {changed} bytes changed");
     assert!(changed > 1000, "an explosion shows: {changed} bytes");
+    // About 90 particles at clustered depths, appended by the simulation
+    // in whatever order its invocations run: the same frame every time.
+    let again = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects())));
+    let differing = boom.iter().zip(&again).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 0, "the same explosion twice differs in {differing} bytes");
     assert_clean(&gpu);
 }

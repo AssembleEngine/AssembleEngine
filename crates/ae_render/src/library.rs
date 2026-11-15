@@ -558,5 +558,17 @@ mod tests {
         let other = LibraryEnv { extent: vk::Extent2D { width: 65, height: 32 }, ..env() };
         let e = err(native_graph(&other, TerrainOutput::Readback), &env());
         assert!(e.contains("`readback.target`"), "{e}");
+
+        // Particles: the depth as a read-only attachment instead of
+        // sampled, and particle passes in a scene without particles.
+        let mut g = base();
+        let draw = pass(&g, LibraryPass::ParticlesDraw);
+        let depth = g.passes[draw].intents.iter().position(|i| i.role == Role::Sampled(ShaderStage::Fragment)).unwrap();
+        g.passes[draw].intents[depth].role = Role::DepthRead;
+        let e = err(g, &env());
+        assert!(e.contains("`particles`") && e.contains("DepthRead"), "{e}");
+        let still = LibraryEnv { particles: false, ..env() };
+        let e = err(base(), &still);
+        assert!(e.contains("needs particles"), "{e}");
     }
 }

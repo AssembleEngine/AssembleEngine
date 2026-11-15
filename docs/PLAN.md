@@ -1678,8 +1678,9 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
   - All particles are sorted back to front by centre and drawn premultiplied. Emissive particles
     write alpha 0, so they add light, and fire behind smoke is dimmed by it.
   - The key is `(far-to-near log depth, 16 bits) << 16 | slot`. Unique keys make the order
-    independent of the order the simulation appended them in, so a frame is byte-identical
-    whichever burst came first.
+    independent of the order the simulation's invocations appended them in: the same bursts give
+    the same frame. Particles in one depth bucket fall back to slot order, which follows the order
+    of emission.
   - This is the plan's "media sorted by centre" applied to everything; the separate emissive
     class was dropped as unnecessary.
 - **Soft edges, and no depth attachment.**
@@ -1707,18 +1708,22 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
   - The skirmish game shows them. No other events reach the client yet: no shots, no impacts.
 - **GPU test `particles_sort_blend_and_soften`** (validation on):
   - A blue puff in front of a red one shows blue, and red when swapped. The frame is
-    byte-identical whichever was emitted first.
+    byte-identical whichever was emitted first (their depths differ).
   - A puff under the ground draws nothing, and nor do dead particles or an empty pool (both
     byte-identical to no particle renderer).
   - A puff cut by the ground changes by at most 3.6 between neighbouring pixels, against a
     strongest contribution of 65.6.
-  - An explosion of the default effects changes the frame.
+  - An explosion of the default effects changes the frame, and is byte-identical when rendered
+    again: about 90 particles at clustered depths, where the slot bits decide.
   - Skipping the sort fails it, and so does a hard depth test instead of the fade.
   - Unit test: deaths only where seen.
 - **Cost.** New bench scene `battle`: the army view, closer, with 2 explosions a frame, about 40k
   live particles.
   - `particles sim` 58 µs, `particles` (draw) 173 µs. The other six scenes are unchanged against
     `m7-unit-shadows-3` (89 of 109 metrics compared, 0 regressed).
+  - An idle renderer (the default client before anything dies) costs the empty draw pass,
+    2.4–3 µs: the depth buffer's move to sampled and the target's load and store. The sim pass
+    records nothing (`m7-particles-idle`: army, overview, orbit, cliffs; totals within noise).
   - The sort first cost 130 µs: the port's 32 blocks per workgroup suit millions of keys and gave
     a 64k pool only 8 workgroups. With 4 blocks it takes about 42 µs; 1 and 2 blocks were slower,
     because the scatter's prefix walks every workgroup.
