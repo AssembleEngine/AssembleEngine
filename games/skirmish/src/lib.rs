@@ -1,15 +1,20 @@
 //! Skirmish: two allyteams on a nav map, defined by content.
 //!
-//! Game parameter: bits 0..24 = 0 (the map spawns no units of its own),
-//! bits 24..40 = the map's side in metres (bases sit 15% in from opposite
-//! corners), bits 40..48 = tanks each allyteam starts with, bits 48..56 =
-//! extra tanks allyteam 0 starts with (a handicap; 0 for an even match).
+//! The bases are the map's first two start points (`MapStart`, from a map
+//! package). Game parameter: bits 0..24 = 0 (the map spawns no units of
+//! its own); bits 24..40 = the map's side in metres, used only on a map
+//! without start points (bases then sit 15% in from opposite corners);
+//! bits 40..48 = tanks each allyteam starts with (0: [`START_TANKS`]);
+//! bits 48..56 = extra tanks allyteam 0 starts with (a handicap). A map
+//! package with start points needs no parameter at all.
 //!
 //! Systems, in schedule order:
+//! * `map_starts` (host, tick 0): the map's start points.
 //! * `start` (tick 0): each allyteam's `factory` at its base and its
 //!   starting `tank`s in a ring around it, as `SpawnRequest`s, and the
-//!   `Match` entity; the engine's catalogue service spawns the defs
-//!   (`content/defs/`).
+//!   `Match` entity (with the bases); the engine's catalogue service spawns
+//!   the defs (`content/defs/`).
+//! * `publish_bases`: the bases as `Base` events, every tick.
 //! * `produce`: a factory earns `income` metal a tick; when it has `cost`
 //!   it starts a unit of def `builds` and spawns it `build_ticks` later
 //!   beside itself.
@@ -30,7 +35,7 @@
 //!   their last in the same tick it is a draw (`DRAW`).
 
 use ae_sdk::catalog::{SpawnRequest, def_id};
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, MoveOrder, MovementClass, NavAgent, Team, mode};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, MapStart, MoveOrder, MovementClass, NavAgent, Team, mode};
 use ae_sdk::{Component, Entity, Run, Spawn, despawn, emit, schedule, system};
 
 ae_sdk::movement_classes![
@@ -177,7 +182,8 @@ pub const ACQUIRE: f32 = 1.5;
 /// How far in front of its base (toward the enemy) a new unit gathers, metres.
 pub const RALLY: f32 = 220.0;
 
-/// The match: the winning allyteam (`NO_WINNER` until decided) and when.
+/// The match: the winning allyteam (`NO_WINNER` until decided) and when,
+/// and where each allyteam's base is (every player knows).
 #[repr(C)]
 #[derive(Clone, Copy, Component)]
 pub struct Match {
@@ -186,6 +192,20 @@ pub struct Match {
     pub reserved: u32,
     #[field(view = "always")]
     pub ended_at: u64,
+    #[field(view = "always")]
+    pub base_x: [f32; ALLIES as usize],
+    #[field(view = "always")]
+    pub base_y: [f32; ALLIES as usize],
+}
+
+/// Allyteam `ally`'s base, published every tick by `bases` (from `Match`).
+#[repr(C)]
+#[derive(Clone, Copy, Component)]
+#[component(event)]
+pub struct Base {
+    pub ally: u32,
+    pub x: f32,
+    pub y: f32,
 }
 
 pub const NO_WINNER: u32 = u32::MAX;
@@ -231,30 +251,39 @@ pub struct FactoryCount {
 
 pub const ALLIES: u32 = 2;
 
-/// The map's side, metres.
-pub fn extent(run: &Run) -> f32 {
-    ((run.param() >> 24) & 0xFFFF) as f32
-}
+/// Tanks each allyteam starts with when the parameter does not say.
+pub const START_TANKS: u64 = 6;
 
-/// Allyteam `ally`'s base.
-pub fn base(run: &Run, ally: u32) -> (f32, f32) {
-    let e = extent(run);
-    if ally == 0 { (e * 0.15, e * 0.15) } else { (e * 0.85, e * 0.85) }
+/// The bases: the map's first two start points; on a map without them
+/// (the generated maps), 15% in from opposite corners of a map whose side
+/// in metres is in the parameter.
+fn bases(run: &Run, starts: &[MapStart]) -> [(f32, f32); ALLIES as usize] {
+    let at = |i: u32| starts.iter().find(|s| s.index == i).map(|s| (s.x, s.y));
+    if let (Some(a), Some(b)) = (at(0), at(1)) {
+        return [a, b];
+    }
+    let e = ((run.param() >> 24) & 0xFFFF) as f32;
+    [(e * 0.15, e * 0.15), (e * 0.85, e * 0.85)]
 }
 
 fn spawn(def: &str, ally: u32, x: f32, y: f32) {
     emit(&SpawnRequest { def: def_id(def), ally, reserved: 0, x, y });
 }
 
-#[system(emits(SpawnRequest))]
+#[system(reads_events(MapStart), emits(SpawnRequest))]
 fn start(run: &Run) {
     if run.tick() != 0 {
         return;
     }
-    Spawn::new().with(&Match { winner: NO_WINNER, reserved: 0, ended_at: 0 }).submit();
+    let at = bases(run, run.events::<MapStart>());
+    Spawn::new().with(&Match { winner: NO_WINNER, reserved: 0, ended_at: 0, base_x: at.map(|b| b.0), base_y: at.map(|b| b.1) }).submit();
+    let tanks = match (run.param() >> 40) & 0xFF {
+        0 => START_TANKS,
+        n => n,
+    };
     for ally in 0..ALLIES {
-        let tanks = ((run.param() >> 40) & 0xFF) + if ally == 0 { (run.param() >> 48) & 0xFF } else { 0 };
-        let (bx, by) = base(run, ally);
+        let tanks = tanks + if ally == 0 { (run.param() >> 48) & 0xFF } else { 0 };
+        let (bx, by) = at[ally as usize];
         spawn("factory", ally, bx, by);
         for i in 0..tanks {
             let a = i as f32 / tanks.max(1) as f32 * core::f32::consts::TAU;
@@ -301,13 +330,25 @@ fn produce(run: &Run) {
     }
 }
 
+/// Every allyteam's base as an event, for systems over other rows.
+#[system(serial, read(Match), emits(Base))]
+fn publish_bases(run: &Run) {
+    let matches = run.read::<Match>();
+    for i in run.rows() {
+        for ally in 0..ALLIES {
+            emit(&Base { ally, x: matches[i].base_x[ally as usize], y: matches[i].base_y[ally as usize] });
+        }
+    }
+}
+
 /// Where allyteam `ally`'s new units gather: [`RALLY`] metres from its
-/// base toward the enemy's.
-pub fn rally_point(run: &Run, ally: u32) -> (f32, f32) {
-    let ((bx, by), (ex, ey)) = (base(run, ally), base(run, (ally + 1) % ALLIES));
+/// base toward the enemy's (`None` before the bases are known).
+fn rally_point(bases: &[Base], ally: u32) -> Option<(f32, f32)> {
+    let at = |a: u32| bases.iter().find(|b| b.ally == a).map(|b| (b.x, b.y));
+    let ((bx, by), (ex, ey)) = (at(ally)?, at((ally + 1) % ALLIES)?);
     let (dx, dy) = (ex - bx, ey - by);
     let d = (dx * dx + dy * dy).sqrt().max(1.0);
-    (bx + dx / d * RALLY, by + dy / d * RALLY)
+    Some((bx + dx / d * RALLY, by + dy / d * RALLY))
 }
 
 /// Nav order groups of one tick: orders to the same point share a group
@@ -359,7 +400,7 @@ fn push(q: &mut Queue, kind: u32, x: f32, y: f32) {
 ///
 /// Runs after `scan` (this tick's `Presence`); nav takes its orders next
 /// tick.
-#[system(serial, read(Team, Body, NavAgent, Weapon), write(Queue), reads_events(UnitCommand, Presence), emits(MoveOrder))]
+#[system(serial, read(Team, Body, NavAgent, Weapon), write(Queue), reads_events(UnitCommand, Presence, Base), emits(MoveOrder))]
 fn orders(run: &Run) {
     let (teams, bodies, agents, weapons, queues, ids) = (run.read::<Team>(), run.read::<Body>(), run.read::<NavAgent>(), run.read::<Weapon>(), run.write::<Queue>(), run.entities());
     let tick = run.tick();
@@ -367,11 +408,13 @@ fn orders(run: &Run) {
     cmds.sort_unstable();
     let all = run.events::<UnitCommand>();
     let seen = run.events::<Presence>();
+    let bases = run.events::<Base>();
     let mut groups = Groups { tick, points: Vec::new() };
     for i in run.rows() {
         let (q, e, ally, b) = (&mut queues[i], ids[i], teams[i].ally, bodies[i]);
-        if q.state == state::NEW {
-            let (x, y) = rally_point(run, ally);
+        if q.state == state::NEW
+            && let Some((x, y)) = rally_point(bases, ally)
+        {
             push(q, command::MOVE, x, y);
             q.state = state::IDLE;
         }
@@ -556,4 +599,4 @@ fn judge(run: &Run) {
     }
 }
 
-schedule!(start, produce, host(catalog_spawn), host(nav), host(spatial), scan, orders, fire, armor, apply, census, judge);
+schedule!(host(map_starts), start, publish_bases, produce, host(catalog_spawn), host(nav), host(spatial), scan, orders, fire, armor, apply, census, judge);

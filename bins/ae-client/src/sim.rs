@@ -52,10 +52,15 @@ pub struct SimOptions {
     pub observer: Option<u32>,
     /// `games/<game>`: `crossing` or `skirmish`.
     pub game: String,
-    /// The game's content directory (its catalogue spawns its units).
-    pub content: Option<String>,
+    /// The game's content: package sources and content directories, in
+    /// mount order (its catalogue spawns its units).
+    pub mounts: Vec<std::path::PathBuf>,
     /// The game parameter, if not the game's default.
     pub param: Option<u64>,
+    /// The sim module from a package (else `games/<game>` is built).
+    pub wasm: Option<Arc<Vec<u8>>>,
+    /// A map package's terrain and start points ([`Map::Loaded`]).
+    pub loaded_map: Option<(Arc<ae_nav::terrain::Terrain>, Vec<[f32; 2]>)>,
 }
 
 /// A player's action from the window, in world coordinates.
@@ -128,7 +133,11 @@ const ENEMY_TINT: [f32; 3] = [0.95, 0.15, 0.1];
 
 impl SimOptions {
     fn plugin(&self) -> NavPlugin {
-        NavPlugin { teams: if self.skirmish() { 0 } else { self.teams }, ..NavPlugin::new(self.map, self.map_cells) }
+        let base = match &self.loaded_map {
+            Some((terrain, starts)) => NavPlugin::loaded(terrain.clone(), starts.clone()),
+            None => NavPlugin::new(self.map, self.map_cells),
+        };
+        NavPlugin { teams: if self.skirmish() { 0 } else { self.teams }, ..base }
     }
 
     pub fn skirmish(&self) -> bool {
@@ -215,16 +224,21 @@ struct ViewState {
 impl Sim {
     /// The world; landed ground changes go to `ground`, if given.
     pub fn new(o: &SimOptions, ground: Option<Arc<GroundFeed>>) -> Result<Self> {
-        let wasm = ae_sim::build::game(&o.game).with_context(|| format!("building games/{}", o.game))?;
+        let wasm = match &o.wasm {
+            Some(w) => w.to_vec(),
+            None => ae_sim::build::game(&o.game).with_context(|| format!("building games/{}", o.game))?,
+        };
         let nav = NavPlugin { ground, ..o.plugin() };
         let spatial = SpatialPlugin::square(nav.extent(), 64.0);
         let cfg = RuntimeConfig { max_workers: o.workers, ..RuntimeConfig::default() };
         let mut plugins: Vec<Arc<dyn ae_sim::host::HostPlugin>> = vec![Arc::new(nav), Arc::new(spatial)];
-        if let Some(dir) = &o.content {
+        if !o.mounts.is_empty() {
             let mut vfs = ae_vfs::Vfs::new();
-            vfs.mount_dir(dir)?;
+            for m in &o.mounts {
+                vfs.mount(m)?;
+            }
             let schema = ae_sim::schema::Schema::from_module(&wasm)?;
-            let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).with_context(|| format!("the catalogue in {dir}"))?;
+            let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).context("the content's catalogue")?;
             plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(Arc::new(catalog))));
         }
         let rt = Runtime::with_hosts(&wasm, cfg, plugins)?;

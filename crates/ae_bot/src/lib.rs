@@ -8,7 +8,8 @@
 //!
 //! [`SkirmishBot`] plays `games/skirmish`: it waits until `wave` of its
 //! units stand idle (the factory's new units gather at the rally point)
-//! and then sends all of them to attack-move the enemy base.
+//! and then sends all of them to attack-move the enemy base (from the
+//! game's `Match`, which every player sees).
 
 use ae_sim::input::Command;
 use ae_sim::runtime::{Runtime, World};
@@ -54,12 +55,15 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
-/// Allyteam `ally`'s base in the skirmish game with parameter `param`
-/// (15% in from opposite corners of a map `param >> 24 & 0xFFFF` metres
-/// on a side), as the game places it.
-pub fn base(param: u64, ally: u32) -> (f32, f32) {
-    let e = ((param >> 24) & 0xFFFF) as f32;
-    if ally == 0 { (e * 0.15, e * 0.15) } else { (e * 0.85, e * 0.85) }
+fn f32_at(bytes: &[u8], at: usize) -> f32 {
+    f32::from_bits(u32_at(bytes, at))
+}
+
+/// The skirmish game's bases, from its `Match` (every player sees it);
+/// `None` before the game's first tick.
+pub fn bases(rt: &Runtime, world: &World) -> Result<Option<[(f32, f32); 2]>> {
+    let (bx, by) = (field(rt, "Match", "base_x")?, field(rt, "Match", "base_y")?);
+    Ok(rt.rows(world, "Match")?.first().map(|(_, m)| [(f32_at(m, bx), f32_at(m, by)), (f32_at(m, bx + 4), f32_at(m, by + 4))]))
 }
 
 impl SkirmishBot {
@@ -92,7 +96,8 @@ impl SkirmishBot {
             return Ok(());
         }
         idle.sort_unstable();
-        let (x, y) = base(world.param, (self.ally + 1) % 2);
+        let Some(bases) = bases(rt, world)? else { return Ok(()) };
+        let (x, y) = bases[(self.ally as usize + 1) % 2];
         out.extend(idle.into_iter().map(|e| unit_command(self.ally, self.stream, e, ATTACK, false, x, y)));
         Ok(())
     }

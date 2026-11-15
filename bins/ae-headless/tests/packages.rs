@@ -2,9 +2,11 @@
 //! content plus the built sim module as `module.wasm`) and a map package
 //! (`games/skirmish/maps/crossing`, the land crossing map exported with
 //! `ae-tool map-export`), both zipped into a package library.
-//! * Played from them alone (no `--game`, no `--nav`), a bot match ends at
-//!   the same digest as the same match from the game's source, its content
-//!   directory and the generated land map.
+//! * Played from them alone (no `--game`, no `--nav`, no game parameter:
+//!   the bases are the map's start points), a bot match ends in the same
+//!   state as the same match from the game's source, its content directory
+//!   and the generated land map: every digest part is equal but the event
+//!   store's (which also holds the map's start points).
 //! * The recording names its packages; a replay finds them in the library
 //!   by name and verifies, and refuses without one.
 //! * The committed map package is what `map-export` makes of the generated
@@ -20,8 +22,11 @@ fn headless(args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-fn final_digest(out: &str) -> String {
-    out.split("final digest ").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or_else(|| panic!("no final digest in {out}")).to_string()
+/// The `--digest` part lines (name, rows, hash), without the event store's.
+fn parts(out: &str) -> Vec<String> {
+    let p: Vec<String> = out.lines().filter(|l| l.starts_with("    ") && l.contains(" rows ") && !l.contains("(events)")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    assert!(p.len() > 10, "no digest parts in {out}");
+    p
 }
 
 #[test]
@@ -44,13 +49,21 @@ fn a_skirmish_from_archives_alone() {
     let rec = lib.join("match.aerep");
     let rec = rec.to_str().unwrap();
 
+    // From source the map side and starting tanks come in the parameter;
+    // from the archives, the map's start points and the game's defaults.
     let param_hi = (2048u64 >> 8 | 6 << 8).to_string();
-    let common = ["--units", "0", "--param-hi", &param_hi, "--ticks", "1500", "--script", "bot", "--workers", "2"];
-    let (ok, from_source) = headless(&[&common[..], &["--game", "skirmish", "--nav", "land", "--map-cells", "256", "--content", root.join("content").to_str().unwrap(), "--record", &format!("{rec}.src")]].concat());
+    // Every digest part but the event store's is equal (that one also
+    // holds the stream of the map's two start points, which the generated
+    // map does not have).
+    let common = ["--units", "0", "--ticks", "1500", "--script", "bot", "--workers", "2", "--digest"];
+    let packages = ["--package", "skirmish", "--package", "skirmish-crossing", "--packages", lib_s];
+    let (ok, from_source) = headless(&[&common[..], &["--param-hi", &param_hi, "--game", "skirmish", "--nav", "land", "--map-cells", "256", "--content", root.join("content").to_str().unwrap()]].concat());
     assert!(ok, "{from_source}");
-    let (ok, from_archives) = headless(&[&common[..], &["--package", "skirmish", "--package", "skirmish-crossing", "--packages", lib_s, "--record", rec]].concat());
+    let (ok, from_archives) = headless(&[&common[..], &packages[..]].concat());
     assert!(ok, "{from_archives}");
-    assert_eq!(final_digest(&from_archives), final_digest(&from_source), "archives:\n{from_archives}\nsource:\n{from_source}");
+    assert_eq!(parts(&from_archives), parts(&from_source), "archives:\n{from_archives}\nsource:\n{from_source}");
+    let (ok, out) = headless(&[&["--units", "0", "--ticks", "1500", "--script", "bot", "--workers", "2", "--record", rec], &packages[..]].concat());
+    assert!(ok, "{out}");
 
     let (ok, out) = headless(&["--replay", rec, "--packages", lib_s, "--verify", "--workers", "1"]);
     assert!(ok && out.contains("50 checkpoints match"), "{out}");

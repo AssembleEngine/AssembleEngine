@@ -95,10 +95,16 @@ impl EventStore {
     }
 
     /// Hash of everything held: per stream, the reader cursors and the
-    /// unpruned events. Part of the world digest (events cross ticks).
+    /// unpruned events. Part of the world digest (events cross ticks). A
+    /// stream with no readers that never held an event is no state and is
+    /// left out, so declaring an unused stream (an SDK type the linker
+    /// keeps) does not change a digest.
     pub fn digest(&self) -> crate::digest::StateHash {
         let mut h = crate::digest::StateHash::new();
         for (&id, s) in &self.streams {
+            if s.cursors.is_empty() && s.first == 0 && s.bytes.is_empty() {
+                continue;
+            }
             let mut row = Vec::with_capacity(16 + s.cursors.len() * 16 + s.bytes.len());
             row.extend_from_slice(&s.first.to_le_bytes());
             for (&reader, &cursor) in &s.cursors {

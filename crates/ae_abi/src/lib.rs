@@ -330,4 +330,7 @@ pub mod engine {
     pub const SPAWN_REQUEST: u64 = 0xAE00_0000_0000_000B;
     /// `Def { id: u64 }`: the catalogue def an entity was spawned from.
     pub const DEF: u64 = 0xAE00_0000_0000_000C;
+    /// Event `MapStart { index, count: u32, x, y, extent: f32, reserved }`:
+    /// a start point of the loaded map (the nav plugin's `map_starts`).
+    pub const MAP_START: u64 = 0xAE00_0000_0000_000D;
 }

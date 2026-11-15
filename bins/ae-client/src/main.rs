@@ -54,6 +54,11 @@
 //! shift either is queued after their current commands. New units gather
 //! at your rally point in front of the base.
 //!
+//! `--package SPEC|PATH` (repeatable, with `--packages DIR` libraries)
+//! plays a game from packages alone: the game package's `module.wasm` and
+//! content, a map package's terrain and start points (`ae_map`), e.g.
+//! `--package skirmish.aegame --package crossing.aemap`.
+//!
 //! `--teams N` splits the crossing maps' units into N allyteams (with
 //! sensors); `--observer K` (default 0 with teams; `all` for everything)
 //! then draws the world as allyteam K sees it through the copy layer: its
@@ -98,6 +103,8 @@ enum MapKind {
     Land,
     Generated,
     Demo,
+    /// A map package's (`--package`).
+    Package,
 }
 
 struct Options {
@@ -134,15 +141,22 @@ struct Options {
     game: String,
     content: Option<String>,
     param: Option<u64>,
+    /// `--package SPEC|PATH` and `--packages DIR`, and what they gave: the
+    /// mounts in order, the game's module and the map (terrain, starts).
+    packages: Vec<String>,
+    package_dirs: Vec<String>,
+    mounts: Vec<std::path::PathBuf>,
+    wasm: Option<Arc<Vec<u8>>>,
+    loaded_map: Option<(Arc<Terrain>, Vec<[f32; 2]>)>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -195,6 +209,8 @@ fn parse() -> Result<Options> {
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
             "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
             "--game" => o.game = value("--game", &mut args)?,
+            "--package" => o.packages.push(value("--package", &mut args)?),
+            "--packages" => o.package_dirs.push(value("--packages", &mut args)?),
             "--content" => o.content = Some(value("--content", &mut args)?),
             "--param" => o.param = Some(value("--param", &mut args)?.parse().context("--param")?),
             "--observer" => {
@@ -214,9 +230,28 @@ fn parse() -> Result<Options> {
             other => bail!("unknown argument {other:?}\n{USAGE}"),
         }
     }
+    if !o.packages.is_empty() {
+        let packages = ae_vfs::resolve_specs(&o.package_dirs, &o.packages)?;
+        let mut vfs = ae_vfs::Vfs::new();
+        vfs.mount_packages(&packages)?;
+        if let Some(game) = packages.iter().rev().find(|p| p.manifest.kind == "game") {
+            o.game = game.manifest.name.clone();
+        }
+        if vfs.exists("module.wasm") {
+            o.wasm = Some(Arc::new(vfs.read("module.wasm")?));
+        }
+        if vfs.exists(ae_map::MAP_JSON) {
+            let map = ae_map::GameMap::load(&vfs)?;
+            o.map = MapKind::Package;
+            o.map_cells = map.info.cells;
+            o.loaded_map = Some((Arc::new(map.to_terrain()), map.info.starts.clone()));
+        }
+        o.mounts = packages.into_iter().map(|p| p.source).collect();
+        eprintln!("packages: {} mount(s), game {}, {}", o.mounts.len(), o.game, if o.loaded_map.is_some() { "map from a package" } else { "no map package" });
+    }
     if o.game == "skirmish" {
         o.teams = o.teams.max(2);
-        if o.content.is_none() {
+        if o.content.is_none() && o.mounts.is_empty() {
             o.content = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/skirmish/content").into());
         }
     }
@@ -243,9 +278,11 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
     let map = match o.map {
         MapKind::Water => Map::WaterCrossing,
         MapKind::Land => Map::LandCrossing,
+        MapKind::Package => Map::Loaded,
         MapKind::Generated | MapKind::Demo => return None,
     };
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), content: o.content.clone(), param: o.param })
+    let mounts = o.mounts.iter().cloned().chain(o.content.iter().map(Into::into)).collect();
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone() })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
@@ -268,11 +305,11 @@ fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> 
     let mut materials = None;
     let mut nav = None;
     let (heightmap, scale, offset, water, cell_size) = match o.map {
-        MapKind::Water | MapKind::Land => {
-            let terrain = if o.map == MapKind::Water {
-                ae_nav::scenario::water_crossing_terrain(o.map_cells)
-            } else {
-                ae_nav::scenario::land_crossing_terrain(o.map_cells)
+        MapKind::Water | MapKind::Land | MapKind::Package => {
+            let terrain = match (o.map, &o.loaded_map) {
+                (MapKind::Package, Some((t, _))) => (**t).clone(),
+                (MapKind::Water, _) => ae_nav::scenario::water_crossing_terrain(o.map_cells),
+                _ => ae_nav::scenario::land_crossing_terrain(o.map_cells),
             };
             let cell = terrain.geom.cell_size;
             materials = Some(terrain.material.clone());
@@ -580,6 +617,7 @@ fn run(o: Options) -> Result<ExitCode> {
         MapKind::Land => "land crossing",
         MapKind::Generated => "generated",
         MapKind::Demo => "demo",
+        MapKind::Package => "package map",
     };
     let started = Instant::now();
     let mut last = Instant::now();

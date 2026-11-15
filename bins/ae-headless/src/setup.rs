@@ -19,10 +19,9 @@ use ae_services::nav::{Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_sim::host::HostPlugin;
 use ae_sim::runtime::{Runtime, RuntimeConfig};
-use ae_vfs::{Library, Package, Vfs};
+use ae_vfs::Vfs;
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::Arc;
 
 /// A package's sim module.
@@ -59,32 +58,6 @@ pub struct Setup {
     pub content: Option<Content>,
 }
 
-/// The packages `specs` name (paths or `name[@version]` in the
-/// libraries), each after its dependencies, each once.
-fn resolve(o: &Opts, specs: &[String]) -> Result<Vec<Package>> {
-    let mut lib = if o.package_dirs.is_empty() { Library::default() } else { Library::scan(&o.package_dirs)? };
-    let mut out: Vec<Package> = Vec::new();
-    for spec in specs {
-        let name = if Path::new(spec).exists() {
-            let p = Package::open(spec)?;
-            let name = format!("{}@{}", p.manifest.name, p.manifest.version);
-            if lib.get(&name).is_err() {
-                lib.add(p)?;
-            }
-            name
-        } else {
-            spec.clone()
-        };
-        for p in lib.resolve(&name)? {
-            match out.iter().find(|o| o.manifest.name == p.manifest.name) {
-                Some(o) => ensure!(o.manifest.version == p.manifest.version, "package {} in versions {} and {}", p.manifest.name, o.manifest.version, p.manifest.version),
-                None => out.push(p),
-            }
-        }
-    }
-    Ok(out)
-}
-
 impl Setup {
     /// From the options, or for a replay from its header (`recorded`): its
     /// packages (unless `--package` names others), map and teams.
@@ -96,7 +69,7 @@ impl Setup {
             ensure!(!o.package_dirs.is_empty(), "the replay was made from packages {p}: name a --packages DIR to find them");
             specs = p.split(',').map(String::from).collect();
         }
-        let packages = resolve(o, &specs)?;
+        let packages = ae_vfs::resolve_specs(&o.package_dirs, &specs)?;
         let mut vfs = Vfs::new();
         vfs.mount_packages(&packages)?;
         for dir in &o.content {
@@ -121,7 +94,7 @@ impl Setup {
         };
         let nav = if vfs.exists(ae_map::MAP_JSON) {
             let map = ae_map::GameMap::load(&vfs)?;
-            Some(NavPlugin { teams, ..NavPlugin::loaded(Arc::new(map.to_terrain())) })
+            Some(NavPlugin { teams, ..NavPlugin::loaded(Arc::new(map.to_terrain()), map.info.starts.clone()) })
         } else if let Some(h) = recorded {
             match h.config.get("map") {
                 Some(m) => {

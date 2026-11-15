@@ -1408,9 +1408,29 @@ Map packages (`ae_map`) and games from archives:
   map); the recording replays from the library by name. It also checks the committed map package
   still equals the generated map. (By hand: the 6,400-tick match from archives ends at the same
   `ffc0d8ea4ea2f386` as from source.)
-- Not done: the game still takes the map side and starting tanks from the game parameter
-  (`--param-hi`), not from the map's start points or a match file; the client does not load
-  packages yet; no resource placement in maps; no import settings or hash-keyed cache.
+- Start points reach the game: `ae_sdk::nav::MapStart { index, count, x, y, extent }` (engine id
+  `0xAE00_0000_0000_000D`), emitted once at tick 0 by the nav plugin's new `map_starts` host system
+  from `NavPlugin::starts` (a loaded map's `starts`; generated maps have none). The skirmish
+  schedules `host(map_starts)` first: its bases are the first two start points (else, on a generated
+  map, the parameter's corners), kept in `Match.base_x/base_y` (view `always`) and published every
+  tick as `Base` events for `orders` (rally points). Starting tanks default to 6 when the parameter
+  does not say, so a map package with starts needs no parameter. The bot reads the bases from
+  `Match` (`ae_bot::bases`) instead of recomputing them.
+- The event store's digest leaves out streams with no readers that never held an event: adding
+  `MapStart` to the SDK put its record into the crossing game's schema too (the linker keeps the
+  object's records) and moved crossing's pinned digest; with the rule it is back to `286918c1…`.
+- Golden re-pinned on purpose (larger `Match`; the rally now waits for the `Base` events): allyteam
+  1 wins at tick 6,457, digest `b7159ef63b6848f4612f49b4dd2522b7`, 1 and 2 workers, dev and release.
+- The archive test now runs the packages with no game parameter at all. Its state equals the
+  source run's in every digest part but the event store's: the store hashes stream positions, and
+  the archive run has a `MapStart` stream the generated map does not.
+- `ae-client --package SPEC|PATH ... [--packages DIR]`: game, content and map from packages
+  (`ae_vfs::resolve_specs`, shared with `ae-headless`); the map package is drawn and simulated
+  (`--map` is ignored). Checked by hand: windowed with two bots, and `--capture` (12 of 12 units
+  visible).
+- Not done: no match file (teams, players, handicaps as data); no resource placement in maps; no
+  import settings or hash-keyed cache; packages are not synced between lockstep peers (each needs
+  the same files; the header's content hash refuses others).
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

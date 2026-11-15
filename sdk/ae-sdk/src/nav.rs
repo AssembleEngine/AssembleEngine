@@ -166,6 +166,23 @@ pub struct OrderPoint {
     pub reserved: u32,
 }
 
+/// Start point `index` of `count` of the loaded map, with the map's side
+/// (`extent`, world units). The nav plugin's `map_starts` host system emits
+/// them once, at tick 0: a game that schedules `host(map_starts)` before
+/// its own start system reads them the same tick. Generated maps have no
+/// start points (nothing is emitted).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_000D, event)]
+pub struct MapStart {
+    pub index: u32,
+    pub count: u32,
+    pub x: f32,
+    pub y: f32,
+    pub extent: f32,
+    pub reserved: u32,
+}
+
 /// Side of a map cell in world units. Terrain is edited in cells.
 pub const CELL_SIZE: f32 = 8.0;
 
@@ -366,6 +383,7 @@ const _: () = {
     assert!(<TerrainEdit as crate::Event>::ID == crate::abi::engine::TERRAIN_EDIT);
     assert!(<TerrainChanged as crate::Event>::ID == crate::abi::engine::TERRAIN_CHANGED);
     assert!(<CostOverlay as crate::Event>::ID == crate::abi::engine::COST_OVERLAY);
+    assert!(<MapStart as crate::Event>::ID == crate::abi::engine::MAP_START);
 };
 
 /// Declare every component and event the engine's nav, spatial and view

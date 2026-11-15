@@ -32,7 +32,7 @@
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MOVE_ORDER, NAV_AGENT, ORDER_POINT, SENSOR, TEAM, TERRAIN_CHANGED, TERRAIN_EDIT};
+use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MAP_START, MOVE_ORDER, NAV_AGENT, ORDER_POINT, SENSOR, TEAM, TERRAIN_CHANGED, TERRAIN_EDIT};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
 use ae_nav::scenario::{self, Plan};
@@ -40,7 +40,7 @@ use ae_nav::nav::{MovementProfile, min_clearance_cells, profiles_for, water_prof
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
 use ae_nav::terrain::Medium;
 use ae_nav::terrain::{CellEdit, SharedTerrain, TerrainPatch};
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MoveOrder, NavAgent, OrderPoint, Sensor, Team, TerrainChanged, TerrainEdit, order, terrain};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MapStart, MoveOrder, NavAgent, OrderPoint, Sensor, Team, TerrainChanged, TerrainEdit, order, terrain};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -77,6 +77,8 @@ pub struct NavPlugin {
     pub teams: u32,
     /// The terrain of [`Map::Loaded`].
     pub terrain: Option<Arc<ae_nav::terrain::Terrain>>,
+    /// The map's start points (world units), emitted by `map_starts`.
+    pub starts: Vec<[f32; 2]>,
 }
 
 /// Line-of-sight radius per movement class of the crossing maps (scout,
@@ -129,12 +131,12 @@ impl GroundFeed {
 
 impl NavPlugin {
     pub fn new(map: Map, map_cells: i32) -> Self {
-        Self { map, map_cells, ground: None, teams: 0, terrain: None }
+        Self { map, map_cells, ground: None, teams: 0, terrain: None, starts: Vec::new() }
     }
 
-    /// A loaded map's terrain ([`Map::Loaded`]).
-    pub fn loaded(terrain: Arc<ae_nav::terrain::Terrain>) -> Self {
-        Self { map: Map::Loaded, map_cells: terrain.geom.cells_x, ground: None, teams: 0, terrain: Some(terrain) }
+    /// A loaded map's terrain and start points ([`Map::Loaded`]).
+    pub fn loaded(terrain: Arc<ae_nav::terrain::Terrain>, starts: Vec<[f32; 2]>) -> Self {
+        Self { map: Map::Loaded, map_cells: terrain.geom.cells_x, ground: None, teams: 0, terrain: Some(terrain), starts }
     }
 
     /// The allyteam of each of the map's units from their spawn x: units
@@ -213,13 +215,17 @@ impl HostPlugin for NavPlugin {
         nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
         nav.reads_events = vec![MOVE_ORDER, ORDER_POINT, TERRAIN_EDIT, COST_OVERLAY];
         nav.emits = vec![TERRAIN_CHANGED];
-        vec![spawn, nav]
+        let mut starts = HostDecl::new("map_starts");
+        starts.emits = vec![MAP_START];
+        starts.cadence = Cadence::Once;
+        vec![spawn, nav, starts]
     }
 
     fn check(&self, name: &str, schema: &Schema) -> Result<()> {
         expect_component(schema, Body::SCHEMA)?;
         expect_component(schema, NavAgent::SCHEMA)?;
         match name {
+            "map_starts" => expect_component(schema, <MapStart as Event>::SCHEMA).map(drop),
             "nav_spawn" => {
                 expect_component(schema, Goal::SCHEMA)?;
                 if self.teams > 0 {
@@ -249,10 +255,26 @@ impl HostPlugin for NavPlugin {
                 Ok(match name {
                     "nav_spawn" => Box::new(Spawner { plan: plan.take().context("nav_spawn listed twice")?, plugin: self.clone() }),
                     "nav" => Box::new(Nav::new(service.take().context("nav listed twice")?, self.ground.clone())),
+                    "map_starts" => Box::new(Starts { starts: self.starts.clone(), extent: self.extent() }),
                     other => bail!("no host system `{other}` in the nav plugin"),
                 })
             })
             .collect()
+    }
+}
+
+/// `map_starts`: one [`MapStart`] per start point, at tick 0.
+struct Starts {
+    starts: Vec<[f32; 2]>,
+    extent: f32,
+}
+
+impl HostSystem for Starts {
+    fn run(&mut self, ctx: &mut HostCtx<'_>) -> Result<()> {
+        for (index, &[x, y]) in self.starts.iter().enumerate() {
+            ctx.emit(MAP_START, bytes_of(&MapStart { index: index as u32, count: self.starts.len() as u32, x, y, extent: self.extent, reserved: 0 }))?;
+        }
+        Ok(())
     }
 }
 

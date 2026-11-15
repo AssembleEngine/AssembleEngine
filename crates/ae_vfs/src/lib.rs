@@ -313,6 +313,33 @@ impl Library {
     }
 }
 
+/// The packages `specs` name (package paths, or `name[@version]` found in
+/// the libraries `dirs`), each after its dependencies, each once; one
+/// name in two versions is an error.
+pub fn resolve_specs(dirs: &[impl AsRef<Path>], specs: &[String]) -> Result<Vec<Package>> {
+    let mut lib = if dirs.is_empty() { Library::default() } else { Library::scan(dirs)? };
+    let mut out: Vec<Package> = Vec::new();
+    for spec in specs {
+        let name = if Path::new(spec).exists() {
+            let p = Package::open(spec)?;
+            let name = format!("{}@{}", p.manifest.name, p.manifest.version);
+            if lib.get(&name).is_err() {
+                lib.add(p)?;
+            }
+            name
+        } else {
+            spec.clone()
+        };
+        for p in lib.resolve(&name)? {
+            match out.iter().find(|o| o.manifest.name == p.manifest.name) {
+                Some(o) => ensure!(o.manifest.version == p.manifest.version, "package {} in versions {} and {}", p.manifest.name, o.manifest.version, p.manifest.version),
+                None => out.push(p),
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

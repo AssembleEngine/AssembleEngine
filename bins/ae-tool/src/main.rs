@@ -225,7 +225,7 @@ fn map_export(args: &[String]) -> Result<()> {
     };
     let name = args.get(3).cloned().unwrap_or_else(|| format!("{kind}-crossing-{cells}"));
     let e = cells as f32 * ae_nav::service::NavConfig::default().cell_size;
-    let map = ae_map::GameMap::from_terrain(&terrain, vec![[(e * 0.15).round(), (e * 0.15).round()], [(e * 0.85).round(), (e * 0.85).round()]], &format!("The {kind} crossing map at {cells} cells"))?;
+    let map = ae_map::GameMap::from_terrain(&terrain, vec![[e * 0.15, e * 0.15], [e * 0.85, e * 0.85]], &format!("The {kind} crossing map at {cells} cells"))?;
     std::fs::create_dir_all(dir)?;
     let mut files = map.files()?;
     let manifest = ae_vfs::Manifest { name: name.clone(), version: "1".into(), kind: "map".into(), depends: Vec::new() };

@@ -138,8 +138,8 @@ fn defs_spawn_with_their_values_and_team() -> Result<()> {
     };
     let (winner, at, d) = decisive(2)?;
     println!("bot match: winner {winner:#x} at tick {at}, digest {:032x}", d);
-    ensure!((winner, at, d) == (1, 6363, 0x40c9_e1b9_faa8_9d3b_33ab_7d8a_ee5e_b74e), "the golden bot match: winner {winner:#x} at tick {at}, digest {d:032x}");
     ensure!(decisive(1)? == (winner, at, d), "the match differs at 1 worker");
+    ensure!((winner, at, d) == (1, 6457, 0xb715_9ef6_3b68_48f4_612f_49b4_dd25_22b7), "the golden bot match: winner {winner:#x} at tick {at}, digest {d:032x}");
     println!("{} spawned per allyteam, own rows in both views; digest {:016x}", 1 + TANKS, d2 as u64);
     Ok(())
 }
@@ -171,7 +171,7 @@ fn unit_commands_queue_and_advance() -> Result<()> {
     let (len, state, _) = queue(&rt, &world, tank)?;
     ensure!(len == 1 && state == 2, "a new tank heads for its rally point: len {len}, state {state}");
     let command = |kind: u32, append: bool, x: f32, y: f32| ae_bot::unit_command(0, stream, tank, kind, append, x, y);
-    let (bx, by) = ae_bot::base(world.param, 0);
+    let (bx, by) = ae_bot::bases(&rt, &world)?.unwrap()[0];
     let mut bundle = TickBundle::new(world.tick);
     bundle.commands = vec![command(ae_bot::MOVE, false, bx + 40.0, by), command(ae_bot::MOVE, true, bx + 600.0, by + 600.0), command(ae_bot::ATTACK, true, bx, by)];
     rt.tick_with(&mut world, 1, &bundle)?;
