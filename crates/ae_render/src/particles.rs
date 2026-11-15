@@ -308,10 +308,30 @@ pub enum ParticleBlend {
     /// lone puff comes out as blended; overlapping ones mix by thickness,
     /// continuously.
     Slices,
+    /// Thickness-aware, unsorted, in a grid (Hillaire): the half-resolution
+    /// target in columns of [`FROXEL`] pixels, each cut into
+    /// [`FROXEL_SLICES`] slices spaced exponentially over the visible
+    /// particles' depth range. Each visible puff adds its chord along the
+    /// centre ray of every column it covers (as a medium, as
+    /// [`ParticleBlend::Volume`]) into the slices it crosses (fixed-point
+    /// atomics); each column integrates its slices front to back; a resolve
+    /// samples that at the scene's depth (trilinear). Cost by columns
+    /// covered, not overdraw; blurred to the columns' size.
+    Froxels,
 }
+
+/// Half-resolution pixels per froxel column side in [`ParticleBlend::Froxels`].
+pub const FROXEL: u32 = 4;
+/// Depth slices per column.
+pub const FROXEL_SLICES: u32 = 32;
 
 /// Depth slices per pixel in [`ParticleBlend::Slices`].
 pub const SLICES: usize = 4;
+
+/// [`ParticleBlend::Froxels`] at half-resolution `extent`: its columns.
+fn froxel_grid(extent: vk::Extent2D) -> (u32, u32) {
+    (extent.width.div_ceil(FROXEL), extent.height.div_ceil(FROXEL))
+}
 
 impl ParticleBlend {
     /// Stores every fragment per pixel ([`ParticleBlend::Reference`],
@@ -337,6 +357,8 @@ struct HalfTargets {
     /// and the emissive sums (RGBA16F).
     moments: Vec<OwnedImage>,
     /// [`ParticleBlend::Reference`]: per-pixel counts and fragments.
+    /// [`ParticleBlend::Froxels`]: the scatter's dispatch, the froxels
+    /// (four 32-bit words each), the visible puffs.
     reference: Vec<OwnedBuffer>,
 }
 
@@ -548,9 +570,10 @@ impl ParticleRenderer {
             )?;
             // Set 1 of the draws: the depth, the puff; the moments' four
             // targets or the slices' five; the reference's counts and
-            // fragments.
-            let f = vk::ShaderStageFlags::FRAGMENT;
-            let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f)])?;
+            // fragments; or the froxels' bins, froxels and puffs (also in
+            // compute).
+            let f = vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE;
+            let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f), (ssbo, f)])?;
             // The sort's push constant: shift, direction.
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout], 8, vk::ShaderStageFlags::COMPUTE)?;
             let fragment = vk::ShaderStageFlags::FRAGMENT;
@@ -559,7 +582,7 @@ impl ParticleRenderer {
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 10 * n },
+                vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 12 * n },
                 vk::DescriptorPoolSize { ty: image, descriptor_count: 20 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(4 * n).pool_sizes(&sizes), None)?;
@@ -644,6 +667,12 @@ impl ParticleRenderer {
             ParticleBlend::Volume => vec![
                 particle_pipeline(spirv!("particles_volume.frag"), &[], Blend::Off).context("particle volume pipeline")?,
                 fullscreen(spirv!("particles_volume_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle volume resolve pipeline")?,
+            ],
+            ParticleBlend::Froxels => vec![
+                compute(spirv!("particles_froxels_bin.comp"), "froxel bin")?,
+                compute(spirv!("particles_froxels_inject.comp"), "froxel inject")?,
+                compute(spirv!("particles_froxels_integrate.comp"), "froxel integrate")?,
+                fullscreen(spirv!("particles_froxels_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle froxel resolve pipeline")?,
             ],
         };
         let caster_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
@@ -740,6 +769,14 @@ impl ParticleRenderer {
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
                 targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: pixels * 4, usage }, MemoryLocation::GpuOnly, "particle reference counts")?);
                 targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: pixels * REFERENCE_LAYERS * 16, usage }, MemoryLocation::GpuOnly, "particle reference fragments")?);
+            }
+            if self.blend == ParticleBlend::Froxels {
+                let columns = froxel_grid(half);
+                let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: 16, usage: usage | vk::BufferUsageFlags::INDIRECT_BUFFER }, MemoryLocation::GpuOnly, "particle froxel dispatch")?);
+                let froxels = columns.0 as u64 * columns.1 as u64 * (FROXEL_SLICES as u64 + 1);
+                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: froxels * 16, usage }, MemoryLocation::GpuOnly, "particle froxels")?);
+                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: self.capacity as u64 * 48, usage }, MemoryLocation::GpuOnly, "particle froxel puffs")?);
             }
             Ok(())
         })();
@@ -854,7 +891,7 @@ impl ParticleRenderer {
             frustum: frustum_planes(frame.view_proj),
             step: [dt, self.sim_time, 1.0 / frame.extent.width.max(1) as f32, 1.0 / frame.extent.height.max(1) as f32],
             pool: [self.capacity, records.len() as u32, total, head],
-            flags: [(frame.shadows && self.shadows) as u32, (self.blend == ParticleBlend::Moments) as u32, frame.unit_shadows.is_some() as u32, 0],
+            flags: [(frame.shadows && self.shadows) as u32, matches!(self.blend, ParticleBlend::Moments | ParticleBlend::Froxels) as u32, frame.unit_shadows.is_some() as u32, 0],
             map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, 0.0],
             height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
             sun: crate::terrain::sun::direction().extend(0.0).to_array(),
@@ -1044,6 +1081,9 @@ impl ParticleRenderer {
             if self.blend.lists() {
                 device.cmd_fill_buffer(cmd, half.reference[0].buffer, 0, vk::WHOLE_SIZE, 0);
             }
+            if self.blend == ParticleBlend::Froxels {
+                device.cmd_fill_buffer(cmd, half.reference[1].buffer, 0, vk::WHOLE_SIZE, 0);
+            }
             // The scene depth's farthest per 2x2 block.
             barrier(&[to_attachment(half.depth.image), to_attachment(half.color.image)]);
             begin(&[half.depth.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
@@ -1092,6 +1132,32 @@ impl ParticleRenderer {
                     barrier(&sampled);
                     begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
                     fullscreen(self.oit[2]);
+                    device.cmd_end_rendering(cmd);
+                }
+                ParticleBlend::Froxels => {
+                    let memory = |src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+                        let barriers = [vk::MemoryBarrier2::default().src_stage_mask(src.0).src_access_mask(src.1).dst_stage_mask(dst.0).dst_access_mask(dst.1)];
+                        device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barriers));
+                    };
+                    let compute_rw = (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
+                    // The simulation's keys and range, the cleared sums.
+                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE), compute_rw);
+                    device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[slot], self.half_sets[slot]], &[]);
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[0]);
+                    device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
+                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), compute_rw);
+                    let indirect = (vk::PipelineStageFlags2::DRAW_INDIRECT | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::INDIRECT_COMMAND_READ | vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
+                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), indirect);
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[1]);
+                    device.cmd_dispatch_indirect(cmd, half.reference[0].buffer, 0);
+                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), compute_rw);
+                    let columns = froxel_grid(half.extent);
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[2]);
+                    device.cmd_dispatch(cmd, columns.0.div_ceil(8), columns.1.div_ceil(8), 1);
+                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), fragment_read);
+                    barrier(&[to_sampled(half.depth.image)]);
+                    begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
+                    fullscreen(self.oit[3]);
                     device.cmd_end_rendering(cmd);
                 }
                 ParticleBlend::Reference | ParticleBlend::Volume => {

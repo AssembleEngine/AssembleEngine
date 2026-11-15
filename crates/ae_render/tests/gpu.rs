@@ -2442,7 +2442,9 @@ fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::partic
 /// centre sort is close to exact in the cluster, the exact per-pixel
 /// order pops about as much as the sort when the two cross (the moments,
 /// whose depth warp follows the frame's particle range, pop more: 372),
-/// and the volume does not pop.
+/// and the volume does not pop; nor do the slices or the froxels, each
+/// compared with the volume (and, the froxels' blur taken out, over 8x8
+/// blocks).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_order_independence() {
@@ -2467,7 +2469,7 @@ fn particles_order_independence() {
     let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
     camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
     let eye = camera.eye(|_| ground);
-    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices];
+    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels];
     let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
     let none = render_particles(&gpu, &source, camera, extent, None);
     // Per pixel the reference changes: mean and largest channel error.
@@ -2480,6 +2482,38 @@ fn particles_order_independence() {
                     let e = image[i + c].abs_diff(reference[i + c]);
                     sum += e as f32;
                     worst = worst.max(e);
+                }
+            }
+        }
+        (sum / (3 * count.max(1)) as f32, worst)
+    };
+    // The same over blocks of a froxel column (8x8 here, at full
+    // resolution), each averaged first: the error with the columns' blur
+    // taken out (blocks the reference changes).
+    let block_error = |image: &[u8], reference: &[u8]| -> (f32, f32) {
+        let (w, h) = (extent.width as usize, extent.height as usize);
+        let (mut sum, mut count, mut worst) = (0.0, 0, 0.0f32);
+        for by in (0..h).step_by(8) {
+            for bx in (0..w).step_by(8) {
+                let (mut a, mut r, mut changed, mut n) = ([0.0f32; 3], [0.0f32; 3], false, 0.0);
+                for y in by..(by + 8).min(h) {
+                    for x in bx..(bx + 8).min(w) {
+                        let i = (y * w + x) * 4;
+                        changed |= reference[i..i + 3] != none[i..i + 3];
+                        for c in 0..3 {
+                            a[c] += image[i + c] as f32;
+                            r[c] += reference[i + c] as f32;
+                        }
+                        n += 1.0;
+                    }
+                }
+                if changed {
+                    count += 1;
+                    for c in 0..3 {
+                        let e = (a[c] - r[c]).abs() / n;
+                        sum += e;
+                        worst = worst.max(e);
+                    }
                 }
             }
         }
@@ -2528,11 +2562,15 @@ fn particles_order_independence() {
     }
     for (k, m) in modes.iter().enumerate() {
         let (mean, max) = error(&images[k], &images[3]);
-        println!("cluster, {m:?} against the volume: mean {mean:.2} max {max}");
+        let (bmean, bmax) = block_error(&images[k], &images[3]);
+        println!("cluster, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
     }
     // Measured: the slices 0.57 (max 10) from the volume; the layers 1.6.
     let (slices_mean, slices_max) = error(&images[4], &images[3]);
     assert!(slices_mean < 1.2 && slices_max < 30, "cluster, the slices against the volume: mean {slices_mean} max {slices_max}");
+    // Measured: the froxels 6.4 (max 55); 4.5 over 8x8 blocks.
+    let (froxels_mean, _) = error(&images[5], &images[3]);
+    assert!(froxels_mean < 9.0, "cluster, the froxels against the volume: {froxels_mean}");
     println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}");
     // Emitted in reverse: the order-independent methods give the same frame.
     let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
@@ -2609,7 +2647,10 @@ fn particles_order_independence() {
         let vmean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
         let vmax = errors.iter().map(|e| e.1).max().unwrap_or(0);
         against_volume.push((vmean, vmax));
-        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the layers mean {mean:.2} max {max}, against the volume mean {vmean:.2} max {vmax}");
+        let blocks: Vec<(f32, f32)> = frames[k].iter().zip(&frames[3]).map(|(a, r)| block_error(a, r)).collect();
+        let bmean = blocks.iter().map(|e| e.0).sum::<f32>() / blocks.len() as f32;
+        let bmax = blocks.iter().map(|e| e.1).fold(0.0f32, f32::max);
+        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the layers mean {mean:.2} max {max}, against the volume mean {vmean:.2} max {vmax}, in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
         pops.push((worst, jumps));
     }
     for k in 0..modes.len() {
@@ -2632,6 +2673,11 @@ fn particles_order_independence() {
     // volume.
     let (slices_pop, slices_error) = (pops[4], against_volume[4]);
     assert!(slices_pop.0 < 20.0 && slices_pop.1 == 0 && slices_error.0 < 1.0 && slices_error.1 < 30, "crossing, the slices: pop {slices_pop:?}, against the volume {slices_error:?}");
+    // Measured: the froxels pop by 10, and are 5.6 (max 42) from the volume:
+    // blurred to their columns (8 pixels here), small puffs missed or caught
+    // by a column's centre ray.
+    let (froxels_pop, froxels_error) = (pops[5], against_volume[5]);
+    assert!(froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0, "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}");
     assert_clean(&gpu);
 }
 

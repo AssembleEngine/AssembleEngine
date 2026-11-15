@@ -1,0 +1,33 @@
+#version 460
+// Froxels, pass 3: one invocation per column. Its slices front to back,
+// each a homogeneous medium: the light and transmittance in front of each
+// boundary, for the resolve to sample at the scene's depth.
+#include "particles_common.glsl"
+#include "particles_froxels.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    uvec2 columns = froxelColumns();
+    uvec2 col = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(col, columns))) {
+        return;
+    }
+    uint base = col.y * columns.x + col.x, stride = columns.x * columns.y;
+    vec3 light = vec3(0.0);
+    float t = 1.0;
+    froxels[base] = floatBitsToUint(vec4(0.0, 0.0, 0.0, 1.0));
+    for (uint s = 0u; s < FROXEL_SLICES; ++s) {
+        uint at = base + (1u + s) * stride;
+        vec4 v = vec4(froxels[at]) / FROXEL_FIXED;
+        float tau = v.a;
+        if (tau > 1e-4) {
+            float tr = exp(-tau);
+            light += t * v.rgb / tau * (1.0 - tr);
+            t *= tr;
+        } else {
+            light += t * v.rgb;
+        }
+        froxels[at] = floatBitsToUint(vec4(light, t));
+    }
+}

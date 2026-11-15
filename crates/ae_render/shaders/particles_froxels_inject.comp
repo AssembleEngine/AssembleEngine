@@ -1,0 +1,75 @@
+#version 460
+// Froxels, pass 2: one workgroup per visible puff, its invocations over
+// the columns it covers. Each column follows the ray through its centre:
+// the puff's sphere's chord there (as the draw's fragment would) as a
+// homogeneous medium (medium()) adds its light and optical depth to each
+// slice the chord crosses, by the length inside (fixed-point atomics).
+#include "particles_common.glsl"
+#include "particles_froxels.glsl"
+
+layout(set = 1, binding = 1) uniform sampler2D puffTex;
+
+layout(local_size_x = 64) in;
+
+void main() {
+    FroxelPuff f = puffs[gl_WorkGroupID.x];
+    uint first = floatBitsToUint(f.depthAngle.z), last = floatBitsToUint(f.depthAngle.w);
+    ivec2 c0 = ivec2(first & 0xffffu, first >> 16), c1 = ivec2(last & 0xffffu, last >> 16);
+    if (any(lessThan(c1, c0))) {
+        return;
+    }
+    uvec2 columns = froxelColumns();
+    uint stride = columns.x * columns.y;
+    vec2 size = vec2(halfSize());
+    // The rays through the columns' centres, scaled to 1 along the view
+    // axis (the projection is symmetric about it).
+    vec4 pr = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camRight.xyz, 1.0);
+    vec4 pu = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camUp.xyz, 1.0);
+    vec2 scale = vec2(pr.x / pr.w, pu.y / pu.w);
+    float radius = f.centreRadius.w, z = f.depthAngle.x, angle = f.depthAngle.y;
+    // The puff's mip for a column's width at its depth.
+    float width = float(FROXEL) / size.x * 2.0 / abs(scale.x) * z;
+    float lod = log2(max(width * float(textureSize(puffTex, 0).x) / (2.0 * radius), 1e-6));
+    vec2 range = froxelRange();
+    int w = c1.x - c0.x + 1;
+    int n = w * (c1.y - c0.y + 1);
+    for (int k = int(gl_LocalInvocationIndex); k < n; k += 64) {
+        ivec2 col = c0 + ivec2(k % w, k / w);
+        vec2 ndc = (vec2(col * int(FROXEL)) + 0.5 * float(FROXEL)) / size * 2.0 - 1.0;
+        vec3 dir = u.camForward.xyz + u.camRight.xyz * (ndc.x / scale.x) + u.camUp.xyz * (ndc.y / scale.y);
+        vec3 off = u.camPos.xyz + dir * z - f.centreRadius.xyz;
+        vec2 r = vec2(dot(off, u.camRight.xyz), dot(off, u.camUp.xyz)) / radius;
+        // Back to the quad's own corners (undo its rotation).
+        vec2 c = vec2(r.x * cos(angle) + r.y * sin(angle), -r.x * sin(angle) + r.y * cos(angle));
+        float r2 = dot(c, c);
+        if (r2 >= 1.0) {
+            continue;
+        }
+        float h = sqrt(1.0 - r2) * radius;
+        float front = max(z - h, u.camPos.w), back = z + h;
+        if (front >= back) {
+            continue;
+        }
+        vec4 color = f.color * textureLod(puffTex, c * 0.5 + 0.5, lod).r;
+        float sigma;
+        vec3 source;
+        medium(color, max(2.0 * h, 1e-3), sigma, source);
+        uint base = uint(col.y) * columns.x + uint(col.x);
+        uint s0 = min(uint(froxelSlice(front, range)), FROXEL_SLICES - 1u);
+        uint s1 = min(uint(froxelSlice(back, range)), FROXEL_SLICES - 1u);
+        for (uint s = s0; s <= s1; ++s) {
+            float z0 = froxelBoundary(float(s), range), z1 = froxelBoundary(float(s + 1u), range);
+            // The first and last slices take what lies beyond the range
+            // (rounding at its ends).
+            z0 = s == 0u ? min(z0, front) : z0;
+            z1 = s == FROXEL_SLICES - 1u ? max(z1, back) : z1;
+            float o = max(min(back, z1) - max(front, z0), 0.0);
+            uvec4 add = uvec4(round(vec4(source, sigma) * o * FROXEL_FIXED));
+            uint at = base + (1u + s) * stride;
+            if (add.r != 0u) atomicAdd(froxels[at].r, add.r);
+            if (add.g != 0u) atomicAdd(froxels[at].g, add.g);
+            if (add.b != 0u) atomicAdd(froxels[at].b, add.b);
+            if (add.a != 0u) atomicAdd(froxels[at].a, add.a);
+        }
+    }
+}

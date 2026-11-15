@@ -1,0 +1,48 @@
+#version 460
+// Froxels, pass 1: one invocation per visible particle. Its puff (as the
+// draw shades it) and the columns its quad's screen bounds cover (all of
+// them when a corner is behind the eye) into `puffs`; the first also
+// sizes the scatter's dispatch.
+#include "particles_common.glsl"
+#include "particles_puff.glsl"
+#include "particles_froxels.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i == 0u) {
+        froxelDispatch = uvec4(cmd.instanceCount, 1u, 1u, 0u);
+    }
+    if (i >= cmd.instanceCount) {
+        return;
+    }
+    Puff f = puffOf(keys[i] & 0xffffu);
+    float z = dot(f.centre - u.camPos.xyz, u.camForward.xyz);
+    // The quad's bounds (its rotated square lies inside the unrotated one).
+    vec2 lo = vec2(1e30), hi = vec2(-1e30);
+    bool behind = false;
+    for (int k = 0; k < 4; ++k) {
+        vec2 s = vec2(k & 1, k >> 1) * 2.0 - 1.0;
+        vec4 p = u.viewProj * vec4(f.centre + (u.camRight.xyz * s.x + u.camUp.xyz * s.y) * f.radius, 1.0);
+        behind = behind || p.w <= 1e-4;
+        vec2 ndc = p.xy / max(p.w, 1e-4);
+        lo = min(lo, ndc);
+        hi = max(hi, ndc);
+    }
+    ivec2 columns = ivec2(froxelColumns());
+    vec2 size = vec2(halfSize());
+    // Columns whose centre ray may meet the quad.
+    ivec2 c0 = behind ? ivec2(0) : ivec2(ceil((lo * 0.5 + 0.5) * size / float(FROXEL) - 0.5));
+    ivec2 c1 = behind ? columns - 1 : ivec2(floor((hi * 0.5 + 0.5) * size / float(FROXEL) - 0.5));
+    c0 = max(c0, ivec2(0));
+    c1 = min(c1, columns - 1);
+    bool empty = f.color.a <= 0.0 && max(f.color.r, max(f.color.g, f.color.b)) <= 0.0;
+    if (empty || any(lessThan(c1, c0))) {
+        c0 = ivec2(1);
+        c1 = ivec2(0);
+    }
+    float first = uintBitsToFloat(uint(c0.x) | uint(c0.y) << 16);
+    float last = uintBitsToFloat(uint(c1.x) | uint(c1.y) << 16);
+    puffs[i] = FroxelPuff(vec4(f.centre, f.radius), f.color, vec4(z, f.angle, first, last));
+}

@@ -50,14 +50,3 @@ bool chord(out float front, out float back, out float len) {
     back = min(inDepth.x + h, d > 0.0 ? u.camPos.w / d : 1e30);
     return front < back;
 }
-
-// A particle of premultiplied colour c (alpha 0: emissive) as a medium
-// over a chord of length len: its extinction, and its light per metre
-// (scattered, rgb / a times the extinction; or emitted, rgb / len). Over
-// the whole chord it gives c, as blended.
-void medium(vec4 c, float len, out float sigma, out vec3 source) {
-    float a = min(c.a, 0.999);
-    float k = a > 1e-6 ? -log(1.0 - a) / a : 1.0;
-    sigma = a * k / len;
-    source = c.rgb * k / len;
-}

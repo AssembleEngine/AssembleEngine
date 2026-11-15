@@ -49,7 +49,7 @@ void main() {
         uint key = ((65535u - uint(q * 65535.0)) << 16) | i;
         keys[atomicAdd(cmd.instanceCount, 1u)] = key;
     }
-    // The visible depth range (the moments' depth warp, flags.y), one
+    // The visible depth range (the moments' depth warp, the froxels' slices; flags.y), one
     // atomic per subgroup.
     if (u.flags.y == 0u) {
         return;

@@ -155,7 +155,7 @@ struct Options {
     scars: Option<String>,
     /// Particles at full resolution (`--particles-full`), not half.
     particles_full: bool,
-    /// `--particle-blend sorted|moments|slices` (comparison; sorted by default).
+    /// `--particle-blend sorted|moments|slices|froxels` (comparison; sorted by default).
     particle_blend: ae_render::particles::ParticleBlend,
     /// `--explode`: explosions around the camera target before a capture.
     explode: u32,
@@ -189,7 +189,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -244,7 +244,8 @@ fn parse() -> Result<Options> {
                     "sorted" => ae_render::particles::ParticleBlend::Sorted,
                     "moments" => ae_render::particles::ParticleBlend::Moments,
                     "slices" => ae_render::particles::ParticleBlend::Slices,
-                    other => anyhow::bail!("--particle-blend {other}: sorted, moments or slices"),
+                    "froxels" => ae_render::particles::ParticleBlend::Froxels,
+                    other => anyhow::bail!("--particle-blend {other}: sorted, moments, slices or froxels"),
                 }
             }
             "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,

@@ -2212,9 +2212,46 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - The range as RG16F halves the range pass (about 96 µs): 378 µs in all (`m7-vol-slices-rg16`).
     The global range the simulation already has would save the rest of it, but one far puff
     would stretch every pixel's slices.
-- **Next:**
-  - Froxels (a 3D grid in camera space, Hillaire), measured the same way.
-  - Then choose: the sort stays the default unless a volume method's cost comes down.
+- **Froxels** (`ParticleBlend::Froxels`, `--particle-blend froxels`), the grid in camera space
+  (Hillaire). Columns of 4x4 half-resolution pixels, 32 slices each, spaced exponentially over the
+  visible particles' depth range (the simulation's, as for the moments). Four passes, no sort:
+  - Puffs: each visible particle shaded as the draw shades it (the vertex shader's shading moved
+    to `particles_puff.glsl`, shared), with the columns its quad covers; this also writes the
+    scatter's indirect dispatch.
+  - Scatter: one workgroup per puff, over its columns. Along each column's centre ray, the puff's
+    chord as a medium (the volume's model, `medium()`) adds its light and optical depth to the
+    slices it crosses. Fixed-point `uint` atomics (core; no float atomics).
+  - Integrate: one invocation per column, front to back, each slice a homogeneous medium.
+  - Resolve: the light and transmittance at the scene's depth, trilinear (four columns, two
+    boundaries).
+- **Froxels, measured against the volume:**
+  - Cluster: 6.4 (max 55); over 8x8 blocks (the columns' size here), 4.5. What remains after
+    averaging is aliasing: a puff smaller than a column is caught or missed by its centre ray (the
+    fire loses its small bright puffs).
+  - Crossing: pops 10 (0 over 40), 5.6 (max 42); over blocks 3.8.
+  - Emitted in reverse: identical.
+  - Columns of 2 pixels: cluster 2.3, crossing 2.0, but 447 µs; worse than the slices on both.
+- **Froxels, cost** (`bench battle`; `m7-vol-froxels`): 17 µs sim + 181 µs draw, against sorted
+  58 + 82 µs and slices 16 + 378 µs.
+  - First version, gathered (each column of a bin of 8x8 columns testing every puff binned
+    there): about 610 µs. The tests alone took about 290 µs; scattering by puff does only the
+    columns each puff covers.
+  - Columns stored per column first: the integration's accesses did not coalesce (about 210 µs
+    for empty bins); slice-major, about 130.
+  - 64 slices: 266 µs. Clearing and integrating the grid is most of the fixed cost, so halving the
+    slices took 85 µs off; the test's numbers did not change (the screen-plane blur dominates).
+  - Of the 181 µs: about 32 the passes every half-resolution blend has (depth, composite), 65 the
+    scatter, the rest clearing (7.5 MB), the puffs and the integration.
+- **Choice:** the sort stays the default.
+  - Both volume methods stop the popping (slices 6, froxels 10, against 116).
+  - The slices are near the volume (0.6) but cost 2.8 times the sort (394 µs against 140, sim and
+    draw).
+  - The froxels cost 1.4 times the sort (198 µs) but are blurred and alias small puffs (6.4 from
+    the volume in the cluster, the sort 1.7).
+  - Neither is worth it while the popping is a short flicker as puffs cross. If it shows in play,
+    froxels for smoke and dust (sparks, fire and flashes sorted, over them) is the cheaper
+    route; it would need a few rays per column, or a filter over the columns, against the
+    aliasing.
 
 ### M0 risk spikes
 
