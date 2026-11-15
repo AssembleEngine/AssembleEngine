@@ -2124,7 +2124,9 @@ Recoil's scars (results):
     overglow flicker (`0.2 |sin(0.6 t)|` near full), `smoothstep(0.9, 0.1, d)^7` of the 3D
     distance from the centre over the half-diagonal (round). The fade-in does not dim it. Its gamma-space
     colour is made linear (`^2.2`) and added after lighting: untouched by the sun and shadows,
-    put out by water within a metre, and shown only in sight (not remembered under the fog).
+    put out by water within a metre, and dimmed by the fog of war as the scar under it is (it
+    was first hidden out of sight, but X sets off explosions anywhere and their scars show, so
+    their glow vanished).
     Brightness goes as temperature^4, so a glow is near its end by half its life, as Recoil's.
   - **Not done:** the ellipsoid and `dot(up, N)^exp` shaping (ours wrap over cliffs on purpose),
     the glow colour map, the water absorption of the scar's colour.

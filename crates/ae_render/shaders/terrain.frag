@@ -301,13 +301,14 @@ void main() {
         glow *= 1.0 - smoothstep(0.0, 1.0, depth);
     }
 
+    // Emissive: after the light and the shadows. The fog of war dims it as
+    // it dims the scar under it (an explosion set off out of sight, X,
+    // still shows its scar, so its glow too).
+    color += glow;
+
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         color = applyVision(color, inWorld.xz);
-        // A glow shows only in sight (not remembered under the fog).
-        if (DECALS) glow *= smoothstep(0.6, 1.0, visionAt(inWorld.xz));
     }
-    // Emissive: after the light, the shadows and the vision's dimming.
-    color += glow;
 
     float dist = distance(inWorld, u.camPos.xyz);
     color = mix(color, u.fog.rgb, fogAmount(dist));
