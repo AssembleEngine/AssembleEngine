@@ -85,8 +85,8 @@ void main() {
     vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
     float rough = clamp(sqrt(lost) * 4.0, 0.0, 1.0);
 
-    // Fresnel: Schlick for water (F0 0.02), floored a little so the ripples
-    // still read from straight above (0 A.D. and RA3 floor theirs).
+    // Fresnel: Schlick with F0 0.06, raised from water's 0.02 so the
+    // ripples still read from straight above (0 A.D. and RA3 floor theirs).
     float cosE = max(dot(E, N), 0.0);
     float fresnel = 0.06 + 0.94 * pow(1.0 - cosE, 5.0);
 

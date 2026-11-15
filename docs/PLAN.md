@@ -1486,7 +1486,8 @@ Water (`cargo test -p ae_render --test gpu water -- --ignored`):
   geometry). Eight analytic wave trains from 48 m to 0.75 m (deep-water speeds) shade it; each fades
   out as it nears three pixels and its slope becomes roughness that widens the sun's highlight
   (RA3's `rough`), so the glitter neither aliases nor disappears with distance; waves calm in the
-  shallows. Fresnel (Schlick, F0 0.02, floored at 0.06) weights an analytic sky; the sun's glints
+  shallows. Fresnel (Schlick with F0 0.06, raised from water's 0.02 so the ripples read from straight
+  above) weights an analytic sky; the sun's glints
   are added light, hence a new premultiplied blend (`pipeline::Blend::{Off, Straight,
   Premultiplied}` replaces the bool). Shore foam: crests running in through the last 1.5 m and a
   line along the waterline, laid on by drifting noise (RA3's `shoreWaves`, by depth instead of a
@@ -1504,7 +1505,9 @@ Water (`cargo test -p ae_render --test gpu water -- --ignored`):
   GPU tests pass with validation.
 - `ae-client`: water on by default on wet maps, `--no-water`, O toggles it. With validation: a
   capture with two teams (fog of war on the lake) and an 8 s windowed `--exercise` (7 swapchain
-  recreates) with 2,000 units, 0 messages.
+  recreates) with 2,000 units, 0 messages. Through the render modules (`--render-module default`
+  and `post`, the lake view of the README): the water pass runs in both graphs (in `post` into its
+  intermediate image, then graded), 0 messages.
 - Cost (`ae-client --bench all --label m7-water` against the baseline; the five water-map scenes now
   draw water): `water` 2–3 µs in the close and army views, 9 µs over the overview, 23 µs in the
   orbit; 0 of 81 earlier metrics regressed (terrain draw +2–5 %, inside the tolerance).
