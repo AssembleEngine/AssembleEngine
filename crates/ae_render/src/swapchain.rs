@@ -170,6 +170,16 @@ impl Swapchain {
         self.handle != vk::SwapchainKHR::null() && !self.images.is_empty()
     }
 
+    /// The requested present policy (not the mode the surface gave us).
+    pub fn policy(&self) -> PresentPolicy {
+        self.policy
+    }
+
+    /// Change the policy; the caller recreates the swapchain.
+    pub fn set_policy(&mut self, policy: PresentPolicy) {
+        self.policy = policy;
+    }
+
     /// Acquire the next image, waiting at most `ACQUIRE_TIMEOUT` so a stuck
     /// presentation engine cannot keep the render thread from stopping.
     pub fn acquire(&self, signal: vk::Semaphore) -> Result<Acquired> {

@@ -101,6 +101,8 @@ pub struct GpuRenderStats {
 struct Control {
     stop: AtomicBool,
     resize: Mutex<Option<(u32, u32)>>,
+    /// A new present policy (vsync on/off) to apply.
+    present: Mutex<Option<PresentPolicy>>,
     minimized: AtomicBool,
     /// The render thread leaked its GPU objects after a hang; the surface
     /// must not be destroyed under the leaked swapchain.
@@ -160,6 +162,14 @@ impl GpuRenderThread {
             self.control.minimized.store(false, Ordering::Release);
         } else if events.minimized {
             self.control.minimized.store(true, Ordering::Release);
+        }
+    }
+
+    /// Ask the render thread for a present policy; the swapchain is
+    /// recreated at the next frame. `Fifo` is vsync, `Mailbox` is uncapped.
+    pub fn set_present(&self, policy: PresentPolicy) {
+        if let Ok(mut pending) = self.control.present.lock() {
+            *pending = Some(policy);
         }
     }
 
@@ -246,6 +256,12 @@ fn render_main<A: RenderApp>(
                 size = new_size;
                 dirty = true;
             }
+            if let Some(policy) = control.present.lock().ok().and_then(|mut pending| pending.take())
+                && swapchain.policy() != policy
+            {
+                swapchain.set_policy(policy);
+                dirty = true;
+            }
             if control.minimized.load(Ordering::Acquire) || size.0 == 0 || size.1 == 0 {
                 stats.skipped_minimized += 1;
                 std::thread::sleep(Duration::from_millis(16));
@@ -257,6 +273,7 @@ fn render_main<A: RenderApp>(
                     continue;
                 }
                 stats.swapchain_recreates += 1;
+                stats.present_mode = format!("{:?}", swapchain.present_mode);
                 dirty = false;
                 if swapchain.format.format != format {
                     format = swapchain.format.format;

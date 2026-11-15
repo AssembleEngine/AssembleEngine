@@ -9,7 +9,7 @@
 //!
 //! `--render-module` takes the frame graph from a render module: an
 //! in-repo one (`render/<NAME>`: `default`, the engine's own graph from
-//! WASM; `post`, with a colour grade and a vignette V toggles), a `.wasm`
+//! WASM; `post`, with a colour grade and a vignette N toggles), a `.wasm`
 //! file, or a graph file (`.json`, e.g. `render/post.graph.json`: the same
 //! graph as data, `ae_render::graph_file`). Its sources (or the file) are watched: an edit rebuilds it
 //! and the running client swaps it in at the next frame, or keeps the old
@@ -35,8 +35,8 @@
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
 //! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
 //! terrain detail, T wireframe, L colour by LOD depth, G fog, C freeze the
-//! LOD, P print the camera, V toggle render module flag bit 0, M tileset,
-//! B blend weights, Esc quits.
+//! LOD, P print the camera, V v-sync, N toggle render module flag bit 0,
+//! M tileset, B blend weights, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -389,7 +389,7 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
             }
         };
     }
-    if events.pressed & keys::V != 0 {
+    if events.pressed & keys::N != 0 {
         view.module_flags ^= 1;
     }
     if events.pressed & keys::M != 0 {
@@ -543,6 +543,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
     let ui: sim::UiQueue = Arc::default();
     let sim_speed = sim::SimSpeed::default();
+    let mut vsync = o.present == PresentPolicy::Fifo;
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
@@ -583,6 +584,11 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut module_errors = 0;
     loop {
         let events = window.pump();
+        if events.pressed & keys::V != 0 {
+            vsync = !vsync;
+            thread.set_present(if vsync { PresentPolicy::Fifo } else { PresentPolicy::Mailbox });
+            println!("vsync {}", if vsync { "on" } else { "off" });
+        }
         // Clicks: left selects own units near the ground point, right
         // orders the selection there.
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
@@ -608,7 +614,8 @@ fn run(o: Options) -> Result<ExitCode> {
         }
         let elapsed = sample.0.elapsed().as_secs_f64();
         if elapsed >= 0.5 {
-            let frames = thread.stats().frames;
+            let render = thread.stats();
+            let frames = render.frames;
             let fps = frames.saturating_sub(sample.1) as f64 / elapsed;
             let detail = match &terrain {
                 Some((view, stats)) => {
@@ -645,6 +652,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
                 None => detail,
             };
+            let detail = detail + if render.present_mode == "FIFO" { " | vsync on" } else { " | vsync off" };
             window.set_title(&format!("AssemblyEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
         }

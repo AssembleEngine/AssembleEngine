@@ -145,7 +145,7 @@ cargo test -p ae_render --test gpu -- --ignored --test-threads=1         # offsc
 cargo run --release -p ae-client                                         # water crossing map + 10k units (WASD, wheel, right-drag)
 cargo run --release -p ae-client -- --map land --capture land.ppm        # 300 sim ticks, then an offscreen frame + GPU ms per pass
 cargo run --release -p ae-client -- --units 0                            # terrain only
-cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (V: vignette)
+cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (N: vignette)
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo test -p ae_render --test module                                    # render modules without a GPU

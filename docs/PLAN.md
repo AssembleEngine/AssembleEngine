@@ -694,7 +694,7 @@ the frame graph:
 - `ae-client` shows it: `--map water|land|generated|demo`, `--map-cells`, `--relief`, `--camera`,
   RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` sim speed, doubling with no
   upper limit (compute-bound), `[`/`]` detail, T wireframe, L LOD colours, G fog, C freeze LOD,
-  P print camera); `--capture FILE.ppm` renders
+  P print camera, V v-sync, N render module flag); `--capture FILE.ppm` renders
   1280x720 offscreen without a
   window and prints GPU time per pass. The SDL window now reports wheel, drag, toggle keys and held
   movement keys (ecs_sim's F "full frame" key is gone).
@@ -837,7 +837,7 @@ Render modules (the M3 exit item "topology hot-reload without restart"):
   rejected naming both passes (a program's descriptor sets are per frame slot and rewritten when its
   pass records, so a second pass in the same frame would update a set already bound).
 - `ae-client --render-module NAME|FILE.wasm` watches the module's sources (or file), rebuilds on
-  change and reloads; V toggles flag bit 0. Topology swap through the present path, windowed, with
+  change and reloads; N toggles flag bit 0. Topology swap through the present path, windowed, with
   validation: a `.wasm` file replaced (by `mv`) with the post module and back while `--exercise`
   resized and minimized (24 s, 21 swapchain recreates, 3,000 units): 3 loads, 0 errors, 0
   validation messages. Live run with validation (`--render-module post
