@@ -23,7 +23,7 @@
 //! particle pool is in its steady state when measuring) at seeded places
 //! around the camera target; time advances 1/60 s a frame.
 
-use super::{MapKind, Options, particles, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
+use super::{MapKind, Options, effects, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
 use ae_bench::Report;
 use ae_bench::diff::Thresholds;
 use ae_bench::measure::{Sample, summarise};
@@ -109,7 +109,7 @@ const SCENES: [Scene; 7] = [
     Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit, explosions: 0 },
     Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0 },
     Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0 },
-    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2 },
+    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2 },
     Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0 },
 ];
 
@@ -220,12 +220,13 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         feed.publish(stream);
         app = app.with_units(units_setup(&s, feed));
     }
-    let feed = match particles(&o).filter(|_| scene.explosions > 0) {
-        Some((feed, setup)) => {
-            app = app.with_particles(setup);
-            Some(feed)
-        }
-        None => None,
+    // Explosions (particles and scorch marks) only in scenes that set them off.
+    let feed = if scene.explosions > 0 {
+        let (with, feed) = effects(app, &o);
+        app = with;
+        feed
+    } else {
+        None
     };
     place_camera(&app, o.camera);
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
@@ -249,7 +250,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
             let h = emitted.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15).wrapping_mul(0x85eb_ca6b);
             let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * 600.0, ((h >> 16) as f32 / 65535.0 - 0.5) * 600.0);
             let scale = 0.8 + (h % 7) as f32 * 0.2;
-            feed.emit_all(&ae_render::particles::explosion([scene.camera[0] + dx, 1.0, scene.camera[1] + dz], true, scale, h));
+            feed.explode(scene.camera[0] + dx, scene.camera[1] + dz, scale, h);
             emitted += 1;
         }
     };

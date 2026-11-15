@@ -12,6 +12,7 @@ use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
+use ae_render::decals::{Decal, DecalFeed};
 use ae_render::particles::{ParticleFeed, explosion};
 use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
 use ae_sensors::{Bits, SensorGrid};
@@ -204,7 +205,7 @@ pub struct Sim {
     bots: Vec<ae_bot::SkirmishBot>,
     unit_command: Option<u64>,
     /// Explosions for units that die where the observer sees.
-    particles: Option<Arc<ParticleFeed>>,
+    effects: Option<Arc<Effects>>,
     /// The last capture's units, by entity: `(entity, x, y, radius)`.
     last_units: Vec<(u64, f32, f32, f32)>,
     /// The observer's line of sight at the last tick.
@@ -272,7 +273,7 @@ impl Sim {
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command, particles: None, last_units: Vec::new(), last_los: None })
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -283,10 +284,10 @@ impl Sim {
         self
     }
 
-    /// Emit an explosion into `feed` for every unit that dies where the
-    /// observer saw at the tick before (every unit without an observer).
-    pub fn with_particles(mut self, feed: Arc<ParticleFeed>) -> Self {
-        self.particles = Some(feed);
+    /// Set off an explosion in `effects` for every unit that dies where
+    /// the observer saw at the tick before (every unit without an observer).
+    pub fn with_effects(mut self, effects: Arc<Effects>) -> Self {
+        self.effects = Some(effects);
         self
     }
 
@@ -294,19 +295,21 @@ impl Sim {
     /// that stood in the observer's line of sight of that tick explode.
     /// Only what the observer saw: a unit dying in the fog leaves nothing.
     fn emit_deaths(&mut self) {
-        let Some(feed) = &self.particles else { return };
+        let Some(effects) = &self.effects else { return };
         let c = &self.capture;
         let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len()).map(|r| (c.entities[r], c.f32(F_X, r), c.f32(F_Y, r), c.f32(F_RADIUS, r))).collect();
         now.sort_unstable_by_key(|u| u.0);
         let grid = self.view.as_ref().map(|v| v.pipeline.coverage.grid);
-        let bursts = deaths(&self.last_units, &now, |x, y| match (&self.last_los, grid) {
+        let sites = deaths(&self.last_units, &now, |x, y| match (&self.last_los, grid) {
             (Some(los), Some(grid)) => {
                 let (cx, cy) = grid.cell(x, y);
                 los.get(cx, cy)
             }
             _ => true,
         });
-        feed.emit_all(&bursts);
+        for &(x, y, scale, seed) in &sites {
+            effects.explode(x, y, scale, seed);
+        }
         self.last_units = now;
         if let Some(v) = &self.view {
             self.last_los = Some(v.pipeline.coverage.los[v.observer[0].ally as usize].clone());
@@ -437,16 +440,37 @@ impl Sim {
     }
 }
 
-/// Explosions for the units of `last` missing from `now` (both sorted by
-/// entity: `(entity, x, y, radius)`) that stood where `seen(x, y)`.
-fn deaths(last: &[(u64, f32, f32, f32)], now: &[(u64, f32, f32, f32)], seen: impl Fn(f32, f32) -> bool) -> Vec<ae_render::particles::Burst> {
-    let mut bursts = Vec::new();
+/// Explosions (`(x, y, scale, seed)`) for the units of `last` missing from
+/// `now` (both sorted by entity: `(entity, x, y, radius)`) that stood where
+/// `seen(x, y)`.
+fn deaths(last: &[(u64, f32, f32, f32)], now: &[(u64, f32, f32, f32)], seen: impl Fn(f32, f32) -> bool) -> Vec<(f32, f32, f32, u32)> {
+    let mut sites = Vec::new();
     for &(id, x, y, radius) in last {
         if now.binary_search_by_key(&id, |u| u.0).is_err() && seen(x, y) {
-            bursts.extend(explosion([x, 1.0, y], true, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
+            sites.push((x, y, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
         }
     }
-    bursts
+    sites
+}
+
+/// Where explosions go: the particles (flash, fire, sparks, smoke) and a
+/// scorch mark on the ground, each when the client draws them.
+#[derive(Debug, Default)]
+pub struct Effects {
+    pub particles: Option<Arc<ParticleFeed>>,
+    pub decals: Option<Arc<DecalFeed>>,
+}
+
+impl Effects {
+    /// An explosion of size `scale` on the ground at world `(x, z)`.
+    pub fn explode(&self, x: f32, z: f32, scale: f32, seed: u32) {
+        if let Some(feed) = &self.particles {
+            feed.emit_all(&explosion([x, 1.0, z], true, scale, seed));
+        }
+        if let Some(feed) = &self.decals {
+            feed.place(Decal::scorch([x, z], 3.5 * scale, seed));
+        }
+    }
 }
 
 /// One unit for the stream: `key` orders rows and matches them across
@@ -558,14 +582,14 @@ pub struct SimThread {
 impl SimThread {
     /// Build the world and tick it at the nav rate times `speed`,
     /// publishing units to `feed` and landed ground changes to `ground`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, particles: Option<Arc<ParticleFeed>>, ui: UiQueue, speed: SimSpeed) -> Self {
+    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, effects: Option<Arc<Effects>>, ui: UiQueue, speed: SimSpeed) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
         let handle = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let result = run(o, feed, ground, vision, particles, ui, speed, &stop2, &stats2);
+                let result = run(o, feed, ground, vision, effects, ui, speed, &stop2, &stats2);
                 if let Err(error) = &result {
                     eprintln!("sim failed: {error:#} (--units 0 runs without the sim)");
                     stats2.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
@@ -590,14 +614,14 @@ impl SimThread {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, particles: Option<Arc<ParticleFeed>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, effects: Option<Arc<Effects>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
     let started = Instant::now();
     let mut sim = Sim::new(&o, Some(ground))?;
     if let Some(feed) = vision {
         sim = sim.with_vision(feed);
     }
-    if let Some(feed) = particles {
-        sim = sim.with_particles(feed);
+    if let Some(effects) = effects {
+        sim = sim.with_effects(effects);
     }
     eprintln!("sim: {} game, {} workers, world built in {:.2} s", o.game, o.workers, started.elapsed().as_secs_f32());
     let mut rate = speed.current();
@@ -702,11 +726,18 @@ mod tests {
     fn units_that_vanish_where_seen_explode() {
         let last = [(1, 10.0, 10.0, 6.0), (2, 20.0, 20.0, 6.0), (3, -30.0, 30.0, 6.0), (5, 50.0, 50.0, 12.0)];
         let now = [(1, 11.0, 10.0, 6.0), (4, 40.0, 40.0, 6.0), (5, 51.0, 50.0, 12.0)];
-        let bursts = deaths(&last, &now, |x, _| x >= 0.0);
-        let at: std::collections::BTreeSet<[u32; 2]> = bursts.iter().map(|b| [b.pos[0].to_bits(), b.pos[2].to_bits()]).collect();
-        assert_eq!(at.len(), 1, "only 2 died where seen (3 died in the fog): {bursts:?}");
+        let sites = deaths(&last, &now, |x, _| x >= 0.0);
+        assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
+        assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
+        // One explosion: flash, fire, sparks, smoke, and a scorch mark.
+        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()) };
+        effects.explode(20.0, 20.0, 1.0, sites[0].3);
+        let bursts = effects.particles.as_ref().unwrap().take_all();
+        assert_eq!(bursts.len(), 4, "flash, fire, sparks, smoke: {bursts:?}");
         assert!(bursts.iter().all(|b| b.pos[0] == 20.0 && b.pos[2] == 20.0 && b.ground));
-        assert_eq!(bursts.len(), 4, "one explosion: flash, fire, sparks, smoke");
+        let decals = effects.decals.as_ref().unwrap().take();
+        assert_eq!(decals.len(), 1);
+        assert_eq!(decals[0].pos, [20.0, 20.0]);
         assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
     }
 

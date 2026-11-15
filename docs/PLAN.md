@@ -1607,7 +1607,8 @@ The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_re
   units shaders keep the lookup compiled in (they exist only with units or water).
 
 The rest of M7, in order: particles, then particles' coloured shadows, then decals (then the
-stretch goal, volumetric smoke). Stop for a context compaction after each.
+stretch goal, volumetric smoke). Stop for a context compaction after each. All three are done
+(below); the stretch goal is next.
 
 Particles (plan):
 - Goal: a strong system, not a demo. It must handle tens of thousands of live particles and
@@ -1939,6 +1940,94 @@ Decals (plan):
   - the ground outside the footprints is byte-identical;
   - a unit standing in a footprint is not painted;
   - no decals is byte-identical to before.
+
+Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `cargo test -p ae_render --lib decal`):
+- **Inside the terrain's draw** (`ae_render::decals`, `terrain_decals.glsl`): no pass, no library
+  resource, no graph change; the goldens, the modules and the graph files are unchanged. Units and
+  the water are never painted.
+  - A decal (`Decal`: centre x, z, half-sizes, rotation, atlas layer, opacity, fade-in) is placed
+    through a `DecalFeed`; the app stamps its start time. `TerrainApp::with_decals` keeps a ring of
+    `DecalsSetup::capacity` (the oldest goes first) across renderer re-creation.
+  - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
+  - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
+    colour); `default_atlas` generates a scorch mark and a crater.
+  - Specialization constant 1 (`DECALS`): the terrain pipeline with decals is built only with
+    `with_decals`. Each frame it is used only while some decal's box (its square in plan, the map's
+    height range) meets the view frustum. Decals never expire, so without this gate the first death
+    would turn it on for good, at about 5 % of the terrain pass. With none in view, the frame is the
+    one without decals (byte-identical, the same pipeline).
+- **Binning: a spatial hash, not a grid over the map.** The world's 32 m cells hash into
+  `buckets(capacity)` (four per decal, a power of two); each bucket lists its decals oldest first,
+  so newer decals cover older ones. Another cell's decal in the same bucket fails the footprint
+  test before anything else is read. A decal's bounding radius is clamped to 32 m (at most 3x3
+  cells), so the buffers have a fixed size. The encode is a counting sort into buffers kept
+  between frames.
+  - The planned grid over the map was 320x320 cells on the 10 km map: in `battle`, which places
+    two decals a frame, rebuilding it cost the CPU frame 1.7 ms (one `Vec` per cell), 73 µs as a
+    counting sort with the hash. With each decal's words and buckets computed at placement, it is
+    12 µs for 1024 decals.
+- **Projection.** Three ways around the centre, weighted by the heightmap's normal (not the
+  tileset's detail normal) in the decal's frame with constant-overlap weights (`docs/antitiling.md`,
+  blend zone 0.8). The side projections put `-sign(n) dy` (the height relative to the centre) in
+  place of the coordinate the face hides, so a decal across a cliff's edge or into its foot
+  continues onto the face as if unfolded. Every atlas sample uses explicit gradients (the loop is
+  non-uniform control flow).
+  - The extent: square in plan, rounded in the vertical, `length(max(|u|, |v|), dy / h) < 1`,
+    fading over its last 15 %.
+- **GPU test** `decals_wrap_over_cliffs`. A step map with 2 m cells along x: a 30 m plateau ends
+  in a 20 m cliff facing +x down to ground at 10 m, with a 6 m step up to 36 m behind it. The atlas
+  has eight black and white stripes across the decal's x. Three decals of half-size 12 m are
+  centred on corner samples: E on the cliff's top edge, F at its foot, L on the low step's edge.
+  - Sampled along x and then onto the face, by the unfolded coordinate, the stripes match the
+    atlas everywhere at full opacity. Samples within 0.5 m of a stripe boundary, near the unit and
+    in the plateau's last 2.5 m (where the heightmap normal already leans) are left out. Counts:
+    - E: plateau 153 of 153, face 179 of 179.
+    - F: ground 150 of 150, face 182 of 182.
+  - The test checks phase, not only stripe count, so it also catches stretching: a face at 1.5x
+    the flat ground's texel size would put its third stripe 3 m off.
+  - Ground beyond every decal's 3D extent is byte-identical (34,785 points).
+  - A unit standing in F's footprint is unchanged, and the ground beside it is painted.
+  - Decals made but none placed are byte-identical to no decals.
+  - Mutations, each caught:
+    - top-down projection only (E face 87 of 179);
+    - a box instead of the rounded extent (ground outside changes);
+    - the side sign flipped (E face 0 of 179);
+    - the specialization forced off (no stripes).
+  - All 22 GPU tests pass with validation, run with `--test-threads=1`. Run in parallel, 7 to 8
+    fail allocating with out of memory, as they did before this change.
+- **Where it departs from the plan:**
+  - The 3D fade bounds a decal but cannot stop the top projection from printing again at the foot
+    of a cliff lower than its half-size. That is Recoil's far-side copy, kept smaller. The ground
+    at the foot of L's 6 m step, within its 3D extent but past its unfolded footprint (6 m down
+    the face, then along the ground), is painted at all 78 test points. The test measures and
+    prints this; it does not assert it.
+  - Within one cell either side of a step, the heightmap normal leans gradually, so the
+    projections blend and a stripe smears there. Real cliffs span several cells.
+  - Decals are permanent until evicted: there is no time-out, so a decal seen once stays as last
+    seen under the fog.
+- **Client:** every explosion (deaths the observer sees, X, `--explode`) leaves a scorch mark of
+  3.5 x scale metres through `sim::Effects`, which carries both feeds. Capacity is 1024;
+  `--no-decals` turns them off.
+- **Cost** (`--bench all --label m7-decals` against `m7-particle-shadows`; `bench-diff`: 109 of
+  110 metrics unchanged):
+  - `battle` (two explosions a frame, so about 700 scorch marks live around the view): the terrain
+    pass rises from 181 to 218 µs (+20 %).
+    - Compiled in with an empty loop it is 190 µs, so the loop's presence costs 5 %.
+    - Reading the centre's height from the CPU instead would save 6 µs; it would no longer follow
+      terrain edits, so the GPU read stays.
+    - The CPU frame is 114 µs against 117.
+  - The other six scenes have no decals and are unchanged. In a game, the cost applies only while
+    a scorch mark is in view.
+- **Validation clean** (0 messages):
+  - client captures with 8 explosions: natively, with the post module, and with both graph files;
+  - a close capture without particles, which shows the twelve scorch marks;
+  - 12 s of `--exercise` (11 swapchain recreations).
+- **Not done:**
+  - Deaths are the only events; there are no decals for impacts or building footprints.
+  - Decals change the albedo only, not the normals.
+  - A decal's height and normal come from the heightmap, not the LOD mesh. Where a coarse mesh
+    sits off the heightmap, the decal follows the drawn surface (its world position) but blends
+    its projections by the heightmap's normal.
 
 M7 stretch goal (after decals): volumetric smoke and dust.
 - Why: the order-independence measurement showed that particles blended as flat layers pop when

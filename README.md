@@ -68,8 +68,9 @@ sun's shadows over the ground, the units and the water (a heightfield, exact at 
 toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
 shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
 smoke) sorted back to front and faded softly into the ground (X sets one off, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`); smoke and
-dust cast coloured shadows on the ground, the units and the water (with the units' shadows). Decals
-are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
+dust cast coloured shadows on the ground, the units and the water (with the units' shadows). Each
+explosion leaves a scorch mark, a decal the terrain's shader paints and wraps over cliff edges
+(`--no-decals`). Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

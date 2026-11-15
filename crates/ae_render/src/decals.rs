@@ -1,0 +1,497 @@
+//! Decals: marks painted on the terrain (scorch marks, craters), applied by
+//! the terrain's own fragment shader (`terrain_decals.glsl`), so nothing
+//! else (units, water) is ever painted and there is no projection volume to
+//! size.
+//!
+//! * A decal is a footprint on the heightfield: a centre (x, z; its height
+//!   is the ground's there, read on the GPU, so it follows terrain edits),
+//!   half-sizes along its own axes, a rotation, a layer of the
+//!   [`DecalAtlas`], an opacity and a fade-in.
+//! * It is projected three ways around its centre, weighted by the ground's
+//!   normal with constant-overlap triplanar weights. The side projections
+//!   take their second coordinate from the height relative to the centre,
+//!   so a decal across a cliff's edge or at its foot wraps onto the face
+//!   with its texels unstretched. Its extent fades with the 3D distance
+//!   from the centre (square in plan, rounded in the vertical).
+//! * Binning: the world's cells of [`GRID_CELL`] metres, hashed into
+//!   [`buckets`] (about four per decal, whatever the map's size), list the
+//!   decals touching them; the shader loops over its bucket's list, oldest
+//!   first, so newer decals cover older ones (another cell's decals in the
+//!   same bucket fail its footprint test). A decal's bounding radius is clamped to
+//!   [`MAX_RADIUS`], so it lists in at most 3x3 cells and the buffers have a
+//!   fixed size.
+//! * A ring of [`DecalsSetup::capacity`] decals: the oldest goes first.
+//!   The terrain pipeline with decals is a specialization (constant 1) used
+//!   only while there are any; with none the frame is the one without
+//!   decals.
+//!
+//! Decals come from a [`DecalFeed`] (the client fills it from what the
+//! observer sees, as the particles' bursts). They stay until evicted: one
+//! seen once stays as last seen under the fog.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+/// Side of a binning cell (metres).
+pub const GRID_CELL: f32 = 32.0;
+/// Largest bounding radius of a decal (metres); bigger ones are scaled down.
+pub const MAX_RADIUS: f32 = GRID_CELL;
+/// Most decals one binning cell lists (the newest are kept).
+pub const MAX_PER_CELL: usize = 255;
+/// Header words before the decals.
+const HEADER_WORDS: usize = 4;
+/// Words per decal.
+const DECAL_WORDS: usize = 12;
+/// Cells a decal lists in at most.
+const CELLS_PER_DECAL: usize = 9;
+
+/// The default atlas's layers.
+pub mod layer {
+    pub const SCORCH: u32 = 0;
+    pub const CRATER: u32 = 1;
+}
+
+/// One decal to place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Decal {
+    /// World x, z of the centre.
+    pub pos: [f32; 2],
+    /// Half-sizes along the decal's own axes (metres).
+    pub half: [f32; 2],
+    /// Rotation about the vertical (radians).
+    pub angle: f32,
+    /// Atlas layer (out of range: drawn as nothing).
+    pub layer: u32,
+    pub opacity: f32,
+    /// Seconds to fade in from placement (0: at once).
+    pub fade_in: f32,
+}
+
+impl Decal {
+    /// A scorch mark of `radius` metres at `pos`, rotated by `seed`.
+    pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
+        let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
+        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4 }
+    }
+
+    /// Bounding radius in plan.
+    fn radius(&self) -> f32 {
+        self.half[0].hypot(self.half[1])
+    }
+}
+
+/// Where decals are queued for the render thread (taken every frame).
+#[derive(Debug, Default)]
+pub struct DecalFeed {
+    queued: Mutex<Vec<Decal>>,
+}
+
+impl DecalFeed {
+    pub fn place(&self, decal: Decal) {
+        self.queued.lock().unwrap_or_else(|p| p.into_inner()).push(decal);
+    }
+
+    pub fn place_all(&self, decals: &[Decal]) {
+        self.queued.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(decals);
+    }
+
+    /// Every queued decal, oldest first (the render thread takes them each
+    /// frame).
+    pub fn take(&self) -> Vec<Decal> {
+        std::mem::take(&mut *self.queued.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// The decals' textures: square layers of `size`² texels, straight
+/// (not premultiplied) linear RGBA, row-major; mips are made from them.
+#[derive(Clone, Debug)]
+pub struct DecalAtlas {
+    pub size: u32,
+    pub layers: Vec<Vec<[f32; 4]>>,
+}
+
+impl DecalAtlas {
+    /// Each layer's mips as sRGB RGBA8 bytes (alpha linear). Colour is
+    /// averaged weighted by alpha, so transparent texels do not darken the
+    /// edges of smaller mips.
+    pub(crate) fn mips(&self) -> Vec<Vec<Vec<u8>>> {
+        let encode = |c: f32| {
+            let c = c.clamp(0.0, 1.0);
+            let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+            (s * 255.0).round() as u8
+        };
+        self.layers
+            .iter()
+            .map(|base| {
+                let mut level = base.clone();
+                let mut side = self.size as usize;
+                let mut mips = Vec::new();
+                loop {
+                    mips.push(level.iter().flat_map(|t| [encode(t[0]), encode(t[1]), encode(t[2]), (t[3].clamp(0.0, 1.0) * 255.0).round() as u8]).collect());
+                    if side == 1 {
+                        break;
+                    }
+                    let half = side / 2;
+                    level = (0..half * half)
+                        .map(|i| {
+                            let (x, y) = (i % half * 2, i / half * 2);
+                            let texels = [level[y * side + x], level[y * side + x + 1], level[(y + 1) * side + x], level[(y + 1) * side + x + 1]];
+                            let a: f32 = texels.iter().map(|t| t[3]).sum();
+                            let colour = |k: usize| if a > 0.0 { texels.iter().map(|t| t[k] * t[3]).sum::<f32>() / a } else { texels.iter().map(|t| t[k]).sum::<f32>() * 0.25 };
+                            [colour(0), colour(1), colour(2), a * 0.25]
+                        })
+                        .collect();
+                    side = half;
+                }
+                mips
+            })
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.size.is_power_of_two() {
+            return Err(format!("decal atlas size {} is not a power of two", self.size));
+        }
+        if self.layers.is_empty() {
+            return Err("decal atlas has no layers".into());
+        }
+        let texels = (self.size * self.size) as usize;
+        match self.layers.iter().position(|l| l.len() != texels) {
+            Some(i) => Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.layers[i].len())),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The engine's decals ([`layer`]), 128² each: a scorch mark (charred
+/// centre, a burnt brown ring, a ragged edge) and a crater (a dark pit, a
+/// pale rim of thrown-up earth).
+pub fn default_atlas() -> DecalAtlas {
+    const SIZE: usize = 128;
+    fn hash(x: i32, y: i32, octave: i32) -> f32 {
+        let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x5bd1_e995);
+        h ^= h >> 15;
+        (h & 0xffff) as f32 / 65535.0
+    }
+    fn value_noise(x: f32, y: f32, octave: i32) -> f32 {
+        let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+        let (fx, fy) = (x - x.floor(), y - y.floor());
+        let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+        let top = hash(ix, iy, octave) + (hash(ix + 1, iy, octave) - hash(ix, iy, octave)) * sx;
+        let bottom = hash(ix, iy + 1, octave) + (hash(ix + 1, iy + 1, octave) - hash(ix, iy + 1, octave)) * sx;
+        top + (bottom - top) * sy
+    }
+    let fbm = |u: f32, v: f32, seed: i32| {
+        let (mut n, mut amplitude) = (0.0, 0.5);
+        for octave in 0..4 {
+            let f = 6.0 * (1 << octave) as f32;
+            n += amplitude * value_noise(u * f, v * f, octave + seed);
+            amplitude *= 0.5;
+        }
+        n / 0.9375
+    };
+    let smooth = |e0: f32, e1: f32, x: f32| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let layer = |f: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]| -> Vec<[f32; 4]> {
+        (0..SIZE * SIZE)
+            .map(|i| {
+                let (u, v) = (((i % SIZE) as f32 + 0.5) / SIZE as f32, ((i / SIZE) as f32 + 0.5) / SIZE as f32);
+                let (x, y) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
+                f(u, v, x.hypot(y), y.atan2(x))
+            })
+            .collect()
+    };
+    let char_ = [0.025, 0.022, 0.02];
+    let burnt = [0.12, 0.075, 0.04];
+    let scorch = layer(&|u, v, r, a| {
+        let n = fbm(u, v, 0);
+        // A ragged edge: the radius wobbles with the angle and the noise.
+        let edge = 0.78 + 0.03 * (a * 5.0).sin() + (n - 0.5) * 0.35;
+        let alpha = 1.0 - smooth(edge - 0.25, edge, r);
+        let colour = mix(char_, burnt, smooth(0.15, edge * 0.9, r + (n - 0.5) * 0.3));
+        [colour[0], colour[1], colour[2], alpha * (0.75 + 0.25 * n)]
+    });
+    let crater = layer(&|u, v, r, _| {
+        let n = fbm(u, v, 7);
+        let pit = [0.05, 0.04, 0.035];
+        let rim = [0.36, 0.30, 0.22];
+        let rr = r + (n - 0.5) * 0.18;
+        let colour = mix(pit, rim, smooth(0.35, 0.6, rr));
+        let alpha = 1.0 - smooth(0.7, 0.95, rr);
+        [colour[0], colour[1], colour[2], alpha]
+    });
+    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater] }
+}
+
+pub struct DecalsSetup {
+    pub feed: Arc<DecalFeed>,
+    /// Most decals at once (the oldest is evicted first).
+    pub capacity: u32,
+    /// The textures; [`default_atlas`] when `None`.
+    pub atlas: Option<Arc<DecalAtlas>>,
+}
+
+impl DecalsSetup {
+    pub fn new(feed: Arc<DecalFeed>, capacity: u32) -> Self {
+        Self { feed, capacity, atlas: None }
+    }
+}
+
+/// Buckets of the spatial hash for `capacity` decals: a power of two,
+/// about four per decal (a decal lists in up to nine cells).
+pub fn buckets(capacity: u32) -> u32 {
+    (capacity * 4).next_power_of_two().max(64)
+}
+
+/// Words of the GPU buffer for `capacity` decals: header, decals, buckets
+/// (first index << 8 | count), indices.
+pub fn buffer_words(capacity: u32) -> usize {
+    HEADER_WORDS + capacity as usize * (DECAL_WORDS + CELLS_PER_DECAL) + buckets(capacity) as usize
+}
+
+/// The bucket of world cell `(x, z)` ([`GRID_CELL`] metres; the shader
+/// hashes the same way).
+pub fn bucket(x: i32, z: i32, mask: u32) -> usize {
+    ((x as u32).wrapping_mul(73_856_093) ^ (z as u32).wrapping_mul(19_349_663)) as usize & mask as usize
+}
+
+/// A placed decal: its words in the buffer and the buckets it lists in
+/// (for the set's table size), computed once.
+#[derive(Clone, Copy, Debug)]
+struct Placed {
+    words: [u32; DECAL_WORDS],
+    buckets: [u32; CELLS_PER_DECAL],
+    n_buckets: u8,
+    /// Centre x, z and bounding radius in plan.
+    bounds: [f32; 3],
+}
+
+/// The live decals, oldest first, and a version bumped by every change.
+#[derive(Debug)]
+pub(crate) struct DecalSet {
+    capacity: usize,
+    live: VecDeque<Placed>,
+    pub version: u64,
+    /// Kept between [`Self::encode`] calls.
+    words: Vec<u32>,
+    count: Vec<u32>,
+    cursor: Vec<u32>,
+}
+
+impl DecalSet {
+    pub fn new(capacity: u32) -> Self {
+        Self { capacity: capacity as usize, live: VecDeque::new(), version: 0, words: Vec::new(), count: Vec::new(), cursor: Vec::new() }
+    }
+
+    /// Place `decal` at `time` (seconds, the frame's animation time).
+    pub fn insert(&mut self, decal: Decal, time: f32) {
+        if self.capacity == 0 {
+            return;
+        }
+        let mut decal = decal;
+        let r = decal.radius();
+        if r > MAX_RADIUS {
+            let k = MAX_RADIUS / r;
+            decal.half = decal.half.map(|h| h * k);
+        }
+        if self.live.len() == self.capacity {
+            self.live.pop_front();
+        }
+        let d = &decal;
+        let (s, c) = d.angle.sin_cos();
+        let fade = if d.fade_in > 0.0 { 1.0 / d.fade_in } else { 0.0 };
+        let words = [d.pos[0], d.pos[1], d.half[0].max(1e-3), d.half[1].max(1e-3), c, s, d.layer as f32, d.opacity, time, fade, 0.0, 0.0].map(f32::to_bits);
+        // The buckets of the distinct cells it touches (two of its cells
+        // may share a bucket: listed once).
+        let mask = buckets(self.capacity as u32) - 1;
+        let r = d.radius();
+        let lo = |v: f32| ((v - r) / GRID_CELL).floor() as i32;
+        let hi = |v: f32| ((v + r) / GRID_CELL).floor() as i32;
+        let mut list = [0u32; CELLS_PER_DECAL];
+        let mut n = 0;
+        for z in lo(d.pos[1])..=hi(d.pos[1]) {
+            for x in lo(d.pos[0])..=hi(d.pos[0]) {
+                let b = bucket(x, z, mask) as u32;
+                if !list[..n].contains(&b) {
+                    list[n] = b;
+                    n += 1;
+                }
+            }
+        }
+        self.live.push_back(Placed { words, buckets: list, n_buckets: n as u8, bounds: [d.pos[0], d.pos[1], r] });
+        self.version += 1;
+    }
+
+    /// Whether any decal's box (its square in plan, `heights` in the
+    /// vertical) is inside every plane (`dot(n, p) + d >= 0`) of a view.
+    pub fn any_in_view(&self, planes: &[[f32; 4]; 6], heights: (f32, f32)) -> bool {
+        self.live.iter().any(|p| {
+            let [x, z, r] = p.bounds;
+            planes.iter().all(|pl| {
+                // The box's corner farthest along the plane's normal.
+                let px = x + r * pl[0].signum();
+                let py = if pl[1] >= 0.0 { heights.1 } else { heights.0 };
+                let pz = z + r * pl[2].signum();
+                pl[0] * px + pl[1] * py + pl[2] * pz + pl[3] >= 0.0
+            })
+        })
+    }
+
+    /// The GPU buffer's words ([`buffer_words`]; the unused tail of the
+    /// index list left out). A counting sort into buffers kept between
+    /// calls.
+    pub fn encode(&mut self) -> &[u32] {
+        let cap = self.capacity;
+        let mask = buckets(cap as u32) - 1;
+        let n_buckets = mask as usize + 1;
+        let buckets_at = HEADER_WORDS + cap * DECAL_WORDS;
+        let index_at = buckets_at + n_buckets;
+        self.words.resize(buffer_words(cap as u32), 0);
+        self.count.clear();
+        self.count.resize(n_buckets, 0);
+        let words = &mut self.words;
+        words[..HEADER_WORDS].copy_from_slice(&[mask, 0, GRID_CELL.to_bits(), cap as u32]);
+        for (i, p) in self.live.iter().enumerate() {
+            let at = HEADER_WORDS + i * DECAL_WORDS;
+            words[at..at + DECAL_WORDS].copy_from_slice(&p.words);
+            for &b in &p.buckets[..p.n_buckets as usize] {
+                self.count[b as usize] += 1;
+            }
+        }
+        // Each bucket's first index; `count` becomes the listings to skip
+        // (a full bucket keeps its newest decals, still oldest first).
+        self.cursor.clear();
+        let mut next = 0u32;
+        for (b, n) in self.count.iter_mut().enumerate() {
+            let kept = (*n).min(MAX_PER_CELL as u32);
+            words[buckets_at + b] = next << 8 | kept;
+            self.cursor.push(next);
+            next += kept;
+            *n -= kept;
+        }
+        for (i, p) in self.live.iter().enumerate() {
+            for &b in &p.buckets[..p.n_buckets as usize] {
+                let b = b as usize;
+                if self.count[b] > 0 {
+                    self.count[b] -= 1;
+                } else {
+                    words[index_at + self.cursor[b] as usize] = i as u32;
+                    self.cursor[b] += 1;
+                }
+            }
+        }
+        &self.words[..index_at + next as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decal(x: f32, z: f32, r: f32) -> Decal {
+        Decal { pos: [x, z], half: [r, r], angle: 0.0, layer: 0, opacity: 1.0, fade_in: 0.0 }
+    }
+
+    /// The decals listed in the bucket of world cell `(x, z)`.
+    fn listed(words: &[u32], cap: u32, x: i32, z: i32) -> Vec<u32> {
+        let mask = buckets(cap) - 1;
+        let buckets_at = HEADER_WORDS + cap as usize * DECAL_WORDS;
+        let index_at = buckets_at + mask as usize + 1;
+        let e = words[buckets_at + bucket(x, z, mask)];
+        let (first, n) = ((e >> 8) as usize, (e & 255) as usize);
+        words[index_at + first..index_at + first + n].to_vec()
+    }
+
+    #[test]
+    fn decals_list_in_the_cells_they_touch_oldest_first_and_the_oldest_is_evicted() {
+        let mut set = DecalSet::new(3);
+        set.insert(decal(10.0, 10.0, 4.0), 0.0); // cell (0, 0)
+        set.insert(decal(32.0, 32.0, 4.0), 0.0); // the corner of four cells
+        set.insert(decal(40.0, 10.0, 100.0), 0.0); // clamped to MAX_RADIUS
+        let words = set.encode().to_vec();
+        assert!(words.len() <= buffer_words(3));
+        // Distinct buckets for these cells at this table size.
+        let cells = [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (2, 1), (-1, 0), (0, -1), (3, 0), (0, 2), (5, 5)];
+        let mask = buckets(3) - 1;
+        let mut seen: Vec<usize> = cells.iter().map(|&(x, z)| bucket(x, z, mask)).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), cells.len(), "test cells collide");
+        assert_eq!(listed(&words, 3, 0, 0), vec![0, 1, 2]);
+        for (x, z) in [(1, 0), (0, 1), (1, 1)] {
+            assert_eq!(listed(&words, 3, x, z), vec![1, 2], "cell {x},{z}");
+        }
+        // Radius 32 about (40, 10): x 8..72 (cells 0..=2), z -22..42 (-1..=1).
+        for (x, z) in [(2, 0), (2, 1), (0, -1)] {
+            assert_eq!(listed(&words, 3, x, z), vec![2], "cell {x},{z}");
+        }
+        assert_eq!(listed(&words, 3, -1, 0), Vec::<u32>::new());
+        assert_eq!(listed(&words, 3, 3, 0), Vec::<u32>::new());
+        assert_eq!(listed(&words, 3, 0, 2), Vec::<u32>::new());
+        let half = f32::from_bits(words[HEADER_WORDS + 2 * DECAL_WORDS + 2]);
+        assert!((half * std::f32::consts::SQRT_2 - MAX_RADIUS).abs() < 1e-3, "{half}");
+
+        set.insert(decal(170.0, 170.0, 4.0), 1.0);
+        let words = set.encode().to_vec();
+        // The first decal went; the others moved down one.
+        assert_eq!(listed(&words, 3, 0, 0), vec![0, 1]);
+        assert_eq!(listed(&words, 3, 5, 5), vec![2]);
+        assert_eq!(set.version, 4);
+    }
+
+    #[test]
+    fn decals_out_of_view_are_not_in_view() {
+        let mut set = DecalSet::new(4);
+        // A view of x in [0, 100] (two planes; the rest always pass).
+        let mut planes = [[0.0, 0.0, 0.0, 1.0]; 6];
+        planes[0] = [1.0, 0.0, 0.0, 0.0];
+        planes[1] = [-1.0, 0.0, 0.0, 100.0];
+        assert!(!set.any_in_view(&planes, (0.0, 10.0)));
+        set.insert(decal(-10.0, 0.0, 4.0), 0.0);
+        assert!(!set.any_in_view(&planes, (0.0, 10.0)), "5.7 m short of the view");
+        set.insert(decal(-4.0, 0.0, 4.0), 0.0);
+        assert!(set.any_in_view(&planes, (0.0, 10.0)), "its square reaches x = 0");
+    }
+
+    #[test]
+    fn a_full_bucket_keeps_its_newest_decals() {
+        let n = MAX_PER_CELL + 5;
+        let mut set = DecalSet::new(n as u32);
+        for _ in 0..n {
+            set.insert(decal(16.0, 16.0, 2.0), 0.0);
+        }
+        let words = set.encode().to_vec();
+        assert_eq!(listed(&words, n as u32, 0, 0), (5..n as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn atlas_mips_reach_one_texel_and_ignore_transparent_colour() {
+        let mut layer = vec![[1.0, 0.0, 0.0, 1.0]; 4];
+        layer[3] = [0.0, 0.0, 1.0, 0.0];
+        let atlas = DecalAtlas { size: 2, layers: vec![layer] };
+        let mips = atlas.mips();
+        assert_eq!(mips[0].len(), 2);
+        assert_eq!(mips[0][1], vec![255, 0, 0, 191]);
+        assert!(default_atlas().validate().is_ok());
+    }
+
+    /// `cargo test --release -p ae_render --lib decal_encode_time -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing"]
+    fn decal_encode_time() {
+        let mut set = DecalSet::new(1024);
+        for i in 0..1024 {
+            set.insert(Decal::scorch([5000.0 + (i % 37) as f32 * 16.0, 5000.0 + (i / 37) as f32 * 16.0], 5.0, i), 0.0);
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(set.encode());
+        }
+        println!("{:.1} µs per encode of 1024 decals", t.elapsed().as_secs_f64() * 1e4);
+    }
+}

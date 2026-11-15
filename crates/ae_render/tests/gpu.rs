@@ -2582,3 +2582,213 @@ fn particles_order_independence() {
     assert!(reference_pop.0 > 80.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
     assert_clean(&gpu);
 }
+
+/// Decals on a step heightmap (2 m cells, steps along x): a plateau 30 m
+/// high ending in a 20 m cliff facing +x down to ground at 10 m, and a 6 m
+/// step up to 36 m at its far side. A test atlas of eight stripes across
+/// the decal's x. Decals of half-size 12 m, centred on corner samples:
+/// E on the cliff's top edge (convex), F at its foot (concave), L on the
+/// low step's top edge.
+/// * Along each decal's x, unfolded over the edge (s: on the flat, the
+///   distance along x; on the face, the height below or above the centre),
+///   the stripes match the atlas at that s on both faces of both corners:
+///   both are painted, the face continues the flat ground's stripes in phase
+///   and unstretched (a top-down projection smears one stripe down the
+///   face; a flipped side projection mirrors them).
+/// * Ground farther than the decal's 3D distance from every centre is
+///   byte-identical to no decals.
+/// * A unit standing in F's footprint is not painted.
+/// * Decals made but none placed draw exactly as no decals.
+/// * L's ground at the foot of the 6 m step, within the 3D distance but
+///   past the unfolded footprint, shows the top projection's copy; it is
+///   measured and printed (the documented limit of the 3D fade).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn decals_wrap_over_cliffs() {
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let (n, cell, scale) = (65usize, 2.0f32, 100.0f32);
+    let column = |x: usize| if x <= 12 { 36.0 } else if x <= 32 { 30.0 } else { 10.0 };
+    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| column(i % n) / scale).collect() };
+    // The surface at world x (linear across a step's cell).
+    let height = |x: f32| {
+        let c = (x / cell).clamp(0.0, (n - 1) as f32);
+        let (i, f) = (c.floor() as usize, c.fract());
+        column(i) + (column((i + 1).min(n - 1)) - column(i)) * f
+    };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 480, height: 360 };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    camera = Camera { target: Vec2::new(56.0, 64.0), ground: 30.0, distance: 95.0, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.42, ..camera };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let pixel = |p: Vec3| -> Option<usize> {
+        let clip = view_proj * p.extend(1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+
+    // Eight stripes across the atlas's x, black and white, opaque.
+    const STRIPES: f32 = 8.0;
+    let size = 64u32;
+    let stripes = (0..size * size).map(|i| if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] }).collect();
+    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes] });
+    let half = 12.0f32;
+    let decal = |x: f32, z: f32| Decal { pos: [x, z], half: [half, half], angle: 0.0, layer: 0, opacity: 1.0, fade_in: 0.0 };
+    // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32).
+    let centres = [(64.0f32, 32.0f32), (66.0, 96.0), (24.0, 64.0)];
+    let centre_y = [30.0f32, 10.0, 36.0];
+    let unit = (74.0f32, 104.0f32);
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Decals {
+        None,
+        Empty,
+        On,
+    }
+    let render = |decals: Decals| -> Vec<u8> {
+        let mut columns: [Vec<u32>; 8] = Default::default();
+        for (k, word) in [unit.0, unit.1, unit.0, unit.1, 1.0, 0.0, 4.0].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+            columns[k].push(word);
+        }
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        if decals != Decals::None {
+            let feed = Arc::new(DecalFeed::default());
+            if decals == Decals::On {
+                feed.place_all(&centres.map(|(x, z)| decal(x, z)));
+            }
+            app = app.with_decals(DecalsSetup { feed, capacity: 64, atlas: Some(atlas.clone()) });
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        run.frames(&mut app, 8).unwrap();
+        run.wait().unwrap();
+        run.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("decals-{}.ppm", decals as u8)), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let none = render(Decals::None);
+    let empty = render(Decals::Empty);
+    let on = render(Decals::On);
+    let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "decals made but none placed draw as none");
+
+    // A point's distance from decal k's centre, as the shader fades it
+    // (square in plan, rounded in the vertical; 1 at the edge).
+    let extent3 = |p: Vec3, k: usize| {
+        let (cx, cz) = centres[k];
+        let d = p - Vec3::new(cx, centre_y[k], cz);
+        (d.x.abs().max(d.z.abs())).hypot(d.y) / half
+    };
+    // The stripe the atlas has at unfolded coordinate s (1 light).
+    let expected = |s: f32| ((s / half * 0.5 + 0.5) * STRIPES).floor() as i32 % 2 == 1;
+    let near_boundary = |s: f32| {
+        let k = (s / half * 0.5 + 0.5) * STRIPES;
+        (k - k.round()).abs() * 2.0 * half / STRIPES < 0.5
+    };
+    // Segments: name, points (world, s). Rows at three z across each decal.
+    type Segment = (&'static str, Vec<(Vec3, f32)>);
+    let mut segments: Vec<Segment> = Vec::new();
+    for ((cx, cz), top) in [(centres[0], true), (centres[1], false)] {
+        let (mut flat, mut face) = (Vec::new(), Vec::new());
+        for dz in [-6.0f32, -2.0, 1.0] {
+            let z = cz + dz;
+            for k in 0..=100 {
+                let t = k as f32 / 100.0;
+                if top {
+                    // The plateau before the edge (its last cell's normal
+                    // already leans), then down the face 0.5..11 m.
+                    let x = cx - half + t * (half - 2.5);
+                    flat.push((Vec3::new(x, 30.0, z), x - cx));
+                    let drop = 0.5 + t * 10.5;
+                    face.push((Vec3::new(64.0 + 2.0 * drop / 20.0, 30.0 - drop, z), drop));
+                } else {
+                    let x = cx + 2.5 + t * (half - 2.5);
+                    flat.push((Vec3::new(x, 10.0, z), x - cx));
+                    let rise = 0.5 + t * 10.5;
+                    face.push((Vec3::new(66.0 - 2.0 * rise / 20.0, 10.0 + rise, z), -rise));
+                }
+            }
+        }
+        segments.push((if top { "E top" } else { "F ground" }, flat));
+        segments.push((if top { "E face" } else { "F face" }, face));
+    }
+    for (name, points) in &segments {
+        let samples: Vec<(f32, bool)> = points.iter().filter(|(p, s)| !near_boundary(*s) && (p.x - unit.0).hypot(p.z - unit.1) > 6.0 && (0..2).any(|k| extent3(*p, k) < 0.85)).filter_map(|&(p, s)| pixel(p).map(|i| (luma(&on, i), expected(s)))).collect();
+        let (lo, hi) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
+        let mid = (lo + hi) * 0.5;
+        let matching = samples.iter().filter(|&&(l, e)| (l > mid) == e).count();
+        // Both stripes show, far apart.
+        let lights = samples.iter().filter(|&&(_, e)| e).count();
+        println!("{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)", samples.len());
+        assert!(samples.len() > 120 && lights > 30 && lights < samples.len() - 30, "{name}: {} samples, {lights} light", samples.len());
+        assert!(hi > 2.0 * lo.max(1.0), "{name}: no stripes (luma {lo:.0}..{hi:.0})");
+        assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
+    }
+
+    // The ground on a 0.5 m grid: outside every decal's 3D extent (with a
+    // margin of a few pixels) it is unchanged.
+    let near_unit = |p: Vec3| (p.x - unit.0).hypot(p.z - unit.1) < 6.0;
+    let (mut outside, mut changed, mut copy, mut copy_changed) = (0, 0, 0, 0);
+    for iz in 0..256 {
+        for ix in 0..256 {
+            let (x, z) = (ix as f32 * 0.5, iz as f32 * 0.5);
+            let p = Vec3::new(x, height(x), z);
+            if near_unit(p) {
+                continue;
+            }
+            let Some(i) = pixel(p) else { continue };
+            let r = (0..3).map(|k| extent3(p, k)).fold(f32::MAX, f32::min);
+            if r > 1.06 {
+                outside += 1;
+                changed += (rgb(&none, i) != rgb(&on, i)) as usize;
+            }
+            // L's copy: the foot of the 6 m step (x past 28, its leaning
+            // cell), within its 3D extent, past its unfolded footprint
+            // (6 m down the face, then along the ground).
+            let lz = centres[2].1;
+            if x > 28.0 && p.y == 30.0 && extent3(p, 2) < 0.94 && (x - 26.0) + 6.0 > half + 0.5 && (z - lz).abs() < half - 1.0 {
+                copy += 1;
+                copy_changed += (rgb(&none, i) != rgb(&on, i)) as usize;
+            }
+        }
+    }
+    println!("{changed} of {outside} points outside the decals changed; L's copy past its unfolded footprint: {copy_changed} of {copy} points");
+    assert!(outside > 30_000, "{outside} points outside");
+    assert_eq!(changed, 0, "ground outside the decals changes");
+
+    // The unit in F's footprint: its top unchanged, the ground beside it
+    // painted.
+    let top = pixel(Vec3::new(unit.0, 10.0 + 3.0, unit.1)).expect("unit in view");
+    assert_eq!(rgb(&none, top), rgb(&on, top), "the unit is painted");
+    let beside: Vec<usize> = (0..40).filter_map(|k| pixel(Vec3::new(unit.0 - 6.0 + k as f32 * 0.1, 10.0, unit.1 - 6.0))).collect();
+    assert!(beside.iter().any(|&i| rgb(&none, i) != rgb(&on, i)), "the ground by the unit is not painted");
+    assert_clean(&gpu);
+}

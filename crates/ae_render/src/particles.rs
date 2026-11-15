@@ -246,6 +246,11 @@ impl ParticleFeed {
         self.queued.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(bursts);
     }
 
+    /// Every queued burst, oldest first.
+    pub fn take_all(&self) -> Vec<Burst> {
+        std::mem::take(&mut *self.queued.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
     /// Up to `max` queued bursts, oldest first; the rest stay queued.
     fn take(&self, max: usize) -> Vec<Burst> {
         let mut queued = self.queued.lock().unwrap_or_else(|p| p.into_inner());

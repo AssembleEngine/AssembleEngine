@@ -28,7 +28,8 @@
 //! (particles: flash, fire, sparks, smoke; X sets one off at the camera
 //! target, `--explode N` sets off N around it before a capture;
 //! `--no-particles` turns them off; they draw at half resolution,
-//! `--particles-full` at full).
+//! `--particles-full` at full) and leave a scorch mark on the ground (a
+//! decal; `--no-decals`).
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -143,6 +144,8 @@ struct Options {
     shadows: bool,
     /// Particles (explosions).
     particles: bool,
+    /// Scorch marks where explosions go off (`--no-decals`).
+    decals: bool,
     /// Particles at full resolution (`--particles-full`), not half.
     particles_full: bool,
     /// `--particle-blend sorted|moments` (comparison; sorted by default).
@@ -175,11 +178,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, decals: true, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--particles-full] [--particle-blend sorted|moments] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -226,6 +229,7 @@ fn parse() -> Result<Options> {
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
             "--no-particles" => o.particles = false,
+            "--no-decals" => o.decals = false,
             "--particles-full" => o.particles_full = true,
             "--particle-blend" => {
                 o.particle_blend = match value("--particle-blend", &mut args)?.as_str() {
@@ -408,14 +412,35 @@ fn particles(o: &Options) -> Option<(Arc<ParticleFeed>, ParticlesSetup)> {
     })
 }
 
+/// Most scorch marks at once.
+const DECALS: u32 = 1024;
+
+/// Where explosions go (particles and scorch marks, as the options turn
+/// them on), with `app` set up to draw them; `None` when both are off.
+fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects>>) {
+    let mut app = app;
+    let mut effects = sim::Effects::default();
+    if let Some((feed, setup)) = particles(o) {
+        app = app.with_particles(setup);
+        effects.particles = Some(feed);
+    }
+    if o.decals {
+        let feed = Arc::new(ae_render::decals::DecalFeed::default());
+        app = app.with_decals(ae_render::decals::DecalsSetup::new(feed.clone(), DECALS));
+        effects.decals = Some(feed);
+    }
+    let any = effects.particles.is_some() || effects.decals.is_some();
+    (app, any.then(|| Arc::new(effects)))
+}
+
 /// `count` explosions scattered around `target` (seeded; `--explode`, X).
-fn explode_around(feed: &ParticleFeed, target: Vec2, count: u32, seed: u32) {
+fn explode_around(effects: &sim::Effects, target: Vec2, count: u32, seed: u32) {
     for k in 0..count {
         let h = (seed ^ k.wrapping_mul(0x9e37_79b9)).wrapping_mul(0x85eb_ca6b);
         let spread = if count > 1 { 120.0 } else { 0.0 };
         let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * spread, ((h >> 16) as f32 / 65535.0 - 0.5) * spread);
         let scale = 0.8 + (h % 7) as f32 * 0.2;
-        feed.emit_all(&ae_render::particles::explosion([target.x + dx, 1.0, target.y + dz], true, scale, h));
+        effects.explode(target.x + dx, target.y + dz, scale, h);
     }
 }
 
@@ -539,10 +564,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
     let app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Readback), tileset(o)?, o);
-    let (mut app, particle_feed) = match particles(o) {
-        Some((feed, setup)) => (app.with_particles(setup), Some(feed)),
-        None => (app, None),
-    };
+    let (mut app, effects_feed) = effects(app, o);
     if let Some(name) = &o.render_module {
         app = app.with_module(ae_render::module::build(name)?);
     }
@@ -606,7 +628,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         app = app.with_units(units_setup(&s, feed));
     }
     place_camera(&app, o.camera);
-    if let Some(feed) = &particle_feed {
+    if let Some(feed) = &effects_feed {
         let target = app.view().lock().unwrap().camera.target;
         explode_around(feed, target, o.explode, 1);
     }
@@ -663,7 +685,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
     let mut ground_thread = None;
-    let mut particle_feed: Option<Arc<ParticleFeed>> = None;
+    let mut effects_feed: Option<Arc<sim::Effects>> = None;
     let mut edits = None;
     let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
     let ui: sim::UiQueue = Arc::default();
@@ -672,11 +694,8 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
-            let mut app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o);
-            if let Some((feed, setup)) = particles(&o) {
-                app = app.with_particles(setup);
-                particle_feed = Some(feed);
-            }
+            let (mut app, feed) = effects(with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o), &o);
+            effects_feed = feed;
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));
@@ -688,7 +707,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 let shown = nav.clone().context("units need a crossing map")?;
                 ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
                 edits = Some(app.terrain_edits());
-                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, particle_feed.clone(), ui.clone(), sim_speed.clone()));
+                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, effects_feed.clone(), ui.clone(), sim_speed.clone()));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
@@ -739,11 +758,11 @@ fn run(o: Options) -> Result<ExitCode> {
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
             steer(&window, &events, &mut view, source, dt, &sim_speed);
-            if let Some(feed) = particle_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
+            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
                 explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32);
             }
             // The exercise keeps particles alive through its resizes.
-            if let Some(feed) = particle_feed.as_ref().filter(|_| o.exercise && last_boom.elapsed().as_secs_f32() >= 1.0) {
+            if let Some(feed) = effects_feed.as_ref().filter(|_| o.exercise && last_boom.elapsed().as_secs_f32() >= 1.0) {
                 explode_around(feed, view.camera.target, 3, started.elapsed().as_nanos() as u32);
                 last_boom = Instant::now();
             }

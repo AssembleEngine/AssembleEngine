@@ -36,6 +36,7 @@ use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
 use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
+use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
 use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
@@ -247,6 +248,11 @@ pub struct TerrainApp {
     unit_counts: Arc<Mutex<(u32, u32)>>,
     particles: Option<ParticlesSetup>,
     particle_renderer: Option<ParticleRenderer>,
+    decals: Option<DecalsSetup>,
+    /// The live decals (kept across renderer re-creation).
+    decal_set: Option<DecalSet>,
+    /// Per slot: the decal version written into it.
+    decals_written: Vec<Option<u64>>,
     /// The slot `prepare` last filled.
     last_slot: usize,
     offscreen: Option<Offscreen>,
@@ -291,6 +297,9 @@ impl TerrainApp {
             unit_counts: Arc::default(),
             particles: None,
             particle_renderer: None,
+            decals: None,
+            decal_set: None,
+            decals_written: Vec::new(),
             last_slot: 0,
             offscreen: None,
             wiring: None,
@@ -353,6 +362,14 @@ impl TerrainApp {
     /// `particles.draw`, after the water).
     pub fn with_particles(mut self, setup: ParticlesSetup) -> Self {
         self.particles = Some(setup);
+        self
+    }
+
+    /// Paint the decals of `setup.feed` on the terrain (inside the terrain
+    /// draw: no pass of their own).
+    pub fn with_decals(mut self, setup: DecalsSetup) -> Self {
+        self.decal_set = Some(DecalSet::new(setup.capacity));
+        self.decals = Some(setup);
         self
     }
 
@@ -523,7 +540,22 @@ impl RenderApp for TerrainApp {
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
         let shadows = self.shadows.then(|| sun::shadow_heights(&s.heightmap, s.info.cell_size, s.info.height_scale, s.info.height_offset, sun::direction()));
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), color, DEPTH_FORMAT, frames_in_flight)
+        let default_atlas;
+        let decals = match &self.decals {
+            Some(setup) => {
+                let atlas: &DecalAtlas = match &setup.atlas {
+                    Some(a) => a,
+                    None => {
+                        default_atlas = crate::decals::default_atlas();
+                        &default_atlas
+                    }
+                };
+                Some((atlas, setup.capacity))
+            }
+            None => None,
+        };
+        self.decals_written.clear();
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, color, DEPTH_FORMAT, frames_in_flight)
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
@@ -616,6 +648,23 @@ impl RenderApp for TerrainApp {
                 }
                 None => {}
             }
+        }
+        if let (Some(set), Some(setup)) = (self.decal_set.as_mut(), self.decals.as_ref()) {
+            for decal in setup.feed.take() {
+                set.insert(decal, params.time);
+            }
+            if self.decals_written.len() <= slot {
+                self.decals_written.resize(slot + 1, None);
+            }
+            if self.decals_written[slot] != Some(set.version) {
+                renderer.write_decals(slot, set.encode())?;
+                self.decals_written[slot] = Some(set.version);
+            }
+            // The pipeline with decals only while one may be on screen
+            // (decals never expire: otherwise it would stay on for good).
+            let i = &self.source.info;
+            let heights = (i.height_offset, i.height_offset + i.height_scale);
+            renderer.set_decals_live(slot, set.any_in_view(&super::renderer::frustum_planes(params.view_proj), heights));
         }
         if let (Some(units), Some(setup)) = (self.unit_renderer.as_mut(), self.units.as_ref()) {
             // This slot's previous frame has completed: its count is final.

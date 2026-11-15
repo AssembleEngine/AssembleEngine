@@ -4,6 +4,7 @@
 #define GRAPHICS
 #include "terrain_common.glsl"
 #include "terrain_shading.glsl"
+#include "terrain_decals.glsl"
 #ifdef BARY
 #extension GL_EXT_fragment_shader_barycentric : require
 #endif
@@ -196,6 +197,7 @@ void main() {
     float hl = sampleHeight(cell - vec2(1, 0)), hr = sampleHeight(cell + vec2(1, 0));
     float hd = sampleHeight(cell - vec2(0, 1)), hu = sampleHeight(cell + vec2(0, 1));
     vec3 n = normalize(vec3(hl - hr, 2.0 * cs, hd - hu));
+    vec3 heightNormal = n;
 
     float t = (inWorld.y - u.height.y) / max(u.height.x, 1e-3);
     float slope = 1.0 - n.y;
@@ -245,6 +247,10 @@ void main() {
         }
         albedo = ts.albedo;
         n = ts.normal;
+    }
+
+    if (DECALS) {
+        albedo = applyDecals(albedo, inWorld, dPdx, dPdy, heightNormal);
     }
 
     if ((u.cfg.z & FLAG_LOD_COLORS) != 0u) {

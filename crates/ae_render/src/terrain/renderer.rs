@@ -26,6 +26,7 @@
 use super::heightmap::{Heightmap, PYRAMID_BASE_LEVEL, Pyramid};
 use super::leb::{self, Cbt};
 use super::tileset::{TILESET_UBO_BYTES, Tileset, TilesetUbo};
+use crate::decals::DecalAtlas;
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -227,6 +228,15 @@ pub struct TerrainRenderer {
     has_shadows: bool,
     /// The units' shadow map (a 1x1 stand-in without it).
     unit_shadow_map: ShadowMap,
+    /// The terrain pipeline with decals (specialization constant 1), when
+    /// made with them; used for a slot while it has any.
+    terrain_decals: Option<vk::Pipeline>,
+    /// Per slot: the decals ([`crate::decals`]; host-visible, 16 bytes
+    /// without), and whether it has any.
+    decal_bufs: Vec<OwnedBuffer>,
+    decal_live: Vec<bool>,
+    /// The decal atlas (1x1 without decals).
+    decal_atlas: OwnedImage,
     /// Per slot: line-of-sight and explored bit planes (host-visible;
     /// 16 bytes without a vision grid).
     vision_bufs: Vec<OwnedBuffer>,
@@ -278,6 +288,7 @@ impl TerrainRenderer {
         vision: Option<VisionGrid>,
         shadows: Option<&[f32]>,
         unit_shadows: bool,
+        decals: Option<(&DecalAtlas, u32)>,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -323,6 +334,19 @@ impl TerrainRenderer {
         let vision_bufs = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: vision_bytes, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "terrain vision"))
             .collect::<Result<Vec<_>>>()?;
+        let decal_bytes = decals.map_or(16, |(_, capacity)| crate::decals::buffer_words(capacity) as u64 * 4);
+        let decal_bufs = (0..frames_in_flight)
+            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: decal_bytes, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "terrain decals"))
+            .collect::<Result<Vec<_>>>()?;
+        let decal_atlas = match decals {
+            Some((atlas, _)) => {
+                atlas.validate().map_err(anyhow::Error::msg)?;
+                let mips = atlas.mips();
+                let layers: Vec<Vec<&[u8]>> = mips.iter().map(|l| l.iter().map(Vec::as_slice).collect()).collect();
+                upload::image_layers(gpu, vk::Format::R8G8B8A8_SRGB, atlas.size, atlas.size, &layers, vk::ImageViewType::TYPE_2D_ARRAY, "decal atlas")?
+            }
+            None => upload::image_layers(gpu, vk::Format::R8G8B8A8_SRGB, 1, 1, &[vec![&[0u8; 4][..]]], vk::ImageViewType::TYPE_2D_ARRAY, "decal atlas")?,
+        };
         let stats = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: IND_WORDS * 4, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "terrain stats"))
             .collect::<Result<Vec<_>>>()?;
@@ -416,14 +440,16 @@ impl TerrainRenderer {
                 b(14, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(15, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(16, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(17, vk::DescriptorType::STORAGE_BUFFER),
+                b(18, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 9 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 7 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 10 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -469,6 +495,10 @@ impl TerrainRenderer {
                 let (view, sampler) = unit_shadow_map.color_texture();
                 let tint = image(sampler, view);
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(16).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&tint));
+                let decal_list = [vk::DescriptorBufferInfo { buffer: decal_bufs[slot].buffer, offset: 0, range: vk::WHOLE_SIZE }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(17).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&decal_list));
+                let atlas = image(samplers[2], decal_atlas.view);
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&atlas));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -477,9 +507,13 @@ impl TerrainRenderer {
         let prepare = pipeline::compute_pipeline(device, spirv!("cbt_prepare.comp"), pipeline_layout)?;
         let update = pipeline::compute_pipeline(device, spirv!("cbt_update.comp"), pipeline_layout)?;
         let reduce = pipeline::compute_pipeline(device, spirv!("cbt_reduce.comp"), pipeline_layout)?;
-        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows)?;
+        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, false)?;
+        let terrain_decals = match decals {
+            Some(_) => Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, true)?),
+            None => None,
+        };
         let wire = if gpu.fill_mode_non_solid {
-            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true, false)?)
+            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true, false, false)?)
         } else {
             None
         };
@@ -538,6 +572,10 @@ impl TerrainRenderer {
             shadow_img,
             has_shadows: shadows.is_some(),
             unit_shadow_map,
+            terrain_decals,
+            decal_live: vec![false; frames_in_flight],
+            decal_bufs,
+            decal_atlas,
             vision_bufs,
             vision,
             samplers,
@@ -678,6 +716,28 @@ impl TerrainRenderer {
         Ok(())
     }
 
+    /// Whether it was made with decals.
+    pub fn has_decals(&self) -> bool {
+        self.terrain_decals.is_some()
+    }
+
+    /// Write `slot`'s decals (its previous submission has completed): the
+    /// words of [`crate::decals`]' buffer. Whether the draw uses the
+    /// pipeline with decals is [`Self::set_decals_live`].
+    pub fn write_decals(&mut self, slot: usize, words: &[u32]) -> Result<()> {
+        anyhow::ensure!(self.terrain_decals.is_some(), "this terrain renderer has no decals");
+        let bytes = self.decal_bufs[slot].mapped().context("decal buffer is not mapped")?;
+        anyhow::ensure!(bytes.len() >= words.len() * 4, "{} decal words for a buffer of {} bytes", words.len(), bytes.len());
+        bytes[..words.len() * 4].copy_from_slice(slice_bytes(words));
+        Ok(())
+    }
+
+    /// Whether `slot` draws with decals (made with them, written, some in
+    /// view); set every frame.
+    pub fn set_decals_live(&mut self, slot: usize, live: bool) {
+        self.decal_live[slot] = live && self.terrain_decals.is_some();
+    }
+
     /// The LOD update: split and merge passes, reduction, draw list. Records
     /// inside a compute pass that declares `leaves` and `indirect` as
     /// storage writes.
@@ -755,7 +815,11 @@ impl TerrainRenderer {
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.terrain);
+            let terrain = match self.terrain_decals {
+                Some(decals) if self.decal_live[ctx.slot] => decals,
+                _ => self.terrain,
+            };
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, terrain);
             device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, 3 * 4, 1, 0);
             if let (Wireframe::Triangles, Some(wire)) = (wireframe, self.wire) {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, wire);
@@ -785,7 +849,7 @@ impl TerrainRenderer {
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
-            for p in [self.prepare, self.update, self.reduce, self.terrain].into_iter().chain(self.wire).chain(self.water) {
+            for p in [self.prepare, self.update, self.reduce, self.terrain].into_iter().chain(self.terrain_decals).chain(self.wire).chain(self.water) {
                 device.destroy_pipeline(p, None);
             }
             device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -798,7 +862,7 @@ impl TerrainRenderer {
         for b in [&mut self.tree, &mut self.bits, &mut self.snap, &mut self.leaves, &mut self.indirect, &mut self.submesh_vb, &mut self.submesh_ib] {
             b.destroy(gpu);
         }
-        for b in self.ubos.iter_mut().chain(self.stats.iter_mut()).chain(self.vision_bufs.iter_mut()) {
+        for b in self.ubos.iter_mut().chain(self.stats.iter_mut()).chain(self.vision_bufs.iter_mut()).chain(self.decal_bufs.iter_mut()) {
             b.destroy(gpu);
         }
         self.height_img.destroy(gpu);
@@ -810,6 +874,7 @@ impl TerrainRenderer {
         self.tile_ubo.destroy(gpu);
         self.shadow_img.destroy(gpu);
         self.unit_shadow_map.destroy(gpu);
+        self.decal_atlas.destroy(gpu);
     }
 }
 
@@ -821,6 +886,7 @@ pub fn frustum_planes(view_proj: Mat4) -> [[f32; 4]; 6] {
     ps.map(|p| (p / p.truncate().length().max(1e-20)).to_array())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn graphics_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,
@@ -829,13 +895,15 @@ fn graphics_pipeline(
     fragment: &[u8],
     wire: bool,
     unit_shadows: bool,
+    decals: bool,
 ) -> Result<vk::Pipeline> {
     let vert = pipeline::shader_module(device, spirv!("terrain.vert"))?;
     let frag = pipeline::shader_module(device, fragment)?;
     // UNIT_SHADOWS (unit_shadows.glsl): without a shadow map the lookup is
-    // compiled out, not just skipped.
-    let spec_value = u32::from(unit_shadows).to_ne_bytes();
-    let spec_entries = [vk::SpecializationMapEntry { constant_id: 0, offset: 0, size: 4 }];
+    // compiled out, not just skipped; DECALS (terrain_decals.glsl) likewise.
+    let spec_words = [u32::from(unit_shadows), u32::from(decals)];
+    let spec_value: Vec<u8> = spec_words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+    let spec_entries = [vk::SpecializationMapEntry { constant_id: 0, offset: 0, size: 4 }, vk::SpecializationMapEntry { constant_id: 1, offset: 4, size: 4 }];
     let spec = vk::SpecializationInfo::default().map_entries(&spec_entries).data(&spec_value);
     let stages = [
         vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(c"main"),
