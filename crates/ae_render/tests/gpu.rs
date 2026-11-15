@@ -2050,6 +2050,11 @@ fn units_cast_shadows() {
 /// * An explosion of the default effects changes the frame, and renders
 ///   byte-identically twice (clustered depths: the slot in the key orders
 ///   what the depth does not, whatever order the simulation appended in).
+///
+/// All of the above at full and at half resolution. Then a depth edge: a
+/// puff behind a plateau's rim leaves the plateau untouched at full
+/// resolution, and at half resolution the composite does not bleed it onto
+/// the plateau (a plain bilinear upsample changes 55 of its pixels).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_sort_blend_and_soften() {
@@ -2095,13 +2100,14 @@ fn particles_sort_blend_and_soften() {
     let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false, 100.0), still([0.05, 0.05, 0.9, 1.0], 12.0, false, 100.0), still([0.6, 0.6, 0.6, 0.9], 40.0, false, 100.0), still([0.9, 0.05, 0.05, 1.0], 12.0, false, 0.02)];
     let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: effect };
 
-    // Some(bursts) with a particle renderer (emitted before the first frame), None without.
-    let render = |bursts: Option<(&[Burst], Vec<EffectDef>)>| -> Vec<u8> {
+    // Some(bursts) with a particle renderer at `downscale` (emitted before
+    // the first frame), None without.
+    let render_on = |source: &Arc<TerrainSource>, bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
-        if let Some((bursts, effects)) = bursts {
+        if let Some((bursts, effects, downscale)) = bursts {
             let feed = Arc::new(ParticleFeed::default());
             feed.emit_all(bursts);
-            app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects });
+            app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects, downscale });
         }
         {
             let view = app.view();
@@ -2120,54 +2126,99 @@ fn particles_sort_blend_and_soften() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-
-    let none = render(None);
-    let empty = render(Some((&[], effects.clone())));
-    assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "an empty pool draws nothing");
-
-    // Two puffs 30 m apart on one line of sight, 30 m above the ground.
-    let centre = Vec3::new(128.0, 40.0, 128.0);
-    let dir = (centre - eye).normalize();
-    let (near, far) = (centre - dir * 30.0, centre + dir * 30.0);
-    let at = index(pixel(centre));
-    let blue_front_a = render(Some((&[one(far, 0), one(near, 1)], effects.clone())));
-    let blue_front_b = render(Some((&[one(near, 1), one(far, 0)], effects.clone())));
-    let red_front = render(Some((&[one(near, 0), one(far, 1)], effects.clone())));
-    let differing = blue_front_a.iter().zip(&blue_front_b).filter(|(a, b)| a != b).count();
-    assert_eq!(differing, 0, "the emission order changes {differing} bytes");
-    let (b, r) = (&blue_front_a[at..at + 3], &red_front[at..at + 3]);
-    println!("blue in front: {b:?}, red in front: {r:?}, ground: {:?}", &none[at..at + 3]);
-    assert!(b[2] > 2 * b[0], "blue in front shows blue: {b:?}");
-    assert!(r[0] > 2 * r[2], "red in front shows red: {r:?}");
-
-    // Under the ground: nothing; dead: nothing.
-    let buried = render(Some((&[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)], effects.clone())));
-    assert_eq!(none.iter().zip(&buried).filter(|(a, b)| a != b).count(), 0, "a buried puff draws");
-    let dead = render(Some((&[one(centre, 3)], effects.clone())));
-    assert_eq!(none.iter().zip(&dead).filter(|(a, b)| a != b).count(), 0, "a dead puff draws");
-
-    // A big puff half in the ground: its contribution along the screen
-    // column through it changes smoothly.
-    let low = Vec3::new(128.0, ground, 128.0);
-    let soft = render(Some((&[one(low, 2)], effects.clone())));
-    let (cx, cy) = pixel(low);
+    let render = |bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| render_on(&source, bursts);
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
-    let column: Vec<f32> = (cy.saturating_sub(60)..(cy + 60).min(extent.height)).map(|y| (luma(&soft, index((cx, y))) - luma(&none, index((cx, y)))).abs()).collect();
-    let strongest = column.iter().cloned().fold(0.0, f32::max);
-    let step = column.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
-    println!("ground-cut puff: strongest {strongest:.1}, largest step {step:.1}");
-    assert!(strongest > 40.0, "the puff shows: {strongest}");
-    assert!(step < 0.25 * strongest, "a hard edge: step {step} of {strongest}");
+    let none = render(None);
 
-    // The default effects.
-    let boom = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects())));
-    let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
-    println!("explosion: {changed} bytes changed");
-    assert!(changed > 1000, "an explosion shows: {changed} bytes");
-    // About 90 particles at clustered depths, appended by the simulation
-    // in whatever order its invocations run: the same frame every time.
-    let again = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects())));
-    let differing = boom.iter().zip(&again).filter(|(a, b)| a != b).count();
-    assert_eq!(differing, 0, "the same explosion twice differs in {differing} bytes");
+    for downscale in [1, 2] {
+        println!("downscale {downscale}:");
+        let empty = render(Some((&[], effects.clone(), downscale)));
+        assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "an empty pool draws nothing");
+
+        // Two puffs 30 m apart on one line of sight, 30 m above the ground.
+        let centre = Vec3::new(128.0, 40.0, 128.0);
+        let dir = (centre - eye).normalize();
+        let (near, far) = (centre - dir * 30.0, centre + dir * 30.0);
+        let at = index(pixel(centre));
+        let blue_front_a = render(Some((&[one(far, 0), one(near, 1)], effects.clone(), downscale)));
+        let blue_front_b = render(Some((&[one(near, 1), one(far, 0)], effects.clone(), downscale)));
+        let red_front = render(Some((&[one(near, 0), one(far, 1)], effects.clone(), downscale)));
+        let differing = blue_front_a.iter().zip(&blue_front_b).filter(|(a, b)| a != b).count();
+        assert_eq!(differing, 0, "the emission order changes {differing} bytes");
+        let (b, r) = (&blue_front_a[at..at + 3], &red_front[at..at + 3]);
+        println!("  blue in front: {b:?}, red in front: {r:?}, ground: {:?}", &none[at..at + 3]);
+        assert!(b[2] > 2 * b[0], "blue in front shows blue: {b:?}");
+        assert!(r[0] > 2 * r[2], "red in front shows red: {r:?}");
+
+        // Under the ground: nothing; dead: nothing.
+        let buried = render(Some((&[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)], effects.clone(), downscale)));
+        assert_eq!(none.iter().zip(&buried).filter(|(a, b)| a != b).count(), 0, "a buried puff draws");
+        let dead = render(Some((&[one(centre, 3)], effects.clone(), downscale)));
+        assert_eq!(none.iter().zip(&dead).filter(|(a, b)| a != b).count(), 0, "a dead puff draws");
+
+        // A big puff half in the ground: its contribution along the screen
+        // column through it changes smoothly.
+        let low = Vec3::new(128.0, ground, 128.0);
+        let soft = render(Some((&[one(low, 2)], effects.clone(), downscale)));
+        let (cx, cy) = pixel(low);
+        let column: Vec<f32> = (cy.saturating_sub(60)..(cy + 60).min(extent.height)).map(|y| (luma(&soft, index((cx, y))) - luma(&none, index((cx, y)))).abs()).collect();
+        let strongest = column.iter().cloned().fold(0.0, f32::max);
+        let step = column.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        println!("  ground-cut puff: strongest {strongest:.1}, largest step {step:.1}");
+        assert!(strongest > 40.0, "the puff shows: {strongest}");
+        assert!(step < 0.25 * strongest, "a hard edge: step {step} of {strongest}");
+
+        // The default effects.
+        let boom = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects(), downscale)));
+        let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
+        println!("  explosion: {changed} bytes changed");
+        assert!(changed > 1000, "an explosion shows: {changed} bytes");
+        // About 90 particles at clustered depths, appended by the simulation
+        // in whatever order its invocations run: the same frame every time.
+        let again = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects(), downscale)));
+        let differing = boom.iter().zip(&again).filter(|(a, b)| a != b).count();
+        assert_eq!(differing, 0, "the same explosion twice differs in {differing} bytes");
+    }
+
+    // A depth edge: a plateau 30 m above the ground on the camera's side,
+    // its rim 10 m before the target, and a puff on the line of sight
+    // through the rim, 40 m beyond it (its sphere's front is behind every
+    // plateau pixel). At full resolution the plateau is untouched; at half
+    // resolution, the depth-aware composite must not bleed the smoke onto
+    // the plateau either, and must still show it over the ground behind.
+    let toward_eye = (Vec2::new(eye.x, eye.z) - camera.target).normalize();
+    let plateau = ground + 30.0;
+    let mut data = vec![ground / scale; n * n];
+    for (i, h) in data.iter_mut().enumerate() {
+        let p = Vec2::new((i % n) as f32 * cell, (i / n) as f32 * cell);
+        if (p - camera.target).dot(toward_eye) > 10.0 {
+            *h = plateau / scale;
+        }
+    }
+    let heightmap = Heightmap { width: n, height: n, data };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let cliff = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let rim = (camera.target + toward_eye * 10.0).extend(plateau);
+    let rim = Vec3::new(rim.x, plateau, rim.y);
+    let behind = rim + (rim - eye).normalize() * 40.0;
+    let bare = render_on(&cliff, None);
+    let full = render_on(&cliff, Some((&[one(behind, 2)], effects.clone(), 1)));
+    let half = render_on(&cliff, Some((&[one(behind, 2)], effects.clone(), 2)));
+    let (mut shown, mut bled, mut worst) = (0, 0, 0.0f32);
+    for i in (0..bare.len()).step_by(4) {
+        let (f, h) = ((luma(&full, i) - luma(&bare, i)).abs(), (luma(&half, i) - luma(&bare, i)).abs());
+        if f > 20.0 {
+            shown += 1;
+        }
+        // Untouched at full resolution: the plateau (and what the puff misses).
+        if f == 0.0 && h > 4.0 {
+            bled += 1;
+            worst = worst.max(h);
+        }
+    }
+    println!("depth edge: {shown} pixels show the puff at full resolution; at half, {bled} untouched pixels changed (worst {worst:.1})");
+    assert!(shown > 200, "the puff shows above the rim: {shown}");
+    assert!(bled <= 4, "smoke bleeds onto the plateau at half resolution: {bled} pixels (worst {worst:.1})");
     assert_clean(&gpu);
 }

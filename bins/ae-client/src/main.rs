@@ -27,7 +27,8 @@
 //! turns them off. Units that die where the observer sees explode
 //! (particles: flash, fire, sparks, smoke; X sets one off at the camera
 //! target, `--explode N` sets off N around it before a capture;
-//! `--no-particles` turns them off).
+//! `--no-particles` turns them off; they draw at half resolution,
+//! `--particles-full` at full).
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -141,6 +142,8 @@ struct Options {
     shadows: bool,
     /// Particles (explosions).
     particles: bool,
+    /// Particles at full resolution (`--particles-full`), not half.
+    particles_full: bool,
     /// `--explode`: explosions around the camera target before a capture.
     explode: u32,
     /// Material tileset name, `None` for the palette.
@@ -169,11 +172,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, particles_full: false, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--particles-full] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -220,6 +223,7 @@ fn parse() -> Result<Options> {
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
             "--no-particles" => o.particles = false,
+            "--particles-full" => o.particles_full = true,
             "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
@@ -380,11 +384,16 @@ fn tileset(o: &Options) -> Result<Option<Arc<Tileset>>> {
     Ok(Some(Arc::new(t)))
 }
 
-/// A particle feed and setup with the engine's effects (`--no-particles`: none).
+/// A particle feed and setup with the engine's effects (`--no-particles`: none;
+/// `--particles-full`: drawn at full resolution).
 fn particles(o: &Options) -> Option<(Arc<ParticleFeed>, ParticlesSetup)> {
     o.particles.then(|| {
         let feed = Arc::new(ParticleFeed::default());
-        (feed.clone(), ParticlesSetup { feed, capacity: ae_render::particles::MAX_CAPACITY, effects: ae_render::particles::default_effects() })
+        let mut setup = ParticlesSetup::new(feed.clone(), ae_render::particles::MAX_CAPACITY);
+        if o.particles_full {
+            setup.downscale = 1;
+        }
+        (feed, setup)
     })
 }
 
@@ -625,7 +634,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
 
 fn run(o: Options) -> Result<ExitCode> {
     if let Some(b) = &o.bench {
-        return bench::run(&bench::BenchOptions { record_threads: o.record_threads, ..b.clone() });
+        return bench::run(&bench::BenchOptions { record_threads: o.record_threads, particles_full: o.particles_full, ..b.clone() });
     }
     let (source, nav) = match o.map {
         MapKind::Demo => (None, None),

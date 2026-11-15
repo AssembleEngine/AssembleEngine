@@ -50,11 +50,13 @@ pub struct BenchOptions {
     pub save: bool,
     /// `--record-threads`.
     pub record_threads: usize,
+    /// `--particles-full`.
+    pub particles_full: bool,
 }
 
 impl Default for BenchOptions {
     fn default() -> Self {
-        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1 }
+        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false }
     }
 }
 
@@ -109,8 +111,9 @@ const SCENES: [Scene; 7] = [
     Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0 },
 ];
 
-fn options_for(scene: &Scene) -> Options {
+fn options_for(scene: &Scene, b: &BenchOptions) -> Options {
     let mut o = Options::default();
+    o.particles_full = b.particles_full;
     o.map = scene.map;
     o.map_cells = scene.map_cells;
     o.units = scene.units;
@@ -206,7 +209,7 @@ fn ns(sample_ms: &mut [f64]) -> Sample {
 }
 
 fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOptions) -> Result<Report> {
-    let o = options_for(scene);
+    let o = options_for(scene, b);
     let source = cache.source(&o)?;
     let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o);
     if let (Some(s), Some(stream)) = (sim_options(&o), cache.stream(&o)?) {

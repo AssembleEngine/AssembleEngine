@@ -1711,8 +1711,8 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     byte-identical whichever was emitted first (their depths differ).
   - A puff under the ground draws nothing, and nor do dead particles or an empty pool (both
     byte-identical to no particle renderer).
-  - A puff cut by the ground changes by at most 3.6 between neighbouring pixels, against a
-    strongest contribution of 65.6.
+  - A puff cut by the ground changes by at most 6.1 between neighbouring pixels, against a
+    strongest contribution of 70.7.
   - An explosion of the default effects changes the frame, and is byte-identical when rendered
     again: about 90 particles at clustered depths, where the slot bits decide.
   - Skipping the sort fails it, and so does a hard depth test instead of the fade.
@@ -1728,13 +1728,42 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     a 64k pool only 8 workgroups. With 4 blocks it takes about 42 µs; 1 and 2 blocks were slower,
     because the scatter's prefix walks every workgroup.
 - **Not done yet:**
-  - The reduced-resolution target: the draw is fill-bound (173 µs), so it is the next lever.
   - The OIT candidates measured against an exact reference: moment-based, tile-binned, froxel
     smoke.
   - Particles are not shaded by the units' shadow map.
   - Fog of war does not dim them (their emitters are only where the observer sees).
   - Effects are not in the content catalogue.
   - No continuous emitters (burning wrecks, dust behind moving units).
+
+Particles, second step: half resolution (same tests, plus `bench battle`, `--particles-full`):
+- **The `particles` pass draws at half resolution by default** (`ParticlesSetup::downscale` 2; 1
+  keeps the full-resolution draw straight into the scene).
+- **Inside the pass, outside the graph.** The graph opens the pass's rendering scope on the scene
+  colour before the renderer records. The renderer:
+  - ends that scope;
+  - reduces the scene depth to the farthest of each 2x2 block (R32F; a fragment pass, so the
+    graph's barrier for fragment-stage sampling covers it);
+  - draws the particles into its own RGBA16F target, cleared, softened against that depth (the
+    same shaders: they read the half-resolution depth);
+  - begins a scope on the scene colour again (load, store) and composites over it, which the
+    graph then ends.
+  - Each frame slot has its own two targets, made when it first draws and remade on resize, with
+    its own barriers. The pass's contract, the modules, the graph files and the goldens are
+    unchanged.
+- **Depth-aware composite.** Per pixel, the four nearest half-resolution texels:
+  - bilinear when all four were softened against depths within 3 % of the pixel's view depth;
+  - otherwise the texel whose depth is nearest. Smoke behind a silhouette stays off it, and smoke
+    in front of the background leaves no halo.
+  - Pixels with no particle are discarded, so untouched pixels stay byte-identical.
+- **Tests.** The particle GPU test runs all its checks at both resolutions; the thresholds hold
+  unchanged (half: blue/red still dominant, ground cut 5.6 of 70.7). New: a puff behind a
+  plateau's rim. The plateau is untouched at full resolution, and at half resolution 0 of its
+  pixels change; a plain bilinear upsample changes 55 of them, by up to 65 in luma.
+- **Cost** (`bench battle`, about 40k live particles, 1280x720): the `particles` pass 85 µs at
+  half resolution against 171 µs at full (`m7-particles-half`, `m7-particles-full`); the sim pass
+  is unchanged at 58 µs. Idle is unchanged: an inactive slot records nothing in either pass.
+- Validation clean: the GPU tests, the bench, and captures with explosions natively, with the
+  post module and with both graph files.
 
 Particles' coloured shadows (plan):
 - **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";

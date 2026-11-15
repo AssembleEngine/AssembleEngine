@@ -170,8 +170,9 @@ pub enum PassWork {
     /// A module's fullscreen program (by payload), sampling `sampled` in
     /// order.
     Fullscreen { sampled: Vec<ResourceId> },
-    /// [`LibraryPass::ParticlesDraw`] with the depth buffer it samples.
-    Particles { depth: ResourceId },
+    /// [`LibraryPass::ParticlesDraw`] with its colour attachment and the
+    /// depth buffer it samples.
+    Particles { color: ResourceId, depth: ResourceId },
 }
 
 /// The render module driving the graph, with its wired declaration.
@@ -641,7 +642,8 @@ impl RenderApp for TerrainApp {
                 fog: fog(&self.source.info, params.fog),
                 shadows: params.shadows,
             };
-            particles.write_frame(slot, &frame);
+            let gpu = self.gpu.clone().context("no device")?;
+            particles.write_frame(&gpu, slot, &frame)?;
         }
         if let Some(state) = self.module.as_mut().filter(|m| !m.failed) {
             let mut input = FrameInput {
@@ -841,7 +843,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
                 program.record(ctx, &images, self.sampler)?;
             }
-            PassWork::Particles { depth } => particles()?.record_draw(ctx, ctx.image(*depth)?),
+            PassWork::Particles { color, depth } => particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?)?,
             PassWork::Readback { image, buffer } => {
                 let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
                 crate::demo::record_readback(ctx, image, buffer);
@@ -1126,7 +1128,8 @@ impl TerrainApp {
                         }
                         LibraryPass::ParticlesDraw => {
                             let depth = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment) && resources[i.resource.index()].is_none()).map(|i| i.resource).context("particles depth")?;
-                            PassWork::Particles { depth }
+                            let color = pass.intents.iter().find(|i| matches!(i.role, Role::ColorAttachment(_))).map(|i| i.resource).context("particles colour")?;
+                            PassWork::Particles { color, depth }
                         }
                         lib => PassWork::Library(lib),
                     }

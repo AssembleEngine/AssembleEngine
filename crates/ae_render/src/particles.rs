@@ -22,6 +22,14 @@
 //! (compute: spawn, move, cull, key, sort; it records its own barriers
 //! between those steps, all inside its buffers) and `particles` (graphics:
 //! one instanced draw from the indirect buffer).
+//!
+//! The draw is fill-bound, so by default it runs at half resolution
+//! ([`ParticlesSetup::downscale`]): the scene depth is reduced to the
+//! farthest of each 2x2 block, the particles soften against that into a
+//! half-resolution RGBA16F target, and a composite puts it over the scene,
+//! bilinear where the four nearest texels' depths match the pixel's and
+//! the nearest-depth texel across an edge (no smoke bleeding onto a unit or
+//! a cliff in front of it). All of it records inside the `particles` pass.
 
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, ImageBinding, PassContext};
@@ -29,7 +37,7 @@ use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
 use crate::upload;
-use ae_framegraph::BufferDesc;
+use ae_framegraph::{BufferDesc, ImageDesc};
 use anyhow::{Context as _, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Vec3};
@@ -242,7 +250,30 @@ pub struct ParticlesSetup {
     pub capacity: u32,
     /// At most [`MAX_EFFECTS`]; a burst naming another effect spawns nothing.
     pub effects: Vec<EffectDef>,
+    /// 1: draw at full resolution, straight into the scene. 2: draw into a
+    /// half-resolution target and composite it over the scene (the draw is
+    /// fill-bound; see [`ParticleRenderer::record_draw`]).
+    pub downscale: u32,
 }
+
+impl ParticlesSetup {
+    /// `capacity` slots, the default effects, half resolution.
+    pub fn new(feed: Arc<ParticleFeed>, capacity: u32) -> Self {
+        Self { feed, capacity, effects: default_effects(), downscale: 2 }
+    }
+}
+
+/// The reduced-resolution targets of one frame slot.
+struct HalfTargets {
+    extent: vk::Extent2D,
+    /// Premultiplied particles (RGBA16F: emissive colours exceed 1).
+    color: OwnedImage,
+    /// The farthest scene depth of each 2x2 block (R32F, reverse-Z).
+    depth: OwnedImage,
+}
+
+const HALF_COLOR: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+const HALF_DEPTH: vk::Format = vk::Format::R32_SFLOAT;
 
 /// Per-frame inputs.
 #[derive(Clone, Copy, Debug)]
@@ -334,12 +365,26 @@ pub struct ParticleRenderer {
     /// Simulation time when the last particle spawned so far dies.
     alive_until: f32,
     sim_time: f32,
+    downscale: u32,
+    /// Per slot, with `downscale` 2: made when the slot first draws, and
+    /// again when the extent changes.
+    half: Vec<Option<HalfTargets>>,
+    /// Per slot: set 1 of the half-resolution draw (the half depth, the
+    /// puff).
+    half_sets: Vec<vk::DescriptorSet>,
+    /// Set 1 of the composite: half colour, half depth, full depth.
+    composite_layout: vk::DescriptorSetLayout,
+    composite_pipeline_layout: vk::PipelineLayout,
+    composite_sets: Vec<vk::DescriptorSet>,
+    depth_down: vk::Pipeline,
+    composite: vk::Pipeline,
 }
 
 impl ParticleRenderer {
     pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, setup: &ParticlesSetup, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         ensure!((1..=MAX_CAPACITY).contains(&setup.capacity), "particle capacity {} (1..={MAX_CAPACITY})", setup.capacity);
         ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
+        ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
         let device = &gpu.device;
         let capacity = setup.capacity;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -384,7 +429,7 @@ impl ParticleRenderer {
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (shadow_view, shadow_sampler) = terrain.shadow_texture();
         let (height_view, height_sampler) = terrain.height_texture();
-        let (set_layout, depth_layout, pipeline_layout, desc_pool, sets, depth_sets) = unsafe {
+        let (set_layout, depth_layout, pipeline_layout, desc_pool, sets, depth_sets, half_sets, composite_layout, composite_pipeline_layout, composite_sets) = unsafe {
             let ssbo = vk::DescriptorType::STORAGE_BUFFER;
             let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
             let set_layout = pipeline::set_layout(
@@ -394,19 +439,28 @@ impl ParticleRenderer {
             let depth_layout = pipeline::set_layout(device, &[(image, vk::ShaderStageFlags::FRAGMENT), (image, vk::ShaderStageFlags::FRAGMENT)])?;
             // The sort's push constant: shift, direction.
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout], 8, vk::ShaderStageFlags::COMPUTE)?;
+            let fragment = vk::ShaderStageFlags::FRAGMENT;
+            let composite_layout = pipeline::set_layout(device, &[(image, fragment), (image, fragment), (image, fragment)])?;
+            let composite_pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, composite_layout], 0, vk::ShaderStageFlags::FRAGMENT)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 6 * n },
-                vk::DescriptorPoolSize { ty: image, descriptor_count: 5 * n },
+                vk::DescriptorPoolSize { ty: image, descriptor_count: 10 * n },
             ];
-            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(2 * n).pool_sizes(&sizes), None)?;
-            let layouts = vec![set_layout; frames_in_flight];
-            let sets = device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))?;
-            let layouts = vec![depth_layout; frames_in_flight];
-            let depth_sets = device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))?;
+            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(4 * n).pool_sizes(&sizes), None)?;
+            let allocate = |layout: vk::DescriptorSetLayout| {
+                let layouts = vec![layout; frames_in_flight];
+                device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))
+            };
+            let sets = allocate(set_layout)?;
+            let depth_sets = allocate(depth_layout)?;
+            let half_sets = allocate(depth_layout)?;
+            let composite_sets = allocate(composite_layout)?;
             let shape = [vk::DescriptorImageInfo { sampler: puff_sampler, image_view: puff.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-            let writes: Vec<_> = depth_sets.iter().map(|&set| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(image).image_info(&shape)).collect();
+            // The puff, in both the full- and the half-resolution draw's set
+            // (the downsample, bound with the full one, does not read it).
+            let writes: Vec<_> = depth_sets.iter().chain(&half_sets).map(|&set| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(image).image_info(&shape)).collect();
             device.update_descriptor_sets(&writes, &[]);
             for (slot, &set) in sets.iter().enumerate() {
                 let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
@@ -425,7 +479,7 @@ impl ParticleRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(image).image_info(&height));
                 device.update_descriptor_sets(&writes, &[]);
             }
-            (set_layout, depth_layout, pipeline_layout, desc_pool, sets, depth_sets)
+            (set_layout, depth_layout, pipeline_layout, desc_pool, sets, depth_sets, half_sets, composite_layout, composite_pipeline_layout, composite_sets)
         };
         let compute = |code: &[u8], what: &str| pipeline::compute_pipeline(device, code, pipeline_layout).with_context(|| format!("particle {what} pipeline"));
         let spawn = compute(spirv!("particles_spawn.comp"), "spawn")?;
@@ -438,7 +492,7 @@ impl ParticleRenderer {
                 vertex: spirv!("particles.vert"),
                 fragment: spirv!("particles.frag"),
                 layout: pipeline_layout,
-                color_formats: &[color_format],
+                color_formats: &[if setup.downscale > 1 { HALF_COLOR } else { color_format }],
                 // Depth is sampled: the shader tests (and fades) by itself.
                 depth: None,
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
@@ -446,6 +500,11 @@ impl ParticleRenderer {
             },
         )
         .context("particle pipeline")?;
+        let fullscreen = |fragment: &[u8], layout, format, blend| {
+            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("fullscreen.vert"), fragment, layout, color_formats: &[format], depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend })
+        };
+        let depth_down = fullscreen(spirv!("particles_depth_down.frag"), pipeline_layout, HALF_DEPTH, Blend::Off).context("particle depth downsample pipeline")?;
+        let composite = fullscreen(spirv!("particles_composite.frag"), composite_pipeline_layout, color_format, Blend::Premultiplied).context("particle composite pipeline")?;
         Ok(Self {
             capacity,
             info: *terrain.info(),
@@ -479,7 +538,50 @@ impl ParticleRenderer {
             last_time: None,
             alive_until: f32::NEG_INFINITY,
             sim_time: 0.0,
+            downscale: setup.downscale,
+            half: (0..frames_in_flight).map(|_| None).collect(),
+            half_sets,
+            composite_layout,
+            composite_pipeline_layout,
+            composite_sets,
+            depth_down,
+            composite,
         })
+    }
+
+    /// `slot`'s half-resolution targets for a frame of `extent`, made or
+    /// remade (the slot's previous submission has completed), and the sets
+    /// that read them.
+    fn ensure_half(&mut self, gpu: &GpuDevice, slot: usize, extent: vk::Extent2D) -> Result<()> {
+        let half = vk::Extent2D { width: extent.width.div_ceil(2).max(1), height: extent.height.div_ceil(2).max(1) };
+        if self.half[slot].as_ref().is_some_and(|h| h.extent == half) {
+            return Ok(());
+        }
+        if let Some(mut old) = self.half[slot].take() {
+            old.color.destroy(gpu);
+            old.depth.destroy(gpu);
+        }
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+        let color = OwnedImage::new(gpu, ImageDesc::color_2d(HALF_COLOR, half.width, half.height, usage), "particles (half resolution)")?;
+        let depth = match OwnedImage::new(gpu, ImageDesc::color_2d(HALF_DEPTH, half.width, half.height, usage), "particle depth (half resolution)") {
+            Ok(depth) => depth,
+            Err(err) => {
+                let mut color = color;
+                color.destroy(gpu);
+                return Err(err);
+            }
+        };
+        let info = |view| [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+        let (color_info, depth_info) = (info(color.view), info(depth.view));
+        let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
+        let writes = [
+            vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&depth_info),
+            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&color_info),
+            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(1).descriptor_type(image).image_info(&depth_info),
+        ];
+        unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
+        self.half[slot] = Some(HalfTargets { extent: half, color, depth });
+        Ok(())
     }
 
     fn sort_groups(capacity: u32) -> u32 {
@@ -524,8 +626,9 @@ impl ParticleRenderer {
     }
 
     /// Take this frame's bursts from the feed and write `slot`'s uniforms
-    /// and spawn list (the slot's previous submission has completed).
-    pub fn write_frame(&mut self, slot: usize, frame: &ParticleFrame) {
+    /// and spawn list (the slot's previous submission has completed); with
+    /// a reduced resolution, make the slot's targets when it draws.
+    pub fn write_frame(&mut self, gpu: &GpuDevice, slot: usize, frame: &ParticleFrame) -> Result<()> {
         let dt = self.last_time.map_or(0.0, |last| (frame.time - last).clamp(0.0, 0.1));
         self.last_time = Some(frame.time);
         self.sim_time += dt;
@@ -577,6 +680,10 @@ impl ParticleRenderer {
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
         }
+        if self.downscale > 1 && self.active[slot] {
+            self.ensure_half(gpu, slot, frame.extent).context("particle targets")?;
+        }
+        Ok(())
     }
 
     /// Spawn, move, cull, key and sort. Records inside a compute pass that
@@ -624,36 +731,131 @@ impl ParticleRenderer {
     /// The live particles over the scene. Records inside a graphics pass
     /// with one colour attachment that reads [`Self::state`] and
     /// [`Self::keys`] in the vertex stage, [`Self::indirect`] as an
-    /// indirect buffer and samples `depth` in the fragment stage.
-    pub fn record_draw(&self, ctx: &PassContext<'_>, depth: ImageBinding) {
+    /// indirect buffer and samples `depth` in the fragment stage; `color`
+    /// is that colour attachment (in `COLOR_ATTACHMENT_OPTIMAL`).
+    ///
+    /// At half resolution the work happens inside the pass, outside the
+    /// graph: it ends the pass's rendering scope, renders the depth
+    /// downsample and the particles into the slot's own targets (with its
+    /// own barriers), then begins a scope on `color` again (load, store)
+    /// for the composite, which the graph ends. The pass's contract stays
+    /// the same at either resolution.
+    pub fn record_draw(&self, ctx: &PassContext<'_>, color: ImageBinding, depth: ImageBinding) -> Result<()> {
         if !self.active[ctx.slot] {
-            return;
+            return Ok(());
         }
-        let (device, cmd) = (ctx.device, ctx.cmd);
-        let depth_set = self.depth_sets[ctx.slot];
-        let image = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: depth.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+        let (device, cmd, slot) = (ctx.device, ctx.cmd, ctx.slot);
+        let depth_set = self.depth_sets[slot];
+        let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
+        let full = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: depth.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+        // The slot's previous frame has completed, and nothing in this one
+        // has bound these sets yet: they are idle.
+        let mut writes = vec![vk::WriteDescriptorSet::default().dst_set(depth_set).dst_binding(0).descriptor_type(image).image_info(&full)];
+        if self.downscale > 1 {
+            writes.push(vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(2).descriptor_type(image).image_info(&full));
+        }
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        if self.downscale == 1 {
+            unsafe {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
+                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[slot], depth_set], &[]);
+                device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
+            }
+            return Ok(());
+        }
+        let half = self.half[slot].as_ref().context("particle targets not made (write_frame)")?;
+        let color_range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let to_attachment = |image: vk::Image| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(image)
+                .subresource_range(color_range)
+        };
+        let to_sampled = |image: vk::Image| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(image)
+                .subresource_range(color_range)
+        };
+        let begin = |view: vk::ImageView, extent: vk::Extent2D, load: vk::AttachmentLoadOp| {
+            let attachment = [vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(load)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } })];
+            let area = vk::Rect2D { offset: vk::Offset2D::default(), extent };
+            unsafe {
+                device.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&attachment));
+                device.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 }]);
+                device.cmd_set_scissor(cmd, 0, &[area]);
+            }
+        };
+        let barrier = |barriers: &[vk::ImageMemoryBarrier2]| unsafe { device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(barriers)) };
         unsafe {
-            // The slot's previous frame has completed, and nothing in this
-            // one has bound the set yet: it is idle.
-            device.update_descriptor_sets(&[vk::WriteDescriptorSet::default().dst_set(depth_set).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image)], &[]);
+            device.cmd_end_rendering(cmd);
+            // The scene depth's farthest per 2x2 block.
+            barrier(&[to_attachment(half.depth.image), to_attachment(half.color.image)]);
+            begin(half.depth.view, half.extent, vk::AttachmentLoadOp::DONT_CARE);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.depth_down);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[slot], depth_set], &[]);
+            device.cmd_draw(cmd, 3, 1, 0, 0);
+            device.cmd_end_rendering(cmd);
+            // The particles, softened against it, into a cleared target.
+            barrier(&[to_sampled(half.depth.image)]);
+            begin(half.color.view, half.extent, vk::AttachmentLoadOp::CLEAR);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot], depth_set], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 1, &[self.half_sets[slot]], &[]);
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
+            device.cmd_end_rendering(cmd);
+            // Over the scene.
+            // (and the scene's colour: written before the scope was ended).
+            let scene = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(color.image)
+                .subresource_range(color.range);
+            barrier(&[to_sampled(half.color.image), scene]);
+            begin(color.view, color.extent, vk::AttachmentLoadOp::LOAD);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.composite_sets[slot]], &[]);
+            device.cmd_draw(cmd, 3, 1, 0, 0);
         }
+        Ok(())
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
-            for p in [self.spawn, self.sim, self.histogram, self.scatter, self.draw] {
+            for p in [self.spawn, self.sim, self.histogram, self.scatter, self.draw, self.depth_down, self.composite] {
                 device.destroy_pipeline(p, None);
             }
             device.destroy_sampler(self.depth_sampler, None);
             device.destroy_sampler(self.puff_sampler, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
+            device.destroy_pipeline_layout(self.composite_pipeline_layout, None);
             device.destroy_descriptor_pool(self.desc_pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_descriptor_set_layout(self.depth_layout, None);
+            device.destroy_descriptor_set_layout(self.composite_layout, None);
+        }
+        for mut half in self.half.iter_mut().filter_map(Option::take) {
+            half.color.destroy(gpu);
+            half.depth.destroy(gpu);
         }
         self.puff.destroy(gpu);
         for b in self.ubos.iter_mut().chain(self.spawns.iter_mut()) {
