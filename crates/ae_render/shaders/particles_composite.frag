@@ -4,7 +4,7 @@
 // half-resolution texels were softened against depths close to this
 // pixel's, bilinear; across a depth edge, the texel whose depth is
 // nearest this pixel's, so smoke behind a silhouette does not bleed onto
-// it and smoke in front of the background does not leave a halo.
+// it.
 #include "particles_common.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2D halfColor;

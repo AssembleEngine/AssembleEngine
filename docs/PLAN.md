@@ -1752,18 +1752,23 @@ Particles, second step: half resolution (same tests, plus `bench battle`, `--par
     unchanged.
 - **Depth-aware composite.** Per pixel, the four nearest half-resolution texels:
   - bilinear when all four were softened against depths within 3 % of the pixel's view depth;
-  - otherwise the texel whose depth is nearest. Smoke behind a silhouette stays off it, and smoke
-    in front of the background leaves no halo.
+  - otherwise the texel whose depth is nearest, so smoke behind a silhouette stays off it.
   - Pixels with no particle are discarded, so untouched pixels stay byte-identical.
 - **Tests.** The particle GPU test runs all its checks at both resolutions; the thresholds hold
   unchanged (half: blue/red still dominant, ground cut 5.6 of 70.7). New: a puff behind a
   plateau's rim. The plateau is untouched at full resolution, and at half resolution 0 of its
   pixels change; a plain bilinear upsample changes 55 of them, by up to 65 in luma.
+  - The other direction: none of the 837 pixels the puff shows on above the rim loses more than
+    half of it at half resolution. This only guards against a gross halo. No variant broke it:
+    the nearest instead of the farthest depth per block gives the same image here, because the
+    nearest-depth texel covers both.
 - **Cost** (`bench battle`, about 40k live particles, 1280x720): the `particles` pass 85 µs at
   half resolution against 171 µs at full (`m7-particles-half`, `m7-particles-full`); the sim pass
-  is unchanged at 58 µs. Idle is unchanged: an inactive slot records nothing in either pass.
+  is unchanged at 58 µs. Idle should be unchanged (not re-measured): by the code, an inactive slot
+  neither makes targets nor records anything inside either pass.
 - Validation clean: the GPU tests, the bench, and captures with explosions natively, with the
-  post module and with both graph files.
+  post module and with both graph files. Resizes: `--exercise` now also sets off explosions every
+  second; 12 s windowed, 11 swapchain recreations with particles alive, 0 messages.
 
 Particles' coloured shadows (plan):
 - **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";

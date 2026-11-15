@@ -78,7 +78,8 @@
 //! `--record-threads N` records the frame's passes on N threads, one
 //! command buffer per pass (default 1: all on the render thread).
 //!
-//! `--seconds` closes the window after S seconds; `--exercise` resizes,
+//! `--seconds` closes the window after S seconds; `--exercise` sets off
+//! explosions every second (with particles) and resizes,
 //! minimizes and restores on a schedule. Validation follows
 //! `AE_VK_VALIDATION` (default on in debug builds); the exit status is 1 if
 //! the layer reported anything.
@@ -700,6 +701,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut last = Instant::now();
     let mut sample = (Instant::now(), 0u64);
     let mut step = 0;
+    let mut last_boom = Instant::now();
     let mut module_errors = 0;
     loop {
         let events = window.pump();
@@ -729,6 +731,11 @@ fn run(o: Options) -> Result<ExitCode> {
             steer(&window, &events, &mut view, source, dt, &sim_speed);
             if let Some(feed) = particle_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
                 explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32);
+            }
+            // The exercise keeps particles alive through its resizes.
+            if let Some(feed) = particle_feed.as_ref().filter(|_| o.exercise && last_boom.elapsed().as_secs_f32() >= 1.0) {
+                explode_around(feed, view.camera.target, 3, started.elapsed().as_nanos() as u32);
+                last_boom = Instant::now();
             }
         }
         if o.exercise {

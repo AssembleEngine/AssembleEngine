@@ -2054,7 +2054,8 @@ fn units_cast_shadows() {
 /// All of the above at full and at half resolution. Then a depth edge: a
 /// puff behind a plateau's rim leaves the plateau untouched at full
 /// resolution, and at half resolution the composite does not bleed it onto
-/// the plateau (a plain bilinear upsample changes 55 of its pixels).
+/// the plateau (a plain bilinear upsample changes 55 of its pixels), nor
+/// lose more than half of it anywhere above the rim (a gross halo).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_sort_blend_and_soften() {
@@ -2205,11 +2206,17 @@ fn particles_sort_blend_and_soften() {
     let bare = render_on(&cliff, None);
     let full = render_on(&cliff, Some((&[one(behind, 2)], effects.clone(), 1)));
     let half = render_on(&cliff, Some((&[one(behind, 2)], effects.clone(), 2)));
-    let (mut shown, mut bled, mut worst) = (0, 0, 0.0f32);
+    let (mut shown, mut bled, mut worst, mut halo, mut lost) = (0, 0, 0.0f32, 0, 0.0f32);
     for i in (0..bare.len()).step_by(4) {
         let (f, h) = ((luma(&full, i) - luma(&bare, i)).abs(), (luma(&half, i) - luma(&bare, i)).abs());
         if f > 20.0 {
             shown += 1;
+            // Smoke over the ground right above the rim, lost at half
+            // resolution (a halo around the plateau).
+            if h < 0.5 * f {
+                halo += 1;
+            }
+            lost += (f - h).max(0.0);
         }
         // Untouched at full resolution: the plateau (and what the puff misses).
         if f == 0.0 && h > 4.0 {
@@ -2217,8 +2224,9 @@ fn particles_sort_blend_and_soften() {
             worst = worst.max(h);
         }
     }
-    println!("depth edge: {shown} pixels show the puff at full resolution; at half, {bled} untouched pixels changed (worst {worst:.1})");
+    println!("depth edge: {shown} pixels show the puff at full resolution; at half, {bled} untouched pixels changed (worst {worst:.1}), {halo} lost more than half of it, lost {:.0} luma in all", lost);
     assert!(shown > 200, "the puff shows above the rim: {shown}");
     assert!(bled <= 4, "smoke bleeds onto the plateau at half resolution: {bled} pixels (worst {worst:.1})");
+    assert!(halo <= 4, "smoke leaves a halo above the rim at half resolution: {halo} pixels");
     assert_clean(&gpu);
 }
