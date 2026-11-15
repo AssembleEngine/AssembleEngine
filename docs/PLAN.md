@@ -1770,6 +1770,42 @@ Particles, second step: half resolution (same tests, plus `bench battle`, `--par
   post module and with both graph files. Resizes: `--exercise` now also sets off explosions every
   second; 12 s windowed, 11 swapchain recreations with particles alive, 0 messages.
 
+Particles, order independence measured (`cargo test -p ae_render --test gpu particles_order -- --ignored --nocapture`):
+- **Three blends**, all at half resolution (`ParticleBlend`, `--particle-blend sorted|moments`):
+  - *Sorted*: the centre sort, as before.
+  - *Moments*: moment-based OIT (four power moments, Peters' reconstruction). Three passes: the
+    moments (R32F + RGBA32F, additive), the colour weighted by the reconstructed transmittance
+    (media and emissive summed apart), and a resolve. No sort. The depth warp is the log over the
+    frame's range of visible particles, which the simulation finds (a subgroup min/max, only in
+    this mode).
+  - *Reference* (tests only, needs `fragmentStoresAndAtomics`, now enabled when present): every
+    fragment stored per pixel (64 at most; magenta past that), sorted by its sphere's front
+    depth, blended. Its depth is the same front depth the soft fade uses: sorting by the quads'
+    own depth would equal the centre sort, since the quads face the camera.
+- **A dense cluster** (48 smoke puffs of four colours, 8–30 m, and 10 fire puffs in a 40 m ball;
+  11,673 pixels): error against the reference, per channel, sorted mean 1.57 (max 51), moments
+  mean 1.43 (max 32). The centre sort is already close to exact order.
+- **Two puffs crossing in depth** (red 16 m, blue 26 m, opacity 0.85, a metre a frame): the
+  largest change between consecutive frames, per channel:
+  - sorted 116 (208 pixel-frames over 40), reference 116 (179), moments 115 (372).
+  - With the warp range pinned to constants, moments give 112 (178): their extra popping is the
+    per-frame range moving, not the method. Their error against the reference is then lower
+    (mean 0.41, max 34; sorted 1.14, max 116).
+  - Luma first hid the swap: red and blue have similar luma, so the jump measured 14.
+- **Conclusion.** The popping comes from blending particles as flat layers, not from the order:
+  the exact per-pixel order pops as much as the sort. No layer method (moments, tile-binned,
+  k-buffers) removes it.
+  - What does is treating smoke as a volume: overlapping particles mixed by how much of their
+    thickness overlaps, which changes continuously as they pass through each other.
+- **Cost** (`bench battle`): moments 17 µs sim (no sort), 552 µs draw, against sorted 59 + 86 µs
+  (`m7-oit-moments`, `m7-oit-sorted`). The sorted path is unchanged.
+- **Kept:** the sort for everything. Moments and the reference stay as comparison modes.
+- **Next** (a change of direction, for smoke and dust): a volumetric reference (each fragment's
+  front and back, intervals integrated with summed extinction and emission), checked to pop well
+  below 116, then candidates against it: the froxel volume (Hillaire 2015) for smoke and dust, and
+  a per-pixel thickness-aware blend. Small emissive particles (sparks, flashes) stay sorted
+  billboards.
+
 Particles' coloured shadows (plan):
 - **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";
   `ProjectileDrawer::DrawShadowTransparent` and `ProjFXFragShadowProg.glsl` implement it.

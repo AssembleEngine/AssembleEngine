@@ -3,6 +3,8 @@
 // its sort key when it is in view. Key: far-to-near depth (16 bits, log
 // scale from the near plane) above the slot (16 bits): unique, so the
 // sorted order does not depend on the order of the appends.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
 #define PARTICLES_WRITE
 #include "particles_common.glsl"
 
@@ -33,13 +35,29 @@ void main() {
     float t = p.posAge.w / p.velLife.w;
     vec4 shape = u.effects[e + 2u];
     float radius = 0.5 * mix(shape.x, shape.y, t) * uintBitsToFloat(p.info.z);
+    bool visible = true;
     for (int k = 0; k < 6; ++k) {
-        if (dot(u.frustum[k].xyz, p.posAge.xyz) + u.frustum[k].w < -radius) {
-            return;
-        }
+        visible = visible && dot(u.frustum[k].xyz, p.posAge.xyz) + u.frustum[k].w >= -radius;
     }
     float d = dot(p.posAge.xyz - u.camPos.xyz, u.camForward.xyz);
-    float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);
-    uint key = ((65535u - uint(q * 65535.0)) << 16) | i;
-    keys[atomicAdd(cmd.instanceCount, 1u)] = key;
+    if (visible) {
+        float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);
+        uint key = ((65535u - uint(q * 65535.0)) << 16) | i;
+        keys[atomicAdd(cmd.instanceCount, 1u)] = key;
+    }
+    // The visible depth range (the moments' depth warp, flags.y), one
+    // atomic per subgroup.
+    if (u.flags.y == 0u) {
+        return;
+    }
+    float lo = subgroupMin(visible ? max(d - radius, u.camPos.w) : 3.4e38);
+    float hi = subgroupMax(visible ? max(d + radius, u.camPos.w) : 0.0);
+    if (subgroupElect()) {
+        if (lo < 3.4e38) {
+            atomicMin(cmd.depthMin, floatBitsToUint(lo));
+        }
+        if (hi > 0.0) {
+            atomicMax(cmd.depthMax, floatBitsToUint(hi));
+        }
+    }
 }

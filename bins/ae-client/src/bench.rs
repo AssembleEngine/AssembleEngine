@@ -52,11 +52,13 @@ pub struct BenchOptions {
     pub record_threads: usize,
     /// `--particles-full`.
     pub particles_full: bool,
+    /// `--particle-blend`.
+    pub particle_blend: ae_render::particles::ParticleBlend,
 }
 
 impl Default for BenchOptions {
     fn default() -> Self {
-        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false }
+        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted }
     }
 }
 
@@ -114,6 +116,7 @@ const SCENES: [Scene; 7] = [
 fn options_for(scene: &Scene, b: &BenchOptions) -> Options {
     let mut o = Options::default();
     o.particles_full = b.particles_full;
+    o.particle_blend = b.particle_blend;
     o.map = scene.map;
     o.map_cells = scene.map_cells;
     o.units = scene.units;

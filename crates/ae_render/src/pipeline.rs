@@ -51,6 +51,8 @@ pub enum Blend {
     /// can also add light (`a` 0 with a colour adds it), which straight
     /// alpha cannot do in a UNORM target (sources clamp to 1).
     Premultiplied,
+    /// `src + dst` (colour and alpha): sums in any order.
+    Additive,
 }
 
 pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Result<vk::Pipeline> {
@@ -79,11 +81,11 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
     let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let attachment = vec![vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(desc.blend != Blend::Off)
-        .src_color_blend_factor(if desc.blend == Blend::Premultiplied { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
-        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .src_color_blend_factor(if matches!(desc.blend, Blend::Premultiplied | Blend::Additive) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
+        .dst_color_blend_factor(if desc.blend == Blend::Additive { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
         .color_blend_op(vk::BlendOp::ADD)
         .src_alpha_blend_factor(vk::BlendFactor::ONE)
-        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .dst_alpha_blend_factor(if desc.blend == Blend::Additive { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
         .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
         desc.color_formats.len()];

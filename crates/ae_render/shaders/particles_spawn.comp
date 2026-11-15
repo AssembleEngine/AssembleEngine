@@ -16,6 +16,8 @@ void main() {
         cmd.instanceCount = 0u;
         cmd.firstVertex = 0u;
         cmd.firstInstance = 0u;
+        cmd.depthMin = 0x7f7fffffu;
+        cmd.depthMax = 0u;
     }
     if (t >= u.pool.z) {
         return;

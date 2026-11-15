@@ -2059,12 +2059,11 @@ fn units_cast_shadows() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn particles_sort_blend_and_soften() {
-    use ae_render::particles::{Burst, EffectDef, ParticleFeed, ParticlesSetup, default_effects, explosion};
+    use ae_render::particles::{Burst, EffectDef, ParticleBlend, default_effects, explosion};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::thread::{Headless, TargetInfo};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2101,31 +2100,8 @@ fn particles_sort_blend_and_soften() {
     let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false, 100.0), still([0.05, 0.05, 0.9, 1.0], 12.0, false, 100.0), still([0.6, 0.6, 0.6, 0.9], 40.0, false, 100.0), still([0.9, 0.05, 0.05, 1.0], 12.0, false, 0.02)];
     let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: effect };
 
-    // Some(bursts) with a particle renderer at `downscale` (emitted before
-    // the first frame), None without.
     let render_on = |source: &Arc<TerrainSource>, bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| -> Vec<u8> {
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
-        if let Some((bursts, effects, downscale)) = bursts {
-            let feed = Arc::new(ParticleFeed::default());
-            feed.emit_all(bursts);
-            app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects, downscale });
-        }
-        {
-            let view = app.view();
-            let mut view = view.lock().unwrap();
-            view.camera = camera;
-            view.fog = false;
-        }
-        app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
-        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
-        run.frames(&mut app, 8).unwrap();
-        run.wait().unwrap();
-        run.finish().unwrap();
-        let pixels = app.readback().unwrap();
-        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
-        pixels
+        render_particles(&gpu, source, camera, extent, bursts.map(|(b, e, downscale)| (b, e, downscale, ParticleBlend::Sorted)))
     };
     let render = |bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| render_on(&source, bursts);
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
@@ -2228,5 +2204,202 @@ fn particles_sort_blend_and_soften() {
     assert!(shown > 200, "the puff shows above the rim: {shown}");
     assert!(bled <= 4, "smoke bleeds onto the plateau at half resolution: {bled} pixels (worst {worst:.1})");
     assert!(halo <= 4, "smoke leaves a halo above the rim at half resolution: {halo} pixels");
+    assert_clean(&gpu);
+}
+
+/// A frame of the flat test terrain seen by `camera`; with Some, a particle
+/// renderer (`downscale`, `blend`) whose bursts are emitted before the
+/// first frame, still for the 8 frames rendered.
+fn render_particles(
+    gpu: &Arc<GpuDevice>,
+    source: &Arc<ae_render::terrain::app::TerrainSource>,
+    camera: ae_render::terrain::camera::Camera,
+    extent: vk::Extent2D,
+    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+) -> Vec<u8> {
+    use ae_render::particles::{ParticleFeed, ParticlesSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, TargetInfo};
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+    if let Some((bursts, effects, downscale, blend)) = particles {
+        let feed = Arc::new(ParticleFeed::default());
+        feed.emit_all(bursts);
+        app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects, downscale, blend });
+    }
+    {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera = camera;
+        view.fog = false;
+    }
+    app.create_offscreen(gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let mut run = Headless::new(gpu, &mut app, target, config).unwrap();
+    run.frames(&mut app, 8).unwrap();
+    run.wait().unwrap();
+    run.finish().unwrap();
+    let pixels = app.readback().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, gpu);
+    pixels
+}
+
+/// Particles that hold still: one colour and size over a long life.
+fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::particles::EffectDef {
+    ae_render::particles::EffectDef { color_start: color, color_end: color, size: [size, size], life: [100.0, 100.0], speed: [0.0, 0.0], up: 0.0, spread: 0.0, gravity: 0.0, drag: 0.0, emissive, fade_in: 0.0 }
+}
+
+/// Order independence, measured (all at half resolution, against the exact
+/// reference: every fragment sorted per pixel by its sphere's front depth):
+/// * a dense cluster of smoke of several colours and sizes, with fire in
+///   it: the error of the centre sort and of the moments, per pixel the
+///   cluster covers;
+/// * two puffs of different sizes crossing in depth, one metre a frame:
+///   the largest change between consecutive frames (popping), and the
+///   error, for each method.
+/// The numbers are printed; the assertions hold what was measured: the
+/// centre sort is close to exact in the cluster, and the exact per-pixel
+/// order pops about as much as the sort when the two cross (the moments,
+/// whose depth warp follows the frame's particle range, pop more: 372).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn particles_order_independence() {
+    use ae_render::particles::{Burst, ParticleBlend};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    if !gpu.fragment_stores {
+        println!("no fragmentStoresAndAtomics: no reference, skipped");
+        return;
+    }
+    let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let eye = camera.eye(|_| ground);
+    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference];
+    let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
+    let none = render_particles(&gpu, &source, camera, extent, None);
+    // Per pixel the reference changes: mean and largest channel error.
+    let error = |image: &[u8], reference: &[u8]| -> (f32, u8) {
+        let (mut sum, mut count, mut worst) = (0.0, 0, 0u8);
+        for i in (0..reference.len()).step_by(4) {
+            if reference[i..i + 3] != none[i..i + 3] {
+                count += 1;
+                for c in 0..3 {
+                    let e = image[i + c].abs_diff(reference[i + c]);
+                    sum += e as f32;
+                    worst = worst.max(e);
+                }
+            }
+        }
+        (sum / (3 * count.max(1)) as f32, worst)
+    };
+    let magenta = |image: &[u8]| image.chunks(4).filter(|p| p[0] > 250 && p[1] < 5 && p[2] > 250).count();
+
+    // A cluster: 48 puffs of smoke (dark, light, brown, bluish) of 8 to 30 m
+    // in a ball of 20 m, and 10 fire puffs in it.
+    let effects = vec![
+        still_effect([0.08, 0.08, 0.08, 0.75], 1.0, false),
+        still_effect([0.7, 0.7, 0.7, 0.6], 1.0, false),
+        still_effect([0.45, 0.3, 0.15, 0.7], 1.0, false),
+        still_effect([0.3, 0.4, 0.7, 0.5], 1.0, false),
+        still_effect([1.8, 0.8, 0.2, 0.9], 1.0, true),
+    ];
+    let centre = Vec3::new(128.0, 45.0, 128.0);
+    let mut state = 12345u32;
+    let mut rand = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state as f32 / u32::MAX as f32
+    };
+    let mut cluster = Vec::new();
+    for k in 0..58u32 {
+        let offset = Vec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5) * 40.0;
+        let effect = if k < 48 { k % 4 } else { 4 };
+        let size = if k < 48 { 8.0 + 22.0 * rand() } else { 6.0 + 6.0 * rand() };
+        cluster.push(Burst { pos: (centre + offset).to_array(), ground: false, effect, count: 1, scale: size, seed: k });
+    }
+    let images: Vec<Vec<u8>> = modes.iter().map(|&m| render(&cluster, &effects, m)).collect();
+    let reference = &images[2];
+    assert_eq!(magenta(reference), 0, "the reference overflows its lists");
+    let covered = reference.chunks(4).zip(none.chunks(4)).filter(|(a, b)| a[..3] != b[..3]).count();
+    let (sorted_mean, sorted_worst) = error(&images[0], reference);
+    let (moments_mean, moments_worst) = error(&images[1], reference);
+    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}");
+    // Emitted in reverse: the order-independent methods give the same frame.
+    let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
+    for (m, image) in modes.iter().zip(&images) {
+        let again = render(&reversed, &effects, *m);
+        let worst = again.iter().zip(image).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        println!("  {m:?} emitted in reverse: largest change {worst}");
+        // Sorted: depth-key ties fall back to the slot. Moments: float sums
+        // in another order (the additive blend rounds differently).
+        if *m != ParticleBlend::Sorted {
+            assert!(worst <= 2, "{m:?} depends on the emission order: {worst}");
+        }
+    }
+
+    // Crossing: a red puff of 16 m and a blue one of 26 m, 3 m apart
+    // sideways, the blue one moving from 14 m in front of the red to 14 m
+    // behind it along the line of sight.
+    let effects = vec![still_effect([0.9, 0.08, 0.05, 0.85], 16.0, false), still_effect([0.08, 0.15, 0.9, 0.85], 26.0, false)];
+    let red = centre;
+    let dir = (red - eye).normalize();
+    let side = dir.cross(Vec3::Y).normalize() * 3.0;
+    let steps: Vec<f32> = (0..=28).map(|i| i as f32 - 14.0).collect();
+    let mut frames: Vec<Vec<Vec<u8>>> = vec![Vec::new(); 3];
+    for &t in &steps {
+        let blue = red + side + dir * t;
+        let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: blue.to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
+        for (k, &m) in modes.iter().enumerate() {
+            frames[k].push(render(&bursts, &effects, m));
+        }
+    }
+    let pop = |frames: &[Vec<u8>]| -> (f32, usize) {
+        // The largest per-pixel channel change between consecutive frames
+        // (a red-blue swap keeps the luma), and how many pixels change by
+        // more than 40 in one frame.
+        let (mut worst, mut jumps) = (0.0f32, 0);
+        for w in frames.windows(2) {
+            for i in (0..w[0].len()).step_by(4) {
+                let d = (0..3).map(|c| w[1][i + c].abs_diff(w[0][i + c])).max().unwrap_or(0) as f32;
+                worst = worst.max(d);
+                if d > 40.0 {
+                    jumps += 1;
+                }
+            }
+        }
+        (worst, jumps)
+    };
+    let mut pops = Vec::new();
+    for (k, m) in modes.iter().enumerate() {
+        let (worst, jumps) = pop(&frames[k]);
+        let errors: Vec<(f32, u8)> = frames[k].iter().zip(&frames[2]).map(|(a, r)| error(a, r)).collect();
+        let mean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
+        let max = errors.iter().map(|e| e.1).max().unwrap_or(0);
+        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the reference mean {mean:.2} max {max}");
+        pops.push((worst, jumps));
+    }
+    for k in 0..3 {
+        assert_eq!(frames[k].iter().map(|f| magenta(f)).sum::<usize>(), 0);
+    }
+    // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
+    // exact order, and the moments about as close.
+    assert!(sorted_mean < 2.5 && moments_mean < 2.5, "cluster error: sorted {sorted_mean}, moments {moments_mean}");
+    // Measured: the exact per-pixel order pops about as much as the centre
+    // sort (179 against 208 pixel-frames over 40; both 116 at worst): the
+    // jump comes from blending particles as flat layers, whatever the order.
+    let (sorted_pop, reference_pop) = (pops[0], pops[2]);
+    assert!(reference_pop.0 > 80.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
     assert_clean(&gpu);
 }

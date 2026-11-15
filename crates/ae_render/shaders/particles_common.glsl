@@ -11,7 +11,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 frustum[6];  // normalised planes, inside >= 0
     vec4 step;        // dt, time, 1/width, 1/height
     uvec4 pool;       // capacity, spawn records, spawn total, ring head
-    uvec4 flags;      // x & 1: hills' shadows
+    uvec4 flags;      // x & 1: hills' shadows; y: find the visible depth range (moments)
     vec4 map;         // cell size, 1/(corners x), 1/(corners y)
     vec4 height;      // scale, offset, water level, has water
     vec4 sun;         // xyz direction
@@ -38,7 +38,9 @@ struct Particle {
 #endif
 layout(std430, set = 0, binding = 1) PARTICLES_ACCESS buffer State { Particle particles[]; };
 layout(std430, set = 0, binding = 2) PARTICLES_ACCESS buffer Keys { uint keys[]; };
-layout(std430, set = 0, binding = 3) PARTICLES_ACCESS buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } cmd;
+// The draw's indirect arguments, then this frame's range of the visible
+// particles' view depths (float bits: positive floats order as uints).
+layout(std430, set = 0, binding = 3) PARTICLES_ACCESS buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; uint depthMin; uint depthMax; } cmd;
 
 struct Spawn {
     vec4 posScale;

@@ -227,6 +227,9 @@ pub struct GpuDevice {
     pub device_name: String,
     /// `fillModeNonSolid` is enabled (line-mode wireframe pipelines).
     pub fill_mode_non_solid: bool,
+    /// `fragmentStoresAndAtomics` is enabled (the particles' exact
+    /// per-pixel reference, tests only).
+    pub fragment_stores: bool,
     /// A frame fence timed out: the GPU may still be executing, so waiting
     /// for idle could block forever and destroying objects is unsafe.
     hung: AtomicBool,
@@ -286,11 +289,11 @@ impl GpuDevice {
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
                 _ => 2,
             };
-            let fill_mode_non_solid = base.fill_mode_non_solid == vk::TRUE;
-            candidates.push((rank, physical, family, properties, fill_mode_non_solid));
+            let optional = (base.fill_mode_non_solid == vk::TRUE, base.fragment_stores_and_atomics == vk::TRUE);
+            candidates.push((rank, physical, family, properties, optional));
         }
         candidates.sort_by_key(|(rank, ..)| *rank);
-        let (_, physical, queue_family, properties, fill_mode_non_solid) = candidates
+        let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores)) = candidates
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances and a graphics+compute queue"))?;
@@ -318,7 +321,8 @@ impl GpuDevice {
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
         let base_features = vk::PhysicalDeviceFeatures::default()
             .shader_clip_distance(true)
-            .fill_mode_non_solid(fill_mode_non_solid);
+            .fill_mode_non_solid(fill_mode_non_solid)
+            .fragment_stores_and_atomics(fragment_stores);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&extensions)
@@ -362,6 +366,7 @@ impl GpuDevice {
             timestamp_period,
             device_name,
             fill_mode_non_solid,
+            fragment_stores,
             hung: AtomicBool::new(false),
         })
     }
