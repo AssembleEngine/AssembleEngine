@@ -2297,6 +2297,19 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - It also brings triplanar weights with a constant overlap, and normals combined by RNM.
   - The supplied example, kept verbatim, and implementation notes (mip seams from the UV jumps,
     sample cost, gating per layer) are in `docs/antitiling.md`.
+- **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).
+  - Seen in play, they look poor: too coarse and too discrete, as if the smoke updated at a lower
+    frame rate than the rest of the scene.
+  - Likely causes to look at:
+    - one centre ray per 4x4 column, so small puffs pop in and out between columns;
+    - the bilinear resolve over coarse columns;
+    - the exponential slices following the frame's particle depth range, which moves every frame.
+  - Directions:
+    - several jittered rays per column, with temporal reprojection and accumulation (as Hillaire
+      does);
+    - a fixed depth distribution instead of one fitted to each frame;
+    - a filter better than bilinear between columns (tricubic, or guided by depth).
+  - The bar stays the same: no popping, close to the volume reference, and a cost near the sort's.
 
 ## Not yet researched
 
