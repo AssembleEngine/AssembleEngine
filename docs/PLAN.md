@@ -1365,6 +1365,22 @@ Command queues, attack-move and bots:
   only shoot what comes in range); the bot does not scout, defend or build; archives and manifests
   in `ae_vfs`, and `.aemap`, are still to do for the exit criterion "defined only by an archive".
 
+Archives and packages (`ae_vfs`):
+- Zip archives mount like directories (`Vfs::mount` takes either). The reader takes stored and
+  deflated entries (`miniz_oxide`), checks every entry's CRC-32 and size, and refuses encryption,
+  zip64, multi-disk, duplicate paths and non-content paths. The writer is deterministic (sorted
+  entries, a fixed 1980 timestamp, deflate level 6 unless stored is smaller), so a package's bytes
+  follow from its files alone. Python's `zipfile` reads our archives and we read its own; an
+  archive of a directory has the directory's content hash.
+- A package is a directory or archive with `manifest.json` (`name`, `version`, `kind` = game, map,
+  mod or library, `depends` = names or `name@version`; unknown keys refused). The manifest is
+  metadata: not a content file, not in the content hash (so the skirmish content's hash, and its
+  replays, are unchanged by its new manifest). `Library::scan` finds packages in directories (zip
+  files by signature, any extension); `resolve` orders a package after its dependencies (each once,
+  depth first), naming cycles, missing packages and who needed them, and two versions of one name.
+- `ae-tool pack DIR OUT` writes a package directory as an archive and prints its content hash;
+  `ae-tool unpack-list FILE` reads and checks every entry.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

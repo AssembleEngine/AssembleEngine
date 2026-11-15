@@ -70,6 +70,8 @@ terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 | `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!` (with `host(..)` entries), typed columns, commands, events, spatial queries; engine components and `movement_classes!` in `ae_sdk::nav` (feature `nav`) | new |
 | `games/sandbox` | The M1 exit workload (built for wasm32 by the tools; not a workspace member) | new |
 | `games/crossing` | The M2 exit workload: orders of every kind, neighbour counts and terrain edits in WASM, the units moved by the nav host system | new |
+| `crates/ae_vfs` | Content file system: layered directory and zip mounts, package manifests and dependency resolution (`Library`), the content hash | new |
+| `crates/ae_catalog` | Defs as data: JSON catalogue files resolved against the game's schema to component bytes (`extends`, `abstract`, canonical writer) | new |
 | `games/skirmish` | The M6 workload: two allyteams with factories, weapons, armour and command queues (move, attack-move, stop), units and buildings defined by `content/defs/*.json` | new |
 | `crates/ae_bot` | Host-side bots that play an allyteam through tick commands, like a player (`SkirmishBot`; `ae-headless --script bot`, the client's opponent) | new |
 | `games/alloc` | Guest heap allocation probe for `tests/guest_alloc.rs` | new |
@@ -84,7 +86,7 @@ terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 | `render/default`, `render/post` | Render modules: the engine's scene graph from WASM; the same with a colour grade and a vignette (built for `wasm32-unknown-unknown`; not workspace members) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
-| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary) | new |
+| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary), `catalog-fmt`, `pack`, `unpack-list` | new |
 | `spikes/parallel_guest` | M0 risk spikes (three binaries) | new |
 | `vendor/` | flecs and its build crate | ecs_sim `vendor/` |
 

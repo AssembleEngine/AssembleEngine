@@ -8,3 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 xxhash-rust.workspace = true
+miniz_oxide = "0.8"
+crc32fast = "1"
+serde.workspace = true
+serde_json.workspace = true

@@ -6,6 +6,8 @@
 //! ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
 //! ae-tool navbench [--scaling ...]   # runs ae_nav's navbench binary
 //! ae-tool catalog-fmt FILE...          # rewrite catalogue files in canonical form
+//! ae-tool pack DIR OUT                 # a package directory as a deterministic zip
+//! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -23,7 +25,9 @@ const USAGE: &str = "usage:
   ae-tool bench <suite>|all [--small] [--quick] [--threads N] [--label NAME] [--out DIR] [--no-save]
   ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
   ae-tool navbench [navbench arguments, e.g. --scaling]
-  ae-tool catalog-fmt FILE...";
+  ae-tool catalog-fmt FILE...
+  ae-tool pack DIR OUT
+  ae-tool unpack-list FILE";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
 /// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
@@ -63,6 +67,8 @@ fn main() -> ExitCode {
         Some("bench-diff") => bench_diff(&args[1..]),
         Some("navbench") => navbench(&args[1..]),
         Some("catalog-fmt") => catalog_fmt(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("pack") => pack(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -160,4 +166,32 @@ fn bench_diff(args: &[String]) -> Result<ExitCode> {
     let result = diff(&Report::load_all(Path::new(base))?, &Report::load_all(Path::new(head))?, thresholds);
     result.print(args.switch("--all"));
     Ok(if result.regressions() > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+/// `ae-tool pack DIR OUT`: DIR (a package: it needs a valid
+/// `manifest.json`) as a deterministic zip archive at OUT.
+fn pack(args: &[String]) -> Result<()> {
+    let [dir, out] = args else { anyhow::bail!("usage: ae-tool pack DIR OUT") };
+    let p = ae_vfs::Package::open(dir)?;
+    let files = ae_vfs::dir_files(std::path::Path::new(dir))?;
+    let zip = ae_vfs::zip::write(&files)?;
+    std::fs::write(out, &zip)?;
+    let mut v = ae_vfs::Vfs::new();
+    v.mount_archive(out)?;
+    println!("{out}: {}@{} ({}), {} files, {} bytes, content hash {:032x}", p.manifest.name, p.manifest.version, p.manifest.kind, files.len(), zip.len(), v.content_hash()?);
+    Ok(())
+}
+
+/// `ae-tool unpack-list FILE`: the files of an archive, with sizes, and its
+/// content hash (every entry is read and checked).
+fn unpack_list(args: &[String]) -> Result<()> {
+    let [file] = args else { anyhow::bail!("usage: ae-tool unpack-list FILE") };
+    let a = ae_vfs::Archive::open(std::path::Path::new(file))?;
+    for p in a.paths() {
+        println!("{:>10} {p}", a.read(p).unwrap()?.len());
+    }
+    let mut v = ae_vfs::Vfs::new();
+    v.mount_archive(file)?;
+    println!("content hash {:032x}", v.content_hash()?);
+    Ok(())
 }
