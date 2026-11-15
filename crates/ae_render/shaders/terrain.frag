@@ -249,8 +249,14 @@ void main() {
         n = ts.normal;
     }
 
+    // The shading normal under the decals (shadows keep the ground's).
+    vec3 shadeN = n;
+    vec3 glow = vec3(0.0);
     if (DECALS) {
-        albedo = applyDecals(albedo, inWorld, dPdx, dPdy, heightNormal);
+        Decals d = applyDecals(albedo, n, inWorld, dPdx, dPdy, heightNormal);
+        albedo = d.albedo;
+        shadeN = d.normal;
+        glow = d.glow;
     }
 
     if ((u.cfg.z & FLAG_LOD_COLORS) != 0u) {
@@ -266,9 +272,9 @@ void main() {
     vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
     vec3 tint;
     float units = unitSunAt(ground, n, tint);
-    vec3 diff = max(dot(n, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
+    vec3 diff = max(dot(shadeN, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
     vec3 sky = vec3(0.45, 0.55, 0.7);
-    vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * n.y));
+    vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * shadeN.y));
 
     // Ground under water (AssemblyEngine addition): tint by the depth of the
     // water column. This is the part of RA3's underwater pass the water
@@ -291,11 +297,17 @@ void main() {
         vec3 shallow = vec3(0.16, 0.38, 0.42);
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
         color = mix(color * vec3(0.6, 0.8, 0.85), tint, 1.0 - exp(-depth * u.water.z));
+        // Water puts a glow out within a metre.
+        glow *= 1.0 - smoothstep(0.0, 1.0, depth);
     }
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         color = applyVision(color, inWorld.xz);
+        // A glow shows only in sight (not remembered under the fog).
+        if (DECALS) glow *= smoothstep(0.6, 1.0, visionAt(inWorld.xz));
     }
+    // Emissive: after the light, the shadows and the vision's dimming.
+    color += glow;
 
     float dist = distance(inWorld, u.camPos.xyz);
     color = mix(color, u.fog.rgb, fogAmount(dist));

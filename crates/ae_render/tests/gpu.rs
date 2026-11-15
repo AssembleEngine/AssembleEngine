@@ -2825,3 +2825,150 @@ fn decals_wrap_over_cliffs() {
     assert!(beside.iter().any(|&i| rgb(&none, i) != rgb(&on, i)), "the ground by the unit is not painted");
     assert_clean(&gpu);
 }
+
+/// Decal shading (Recoil's scars) on a plateau 30 m high over ground at
+/// 10 m (2 m cells): its west cliff faces -x, toward the sun
+/// (-0.5, 0.55, 0.35), its east edge drops into the hill's shadow.
+/// * Relit by its normal map: a decal whose normals all lean toward its +x
+///   (u), centred on the west cliff's top edge, against the same decal with
+///   flat normals. At angle 0 the plateau leans away from the sun (darker)
+///   and the face, its side projection unfolded downward, leans up toward
+///   it (brighter); turned by pi both reverse. A sign error in either
+///   projection's tangent fails one of the four.
+/// * Modulate: a mid-grey (sRGB 0.5) decal leaves the ground as it is; a
+///   quarter grey (sRGB 0.25) halves it (in sRGB bytes), Recoil's
+///   `2 * decal * ground`.
+/// * Glow: a glowing decal in the hill's shadow brightens its centre and
+///   reddens it; once its glow life is over the frame equals the same decal
+///   without glow.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn decals_relit_modulated_and_glowing() {
+    use ae_render::decals::{Blend, Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{Headless, TargetInfo};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let (n, scale) = (65usize, 100.0f32);
+    let column = |x: usize| if (21..=40).contains(&x) { 30.0 } else { 10.0 };
+    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| column(i % n) / scale).collect() };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 2.0, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 480, height: 360 };
+    let base = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    // From the west for the cliff, from the east for the shadowed ground.
+    let west = Camera { target: Vec2::new(44.0, 64.0), ground: 25.0, distance: 70.0, yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.42, ..base };
+    let east = Camera { target: Vec2::new(88.0, 64.0), ground: 10.0, distance: 60.0, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.7, ..base };
+    let pixel = |camera: &Camera, p: Vec3| -> Option<usize> {
+        let view_proj = lod_view(&source, camera, extent.width, extent.height).view_proj;
+        let clip = view_proj * p.extend(1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+
+    // Layers: 0 grey leaning toward +u; 1 grey, flat, glow mask 0.6 (Recoil's
+    // scars peak at 0.67 and 0.95); 2 sRGB
+    // 0.5; 3 sRGB 0.25 (both flat).
+    let size = 32u32;
+    let texels = (size * size) as usize;
+    let linear = |s: f32| ((s + 0.055) / 1.055).powf(2.4);
+    let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
+    let lean = 0.5f32.atan();
+    let layers = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25))];
+    let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
+    let normals = vec![vec![[lean.sin(), 0.0, lean.cos(), 0.0]; texels], vec![[0.0, 0.0, 1.0, 0.6]; texels], flat.clone(), flat];
+    let atlas = Arc::new(DecalAtlas { size, layers, normals });
+    let half = 12.0f32;
+    let edge = (42.0f32, 64.0f32);
+    let at_edge = |layer: u32, angle: f32| Decal::permanent([edge.0, edge.1], [half, half], angle, layer);
+    let glow_at = (88.0f32, 64.0f32);
+    let glowing = |glow: f32, glow_life: f32| Decal { glow, glow_life, ..Decal::permanent([glow_at.0, glow_at.1], [6.0, 6.0], 0.0, 1) };
+
+    let render = |decals: &[Decal], camera: Camera| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_shadows();
+        let feed = Arc::new(DecalFeed::default());
+        feed.place_all(decals);
+        app = app.with_decals(DecalsSetup { feed, capacity: 16, atlas: Some(atlas.clone()) });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        run.frames(&mut app, 8).unwrap();
+        run.wait().unwrap();
+        run.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            let name = decals.first().map_or("none".to_string(), |d| format!("{}-{}-{:.1}-{}", d.layer, d.angle, d.glow, d.glow_life));
+            std::fs::write(std::path::Path::new(&dir).join(format!("decal-shading-{name}.ppm")), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+
+    // The plateau 2.5..9 m in from the edge, and the face 1..10 m down.
+    let (mut top, mut face) = (Vec::new(), Vec::new());
+    for dz in [-6.0f32, -2.0, 3.0] {
+        for k in 0..=40 {
+            let t = k as f32 / 40.0;
+            top.push(Vec3::new(edge.0 + 2.5 + t * 6.5, 30.0, edge.1 + dz));
+            let drop = 1.0 + t * 9.0;
+            face.push(Vec3::new(40.0 + 2.0 * (1.0 - drop / 20.0), 30.0 - drop, edge.1 + dz));
+        }
+    }
+    let lumas = |frame: &[u8], points: &[Vec3]| -> Vec<f32> { points.iter().filter_map(|&p| pixel(&west, p)).map(|i| luma(frame, i)).collect() };
+    let flat = render(&[at_edge(1, 0.0)], west);
+    let lean0 = render(&[at_edge(0, 0.0)], west);
+    let lean_pi = render(&[at_edge(0, std::f32::consts::PI)], west);
+    let none = render(&[], west);
+    for (name, points, sign) in [("plateau", &top, -1.0f32), ("face", &face, 1.0)] {
+        let (f, a, b) = (median(lumas(&flat, points)), median(lumas(&lean0, points)), median(lumas(&lean_pi, points)));
+        println!("relit {name}: flat {f:.0}, leaning +x {a:.0}, turned by pi {b:.0} ({} samples)", lumas(&flat, points).len());
+        assert!(lumas(&flat, points).len() > 80, "{name} out of view");
+        assert!(sign * (a - f) > 8.0 && sign * (f - b) > 8.0, "{name}: flat {f}, angle 0 {a}, angle pi {b}");
+    }
+
+    // Modulate on the plateau and the face.
+    let points: Vec<Vec3> = top.iter().chain(&face).copied().collect();
+    let modulated = |layer| render(&[Decal { blend: Blend::Modulate, ..at_edge(layer, 0.0) }], west);
+    let (mid, quarter) = (modulated(2), modulated(3));
+    let ground = lumas(&none, &points);
+    let mid_ratio = median(lumas(&mid, &points).iter().zip(&ground).map(|(m, g)| m / g).collect());
+    let quarter_ratio = median(lumas(&quarter, &points).iter().zip(&ground).map(|(m, g)| m / g).collect());
+    println!("modulate: sRGB 0.5 leaves {mid_ratio:.3} of the ground, 0.25 leaves {quarter_ratio:.3}");
+    assert!((mid_ratio - 1.0).abs() < 0.04, "mid grey changes the ground: {mid_ratio}");
+    assert!((0.42..0.6).contains(&quarter_ratio), "quarter grey: {quarter_ratio}");
+
+    // Glow in the hill's shadow.
+    let dark = render(&[glowing(0.0, 0.0)], east);
+    let lit = render(&[glowing(1.0, 100.0)], east);
+    let ended = render(&[glowing(1.0, 0.05)], east);
+    let centre = pixel(&east, Vec3::new(glow_at.0, 10.0, glow_at.1)).expect("glow in view");
+    let sunny = pixel(&east, Vec3::new(112.0, 10.0, glow_at.1)).expect("sunlit ground in view");
+    let (d, l) = (luma(&dark, centre), luma(&lit, centre));
+    println!("glow: centre {d:.0} without, {l:.0} with (rgb {:?}); sunlit ground {:.0}", &lit[centre..centre + 3], luma(&dark, sunny));
+    assert!(luma(&dark, sunny) > d + 20.0, "the glowing decal is not in shadow");
+    assert!(l > d + 60.0 && lit[centre] > lit[centre + 2] + 30, "no glow: {d} -> {l}, {:?}", &lit[centre..centre + 3]);
+    // Away from the centre the glow is held back.
+    let rim = pixel(&east, Vec3::new(glow_at.0 + 5.0, 10.0, glow_at.1)).unwrap();
+    assert!(luma(&lit, rim) - luma(&dark, rim) < (l - d) * 0.25, "glow not held to the centre");
+    assert_eq!(dark.iter().zip(&ended).filter(|(a, b)| a != b).count(), 0, "a glow past its life still shows");
+    assert_clean(&gpu);
+}
