@@ -17,9 +17,12 @@ use ae_sensors::{Bits, SensorGrid};
 use ae_services::view::{SENSOR_CELL, ViewPipeline};
 use ae_view::{Observer, RowState, ViewTable};
 use ae_sim::capture::{Capture, CaptureSpec};
+use ae_sim::input::{Command, TickBundle};
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
+use ae_sdk::Entity;
+use ae_sdk::nav::MoveOrder;
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -33,7 +36,7 @@ const F_VY: usize = 3;
 const F_RADIUS: usize = 4;
 const F_PROFILE: usize = 5;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SimOptions {
     pub map: Map,
     pub map_cells: i32,
@@ -47,7 +50,75 @@ pub struct SimOptions {
     /// Draw the world as this allyteam sees it (needs teams): its view
     /// table and its vision on the terrain. `None`: everything.
     pub observer: Option<u32>,
+    /// `games/<game>`: `crossing` or `skirmish`.
+    pub game: String,
+    /// The game's content directory (its catalogue spawns its units).
+    pub content: Option<String>,
+    /// The game parameter, if not the game's default.
+    pub param: Option<u64>,
 }
+
+/// A player's action from the window, in world coordinates.
+#[derive(Clone, Copy, Debug)]
+pub enum UiInput {
+    /// Select the observer's own units within `radius` of `(x, y)`.
+    Select { x: f32, y: f32, radius: f32 },
+    /// Order the selection to `(x, y)`.
+    Move { x: f32, y: f32 },
+}
+
+/// What the window hands the sim thread.
+pub type UiQueue = Arc<Mutex<Vec<UiInput>>>;
+
+/// The slowest the client goes. There is no upper limit: `+` doubles the
+/// multiplier, and once the requested tick length is below what a tick
+/// costs, the sim thread simply runs flat out.
+pub const MIN_SPEED: f32 = 0.25;
+
+/// The sim's tick-rate multiplier, shared by the window (which changes it)
+/// and the sim thread (which schedules ticks by it).
+#[derive(Clone, Debug)]
+pub struct SimSpeed(Arc<AtomicU32>);
+
+impl Default for SimSpeed {
+    fn default() -> Self {
+        Self(Arc::new(AtomicU32::new(1.0f32.to_bits())))
+    }
+}
+
+impl SimSpeed {
+    pub fn current(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    fn set(&self, speed: f32) -> f32 {
+        self.0.store(speed.to_bits(), Ordering::Relaxed);
+        speed
+    }
+
+    /// Twice as fast, with no upper limit (the sim becomes compute-bound).
+    pub fn faster(&self) -> f32 {
+        self.set((self.current() * 2.0).min(f32::MAX))
+    }
+
+    /// Half as fast (clamped at [`MIN_SPEED`]).
+    pub fn slower(&self) -> f32 {
+        self.set((self.current() * 0.5).max(MIN_SPEED))
+    }
+
+    /// For the title bar: `0.5x`, `1x`, `16x`, `32x`, `64x`.
+    pub fn label(&self) -> String {
+        let speed = self.current();
+        if speed >= 1e9 {
+            format!("{speed:.0e}x")
+        } else {
+            format!("{speed}x")
+        }
+    }
+}
+
+/// Looks of the skirmish game's `Look.class` (own; enemies tinted).
+const SKIRMISH_LOOKS: [[f32; 3]; 4] = [[0.55, 0.62, 0.75], [0.95, 0.75, 0.10], [0.20, 0.75, 0.30], [0.75, 0.20, 0.85]];
 
 /// Radius drawn for a blip (its real one is line-of-sight only).
 const BLIP_RADIUS: f32 = 5.0;
@@ -55,7 +126,16 @@ const ENEMY_TINT: [f32; 3] = [0.95, 0.15, 0.1];
 
 impl SimOptions {
     fn plugin(&self) -> NavPlugin {
-        NavPlugin { teams: self.teams, ..NavPlugin::new(self.map, self.map_cells) }
+        NavPlugin { teams: if self.skirmish() { 0 } else { self.teams }, ..NavPlugin::new(self.map, self.map_cells) }
+    }
+
+    pub fn skirmish(&self) -> bool {
+        self.game == "skirmish"
+    }
+
+    /// Allyteams the views cover (the skirmish always has two).
+    pub fn allies(&self) -> u32 {
+        if self.skirmish() { 2 } else { self.teams }
     }
 
     /// The vision grid of an observer (the copy layer's sensor grid).
@@ -64,24 +144,34 @@ impl SimOptions {
         VisionGrid { width: g.width, height: g.height, cell_size: g.cell_size }
     }
 
-    /// The game parameter: unit count, quake tick (orders at tick 0).
-    fn param(&self) -> u64 {
-        self.units as u64 | (self.quake as u64) << 24
+    /// The game parameter: `--param`, or the game's default (crossing:
+    /// unit count and quake tick; skirmish: the map side and 8 tanks each).
+    pub fn param(&self) -> u64 {
+        self.param.unwrap_or(if self.skirmish() { (self.map_cells as u64 * 8) << 24 | 8 << 40 } else { self.units as u64 | (self.quake as u64) << 24 })
     }
 
     /// One look per movement class of the map (the crossing game declares
     /// the same classes): ships and hovercraft float. With an observer, the
     /// same classes again for enemies (tinted red), then one for blips
     /// (grey; their class is not known).
+    /// The own looks, then enemies tinted red, a grey blip and a white
+    /// selected look.
     pub fn classes(&self) -> Vec<UnitClass> {
-        const COLORS: [[f32; 3]; 5] = [[0.95, 0.75, 0.10], [0.80, 0.12, 0.08], [0.92, 0.92, 0.96], [0.10, 0.80, 0.90], [0.75, 0.20, 0.85]];
-        let own: Vec<UnitClass> = self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], floats: p.medium.on_surface() }).collect();
+        let own = self.own_classes();
         if self.observer.is_none() {
             return own;
         }
         let tint = |c: [f32; 3]| std::array::from_fn(|k| c[k] * 0.35 + ENEMY_TINT[k] * 0.65);
         let enemy = own.iter().map(|c| UnitClass { color: tint(c.color), floats: c.floats });
-        own.iter().copied().chain(enemy).chain([UnitClass { color: [0.6, 0.6, 0.6], floats: false }]).collect()
+        own.iter().copied().chain(enemy).chain([UnitClass { color: [0.6, 0.6, 0.6], floats: false }, UnitClass { color: [1.0, 1.0, 1.0], floats: false }]).collect()
+    }
+
+    fn own_classes(&self) -> Vec<UnitClass> {
+        const COLORS: [[f32; 3]; 5] = [[0.95, 0.75, 0.10], [0.80, 0.12, 0.08], [0.92, 0.92, 0.96], [0.10, 0.80, 0.90], [0.75, 0.20, 0.85]];
+        if self.skirmish() {
+            return SKIRMISH_LOOKS.iter().map(|&color| UnitClass { color, floats: false }).collect();
+        }
+        self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], floats: p.medium.on_surface() }).collect()
     }
 }
 
@@ -112,30 +202,43 @@ struct ViewState {
     /// Milliseconds of the last tick: capture + coverage, view build, rows
     /// + stream.
     ms: [f64; 3],
+    /// The player's selection (own units, by view id).
+    selected: std::collections::BTreeSet<u32>,
 }
 
 impl Sim {
     /// The world; landed ground changes go to `ground`, if given.
     pub fn new(o: &SimOptions, ground: Option<Arc<GroundFeed>>) -> Result<Self> {
-        let wasm = ae_sim::build::game("crossing").context("building games/crossing")?;
+        let wasm = ae_sim::build::game(&o.game).with_context(|| format!("building games/{}", o.game))?;
         let nav = NavPlugin { ground, ..o.plugin() };
         let spatial = SpatialPlugin::square(nav.extent(), 64.0);
         let cfg = RuntimeConfig { max_workers: o.workers, ..RuntimeConfig::default() };
-        let rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
+        let mut plugins: Vec<Arc<dyn ae_sim::host::HostPlugin>> = vec![Arc::new(nav), Arc::new(spatial)];
+        if let Some(dir) = &o.content {
+            let mut vfs = ae_vfs::Vfs::new();
+            vfs.mount_dir(dir)?;
+            let schema = ae_sim::schema::Schema::from_module(&wasm)?;
+            let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).with_context(|| format!("the catalogue in {dir}"))?;
+            plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(Arc::new(catalog))));
+        }
+        let rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
         let world = rt.world_for(o.param(), o.workers)?;
+        // The raw capture (no observer) draws units with a nav agent.
         let spec = CaptureSpec::new(&rt.schema, &FIELDS)?;
+        // Skirmish units draw by their `Look`, crossing units by class.
+        let (extra, class_field) = if o.skirmish() { ("Look", ("Look", "class")) } else { ("NavAgent", ("NavAgent", "profile")) };
         let view = match o.observer {
             Some(ally) => {
-                anyhow::ensure!(ally < o.teams, "observer {ally} of {} teams", o.teams);
-                let pipeline = ViewPipeline::new(&rt.schema, &["NavAgent"], o.teams as usize, o.plugin().extent())?;
+                anyhow::ensure!(ally < o.allies(), "observer {ally} of {} allyteams", o.allies());
+                let pipeline = ViewPipeline::new(&rt.schema, &[extra], o.allies() as usize, o.plugin().extent())?;
                 let field = |c: &str, f: &str| pipeline.field(c, f).with_context(|| format!("`{c}.{f}` is not viewed"));
-                let fields = [field("Body", "x")?, field("Body", "y")?, field("Body", "vx")?, field("Body", "vy")?, field("Body", "radius")?, field("NavAgent", "profile")?];
+                let fields = [field("Body", "x")?, field("Body", "y")?, field("Body", "vx")?, field("Body", "vy")?, field("Body", "radius")?, field(class_field.0, class_field.1)?];
                 let grid = pipeline.coverage.grid;
-                Some(ViewState { pipeline, observer: [Observer::new(ally, 0x0B5E_4E00 ^ ally as u64)], explored: Bits::new(grid.width, grid.height), vision: None, table: ViewTable::default(), fields, ms: [0.0; 3] })
+                Some(ViewState { pipeline, observer: [Observer::new(ally, 0x0B5E_4E00 ^ ally as u64)], explored: Bits::new(grid.width, grid.height), vision: None, table: ViewTable::default(), fields, ms: [0.0; 3], selected: Default::default() })
             }
             None => None,
         };
-        let classes = o.plugin().map_profiles().len() as u32;
+        let classes = o.own_classes().len() as u32;
         Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes })
     }
 
@@ -158,7 +261,42 @@ impl Sim {
     }
 
     pub fn tick(&mut self) -> Result<()> {
-        self.rt.tick(&mut self.world, self.workers)?;
+        self.tick_with(&[])
+    }
+
+    /// One tick with the player's actions since the last: a selection
+    /// changes what is selected; a move becomes one `MoveOrder` command per
+    /// selected unit still in view (view ids resolved to entities by the
+    /// observer, here in trusted code), all in one group.
+    pub fn tick_with(&mut self, inputs: &[UiInput]) -> Result<()> {
+        let mut bundle = TickBundle::new(self.world.tick);
+        if let Some(v) = self.view.as_mut() {
+            let ally = v.observer[0].ally;
+            for input in inputs {
+                match *input {
+                    UiInput::Select { x, y, radius } => {
+                        let t = &v.table;
+                        let [fx, fy] = [v.fields[0], v.fields[1]].map(|f| t.fields.iter().position(|&c| c == f).unwrap());
+                        v.selected = (0..t.len())
+                            .filter(|&r| t.state[r] == RowState::Own && (f32::from_bits(t.columns[fx][r]) - x).hypot(f32::from_bits(t.columns[fy][r]) - y) <= radius)
+                            .map(|r| t.ids[r])
+                            .collect();
+                        eprintln!("selected {} units", v.selected.len());
+                    }
+                    UiInput::Move { x, y } => {
+                        let group = 1u64 << 43 | self.world.tick << 8 | ally as u64;
+                        for &id in &v.selected {
+                            if let Some(e) = v.observer[0].entity_of(id) {
+                                let order = MoveOrder::move_to(Entity(e), x, y, group);
+                                let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
+                                bundle.commands.push(Command { player: ally, stream: ae_abi::engine::MOVE_ORDER, bytes });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.rt.tick_with(&mut self.world, self.workers, &bundle)?;
         Ok(())
     }
 
@@ -194,6 +332,7 @@ impl Sim {
                 let shown = |c: usize| t.mask[r] & (1 << c) != 0;
                 let word = |c: usize| t.columns[c][r];
                 let class = match t.state[r] {
+                    RowState::Own if v.selected.contains(&t.ids[r]) => 2 * self.classes + 1,
                     RowState::Own => word(fp),
                     _ if shown(fp) => self.classes + word(fp),
                     _ => 2 * self.classes,
@@ -308,6 +447,9 @@ pub struct SimStats {
     /// Mean over the last report interval.
     pub tick_ms: f64,
     pub capture_ms: f64,
+    /// Achieved tick rate over the last report interval, as a multiple of
+    /// the nav rate (what the machine can actually run).
+    pub actual_speed: f32,
     /// Ticks run late (the sim could not keep the tick rate).
     pub late: u64,
     pub ready: bool,
@@ -325,16 +467,16 @@ pub struct SimThread {
 }
 
 impl SimThread {
-    /// Build the world and tick it at the nav rate, publishing units to
-    /// `feed` and landed ground changes to `ground`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>) -> Self {
+    /// Build the world and tick it at the nav rate times `speed`,
+    /// publishing units to `feed` and landed ground changes to `ground`.
+    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, ui: UiQueue, speed: SimSpeed) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
         let handle = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let result = run(o, feed, ground, vision, &stop2, &stats2);
+                let result = run(o, feed, ground, vision, ui, speed, &stop2, &stats2);
                 if let Err(error) = &result {
                     eprintln!("sim failed: {error:#} (--units 0 runs without the sim)");
                     stats2.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
@@ -358,42 +500,58 @@ impl SimThread {
     }
 }
 
-fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
     let started = Instant::now();
     let mut sim = Sim::new(&o, Some(ground))?;
     if let Some(feed) = vision {
         sim = sim.with_vision(feed);
     }
-    eprintln!("sim: crossing game, {} units, {} workers, world built in {:.2} s", o.units, o.workers, started.elapsed().as_secs_f32());
-    let period = Duration::from_secs_f32(TICK_SECONDS);
+    eprintln!("sim: {} game, {} workers, world built in {:.2} s", o.game, o.workers, started.elapsed().as_secs_f32());
+    let mut rate = speed.current();
+    let mut period = Duration::from_secs_f32(TICK_SECONDS / rate);
     let mut next = Instant::now();
     let (mut tick_sum, mut capture_sum, mut count) = (0.0, 0.0, 0u32);
+    let mut report_started = Instant::now();
     let mut late = 0;
     while !stop.load(Ordering::Relaxed) {
+        let new_rate = speed.current();
+        if new_rate != rate {
+            // Schedule from now: the old period no longer applies.
+            rate = new_rate;
+            period = Duration::from_secs_f32(TICK_SECONDS / rate);
+            next = Instant::now();
+        }
         let t0 = Instant::now();
-        sim.tick()?;
+        let inputs = std::mem::take(&mut *ui.lock().unwrap_or_else(|p| p.into_inner()));
+        sim.tick_with(&inputs)?;
         let t1 = Instant::now();
-        let stream = sim.stream(TICK_SECONDS)?;
+        // Interpolate positions over the tick length the viewer actually sees.
+        let stream = sim.stream(TICK_SECONDS / rate)?;
         let (tick, units) = (stream.tick, stream.len());
         let view = sim.view_counts();
         feed.publish(Arc::new(stream));
         tick_sum += (t1 - t0).as_secs_f64() * 1e3;
         capture_sum += t1.elapsed().as_secs_f64() * 1e3;
         count += 1;
-        if count == 30 {
+        let elapsed = report_started.elapsed().as_secs_f32();
+        if count == 30 || (count > 0 && elapsed >= 0.5) {
+            let actual_speed = if elapsed > 0.0 { count as f32 * TICK_SECONDS / elapsed } else { 0.0 };
             let mut s = stats.lock().unwrap_or_else(|p| p.into_inner());
-            *s = SimStats { tick, units, tick_ms: tick_sum / count as f64, capture_ms: capture_sum / count as f64, late, ready: true, failed: false, view };
+            *s = SimStats { tick, units, tick_ms: tick_sum / count as f64, capture_ms: capture_sum / count as f64, actual_speed, late, ready: true, failed: false, view };
             (tick_sum, capture_sum, count) = (0.0, 0.0, 0);
+            report_started = Instant::now();
         }
-        next += period;
-        let now = Instant::now();
-        if now < next {
-            std::thread::sleep(next - now);
-        } else {
-            late += 1;
-            if now - next > period * 8 {
-                // Too far behind to catch up: drop the backlog.
-                next = now;
+        if !period.is_zero() {
+            next += period;
+            let now = Instant::now();
+            if now < next {
+                std::thread::sleep(next - now);
+            } else {
+                late += 1;
+                if now - next > period * 8 {
+                    // Too far behind to catch up: drop the backlog.
+                    next = now;
+                }
             }
         }
     }
@@ -443,5 +601,29 @@ mod tests {
         // 9 left.
         let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), now, 0.1);
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+    }
+
+    #[test]
+    fn speed_doubles_without_a_ceiling() {
+        let speed = SimSpeed::default();
+        assert_eq!(speed.current(), 1.0);
+        assert_eq!(speed.faster(), 2.0);
+        assert_eq!(speed.faster(), 4.0);
+        assert_eq!(speed.slower(), 2.0);
+        assert_eq!(speed.faster(), 4.0);
+        assert_eq!(speed.faster(), 8.0);
+        assert_eq!(speed.faster(), 16.0);
+        assert_eq!(speed.faster(), 32.0);
+        assert_eq!(speed.faster(), 64.0);
+        assert_eq!(speed.label(), "64x");
+        for _ in 0..20 {
+            speed.faster();
+        }
+        assert_eq!(speed.current(), 64.0 * 2f32.powi(20), "no top step");
+        for _ in 0..60 {
+            speed.slower();
+        }
+        assert_eq!(speed.current(), MIN_SPEED, "clamped at the bottom");
+        assert_eq!(speed.slower(), MIN_SPEED);
     }
 }

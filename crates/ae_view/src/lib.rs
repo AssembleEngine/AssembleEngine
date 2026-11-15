@@ -225,6 +225,14 @@ impl Observer {
         Self { ally, seed, next_id: 1, known: Vec::new(), last_seen: Vec::new(), ghosts: Vec::new() }
     }
 
+    /// The sim entity behind view id `id`, while it is in view (not for
+    /// ghosts). For trusted engine code turning a player's choice (made on
+    /// view ids) into commands, which name sim entities; never hand it to
+    /// untrusted code.
+    pub fn entity_of(&self, id: ViewId) -> Option<u64> {
+        self.known.iter().find(|(_, v)| *v == id).map(|(e, _)| *e)
+    }
+
     /// The wobble of a blip: (dx, dy) world units.
     pub fn wobble(&self, spec: &ViewSpec, id: ViewId, tick: u64) -> (f32, f32) {
         let period = spec.wobble_ticks as u64;

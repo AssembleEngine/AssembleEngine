@@ -692,8 +692,10 @@ the frame graph:
   heavy 95, ship 60), so render assumes 1 world unit = 1 m (factor 0.1, `--relief` on top). Under that
   assumption a scout's limit is a 59° step, a heavy's 50°. To settle when units get real scale.
 - `ae-client` shows it: `--map water|land|generated|demo`, `--map-cells`, `--relief`, `--camera`,
-  RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` detail, T wireframe, L LOD colours,
-  G fog, C freeze LOD, P print camera); `--capture FILE.ppm` renders 1280x720 offscreen without a
+  RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` sim speed, doubling with no
+  upper limit (compute-bound), `[`/`]` detail, T wireframe, L LOD colours, G fog, C freeze LOD,
+  P print camera); `--capture FILE.ppm` renders
+  1280x720 offscreen without a
   window and prints GPU time per pass. The SDL window now reports wheel, drag, toggle keys and held
   movement keys (ecs_sim's F "full frame" key is gone).
 - Captures are `R8G8B8A8_SRGB` like the swapchain, so they show what the window shows; the

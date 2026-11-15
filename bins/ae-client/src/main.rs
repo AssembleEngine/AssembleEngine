@@ -32,9 +32,11 @@
 //! built.
 //!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
-//! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` more or less
-//! detail, T wireframe, L colour by LOD depth, G fog, C freeze the LOD,
-//! P print the camera, V toggle render module flag bit 0, Esc quits.
+//! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
+//! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
+//! terrain detail, T wireframe, L colour by LOD depth, G fog, C freeze the
+//! LOD, P print the camera, V toggle render module flag bit 0, M tileset,
+//! B blend weights, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -42,6 +44,11 @@
 //!
 //! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
 //! (see `bench.rs`; `--bench list` names them).
+//!
+//! `--game skirmish` plays the skirmish game (`games/skirmish`, its content
+//! from `--content`, default `games/skirmish/content`; `--param` overrides
+//! the game parameter) as allyteam 0: left click selects your units near
+//! the clicked ground (white), right click orders them there.
 //!
 //! `--teams N` splits the crossing maps' units into N allyteams (with
 //! sensors); `--observer K` (default 0 with teams; `all` for everything)
@@ -119,15 +126,19 @@ struct Options {
     teams: u32,
     /// The allyteam whose view is drawn (`None`: everything).
     observer: Option<u32>,
+    /// `crossing` (default) or `skirmish`.
+    game: String,
+    content: Option<String>,
+    param: Option<u64>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -179,6 +190,9 @@ fn parse() -> Result<Options> {
             "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
             "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
+            "--game" => o.game = value("--game", &mut args)?,
+            "--content" => o.content = Some(value("--content", &mut args)?),
+            "--param" => o.param = Some(value("--param", &mut args)?.parse().context("--param")?),
             "--observer" => {
                 observer_given = true;
                 o.observer = match value("--observer", &mut args)?.as_str() {
@@ -194,6 +208,12 @@ fn parse() -> Result<Options> {
                 std::process::exit(0);
             }
             other => bail!("unknown argument {other:?}\n{USAGE}"),
+        }
+    }
+    if o.game == "skirmish" {
+        o.teams = o.teams.max(2);
+        if o.content.is_none() {
+            o.content = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/skirmish/content").into());
         }
     }
     if o.teams > 0 && !observer_given {
@@ -221,7 +241,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Land => Map::LandCrossing,
         MapKind::Generated | MapKind::Demo => return None,
     };
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer })
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), content: o.content.clone(), param: o.param })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
@@ -324,7 +344,7 @@ fn exercise(window: &mut SdlWindow, started: Instant, step: &mut usize) {
 }
 
 /// Camera and switches from this frame's input.
-fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mut TerrainView, source: &TerrainSource, dt: f32) {
+fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mut TerrainView, source: &TerrainSource, dt: f32, sim_speed: &sim::SimSpeed) {
     let held = window.held();
     let camera = &mut view.camera;
     let speed = camera.distance * if held.fast { 2.5 } else { 0.9 } * dt;
@@ -338,9 +358,17 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     camera.pitch = (camera.pitch + (held.tilt_up as i32 - held.tilt_down as i32) as f32 * 1.0 * dt + events.drag.1 * 0.004).clamp(0.08, 1.5);
     camera.distance = (camera.distance * 0.88f32.powf(events.wheel)).clamp(20.0, w.max(h) * 2.0);
     if events.pressed & keys::PLUS != 0 {
-        view.tau = (view.tau / 1.5).max(0.25);
+        sim_speed.faster();
+        println!("sim speed {}", sim_speed.label());
     }
     if events.pressed & keys::MINUS != 0 {
+        sim_speed.slower();
+        println!("sim speed {}", sim_speed.label());
+    }
+    if events.pressed & keys::LBRACKET != 0 {
+        view.tau = (view.tau / 1.5).max(0.25);
+    }
+    if events.pressed & keys::RBRACKET != 0 {
         view.tau = (view.tau * 1.5).min(64.0);
     }
     if events.pressed & keys::T != 0 {
@@ -513,6 +541,8 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut ground_thread = None;
     let mut edits = None;
     let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
+    let ui: sim::UiQueue = Arc::default();
+    let sim_speed = sim::SimSpeed::default();
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
@@ -528,7 +558,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 let shown = nav.clone().context("units need a crossing map")?;
                 ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
                 edits = Some(app.terrain_edits());
-                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision));
+                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, ui.clone(), sim_speed.clone()));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
@@ -553,6 +583,16 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut module_errors = 0;
     loop {
         let events = window.pump();
+        // Clicks: left selects own units near the ground point, right
+        // orders the selection there.
+        if let (Some((view, _)), Some(source)) = (&terrain, &source) {
+            let view = *view.lock().unwrap_or_else(|p| p.into_inner());
+            for click in events.clicks.iter().flatten() {
+                let Some(at) = ground_at(&view, source, window.pixel_size(), click.x, click.y) else { continue };
+                let input = if click.button == ae_render::window::Click::LEFT { sim::UiInput::Select { x: at.x, y: at.y, radius: 120.0 } } else { sim::UiInput::Move { x: at.x, y: at.y } };
+                ui.lock().unwrap_or_else(|p| p.into_inner()).push(input);
+            }
+        }
         thread.handle_events(&events);
         if events.quit || !thread.running() || o.seconds.is_some_and(|s| started.elapsed().as_secs_f32() >= s) {
             break;
@@ -561,7 +601,7 @@ fn run(o: Options) -> Result<ExitCode> {
         last = Instant::now();
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
-            steer(&window, &events, &mut view, source, dt);
+            steer(&window, &events, &mut view, source, dt, &sim_speed);
         }
         if o.exercise {
             exercise(&mut window, started, &mut step);
@@ -585,7 +625,7 @@ fn run(o: Options) -> Result<ExitCode> {
                         " | sim failed (see the terminal)".into()
                     } else if s.ready {
                         let view = s.view.map(|[own, seen, blip, _]| format!(", observer {}: {own} own, {seen} seen, {blip} blips", o.observer.unwrap_or(0))).unwrap_or_default();
-                        format!(" | {} units, tick {}, {:.1} ms/tick{view}", s.units, s.tick, s.tick_ms)
+                        format!(" | {} units, tick {}, {:.1} ms/tick, {:.1}x({}) speed{view}", s.units, s.tick, s.tick_ms, s.actual_speed, sim_speed.label())
                     } else {
                         " | building the world".into()
                     }
@@ -652,6 +692,41 @@ fn run(o: Options) -> Result<ExitCode> {
         bail!("render thread: {error}");
     }
     Ok(if stats.validation_errors + stats.validation_warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+}
+
+/// The terrain point under a click (`x`, `y` as fractions of the window):
+/// the camera ray through it, marched over the heightmap, the crossing
+/// bisected. `None` if the ray misses the map.
+fn ground_at(view: &TerrainView, source: &TerrainSource, (w, h): (u32, u32), x: f32, y: f32) -> Option<Vec2> {
+    let mut camera = view.camera;
+    camera.ground = source.height_at(camera.target);
+    let eye = camera.eye(|p| source.height_at(p));
+    let inverse = (camera.proj(w as f32 / h.max(1) as f32) * camera.view(eye)).inverse();
+    let at = |z: f32| {
+        let p = inverse * glam::Vec4::new(x * 2.0 - 1.0, y * 2.0 - 1.0, z, 1.0);
+        p.truncate() / p.w
+    };
+    // Reverse-Z: depth 1 is the near plane.
+    let (near, mid) = (at(1.0), at(0.5));
+    let dir = (mid - near).normalize();
+    let (ew, eh) = source.info.extent();
+    let above = |p: glam::Vec3| p.y > source.height_at(Vec2::new(p.x, p.z));
+    let (mut t, mut prev) = (0.0f32, 0.0f32);
+    while t < 4.0 * ew.max(eh) {
+        let p = near + dir * t;
+        if !above(p) {
+            let (mut lo, mut hi) = (prev, t);
+            for _ in 0..24 {
+                let m = 0.5 * (lo + hi);
+                if above(near + dir * m) { lo = m } else { hi = m }
+            }
+            let hit = near + dir * hi;
+            return (hit.x >= 0.0 && hit.z >= 0.0 && hit.x <= ew && hit.z <= eh).then_some(Vec2::new(hit.x, hit.z));
+        }
+        prev = t;
+        t += (t * 0.01).max(2.0);
+    }
+    None
 }
 
 fn validation_text(on: bool, errors: u64, warnings: u64) -> String {

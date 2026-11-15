@@ -43,6 +43,23 @@ pub struct WindowEvents {
     pub drag: (f32, f32),
     /// Keys pressed in this batch (`keys::*` bits).
     pub pressed: u32,
+    /// Mouse clicks (released within a few pixels of where pressed, so
+    /// not a drag), in order; at most four per batch.
+    pub clicks: [Option<Click>; 4],
+}
+
+/// A click: the button (`LEFT`, `RIGHT`, ...) and where, as fractions of
+/// the window (0..1 from the top-left), independent of pixel density.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Click {
+    pub button: u8,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Click {
+    pub const LEFT: u8 = 1;
+    pub const RIGHT: u8 = 3;
 }
 
 /// Toggle keys reported in [`WindowEvents::pressed`].
@@ -57,6 +74,8 @@ pub mod keys {
     pub const V: u32 = 1 << 7;
     pub const M: u32 = 1 << 8;
     pub const B: u32 = 1 << 9;
+    pub const LBRACKET: u32 = 1 << 10;
+    pub const RBRACKET: u32 = 1 << 11;
 }
 
 /// Movement keys currently held (WASD or arrows pan, Q/E orbit, R/F tilt,
@@ -80,6 +99,8 @@ pub struct SdlWindow {
     window: *mut sdl::SDL_Window,
     /// Print window events (AE_RENDER_TRACE_EVENTS=1).
     trace: bool,
+    /// Where each mouse button went down (to tell clicks from drags).
+    pressed_at: [Option<(f32, f32)>; 8],
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
@@ -104,6 +125,7 @@ impl SdlWindow {
             Ok(Self {
                 window,
                 trace: std::env::var("AE_RENDER_TRACE_EVENTS").is_ok_and(|raw| raw.trim() == "1"),
+                pressed_at: [None; 8],
                 _not_send: std::marker::PhantomData,
             })
         }
@@ -183,8 +205,27 @@ impl SdlWindow {
                         sdl::SDLK_B => keys::B,
                         sdl::SDLK_EQUALS | sdl::SDLK_PLUS | sdl::SDLK_KP_PLUS => keys::PLUS,
                         sdl::SDLK_MINUS | sdl::SDLK_KP_MINUS => keys::MINUS,
+                        sdl::SDLK_LEFTBRACKET => keys::LBRACKET,
+                        sdl::SDLK_RIGHTBRACKET => keys::RBRACKET,
                         _ => 0,
                     };
+                } else if kind == sdl::SDL_EVENT_MOUSE_BUTTON_DOWN {
+                    let b = event.button.button as usize;
+                    if b < self.pressed_at.len() {
+                        self.pressed_at[b] = Some((event.button.x, event.button.y));
+                    }
+                } else if kind == sdl::SDL_EVENT_MOUSE_BUTTON_UP {
+                    let b = event.button.button as usize;
+                    if let Some(Some((x0, y0))) = self.pressed_at.get_mut(b).map(Option::take) {
+                        let (x, y) = (event.button.x, event.button.y);
+                        if (x - x0).abs() + (y - y0).abs() < 6.0 {
+                            let (mut w, mut h) = (0, 0);
+                            sdl::SDL_GetWindowSize(self.window, &mut w, &mut h);
+                            if let Some(slot) = events.clicks.iter_mut().find(|c| c.is_none()) {
+                                *slot = Some(Click { button: b as u8, x: x / w.max(1) as f32, y: y / h.max(1) as f32 });
+                            }
+                        }
+                    }
                 } else if kind == sdl::SDL_EVENT_MOUSE_WHEEL {
                     events.wheel += event.wheel.y;
                 } else if kind == sdl::SDL_EVENT_MOUSE_MOTION {

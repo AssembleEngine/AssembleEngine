@@ -15,12 +15,16 @@ dependencies = [
 name = "ae-client"
 version = "0.0.1"
 dependencies = [
+ "ae-sdk",
+ "ae_abi",
  "ae_bench",
+ "ae_catalog",
  "ae_nav",
  "ae_render",
  "ae_sensors",
  "ae_services",
  "ae_sim",
+ "ae_vfs",
  "ae_view",
  "anyhow",
  "ash",

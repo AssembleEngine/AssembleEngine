@@ -21,6 +21,9 @@
           "hp": 2000,
           "max": 2000
         },
+        "Look": {
+          "class": 0
+        },
         "Sensor": {
           "los": 500.0,
           "radar": 1500.0
@@ -49,6 +52,9 @@
         "Health": {
           "hp": 300,
           "max": 300
+        },
+        "Look": {
+          "class": 1
         },
         "NavAgent": {
           "max_speed": 30.0,

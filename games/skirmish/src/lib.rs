@@ -50,6 +50,17 @@ pub struct Health {
     pub max: u32,
 }
 
+/// How clients draw the unit (an index into their looks; content data).
+#[repr(C)]
+#[derive(Clone, Copy, Component)]
+pub struct Look {
+    #[field(view = "los")]
+    pub class: u32,
+}
+
+// Only content sets it; no system names it.
+ae_sdk::declare!(Look);
+
 /// Damage taken off every hit (a hit does at least 1).
 #[repr(C)]
 #[derive(Clone, Copy, Component)]
