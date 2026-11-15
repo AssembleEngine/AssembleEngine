@@ -1381,6 +1381,37 @@ Archives and packages (`ae_vfs`):
 - `ae-tool pack DIR OUT` writes a package directory as an archive and prints its content hash;
   `ae-tool unpack-list FILE` reads and checks every entry.
 
+Map packages (`ae_map`) and games from archives:
+- A map package (kind `map`) is `map.json` (version, side in cells, terrain seed, water level in
+  dm or none, a terrain-type table of name / cost / solid / material, start points, description) and
+  two PNGs an image editor opens: `height.png` (16-bit greyscale, ground height in dm, 0..=2400,
+  before water) and `types.png` (8-bit, indices into the type table). Colour and normal detail stay
+  in the shared tilesets. Loading checks sizes, bit depths, height range, type indices, materials and
+  unknown keys, naming the file and cell. `GameMap::to_terrain` floods water last, as the generators
+  do; `from_terrain` makes one type per distinct cost / solid / material. Both crossing maps go
+  through export, a zip and loading bit-identical (terrain digests equal), and the files are
+  deterministic.
+- `Map::Loaded` + `NavPlugin::loaded(terrain)`: the nav service on a loaded terrain (land movement
+  classes; `scenario::terrain_plan_with`, no units of the map's own unless asked for).
+- `ae-tool map-export land|water CELLS DIR [NAME]` writes a generated map as a map package;
+  `games/skirmish/maps/crossing` (package `skirmish-crossing`, 256 cells, 6 types, 20 KB) is the
+  land map so exported. `ae-tool pack DIR OUT --module GAME` adds the built sim module as
+  `module.wasm`.
+- `ae-headless` builds every run in one place (`setup.rs`): a mount stack from `--package SPEC|PATH`
+  (repeatable, each with its dependencies from `--packages DIR` libraries) and `--content DIR`; its
+  `module.wasm` is the sim module (else `--game`), its `defs/` the catalogue, its `map.json` the map
+  (else `--nav`). Headers add `packages = name@version,...`; a replay of a package run finds them
+  in `--packages` by name (without one it says so). Headers of runs without packages are unchanged.
+- Test `ae-headless/tests/packages.rs`: the skirmish's game package (content + `module.wasm`) and
+  the map package, zipped into a library, play a 1,500-tick bot match with no `--game` and no
+  `--nav` and end at the same digest as the source path (game crate, content directory, generated
+  map); the recording replays from the library by name. It also checks the committed map package
+  still equals the generated map. (By hand: the 6,400-tick match from archives ends at the same
+  `ffc0d8ea4ea2f386` as from source.)
+- Not done: the game still takes the map side and starting tanks from the game parameter
+  (`--param-hi`), not from the map's start points or a match file; the client does not load
+  packages yet; no resource placement in maps; no import settings or hash-keyed cache.
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

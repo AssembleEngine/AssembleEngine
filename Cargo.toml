@@ -19,6 +19,7 @@ ae_net = { path = "crates/ae_net" }
 ae_vfs = { path = "crates/ae_vfs" }
 ae_catalog = { path = "crates/ae_catalog" }
 ae_bot = { path = "crates/ae_bot" }
+ae_map = { path = "crates/ae_map" }
 ae_render_abi = { path = "crates/ae_render_abi" }
 ae_nav = { path = "crates/ae_nav" }
 ae_ecs = { path = "crates/ae_ecs" }

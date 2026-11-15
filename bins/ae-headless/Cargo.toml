@@ -21,5 +21,12 @@ ae_net.workspace = true
 ae_vfs.workspace = true
 ae_catalog.workspace = true
 ae_bot.workspace = true
+ae_map.workspace = true
 ae_abi.workspace = true
 ae-sdk = { workspace = true, features = ["nav"] }
+
+[dev-dependencies]
+ae_vfs.workspace = true
+ae_map.workspace = true
+ae_nav.workspace = true
+ae_sim.workspace = true

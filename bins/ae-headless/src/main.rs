@@ -30,7 +30,10 @@
 //!
 //! `--content DIR` mounts a game's content: its catalogue (`DIR/defs/`)
 //! spawns the game's `SpawnRequest`s, and its hash goes into replay and
-//! lockstep headers.
+//! lockstep headers. `--package SPEC|PATH` (with `--packages DIR`
+//! libraries) mounts packages and their dependencies: a package's
+//! `module.wasm` is the game and a map package's `map.json` the map, so
+//! `--game` and `--nav` are not needed (see `setup.rs`).
 //!
 //! `--connect ADDR --player P` plays in lockstep with `ae-relay` (see
 //! `client.rs`).
@@ -41,19 +44,17 @@
 
 mod client;
 mod replay;
+mod setup;
 
 use ae_nav::scenario::Scenario;
 use ae_services::nav::{Map, NavPlugin};
-use ae_services::spatial::SpatialPlugin;
-use ae_sim::host::HostPlugin;
 use ae_sim::runtime::{Runtime, RuntimeConfig, TickStats};
-use std::sync::Arc;
 use ae_wasm::Metering;
 use anyhow::{Context, Result, bail};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]
+const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm|--package SPEC|PATH... [--packages DIR] [--content DIR] [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]
        ae-headless --game NAME --nav water ... --record FILE.aerep [--script orders|bot] [--checkpoint-every N]
        ae-headless --game NAME --replay FILE.aerep [--verify] [--workers N]
        ae-headless --game NAME --replay FILE.aerep --bisect --inject TICK:Component.field:ROW
@@ -97,7 +98,11 @@ struct Opts {
     inject: Option<replay::Inject>,
     connect: Option<String>,
     /// A content directory: its catalogue spawns defs (`SpawnRequest`).
-    content: Option<String>,
+    /// `--content DIR` (repeatable): directories mounted over the packages.
+    content: Vec<String>,
+    /// `--package SPEC|PATH` (repeatable) and `--packages DIR` (libraries).
+    packages: Vec<String>,
+    package_dirs: Vec<String>,
     player: u32,
     latency: u64,
     jitter: u64,
@@ -106,7 +111,7 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: Script::None, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: Script::None, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: Vec::new(), packages: Vec::new(), package_dirs: Vec::new(), player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -141,7 +146,9 @@ fn parse() -> Result<Opts> {
             "--verify" => o.verify = true,
             "--bisect" => o.bisect = true,
             "--connect" => o.connect = Some(value()?),
-            "--content" => o.content = Some(value()?),
+            "--content" => o.content.push(value()?),
+            "--package" => o.packages.push(value()?),
+            "--packages" => o.package_dirs.push(value()?),
             "--player" => o.player = value()?.parse()?,
             "--latency" => o.latency = value()?.parse()?,
             "--jitter" => o.jitter = value()?.parse()?,
@@ -159,7 +166,7 @@ fn parse() -> Result<Opts> {
             _ => bail!("unknown argument {a}\n{USAGE}"),
         }
     }
-    if o.game.is_empty() || o.workers.is_empty() || o.workers.contains(&0) || (o.compare && o.nav.is_none()) || o.observers > o.teams || (o.teams > 0 && o.nav.is_none()) {
+    if (o.game.is_empty() && o.packages.is_empty() && o.replay.is_none()) || o.workers.is_empty() || o.workers.contains(&0) || (o.compare && o.nav.is_none()) || o.observers > o.teams || (o.teams > 0 && o.nav.is_none() && o.packages.is_empty() && o.content.is_empty()) {
         bail!("{USAGE}");
     }
     Ok(o)
@@ -200,7 +207,8 @@ fn run() -> Result<bool> {
         return replay::replay(&o, path, o.verify);
     }
     ae_profile::start();
-    let wasm = ae_sim::build::game(&o.game)?;
+    let setup = setup::Setup::new(&o, None)?;
+    let wasm = &setup.wasm;
     let max = *o.workers.iter().max().unwrap();
     let cfg = RuntimeConfig {
         max_workers: max,
@@ -209,19 +217,15 @@ fn run() -> Result<bool> {
         overlap_hosts: o.overlap,
         ..RuntimeConfig::default()
     };
-    let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
-    let mut extent = 0.0;
-    if let Some(c) = replay::content(&o, &wasm)? {
-        println!("content {}: {} defs, hash {:032x}", o.content.as_deref().unwrap_or(""), c.catalog.defs.len(), c.hash);
-        plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(c.catalog.clone())));
+    if let Some(c) = &setup.content {
+        let packages = if c.packages.is_empty() { String::new() } else { format!(" (packages {})", c.packages.join(", ")) };
+        println!("content{packages}: {} defs, hash {:032x}", c.catalog.as_ref().map_or(0, |c| c.defs.len()), c.hash);
     }
-    if let Some(map) = o.nav {
-        let nav = NavPlugin { teams: o.teams, ..NavPlugin::new(map, o.map_cells) };
-        extent = nav.extent();
-        plugins.push(Arc::new(nav.clone()));
-        plugins.push(Arc::new(SpatialPlugin::square(nav.extent(), 64.0)));
+    if let Some(n) = setup.nav.as_ref().filter(|n| n.map == Map::Loaded) {
+        println!("map from a package: {} cells a side", n.map_cells);
     }
-    let mut rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
+    let extent = setup.nav.as_ref().map_or(0.0, |n| n.extent());
+    let mut rt = Runtime::with_hosts(wasm, cfg, setup.plugins())?;
     println!(
         "game {}: {} components, {} systems in {} layers: {}",
         o.game,
@@ -235,7 +239,7 @@ fn run() -> Result<bool> {
     for &w in &o.workers {
         let built = Instant::now();
         let mut world = rt.world_for(o.units | (o.param_hi as u64) << 32, w)?;
-        if o.nav.is_some() {
+        if setup.nav.is_some() {
             println!("  {w}w: world with nav service built in {:.2} s", built.elapsed().as_secs_f64());
         }
         let mut totals = TickStats::default();

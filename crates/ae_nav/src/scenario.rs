@@ -158,6 +158,16 @@ pub fn land_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profi
     (nav, Plan { units: specs, orders: vec![(1, all, goal)] })
 }
 
+/// A plan on a given terrain (a loaded map): `units` land units on the
+/// land map's spawn plaza (none for a game that spawns its own), no orders.
+pub fn terrain_plan_with(units: u32, terrain: Terrain, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
+    let cfg = NavConfig { seed: terrain.seed, ..config(units, terrain.geom.cells_x, workers) };
+    #[allow(unused_mut)]
+    let mut nav = NavService::with_terrain(cfg, terrain, profiles);
+    let specs = if units == 0 { Vec::new() } else { nav.spawn_plan() };
+    (nav, Plan { units: specs, orders: Vec::new() })
+}
+
 /// The terrain of [`land_crossing_plan`] alone (no hierarchy, no units),
 /// for viewers. Equal to the service's terrain for any unit count.
 pub fn land_crossing_terrain(map_cells: i32) -> Terrain {

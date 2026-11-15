@@ -13,7 +13,8 @@
 //! instead, sending what it decides the same way.
 
 use super::{Opts, Script};
-use super::replay::{content, header, orders, runtime};
+use super::replay::orders;
+use super::setup::Setup;
 use ae_net::{Emulator, Packet, micros};
 use ae_sim::input::{Command, TickBundle};
 use anyhow::{Context, Result};
@@ -38,13 +39,11 @@ fn schedule(tick: u64, delay: u64, last: Option<u64>) -> u64 {
 
 pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let relay: SocketAddr = relay.parse().with_context(|| format!("relay address {relay}"))?;
-    let wasm = ae_sim::build::game(&o.game)?;
-    let nav = o.nav.map(|m| (m, o.map_cells, o.teams));
+    let setup = Setup::new(o, None)?;
     let param = o.units | (o.param_hi as u64) << 32;
-    let content = content(o, &wasm)?;
-    let h = header(&wasm, param, nav, content.as_ref(), o.checkpoint_every.max(1))?;
+    let h = setup.header(param, o.checkpoint_every.max(1))?;
     let workers = o.workers[0];
-    let mut rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
+    let mut rt = setup.runtime(workers, o.range_rows)?;
     let mut world = rt.world_for(param, workers)?;
     let bot = if o.script == Script::Bot { Some(ae_bot::SkirmishBot::pair(&rt)?.into_iter().nth(player as usize).context("--script bot plays player 0 or 1")?) } else { None };
 

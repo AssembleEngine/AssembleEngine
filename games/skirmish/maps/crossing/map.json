@@ -1,0 +1,54 @@
+{
+  "cells": 256,
+  "description": "The land crossing map at 256 cells",
+  "seed": 6840346605343543860,
+  "starts": [
+    [
+      307.0,
+      307.0
+    ],
+    [
+      1741.0,
+      1741.0
+    ]
+  ],
+  "types": [
+    {
+      "cost": 8,
+      "material": "road",
+      "name": "road-8",
+      "solid": false
+    },
+    {
+      "cost": 10,
+      "material": "grass",
+      "name": "grass-10",
+      "solid": false
+    },
+    {
+      "cost": 12,
+      "material": "sand",
+      "name": "sand-12",
+      "solid": false
+    },
+    {
+      "cost": 15,
+      "material": "forest",
+      "name": "forest-15",
+      "solid": false
+    },
+    {
+      "cost": 17,
+      "material": "mud",
+      "name": "mud-17",
+      "solid": false
+    },
+    {
+      "cost": 255,
+      "material": "rock",
+      "name": "rock-255-solid",
+      "solid": true
+    }
+  ],
+  "version": 1
+}

@@ -6,7 +6,8 @@
 //! ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
 //! ae-tool navbench [--scaling ...]   # runs ae_nav's navbench binary
 //! ae-tool catalog-fmt FILE...          # rewrite catalogue files in canonical form
-//! ae-tool pack DIR OUT                 # a package directory as a deterministic zip
+//! ae-tool pack DIR OUT [--module GAME]  # a package directory as a deterministic zip
+//! ae-tool map-export land|water CELLS DIR [NAME]  # a generated map as a map package
 //! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
@@ -26,7 +27,8 @@ const USAGE: &str = "usage:
   ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
   ae-tool navbench [navbench arguments, e.g. --scaling]
   ae-tool catalog-fmt FILE...
-  ae-tool pack DIR OUT
+  ae-tool pack DIR OUT [--module GAME]
+  ae-tool map-export land|water CELLS DIR [NAME]
   ae-tool unpack-list FILE";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
@@ -68,6 +70,7 @@ fn main() -> ExitCode {
         Some("navbench") => navbench(&args[1..]),
         Some("catalog-fmt") => catalog_fmt(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("pack") => pack(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("map-export") => map_export(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
         _ => {
             eprintln!("{USAGE}");
@@ -168,12 +171,22 @@ fn bench_diff(args: &[String]) -> Result<ExitCode> {
     Ok(if result.regressions() > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
 }
 
-/// `ae-tool pack DIR OUT`: DIR (a package: it needs a valid
-/// `manifest.json`) as a deterministic zip archive at OUT.
+/// `ae-tool pack DIR OUT [--module GAME]`: DIR (a package: it needs a
+/// valid `manifest.json`) as a deterministic zip archive at OUT; with
+/// `--module`, game GAME (`games/GAME`, or a `.wasm` file) built and added
+/// as `module.wasm`, so the archive alone is the game.
 fn pack(args: &[String]) -> Result<()> {
-    let [dir, out] = args else { anyhow::bail!("usage: ae-tool pack DIR OUT") };
+    let (dir, out, module) = match args {
+        [dir, out] => (dir, out, None),
+        [dir, out, flag, game] if flag == "--module" => (dir, out, Some(game)),
+        _ => anyhow::bail!("usage: ae-tool pack DIR OUT [--module GAME]"),
+    };
     let p = ae_vfs::Package::open(dir)?;
-    let files = ae_vfs::dir_files(std::path::Path::new(dir))?;
+    let mut files = ae_vfs::dir_files(std::path::Path::new(dir))?;
+    if let Some(game) = module {
+        anyhow::ensure!(!files.contains_key("module.wasm"), "{dir} already has a module.wasm");
+        files.insert("module.wasm".into(), ae_sim::build::game(game)?);
+    }
     let zip = ae_vfs::zip::write(&files)?;
     std::fs::write(out, &zip)?;
     let mut v = ae_vfs::Vfs::new();
@@ -193,5 +206,33 @@ fn unpack_list(args: &[String]) -> Result<()> {
     let mut v = ae_vfs::Vfs::new();
     v.mount_archive(file)?;
     println!("content hash {:032x}", v.content_hash()?);
+    Ok(())
+}
+
+/// `ae-tool map-export land|water CELLS DIR [NAME]`: a generated crossing
+/// map as a map package directory (`ae_map`): manifest, `map.json`,
+/// `height.png`, `types.png`. Start points are the skirmish bases (15% in
+/// from opposite corners).
+fn map_export(args: &[String]) -> Result<()> {
+    let (kind, cells, dir) = match args {
+        [k, c, d] | [k, c, d, _] => (k.as_str(), c.parse::<i32>().context("CELLS")?, std::path::Path::new(d)),
+        _ => anyhow::bail!("usage: ae-tool map-export land|water CELLS DIR [NAME]"),
+    };
+    let terrain = match kind {
+        "land" => ae_nav::scenario::land_crossing_terrain(cells),
+        "water" => ae_nav::scenario::water_crossing_terrain(cells),
+        k => anyhow::bail!("unknown map {k} (land or water)"),
+    };
+    let name = args.get(3).cloned().unwrap_or_else(|| format!("{kind}-crossing-{cells}"));
+    let e = cells as f32 * ae_nav::service::NavConfig::default().cell_size;
+    let map = ae_map::GameMap::from_terrain(&terrain, vec![[(e * 0.15).round(), (e * 0.15).round()], [(e * 0.85).round(), (e * 0.85).round()]], &format!("The {kind} crossing map at {cells} cells"))?;
+    std::fs::create_dir_all(dir)?;
+    let mut files = map.files()?;
+    let manifest = ae_vfs::Manifest { name: name.clone(), version: "1".into(), kind: "map".into(), depends: Vec::new() };
+    files.insert(ae_vfs::MANIFEST.into(), format!("{}\n", serde_json::to_string_pretty(&manifest)?).into_bytes());
+    for (p, bytes) in &files {
+        std::fs::write(dir.join(p), bytes)?;
+    }
+    println!("{}: map {name}, {cells}x{cells} cells, {} terrain types{}", dir.display(), map.info.types.len(), if map.info.water_level.is_some() { ", water" } else { "" });
     Ok(())
 }

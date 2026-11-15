@@ -57,6 +57,9 @@ pub enum Map {
     WaterCrossing,
     /// [`scenario::land_crossing_plan`]: pathsim's dry map.
     LandCrossing,
+    /// [`NavPlugin::terrain`], a loaded map (`ae_map`), with the land map's
+    /// movement classes; units of the map's own only when asked for.
+    Loaded,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +75,8 @@ pub struct NavPlugin {
     /// `Sensor` components): see [`NavPlugin::allies`] and
     /// [`NavPlugin::sensor_of`].
     pub teams: u32,
+    /// The terrain of [`Map::Loaded`].
+    pub terrain: Option<Arc<ae_nav::terrain::Terrain>>,
 }
 
 /// Line-of-sight radius per movement class of the crossing maps (scout,
@@ -124,7 +129,12 @@ impl GroundFeed {
 
 impl NavPlugin {
     pub fn new(map: Map, map_cells: i32) -> Self {
-        Self { map, map_cells, ground: None, teams: 0 }
+        Self { map, map_cells, ground: None, teams: 0, terrain: None }
+    }
+
+    /// A loaded map's terrain ([`Map::Loaded`]).
+    pub fn loaded(terrain: Arc<ae_nav::terrain::Terrain>) -> Self {
+        Self { map: Map::Loaded, map_cells: terrain.geom.cells_x, ground: None, teams: 0, terrain: Some(terrain) }
     }
 
     /// The allyteam of each of the map's units from their spawn x: units
@@ -162,6 +172,7 @@ impl NavPlugin {
         match self.map {
             Map::WaterCrossing => scenario::water_crossing_plan_with(units, self.map_cells, workers, profiles),
             Map::LandCrossing => scenario::land_crossing_plan_with(units, self.map_cells, workers, profiles),
+            Map::Loaded => scenario::terrain_plan_with(units, (**self.terrain.as_ref().expect("Map::Loaded without a terrain")).clone(), workers, profiles),
         }
     }
 
@@ -170,7 +181,7 @@ impl NavPlugin {
         let cfg = NavConfig::default();
         match self.map {
             Map::WaterCrossing => water_profiles(cfg.cell_size),
-            Map::LandCrossing => profiles_for(cfg.cell_size, cfg.radius_scale),
+            Map::LandCrossing | Map::Loaded => profiles_for(cfg.cell_size, cfg.radius_scale),
         }
     }
 

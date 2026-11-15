@@ -1,0 +1,14 @@
+[package]
+name = "ae_map"
+description = "Map packages (.aemap): heights and terrain types as PNG plus map.json, loaded through the VFS into nav terrain, and written back from it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_nav.workspace = true
+ae_vfs.workspace = true
+anyhow.workspace = true
+png = "0.17"
+serde.workspace = true
+serde_json.workspace = true
