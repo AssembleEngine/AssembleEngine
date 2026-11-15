@@ -36,7 +36,8 @@ use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
 use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
+use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
@@ -169,6 +170,8 @@ pub enum PassWork {
     /// A module's fullscreen program (by payload), sampling `sampled` in
     /// order.
     Fullscreen { sampled: Vec<ResourceId> },
+    /// [`LibraryPass::ParticlesDraw`] with the depth buffer it samples.
+    Particles { depth: ResourceId },
 }
 
 /// The render module driving the graph, with its wired declaration.
@@ -241,6 +244,8 @@ pub struct TerrainApp {
     unit_renderer: Option<UnitRenderer>,
     /// `(rows, visible)` of the last completed frame with units.
     unit_counts: Arc<Mutex<(u32, u32)>>,
+    particles: Option<ParticlesSetup>,
+    particle_renderer: Option<ParticleRenderer>,
     /// The slot `prepare` last filled.
     last_slot: usize,
     offscreen: Option<Offscreen>,
@@ -283,6 +288,8 @@ impl TerrainApp {
             vision_written: Vec::new(),
             unit_renderer: None,
             unit_counts: Arc::default(),
+            particles: None,
+            particle_renderer: None,
             last_slot: 0,
             offscreen: None,
             wiring: None,
@@ -338,6 +345,13 @@ impl TerrainApp {
     /// Draw the units of `setup.feed` on the terrain.
     pub fn with_units(mut self, setup: UnitsSetup) -> Self {
         self.units = Some(setup);
+        self
+    }
+
+    /// Draw the particles of `setup.feed` (`particles.sim` and
+    /// `particles.draw`, after the water).
+    pub fn with_particles(mut self, setup: ParticlesSetup) -> Self {
+        self.particles = Some(setup);
         self
     }
 
@@ -480,6 +494,9 @@ impl RenderApp for TerrainApp {
     type Pass = ScenePass;
 
     fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
+        if let Some(mut old) = self.particle_renderer.take() {
+            old.destroy(gpu);
+        }
         if let Some(mut old) = self.unit_renderer.take() {
             old.destroy(gpu);
         }
@@ -504,6 +521,9 @@ impl RenderApp for TerrainApp {
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+        }
+        if let Some(setup) = &self.particles {
+            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, setup, color, frames_in_flight).context("particle renderer")?);
         }
         self.renderer = Some(terrain);
         Ok(())
@@ -606,6 +626,23 @@ impl RenderApp for TerrainApp {
             };
             units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
         }
+        if let Some(particles) = self.particle_renderer.as_mut() {
+            let mut camera = view.camera;
+            camera.ground = self.source.height_at(camera.target);
+            let v = camera.view(params.cam_pos);
+            let axes = [v.row(0).truncate(), v.row(1).truncate(), -v.row(2).truncate()];
+            let frame = ParticleFrame {
+                view_proj: params.view_proj,
+                cam_pos: params.cam_pos,
+                axes,
+                near: camera.near(),
+                extent: self.extent,
+                time: params.time,
+                fog: fog(&self.source.info, params.fog),
+                shadows: params.shadows,
+            };
+            particles.write_frame(slot, &frame);
+        }
         if let Some(state) = self.module.as_mut().filter(|m| !m.failed) {
             let mut input = FrameInput {
                 width: self.extent.width,
@@ -662,6 +699,9 @@ impl RenderApp for TerrainApp {
                 Binding::Buffer(BufferBinding { buffer: o.buffer.buffer, offset: 0, size: o.buffer.size, identity: (0xAE7 << 40) | 11 })
             }
             LibraryResource::ShadowMap => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().binding()),
+            LibraryResource::ParticleState => Binding::Buffer(self.particle_renderer.as_ref()?.state()),
+            LibraryResource::ParticleKeys => Binding::Buffer(self.particle_renderer.as_ref()?.keys()),
+            LibraryResource::ParticleIndirect => Binding::Buffer(self.particle_renderer.as_ref()?.indirect()),
         })
     }
 
@@ -690,6 +730,9 @@ impl RenderApp for TerrainApp {
         if self.sampler != vk::Sampler::null() {
             unsafe { gpu.device.destroy_sampler(self.sampler, None) };
             self.sampler = vk::Sampler::null();
+        }
+        if let Some(mut particles) = self.particle_renderer.take() {
+            particles.destroy(gpu);
         }
         if let Some(mut units) = self.unit_renderer.take() {
             units.destroy(gpu);
@@ -746,6 +789,7 @@ impl TerrainApp {
         SceneRecorder {
             renderer: self.renderer.as_ref(),
             units: self.unit_renderer.as_ref(),
+            particles: self.particle_renderer.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
             update_lod: self.update_lod,
@@ -759,6 +803,7 @@ impl TerrainApp {
 struct SceneRecorder<'a> {
     renderer: Option<&'a TerrainRenderer>,
     units: Option<&'a UnitRenderer>,
+    particles: Option<&'a ParticleRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
     update_lod: bool,
@@ -770,6 +815,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
     fn record(&self, pass: &ScenePass, ctx: &PassContext<'_>) -> Result<()> {
         let units = || self.units.context("unit renderer not created");
         let terrain = || self.renderer.context("terrain renderer not created");
+        let particles = || self.particles.context("particle renderer not created");
         match &pass.work {
             PassWork::Library(lib) => match lib {
                 LibraryPass::TerrainLod => terrain()?.record_lod(ctx, self.update_lod),
@@ -784,6 +830,8 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                         terrain()?.record_water(ctx);
                     }
                 }
+                LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
+                LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
@@ -793,6 +841,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
                 program.record(ctx, &images, self.sampler)?;
             }
+            PassWork::Particles { depth } => particles()?.record_draw(ctx, ctx.image(*depth)?),
             PassWork::Readback { image, buffer } => {
                 let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
                 crate::demo::record_readback(ctx, image, buffer);
@@ -821,7 +870,9 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     let mut graph = FrameGraph::new();
     let leaves = library_buffer(&mut graph, LibraryResource::TerrainLeaves);
     let indirect = library_buffer(&mut graph, LibraryResource::TerrainIndirect);
-    let depth = graph.image("depth", ImageDesc::depth_2d(env.depth_format, width, height, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT), ResourceClass::Transient);
+    // Sampled usage for the particles (always, so a graph is the same
+    // with and without them up to their passes).
+    let depth = graph.image("depth", ImageDesc::depth_2d(env.depth_format, width, height, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
     let target = match output {
         TerrainOutput::Present => graph.image("target", ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer),
         TerrainOutput::Readback => graph.image(
@@ -833,6 +884,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     // The unit buffers, then the units' shadow map.
     let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts].map(|r| library_buffer(&mut graph, r)));
     let map = (env.units && env.shadows).then(|| library_shadow_map(&mut graph));
+    let particles = env.particles.then(|| [LibraryResource::ParticleState, LibraryResource::ParticleKeys, LibraryResource::ParticleIndirect].map(|r| library_buffer(&mut graph, r)));
     // A receiver samples the map when the graph has it.
     fn receive(pass: ae_framegraph::PassBuilder<'_, LibraryPass>, map: Option<ResourceId>) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
         match map {
@@ -888,6 +940,19 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         // After the units (a third writer of the target), testing against
         // the depth they leave without writing it.
         receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(target, LoadOp::Load).depth_read(depth), map).id();
+    }
+    if let Some([state, keys, draws]) = particles {
+        let write = Role::StorageBufferWrite(ShaderStage::Compute);
+        graph.pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim).access(state, write).access(keys, write).access(draws, write).id();
+        // Over everything else, sampling the depth the scene left.
+        graph
+            .pass("particles", PassKind::Graphics, LibraryPass::ParticlesDraw)
+            .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(draws, Role::IndirectBuffer)
+            .color(target, LoadOp::Load)
+            .sampled(depth, ShaderStage::Fragment)
+            .id();
     }
     match output {
         TerrainOutput::Present => {
@@ -953,7 +1018,8 @@ impl TerrainApp {
     /// programs reflected, checked and built.
     fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
         let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 }
-            | if env.shadows { DECLARE_SHADOWS } else { 0 };
+            | if env.shadows { DECLARE_SHADOWS } else { 0 }
+            | if env.particles { DECLARE_PARTICLES } else { 0 };
         let declared = module
             .declare(env.extent.width, env.extent.height, env.color_format.as_raw() as u32, flags)?
             .with_context(|| format!("the module declines a {}x{} {:?} target", env.extent.width, env.extent.height, env.color_format))?;
@@ -1020,6 +1086,7 @@ impl TerrainApp {
         Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(),
             water: self.water && renderer.has_water(),
             shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
+            particles: self.particle_renderer.is_some(),
         })
     }
 
@@ -1037,6 +1104,9 @@ impl TerrainApp {
             LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
             LibraryResource::UnitCounts => units.map(|u| u.counts_desc()),
             LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc { size: o.buffer.size, usage: vk::BufferUsageFlags::TRANSFER_DST }),
+            LibraryResource::ParticleState => self.particle_renderer.as_ref().map(|p| p.state_desc()),
+            LibraryResource::ParticleKeys => self.particle_renderer.as_ref().map(|p| p.keys_desc()),
+            LibraryResource::ParticleIndirect => self.particle_renderer.as_ref().map(|p| p.indirect_desc()),
             LibraryResource::ReadbackTarget | LibraryResource::ShadowMap => None,
         })?;
         if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {
@@ -1053,6 +1123,10 @@ impl TerrainApp {
                             let image = pass.intents.iter().find(|i| i.role == Role::TransferSrc).map(|i| i.resource).context("readback image")?;
                             let buffer = pass.intents.iter().find(|i| resources[i.resource.index()] == Some(LibraryResource::ReadbackBuffer)).map(|i| i.resource).context("readback buffer")?;
                             PassWork::Readback { image, buffer }
+                        }
+                        LibraryPass::ParticlesDraw => {
+                            let depth = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment) && resources[i.resource.index()].is_none()).map(|i| i.resource).context("particles depth")?;
+                            PassWork::Particles { depth }
                         }
                         lib => PassWork::Library(lib),
                     }

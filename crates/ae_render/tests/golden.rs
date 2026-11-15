@@ -20,7 +20,11 @@ fn dot_of<R>(graph: &FrameGraph<R>) -> String {
 }
 
 fn scene(units: bool, water: bool, shadows: bool, output: TerrainOutput) -> String {
-    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows };
+    scene_with(units, water, shadows, false, output)
+}
+
+fn scene_with(units: bool, water: bool, shadows: bool, particles: bool, output: TerrainOutput) -> String {
+    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows, particles };
     let mut graph = native_graph(&env, output);
     // Fixed library sizes (the renderers' real ones depend on the map), with
     // every usage a library buffer may need.
@@ -55,7 +59,7 @@ fn check(name: &str, dot: &str) -> Option<String> {
 
 #[test]
 fn baked_plans_match_the_golden_dot_files() {
-    let cases: [(&str, fn() -> String); 9] = [
+    let cases: [(&str, fn() -> String); 10] = [
         ("scene_units_present", || scene(true, false, false, TerrainOutput::Present)),
         ("scene_units_readback", || scene(true, false, false, TerrainOutput::Readback)),
         ("scene_present", || scene(false, false, false, TerrainOutput::Present)),
@@ -63,6 +67,7 @@ fn baked_plans_match_the_golden_dot_files() {
         ("scene_water_readback", || scene(false, true, false, TerrainOutput::Readback)),
         ("scene_units_shadows_present", || scene(true, false, true, TerrainOutput::Present)),
         ("scene_units_water_shadows_readback", || scene(true, true, true, TerrainOutput::Readback)),
+        ("scene_units_water_shadows_particles_present", || scene_with(true, true, true, true, TerrainOutput::Present)),
         ("demo_present", || dot_of(&build_demo_graph(vk::Extent2D { width: 1280, height: 720 }, DemoOutput::Present { format: vk::Format::B8G8R8A8_SRGB }).0)),
         ("demo_readback", || dot_of(&build_demo_graph(vk::Extent2D { width: 256, height: 256 }, DemoOutput::Readback).0)),
     ];

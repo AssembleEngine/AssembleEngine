@@ -9,7 +9,7 @@
 //!   "version": 1,
 //!   "resources": [
 //!     { "name": "terrain.leaves", "kind": "library" },
-//!     { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment"] },
+//!     { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment", "sampled"] },
 //!     { "name": "scene", "kind": "image", "format": "target", "usage": ["color_attachment", "sampled"] },
 //!     { "name": "target", "kind": "output" }
 //!   ],
@@ -57,10 +57,11 @@
 //!   can sample `shadows.map` only where the map exists.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
 //!   `readback`, `present`, `water`, `no_water`, `shadows` or `no_shadows`
-//!   (the units cast shadows), to exist only in such scenes.
+//!   (the units cast shadows), `particles` or `no_particles`, to exist only
+//!   in such scenes.
 
 use crate::module::{Declared, ModuleFrame};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
@@ -123,6 +124,8 @@ enum When {
     NoWater,
     Shadows,
     NoShadows,
+    Particles,
+    NoParticles,
 }
 
 impl When {
@@ -138,13 +141,26 @@ impl When {
             Some(When::NoWater) => !water,
             Some(When::Shadows) => shadows,
             Some(When::NoShadows) => !shadows,
+            Some(When::Particles) => flags & DECLARE_PARTICLES != 0,
+            Some(When::NoParticles) => flags & DECLARE_PARTICLES == 0,
         }
     }
 }
 
 /// Every combination of the `declare` flags a scene can be asked for
-/// (shadows only with units).
-pub const SCENE_FLAGS: [u32; 12] = [
+/// (shadows only with units), each without and with particles.
+pub const SCENE_FLAGS: [u32; 24] = {
+    let mut flags = [0; 24];
+    let mut i = 0;
+    while i < 12 {
+        flags[i] = SCENE_FLAGS_BASE[i];
+        flags[i + 12] = SCENE_FLAGS_BASE[i] | DECLARE_PARTICLES;
+        i += 1;
+    }
+    flags
+};
+
+const SCENE_FLAGS_BASE: [u32; 12] = [
     0,
     DECLARE_UNITS,
     DECLARE_READBACK,
@@ -350,10 +366,11 @@ impl GraphFile {
         for flags in SCENE_FLAGS {
             file.build(64, 64, 50, flags).with_context(|| {
                 format!(
-                    "declaring for {}units, {}water, {}shadows, {}",
+                    "declaring for {}units, {}water, {}shadows, {}particles, {}",
                     if flags & DECLARE_UNITS != 0 { "" } else { "no " },
                     if flags & DECLARE_WATER != 0 { "" } else { "no " },
                     if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
+                    if flags & DECLARE_PARTICLES != 0 { "" } else { "no " },
                     if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
                 )
             })?;

@@ -40,10 +40,14 @@ impl Camera {
         Mat4::look_at_rh(eye, self.target3(), Vec3::Y)
     }
 
+    /// The near plane of [`Self::proj`].
+    pub fn near(&self) -> f32 {
+        (self.distance * 0.002).clamp(0.25, 20.0)
+    }
+
     /// Reverse-Z infinite projection for Vulkan (y down in clip space).
     pub fn proj(&self, aspect: f32) -> Mat4 {
-        let near = (self.distance * 0.002).clamp(0.25, 20.0);
-        let mut p = Mat4::perspective_infinite_reverse_rh(self.fov_y, aspect, near);
+        let mut p = Mat4::perspective_infinite_reverse_rh(self.fov_y, aspect, self.near());
         p.y_axis.y = -p.y_axis.y;
         p
     }

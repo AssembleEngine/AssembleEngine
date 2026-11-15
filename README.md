@@ -66,7 +66,9 @@ waves that fade into roughness with distance, sky reflection by fresnel, sun gli
 war, and caustics on the ground under it; O toggles it, `--no-water` leaves it out. The hills cast the
 sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
 toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
-shadow map later). Particles and decals are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
+shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
+smoke) sorted back to front and faded softly into the ground (X sets one off, `--no-particles`). Decals
+are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|
@@ -162,6 +164,8 @@ cargo run --release -p ae-client -- --render-module post                 # graph
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
 cargo run --release -p ae-client -- --units 0 --camera 10700,12800,350,2.5,0.45   # the lake by the causeway: waves, glints, foam (O: water)
 cargo run --release -p ae-client -- --map generated --units 0          # mountains and mesas casting the sun's shadows (H: shadows)
+cargo run --release -p ae-client -- --game skirmish                     # units fighting; those that die in view explode (X: an explosion at the camera target)
+cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12 --capture boom.ppm   # explosions, a second in
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged

@@ -1662,6 +1662,75 @@ Particles (plan):
   - The soft fade leaves no hard line on the ground.
   - Particles in hidden cells are not drawn.
 
+Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignored`, `cargo test -p ae-client vanish`):
+- `ae_render::particles`: a GPU pool, a ring of up to 65,536 slots (the sort key's slot bits).
+  - Bursts (`Burst`: position, effect, count, scale, seed; `ground` puts it above the terrain or
+    the water) come through a `ParticleFeed`. Effects are data (`EffectDef`: colour and size over
+    the life, speeds, `up`, spread, gravity, drag, emissive, fade-in); `default_effects` has flash,
+    fire, sparks, smoke and dust, and `explosion` combines four of them.
+- Passes:
+  - **`particles.sim`** (compute) records its own barriers between five steps: spawn (it also
+    resets the count), simulate, cull and key, then a 4-pass 8-bit LSD radix sort.
+    - The radix sort is ported from `~/particles`: keys only, and the count is read from the
+      indirect buffer.
+  - **`particles.draw`** (graphics) is one indirect instanced draw of camera-facing quads.
+- **One sorted list, one blend.**
+  - All particles are sorted back to front by centre and drawn premultiplied. Emissive particles
+    write alpha 0, so they add light, and fire behind smoke is dimmed by it.
+  - The key is `(far-to-near log depth, 16 bits) << 16 | slot`. Unique keys make the order
+    independent of the order the simulation appended them in, so a frame is byte-identical
+    whichever burst came first.
+  - This is the plan's "media sorted by centre" applied to everything; the separate emissive
+    class was dropped as unnecessary.
+- **Soft edges, and no depth attachment.**
+  - The draw samples the depth buffer (`sampled:fragment`, a new `DepthUse::Sampled`).
+  - It treats each particle as a sphere of its size, fading where the sphere's front passes behind
+    the scene; this is also its depth test.
+  - The depth buffer is now declared with sampled usage in every graph (native, both modules,
+    both graph files). The existing goldens and bench scenes are unchanged.
+- **Look.** A 128² puff texture generated at start, mipmapped: a radial falloff broken up by four
+  octaves of value noise.
+  - Each particle gets a random rotation and brightness.
+  - Smoke and dust are lit by the sun (past the hills) and the sky, and fogged. Emissive
+    particles fade in the fog.
+- **Contract.**
+  - Library resources `particles.state`, `particles.keys`, `particles.indirect`.
+  - `DECLARE_PARTICLES` (`DeclareEnv::particles`); graph files take `when: particles` /
+    `no_particles` (`SCENE_FLAGS` doubled to 24).
+  - One new golden. The module test now also runs with particles.
+- **Client.**
+  - Particles are on by default (`--no-particles`).
+  - On the sim thread, a unit whose entity is gone from the capture explodes where it stood, if
+    the observer's line of sight of the tick before covered that cell. A unit dying in the fog
+    leaves nothing, and its own sight dying with it does not hide it.
+  - X sets off an explosion at the camera target; `--explode N` sets off N before a capture.
+  - The skirmish game shows them. No other events reach the client yet: no shots, no impacts.
+- **GPU test `particles_sort_blend_and_soften`** (validation on):
+  - A blue puff in front of a red one shows blue, and red when swapped. The frame is
+    byte-identical whichever was emitted first.
+  - A puff under the ground draws nothing, and nor do dead particles or an empty pool (both
+    byte-identical to no particle renderer).
+  - A puff cut by the ground changes by at most 3.6 between neighbouring pixels, against a
+    strongest contribution of 65.6.
+  - An explosion of the default effects changes the frame.
+  - Skipping the sort fails it, and so does a hard depth test instead of the fade.
+  - Unit test: deaths only where seen.
+- **Cost.** New bench scene `battle`: the army view, closer, with 2 explosions a frame, about 40k
+  live particles.
+  - `particles sim` 58 µs, `particles` (draw) 173 µs. The other six scenes are unchanged against
+    `m7-unit-shadows-3` (89 of 109 metrics compared, 0 regressed).
+  - The sort first cost 130 µs: the port's 32 blocks per workgroup suit millions of keys and gave
+    a 64k pool only 8 workgroups. With 4 blocks it takes about 42 µs; 1 and 2 blocks were slower,
+    because the scatter's prefix walks every workgroup.
+- **Not done yet:**
+  - The reduced-resolution target: the draw is fill-bound (173 µs), so it is the next lever.
+  - The OIT candidates measured against an exact reference: moment-based, tile-binned, froxel
+    smoke.
+  - Particles are not shaded by the units' shadow map.
+  - Fog of war does not dim them (their emitters are only where the observer sees).
+  - Effects are not in the content catalogue.
+  - No continuous emitters (burning wrecks, dust behind moving units).
+
 Particles' coloured shadows (plan):
 - **Recoil's method.** It is WickedEngine's "easy transparent shadow maps";
   `ProjectileDrawer::DrawShadowTransparent` and `ProjFXFragShadowProg.glsl` implement it.

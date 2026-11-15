@@ -16,8 +16,9 @@
 //! (the frame graph declaration, [`crate::GraphBuilder`]), program table
 //! pointer and length ([`ProgramTable`]); 0 if the module cannot render
 //! that target. `flags` holds [`DECLARE_UNITS`], [`DECLARE_READBACK`],
-//! [`DECLARE_WATER`] and [`DECLARE_SHADOWS`] (the last two added later; a
-//! module that ignores them simply draws no water, or no unit shadows).
+//! [`DECLARE_WATER`], [`DECLARE_SHADOWS`] and [`DECLARE_PARTICLES`] (the
+//! last three added later; a module that ignores them simply draws no
+//! water, no unit shadows, or no particles).
 //! `frame` returns the address of [`FrameOutput`] as four `u32`s: pointer
 //! and word count of a bitset of *disabled* programs (a conditional pass
 //! whose payload's bit is set is skipped), pointer and length of the
@@ -55,6 +56,14 @@ pub const DECLARE_WATER: u32 = 1 << 2;
 /// `water.draw` pass sample it (`sampled:fragment`); a graph that does not
 /// simply renders without the units' shadows.
 pub const DECLARE_SHADOWS: u32 = 1 << 3;
+/// `declare` flag: the scene has particles: the `particles.sim` (compute)
+/// and `particles.draw` (graphics) library passes and the
+/// `particles.state`, `particles.keys` and `particles.indirect` library
+/// buffers exist. `particles.draw` blends into one colour attachment and
+/// samples the depth buffer in the fragment stage (soft edges; it tests
+/// depth itself), so a graph that draws particles declares its depth
+/// buffer with sampled usage. A graph without them draws no particles.
+pub const DECLARE_PARTICLES: u32 = 1 << 4;
 
 /// The `shadows.map` library image as a graph declares it (`External`):
 /// [`SHADOW_MAP_FORMAT`], [`SHADOW_MAP_WIDTH`] × [`SHADOW_MAP_HEIGHT`],

@@ -1,0 +1,63 @@
+#version 460
+// One invocation per particle spawned this frame: finds its burst and
+// writes the ring slot after the head. Invocation 0 also zeroes the
+// instance count the simulation appends to.
+#define PARTICLES_WRITE
+#include "particles_common.glsl"
+
+layout(set = 0, binding = 8) uniform sampler2D heightTex;
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t == 0u) {
+        cmd.vertexCount = 6u;
+        cmd.instanceCount = 0u;
+        cmd.firstVertex = 0u;
+        cmd.firstInstance = 0u;
+    }
+    if (t >= u.pool.z) {
+        return;
+    }
+    // The last burst whose first index is at most t.
+    uint lo = 0u, hi = u.pool.y - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi + 1u) >> 1;
+        if (spawns[mid].info.z <= t) {
+            lo = mid;
+        } else {
+            hi = mid - 1u;
+        }
+    }
+    Spawn s = spawns[lo];
+    uint e = (s.info.x & 0xffffu) * 5u;
+    vec3 origin = s.posScale.xyz;
+    if ((s.info.x & 0x10000u) != 0u) {
+        float h = textureLod(heightTex, (origin.xz / u.map.x + 0.5) * u.map.yz, 0.0).r * u.height.x + u.height.y;
+        if (u.height.w > 0.5) {
+            h = max(h, u.height.z);
+        }
+        origin.y += h;
+    }
+    uint j = t - s.info.z;
+    uint rng = hash(s.info.w ^ hash(j * 0x632be5abu + 1u));
+    float scale = s.posScale.w;
+    vec4 shape = u.effects[e + 2u];
+    vec4 motion = u.effects[e + 3u];
+    // A direction uniform over the sphere, pulled up by `up`.
+    float z = rand01(rng) * 2.0 - 1.0;
+    float a = rand01(rng) * 6.2831853;
+    vec3 dir = vec3(sqrt(1.0 - z * z) * cos(a), z, sqrt(1.0 - z * z) * sin(a));
+    dir = normalize(mix(dir, vec3(0.0, 1.0, 0.0), motion.z) + vec3(0.0, 1e-4, 0.0));
+    float speed = mix(motion.x, motion.y, rand01(rng)) * scale;
+    // A point in the ball of radius `spread`.
+    float z2 = rand01(rng) * 2.0 - 1.0;
+    float a2 = rand01(rng) * 6.2831853;
+    vec3 off = vec3(sqrt(1.0 - z2 * z2) * cos(a2), z2, sqrt(1.0 - z2 * z2) * sin(a2)) * pow(rand01(rng), 1.0 / 3.0) * motion.w * scale;
+    float life = mix(shape.z, shape.w, rand01(rng));
+    uint slot = (u.pool.w + t) % u.pool.x;
+    particles[slot].posAge = vec4(origin + off, 0.0);
+    particles[slot].velLife = vec4(dir * speed, life);
+    particles[slot].info = uvec4(s.info.x & 0xffffu, rng, floatBitsToUint(scale), 0u);
+}

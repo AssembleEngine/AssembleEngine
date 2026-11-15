@@ -12,6 +12,7 @@ use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
+use ae_render::particles::{ParticleFeed, explosion};
 use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
 use ae_sensors::{Bits, SensorGrid};
 use ae_services::view::{SENSOR_CELL, ViewPipeline};
@@ -202,6 +203,12 @@ pub struct Sim {
     /// unit command stream.
     bots: Vec<ae_bot::SkirmishBot>,
     unit_command: Option<u64>,
+    /// Explosions for units that die where the observer sees.
+    particles: Option<Arc<ParticleFeed>>,
+    /// The last capture's units, by entity: `(entity, x, y, radius)`.
+    last_units: Vec<(u64, f32, f32, f32)>,
+    /// The observer's line of sight at the last tick.
+    last_los: Option<Bits>,
 }
 
 /// One observer's copy layer: the pipeline, the observer, what it has ever
@@ -265,7 +272,7 @@ impl Sim {
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command })
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command, particles: None, last_units: Vec::new(), last_los: None })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -274,6 +281,36 @@ impl Sim {
             v.vision = Some(feed);
         }
         self
+    }
+
+    /// Emit an explosion into `feed` for every unit that dies where the
+    /// observer saw at the tick before (every unit without an observer).
+    pub fn with_particles(mut self, feed: Arc<ParticleFeed>) -> Self {
+        self.particles = Some(feed);
+        self
+    }
+
+    /// Units gone from the capture since the last tick (despawned: dead)
+    /// that stood in the observer's line of sight of that tick explode.
+    /// Only what the observer saw: a unit dying in the fog leaves nothing.
+    fn emit_deaths(&mut self) {
+        let Some(feed) = &self.particles else { return };
+        let c = &self.capture;
+        let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len()).map(|r| (c.entities[r], c.f32(F_X, r), c.f32(F_Y, r), c.f32(F_RADIUS, r))).collect();
+        now.sort_unstable_by_key(|u| u.0);
+        let grid = self.view.as_ref().map(|v| v.pipeline.coverage.grid);
+        let bursts = deaths(&self.last_units, &now, |x, y| match (&self.last_los, grid) {
+            (Some(los), Some(grid)) => {
+                let (cx, cy) = grid.cell(x, y);
+                los.get(cx, cy)
+            }
+            _ => true,
+        });
+        feed.emit_all(&bursts);
+        self.last_units = now;
+        if let Some(v) = &self.view {
+            self.last_los = Some(v.pipeline.coverage.los[v.observer[0].ally as usize].clone());
+        }
     }
 
     /// Rows of each state in the last view: own, seen, blip, ghost.
@@ -344,6 +381,9 @@ impl Sim {
     /// interpolation): every unit, or what the observer sees.
     pub fn stream(&mut self, tick_seconds: f32) -> Result<InstanceStream> {
         self.rt.capture(&self.world, &self.spec, &mut self.capture)?;
+        if self.view.is_none() {
+            self.emit_deaths();
+        }
         let Some(v) = self.view.as_mut() else {
             return Ok(self.streamer.stream(&self.capture, Instant::now(), tick_seconds));
         };
@@ -383,6 +423,10 @@ impl Sim {
             })
             .collect();
         let stream = self.streamer.stream_rows(self.capture.tick, &rows, Instant::now(), tick_seconds);
+        // After the rows: the last tick's line of sight decides, then
+        // this one's is kept.
+        self.emit_deaths();
+        let v = self.view.as_mut().expect("observer");
         v.ms = [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3];
         Ok(stream)
     }
@@ -391,6 +435,18 @@ impl Sim {
     pub fn view_ms(&self) -> Option<[f64; 3]> {
         self.view.as_ref().map(|v| v.ms)
     }
+}
+
+/// Explosions for the units of `last` missing from `now` (both sorted by
+/// entity: `(entity, x, y, radius)`) that stood where `seen(x, y)`.
+fn deaths(last: &[(u64, f32, f32, f32)], now: &[(u64, f32, f32, f32)], seen: impl Fn(f32, f32) -> bool) -> Vec<ae_render::particles::Burst> {
+    let mut bursts = Vec::new();
+    for &(id, x, y, radius) in last {
+        if now.binary_search_by_key(&id, |u| u.0).is_err() && seen(x, y) {
+            bursts.extend(explosion([x, 1.0, y], true, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
+        }
+    }
+    bursts
 }
 
 /// One unit for the stream: `key` orders rows and matches them across
@@ -502,14 +558,14 @@ pub struct SimThread {
 impl SimThread {
     /// Build the world and tick it at the nav rate times `speed`,
     /// publishing units to `feed` and landed ground changes to `ground`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, ui: UiQueue, speed: SimSpeed) -> Self {
+    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, particles: Option<Arc<ParticleFeed>>, ui: UiQueue, speed: SimSpeed) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
         let handle = std::thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let result = run(o, feed, ground, vision, ui, speed, &stop2, &stats2);
+                let result = run(o, feed, ground, vision, particles, ui, speed, &stop2, &stats2);
                 if let Err(error) = &result {
                     eprintln!("sim failed: {error:#} (--units 0 runs without the sim)");
                     stats2.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
@@ -533,11 +589,15 @@ impl SimThread {
     }
 }
 
-fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, particles: Option<Arc<ParticleFeed>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
     let started = Instant::now();
     let mut sim = Sim::new(&o, Some(ground))?;
     if let Some(feed) = vision {
         sim = sim.with_vision(feed);
+    }
+    if let Some(feed) = particles {
+        sim = sim.with_particles(feed);
     }
     eprintln!("sim: {} game, {} workers, world built in {:.2} s", o.game, o.workers, started.elapsed().as_secs_f32());
     let mut rate = speed.current();
@@ -634,6 +694,20 @@ mod tests {
         // 9 left.
         let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), now, 0.1);
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+    }
+
+    /// A unit gone since the last capture explodes where it stood, if the
+    /// observer saw there; units that stay or join do not.
+    #[test]
+    fn units_that_vanish_where_seen_explode() {
+        let last = [(1, 10.0, 10.0, 6.0), (2, 20.0, 20.0, 6.0), (3, -30.0, 30.0, 6.0), (5, 50.0, 50.0, 12.0)];
+        let now = [(1, 11.0, 10.0, 6.0), (4, 40.0, 40.0, 6.0), (5, 51.0, 50.0, 12.0)];
+        let bursts = deaths(&last, &now, |x, _| x >= 0.0);
+        let at: std::collections::BTreeSet<[u32; 2]> = bursts.iter().map(|b| [b.pos[0].to_bits(), b.pos[2].to_bits()]).collect();
+        assert_eq!(at.len(), 1, "only 2 died where seen (3 died in the fog): {bursts:?}");
+        assert!(bursts.iter().all(|b| b.pos[0] == 20.0 && b.pos[2] == 20.0 && b.ground));
+        assert_eq!(bursts.len(), 4, "one explosion: flash, fire, sparks, smoke");
+        assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
     }
 
     #[test]

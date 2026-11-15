@@ -18,9 +18,12 @@
 //!   workload; a change means times are not comparable.
 //!
 //! Units come from the crossing game run headless to tick 300 (once per
-//! map, shared by its scenes), as `--capture` does.
+//! map, shared by its scenes), as `--capture` does. A scene with
+//! explosions emits that many every frame (warm-up included, so the
+//! particle pool is in its steady state when measuring) at seeded places
+//! around the camera target; time advances 1/60 s a frame.
 
-use super::{MapKind, Options, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
+use super::{MapKind, Options, particles, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
 use ae_bench::Report;
 use ae_bench::diff::Thresholds;
 use ae_bench::measure::{Sample, summarise};
@@ -72,6 +75,8 @@ struct Scene {
     tileset: Option<&'static str>,
     camera: [f32; 5],
     path: Path,
+    /// Explosions emitted per frame (0: no particle renderer).
+    explosions: u32,
 }
 
 /// The passes the offscreen graph adds to copy the image to the host
@@ -94,13 +99,14 @@ const WARMUP_SECONDS: f32 = 1.0;
 const ARMY: [f32; 5] = [2900.0, 17900.0, 1400.0, 0.4, 0.85];
 const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 
-const SCENES: [Scene; 6] = [
-    Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed },
-    Scene { name: "army", about: "water crossing map, the army from above (8.6k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed },
-    Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit },
-    Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed },
-    Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed },
-    Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed },
+const SCENES: [Scene; 7] = [
+    Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0 },
+    Scene { name: "army", about: "water crossing map, the army from above (8.6k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0 },
+    Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit, explosions: 0 },
+    Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0 },
+    Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0 },
+    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2 },
+    Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0 },
 ];
 
 fn options_for(scene: &Scene) -> Options {
@@ -208,6 +214,13 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         feed.publish(stream);
         app = app.with_units(units_setup(&s, feed));
     }
+    let feed = match particles(&o).filter(|_| scene.explosions > 0) {
+        Some((feed, setup)) => {
+            app = app.with_particles(setup);
+            Some(feed)
+        }
+        None => None,
+    };
     place_camera(&app, o.camera);
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(gpu, extent)?;
@@ -222,14 +235,30 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
             view.lock().unwrap().camera.yaw = yaw0 + std::f32::consts::TAU * i as f32 / total as f32;
         }
     };
+    // This frame's explosions, scattered over 600 m around the target.
+    let mut emitted = 0u32;
+    let mut emit = || {
+        let Some(feed) = &feed else { return };
+        for _ in 0..scene.explosions {
+            let h = emitted.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15).wrapping_mul(0x85eb_ca6b);
+            let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * 600.0, ((h >> 16) as f32 / 65535.0 - 0.5) * 600.0);
+            let scale = 0.8 + (h % 7) as f32 * 0.2;
+            feed.emit_all(&ae_render::particles::explosion([scene.camera[0] + dx, 1.0, scene.camera[1] + dz], true, scale, h));
+            emitted += 1;
+        }
+    };
 
     set_frame(0, b.frames);
     // Frames for the subdivision to settle, and time for the GPU's clocks
     // to rise (the first scene otherwise measures 15-25% slow).
     let warm = Instant::now();
-    headless.frames(&mut app, b.warmup)?;
+    for _ in 0..b.warmup {
+        emit();
+        headless.frames(&mut app, 1)?;
+    }
     while warm.elapsed().as_secs_f32() < WARMUP_SECONDS {
-        headless.frames(&mut app, 10)?;
+        emit();
+        headless.frames(&mut app, 1)?;
     }
     headless.take_gpu_frames();
     let (mut cpu_frame, mut cpu_record) = (Vec::with_capacity(b.frames), Vec::with_capacity(b.frames));
@@ -237,6 +266,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let mut gpu_frames = Vec::with_capacity(b.frames);
     for i in 0..b.frames {
         set_frame(i, b.frames);
+        emit();
         let started = Instant::now();
         headless.frames(&mut app, 1)?;
         let elapsed = started.elapsed().as_secs_f64() * 1e3;

@@ -18,6 +18,12 @@
 //! (`terrain.draw`, `units.draw`, `water.draw`) sample it
 //! ([`LibraryPass::receives`], [`check_shadows`]), and the host then
 //! shades by it; a graph without it renders without the units' shadows.
+//!
+//! Particles (`particles.sim`, `particles.draw`) are drawn after
+//! everything opaque and the water: the draw blends into the colour target
+//! and samples the depth buffer (it tests depth itself, fading where a
+//! particle meets the scene), so it takes the depth as
+//! `Sampled(Fragment)` rather than as an attachment.
 
 use ae_framegraph::{BufferDesc, FrameGraph, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage};
 use ash::vk;
@@ -39,10 +45,17 @@ pub enum LibraryResource {
     /// The units' shadow map: a depth image of fixed size
     /// ([`ae_render_abi::module::shadow_map_spec`]).
     ShadowMap,
+    /// The particles' pool (`particles.sim` spawns and moves them).
+    ParticleState,
+    /// The live particles' sort keys, back to front (`particles.sim`
+    /// writes, `particles.draw` reads).
+    ParticleKeys,
+    /// The particles' indirect draw (its instance count is the live count).
+    ParticleIndirect,
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 9] = [
+    pub const ALL: [LibraryResource; 12] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
         Self::UnitInstances,
@@ -52,6 +65,9 @@ impl LibraryResource {
         Self::ReadbackTarget,
         Self::ReadbackBuffer,
         Self::ShadowMap,
+        Self::ParticleState,
+        Self::ParticleKeys,
+        Self::ParticleIndirect,
     ];
 
     pub fn name(self) -> &'static str {
@@ -65,6 +81,9 @@ impl LibraryResource {
             Self::ReadbackTarget => "readback.target",
             Self::ReadbackBuffer => "readback.buffer",
             Self::ShadowMap => ae_render_abi::module::SHADOW_MAP_NAME,
+            Self::ParticleState => "particles.state",
+            Self::ParticleKeys => "particles.keys",
+            Self::ParticleIndirect => "particles.indirect",
         }
     }
 
@@ -92,6 +111,11 @@ pub enum LibraryPass {
     /// The water surface over the terrain and units: tests against their
     /// depth read-only and blends into the colour target.
     WaterDraw,
+    /// Spawn, move and sort the particles (compute).
+    ParticlesSim,
+    /// The particles, back to front, blended over the scene; samples the
+    /// depth buffer.
+    ParticlesDraw,
     /// Copy an image to [`LibraryResource::ReadbackBuffer`].
     ReadbackCopy,
     /// Records nothing: the pass that declares host reads.
@@ -114,10 +138,12 @@ pub enum DepthUse {
     Write,
     /// `DepthRead`: tests only.
     Read,
+    /// `Sampled(Fragment)`: the shader reads it (and tests by itself).
+    Sampled,
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 11] = [
+    pub const ALL: [LibraryPass; 13] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -126,6 +152,8 @@ impl LibraryPass {
         Self::UnitsCount,
         Self::ShadowsDraw,
         Self::WaterDraw,
+        Self::ParticlesSim,
+        Self::ParticlesDraw,
         Self::ReadbackCopy,
         Self::HostRead,
         Self::Present,
@@ -141,6 +169,8 @@ impl LibraryPass {
             Self::UnitsCount => "units.count",
             Self::ShadowsDraw => "shadows.draw",
             Self::WaterDraw => "water.draw",
+            Self::ParticlesSim => "particles.sim",
+            Self::ParticlesDraw => "particles.draw",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
             Self::Present => "present",
@@ -153,8 +183,8 @@ impl LibraryPass {
 
     pub fn kind(self) -> PassKind {
         match self {
-            Self::TerrainLod | Self::UnitsCull => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::WaterDraw => PassKind::Graphics,
+            Self::TerrainLod | Self::UnitsCull | Self::ParticlesSim => PassKind::Compute,
+            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::WaterDraw | Self::ParticlesDraw => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -179,6 +209,16 @@ impl LibraryPass {
             ],
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
             Self::ShadowsDraw => &[(R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)), (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear))],
+            Self::ParticlesSim => &[
+                (R::ParticleState, Role::StorageBufferWrite(ShaderStage::Compute)),
+                (R::ParticleKeys, Role::StorageBufferWrite(ShaderStage::Compute)),
+                (R::ParticleIndirect, Role::StorageBufferWrite(ShaderStage::Compute)),
+            ],
+            Self::ParticlesDraw => &[
+                (R::ParticleState, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::ParticleKeys, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::ParticleIndirect, Role::IndirectBuffer),
+            ],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
             Self::WaterDraw | Self::HostRead | Self::Present => &[],
         }
@@ -190,6 +230,7 @@ impl LibraryPass {
         match self {
             Self::TerrainDraw | Self::UnitsDraw => Some(Attachments { color: 1, depth: DepthUse::Write }),
             Self::WaterDraw => Some(Attachments { color: 1, depth: DepthUse::Read }),
+            Self::ParticlesDraw => Some(Attachments { color: 1, depth: DepthUse::Sampled }),
             _ => None,
         }
     }
@@ -197,6 +238,11 @@ impl LibraryPass {
     /// Whether it needs the unit renderer.
     pub fn uses_units(self) -> bool {
         matches!(self, Self::UnitsReset | Self::UnitsCull | Self::UnitsDraw | Self::UnitsCount | Self::ShadowsDraw)
+    }
+
+    /// Whether it needs the particle renderer.
+    pub fn uses_particles(self) -> bool {
+        matches!(self, Self::ParticlesSim | Self::ParticlesDraw)
     }
 
     /// Whether it shades by the units' shadow map: in a graph that
@@ -235,6 +281,8 @@ pub struct LibraryEnv {
     pub water: bool,
     /// The units cast shadows (the renderer has the units' shadow map).
     pub shadows: bool,
+    /// The scene has particles (the particle renderer exists).
+    pub particles: bool,
 }
 
 /// Library resource of each graph resource (by `ResourceId` index).
@@ -305,6 +353,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     if lib.uses_units() && !env.units {
         return Err(error(format!("pass `{name}` ({}) needs units; this scene has none", lib.name())));
     }
+    if lib.uses_particles() && !env.particles {
+        return Err(error(format!("pass `{name}` ({}) needs particles; this scene has none", lib.name())));
+    }
     if lib == LibraryPass::WaterDraw && !env.water {
         return Err(error(format!("pass `{name}` (water.draw) needs water; this scene draws none")));
     }
@@ -335,7 +386,13 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
                     return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target {:?}", r.name, image.format, env.color_format)));
                 }
             }
-            (_, Role::DepthAttachment(_)) | (_, Role::DepthRead) if lib.attachments().is_some_and(|a| (a.depth == DepthUse::Read) == (intent.role == Role::DepthRead)) => {
+            (_, Role::DepthAttachment(_)) | (_, Role::DepthRead) | (_, Role::Sampled(ShaderStage::Fragment))
+                if lib.attachments().is_some_and(|a| match a.depth {
+                    DepthUse::Write => matches!(intent.role, Role::DepthAttachment(_)),
+                    DepthUse::Read => intent.role == Role::DepthRead,
+                    DepthUse::Sampled => intent.role == Role::Sampled(ShaderStage::Fragment) && r.desc.is_image(),
+                }) =>
+            {
                 depth += 1;
                 if let ResourceDesc::Image(image) = r.desc
                     && image.format != env.depth_format
@@ -355,6 +412,7 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
         let role = match a.depth {
             DepthUse::Write => "a depth attachment",
             DepthUse::Read => "a read-only depth attachment (depth_read)",
+            DepthUse::Sampled => "the depth buffer sampled in the fragment stage (sampled:fragment)",
         };
         return Err(error(format!("pass `{name}` ({}) needs {} colour attachment(s) and {role}; it has {color} and {depth}", lib.name(), a.color)));
     }
@@ -382,7 +440,7 @@ mod tests {
     use crate::terrain::app::{TerrainOutput, native_graph};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {

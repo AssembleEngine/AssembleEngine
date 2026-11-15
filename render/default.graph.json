@@ -3,13 +3,16 @@
   "resources": [
     { "name": "terrain.leaves", "kind": "library" },
     { "name": "terrain.indirect", "kind": "library" },
-    { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment"] },
+    { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment", "sampled"] },
     { "name": "target", "kind": "output" },
     { "name": "units.instances", "kind": "library", "when": "units" },
     { "name": "units.visible", "kind": "library", "when": "units" },
     { "name": "units.indirect", "kind": "library", "when": "units" },
     { "name": "units.counts", "kind": "library", "when": "units" },
-    { "name": "shadows.map", "kind": "library", "when": "shadows" }
+    { "name": "shadows.map", "kind": "library", "when": "shadows" },
+    { "name": "particles.state", "kind": "library", "when": "particles" },
+    { "name": "particles.keys", "kind": "library", "when": "particles" },
+    { "name": "particles.indirect", "kind": "library", "when": "particles" }
   ],
   "passes": [
     { "name": "terrain lod", "kind": "compute", "library": "terrain.lod",
@@ -29,6 +32,10 @@
     { "name": "units count read", "kind": "transfer", "library": "host.read", "when": "units", "root": true,
       "access": ["units.counts host_read"] },
     { "name": "water", "kind": "graphics", "library": "water.draw", "when": "water",
-      "access": ["target color:load", "depth depth_read", "shadows.map sampled:fragment"] }
+      "access": ["target color:load", "depth depth_read", "shadows.map sampled:fragment"] },
+    { "name": "particles sim", "kind": "compute", "library": "particles.sim", "when": "particles",
+      "access": ["particles.state storage_buffer_write:compute", "particles.keys storage_buffer_write:compute", "particles.indirect storage_buffer_write:compute"] },
+    { "name": "particles", "kind": "graphics", "library": "particles.draw", "when": "particles",
+      "access": ["particles.state storage_buffer_read:vertex", "particles.keys storage_buffer_read:vertex", "particles.indirect indirect", "target color:load", "depth sampled:fragment"] }
   ]
 }

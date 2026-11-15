@@ -24,7 +24,10 @@
 //! is drawn over the ground under it, which is tinted by its depth and lit
 //! by caustics; `--no-water` leaves only the tint. The hills cast the
 //! sun's shadows over the ground, the units and the water; `--no-shadows`
-//! turns them off.
+//! turns them off. Units that die where the observer sees explode
+//! (particles: flash, fire, sparks, smoke; X sets one off at the camera
+//! target, `--explode N` sets off N around it before a capture;
+//! `--no-particles` turns them off).
 //!
 //! On the crossing maps the sim runs beside the renderer: the crossing game
 //! (`games/crossing`, built on first use) with `--units` units (default
@@ -40,7 +43,8 @@
 //! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
 //! terrain detail, T wireframe, L colour by LOD depth, G fog, C freeze the
 //! LOD, P print the camera, V v-sync, N toggle render module flag bit 0,
-//! M tileset, B blend weights, O water surface, H shadows, Esc quits.
+//! M tileset, B blend weights, O water surface, H shadows, X explosion,
+//! Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -86,6 +90,7 @@ mod watch;
 use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_services::nav::{GroundFeed, Map};
 use ae_render::demo::DemoApp;
+use ae_render::particles::{ParticleFeed, ParticlesSetup};
 use ae_render::swapchain::PresentPolicy;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view};
 use ae_render::terrain::edit::TerrainEditor;
@@ -134,6 +139,10 @@ struct Options {
     water: bool,
     /// The sun's shadows.
     shadows: bool,
+    /// Particles (explosions).
+    particles: bool,
+    /// `--explode`: explosions around the camera target before a capture.
+    explode: u32,
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
@@ -160,11 +169,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -210,6 +219,8 @@ fn parse() -> Result<Options> {
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
+            "--no-particles" => o.particles = false,
+            "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
             "--frames" => o.bench.get_or_insert_with(Default::default).frames = value("--frames", &mut args)?.parse().context("--frames")?,
@@ -369,6 +380,25 @@ fn tileset(o: &Options) -> Result<Option<Arc<Tileset>>> {
     Ok(Some(Arc::new(t)))
 }
 
+/// A particle feed and setup with the engine's effects (`--no-particles`: none).
+fn particles(o: &Options) -> Option<(Arc<ParticleFeed>, ParticlesSetup)> {
+    o.particles.then(|| {
+        let feed = Arc::new(ParticleFeed::default());
+        (feed.clone(), ParticlesSetup { feed, capacity: ae_render::particles::MAX_CAPACITY, effects: ae_render::particles::default_effects() })
+    })
+}
+
+/// `count` explosions scattered around `target` (seeded; `--explode`, X).
+fn explode_around(feed: &ParticleFeed, target: Vec2, count: u32, seed: u32) {
+    for k in 0..count {
+        let h = (seed ^ k.wrapping_mul(0x9e37_79b9)).wrapping_mul(0x85eb_ca6b);
+        let spread = if count > 1 { 120.0 } else { 0.0 };
+        let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * spread, ((h >> 16) as f32 / 65535.0 - 0.5) * spread);
+        let scale = 0.8 + (h % 7) as f32 * 0.2;
+        feed.emit_all(&ae_render::particles::explosion([target.x + dx, 1.0, target.y + dz], true, scale, h));
+    }
+}
+
 /// Apply the tileset options to a new app.
 fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) -> TerrainApp {
     if let Some(t) = tileset {
@@ -488,7 +518,11 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     use ae_render::thread::{RenderApp, TargetInfo, run_headless};
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
-    let mut app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Readback), tileset(o)?, o);
+    let app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Readback), tileset(o)?, o);
+    let (mut app, particle_feed) = match particles(o) {
+        Some((feed, setup)) => (app.with_particles(setup), Some(feed)),
+        None => (app, None),
+    };
     if let Some(name) = &o.render_module {
         app = app.with_module(ae_render::module::build(name)?);
     }
@@ -552,6 +586,10 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         app = app.with_units(units_setup(&s, feed));
     }
     place_camera(&app, o.camera);
+    if let Some(feed) = &particle_feed {
+        let target = app.view().lock().unwrap().camera.target;
+        explode_around(feed, target, o.explode, 1);
+    }
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
     let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
@@ -605,6 +643,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
     let mut ground_thread = None;
+    let mut particle_feed: Option<Arc<ParticleFeed>> = None;
     let mut edits = None;
     let mut module: Option<(watch::ModuleWatch, Arc<Mutex<ae_render::terrain::app::ModuleStatus>>)> = None;
     let ui: sim::UiQueue = Arc::default();
@@ -614,6 +653,10 @@ fn run(o: Options) -> Result<ExitCode> {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
             let mut app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o);
+            if let Some((feed, setup)) = particles(&o) {
+                app = app.with_particles(setup);
+                particle_feed = Some(feed);
+            }
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone()));
@@ -625,7 +668,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 let shown = nav.clone().context("units need a crossing map")?;
                 ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
                 edits = Some(app.terrain_edits());
-                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, ui.clone(), sim_speed.clone()));
+                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, particle_feed.clone(), ui.clone(), sim_speed.clone()));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
@@ -675,6 +718,9 @@ fn run(o: Options) -> Result<ExitCode> {
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
             steer(&window, &events, &mut view, source, dt, &sim_speed);
+            if let Some(feed) = particle_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
+                explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32);
+            }
         }
         if o.exercise {
             exercise(&mut window, started, &mut step);

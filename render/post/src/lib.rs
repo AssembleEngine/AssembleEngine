@@ -36,7 +36,7 @@ impl RenderModule for Post {
         let mut p = ProgramTable::new();
         let leaves = library(&mut g, "terrain.leaves");
         let indirect = library(&mut g, "terrain.indirect");
-        let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT), Class::Transient);
+        let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
         let scene = g.image("scene", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
         let target = if env.readback {
             g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
@@ -46,6 +46,7 @@ impl RenderModule for Post {
         // The unit buffers, then the units' shadow map.
         let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts"].map(|name| library(&mut g, name)));
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
+        let particles = env.particles.then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
@@ -95,6 +96,20 @@ impl RenderModule for Post {
         if env.water {
             let water = p.library("water.draw");
             receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth), map).id();
+        }
+        // The particles over everything, sampling the depth the scene left.
+        if let Some([state, keys, draws]) = particles {
+            let sim = p.library("particles.sim");
+            let write = Role::StorageBufferWrite(ShaderStage::Compute);
+            g.pass("particles sim", PassKind::Compute, sim).access(state, write).access(keys, write).access(draws, write).id();
+            let draw = p.library("particles.draw");
+            g.pass("particles", PassKind::Graphics, draw)
+                .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .color(scene, LoadOp::Load)
+                .sampled(depth, ShaderStage::Fragment)
+                .id();
         }
         let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
         g.pass("grade", PassKind::Graphics, grade).sampled(scene, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();

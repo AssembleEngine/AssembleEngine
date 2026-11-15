@@ -56,6 +56,13 @@ pub struct DeclareEnv {
     /// `units.instances` in the vertex stage) and every terrain, unit and
     /// water draw sample it (`sampled:fragment`).
     pub shadows: bool,
+    /// The scene has particles: the `particles.sim` and `particles.draw`
+    /// library passes and the `particles.state`, `particles.keys` and
+    /// `particles.indirect` library buffers exist. `particles.draw` samples
+    /// the depth buffer (`sampled:fragment`, so declare it with sampled
+    /// usage) and blends into one colour attachment, after everything
+    /// opaque and the water.
+    pub particles: bool,
 }
 
 pub struct Declaration {
@@ -113,7 +120,7 @@ pub mod rt {
 
     impl<M: RenderModule> Exports<M> {
         pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> u32 {
-            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0, water: flags & abi::module::DECLARE_WATER != 0, shadows: flags & abi::module::DECLARE_SHADOWS != 0 };
+            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0, water: flags & abi::module::DECLARE_WATER != 0, shadows: flags & abi::module::DECLARE_SHADOWS != 0, particles: flags & abi::module::DECLARE_PARTICLES != 0 };
             let Some(d) = self.module.declare(&env) else { return 0 };
             self.declaration = (d.graph.finish(), d.programs.finish());
             let (g, p) = &self.declaration;

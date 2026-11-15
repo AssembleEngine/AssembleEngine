@@ -1,0 +1,45 @@
+#version 460
+// One invocation per pool slot: age and move a live particle, and append
+// its sort key when it is in view. Key: far-to-near depth (16 bits, log
+// scale from the near plane) above the slot (16 bits): unique, so the
+// sorted order does not depend on the order of the appends.
+#define PARTICLES_WRITE
+#include "particles_common.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= u.pool.x) {
+        return;
+    }
+    Particle p = particles[i];
+    if (p.posAge.w >= p.velLife.w) {
+        return;
+    }
+    float dt = u.step.x;
+    uint e = p.info.x * 5u;
+    vec4 physics = u.effects[e + 4u];
+    p.posAge.w += dt;
+    vec3 vel = p.velLife.xyz;
+    vel.y -= physics.x * dt;
+    vel *= exp(-physics.y * dt);
+    p.posAge.xyz += vel * dt;
+    p.velLife.xyz = vel;
+    particles[i] = p;
+    if (p.posAge.w >= p.velLife.w) {
+        return;
+    }
+    float t = p.posAge.w / p.velLife.w;
+    vec4 shape = u.effects[e + 2u];
+    float radius = 0.5 * mix(shape.x, shape.y, t) * uintBitsToFloat(p.info.z);
+    for (int k = 0; k < 6; ++k) {
+        if (dot(u.frustum[k].xyz, p.posAge.xyz) + u.frustum[k].w < -radius) {
+            return;
+        }
+    }
+    float d = dot(p.posAge.xyz - u.camPos.xyz, u.camForward.xyz);
+    float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);
+    uint key = ((65535u - uint(q * 65535.0)) << 16) | i;
+    keys[atomicAdd(cmd.instanceCount, 1u)] = key;
+}
