@@ -2202,8 +2202,10 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - Crossing: pops 6 (0 over 40), 0.19 (max 7).
   - Emitted in reverse: identical.
 - **Cost** (`bench battle`, about 40k particles; `m7-vol-sorted`, `m7-vol-slices`): slices 16 µs sim
-  (no sort) + 494 µs draw, against sorted 58 + 82 µs. About the moments' cost (552 µs) for an
-  answer an order of magnitude closer.
+  (no sort) + 494 µs draw, against sorted 58 + 82 µs.
+  - That is about the moments' cost (552 µs). Against the volume the slices are much closer than
+    the moments: in the crossing 0.19 (max 7) against 1.79 (max 70), popping 6 against 115; in the
+    cluster 0.57 (max 10) against 1.16 (max 29).
 - **Next:**
   - Froxels (a 3D grid in camera space, Hillaire), measured the same way.
   - Then choose: the sort stays the default unless a volume method's cost comes down.
