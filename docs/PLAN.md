@@ -1432,6 +1432,25 @@ Map packages (`ae_map`) and games from archives:
   import settings or hash-keyed cache; packages are not synced between lockstep peers (each needs
   the same files; the header's content hash refuses others).
 
+One archive is the whole game: `ae-tool pack games/skirmish/content OUT --module skirmish --with
+games/skirmish/maps/crossing` (59 KB: content, `module.wasm`, the map's files; the map's manifest left
+out), run as `ae-headless --package OUT --units 0 --script bot` with no library, `--game`, `--nav` or
+parameter. `packages.rs` plays it for 6,500 ticks (the match is decided at 6,457). Its state equals the
+source run's in every part but the event store's, and its total digest `5bdc31cf5379b7760c4b88f1e82fe5e4`
+is pinned, the same in dev and release: the bot-vs-bot golden of the archive-defined game. With
+packages, `ae-client` passes parameter 0 unless `--param` is given, so the archive's defaults rule (6
+tanks, the map's starts), as in headless.
+
+Benches at the end of M6 (`ae-tool bench all --label m6`, CPU suites; `bench-diff` against
+`bench/results/baseline`): 287 metrics, 0 regressed, none of them affected by M6's changes for the
+worse (the event-digest rule, the new sim systems). The GPU suites were not rerun; nothing in render
+changed. Not done: no benches of their own for `ae_vfs`, `ae_map`, `ae_catalog` or `ae_bot`, or a
+skirmish scenario bench.
+
+M6 is complete with the caveats above (no ownership check on commands; no match file; the bot only
+attacks in waves; the client's mouse orders (right click, ctrl, shift) have only been smoke-run, not
+played by hand). Next is M7 (water, shadows, particles, decals).
+
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).
 

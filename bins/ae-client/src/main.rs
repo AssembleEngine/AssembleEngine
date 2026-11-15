@@ -247,6 +247,9 @@ fn parse() -> Result<Options> {
             o.loaded_map = Some((Arc::new(map.to_terrain()), map.info.starts.clone()));
         }
         o.mounts = packages.into_iter().map(|p| p.source).collect();
+        // The packages' defaults (start points, the game's own) rule, not
+        // the client's: parameter 0 unless `--param` says otherwise.
+        o.param.get_or_insert(0);
         eprintln!("packages: {} mount(s), game {}, {}", o.mounts.len(), o.game, if o.loaded_map.is_some() { "map from a package" } else { "no map package" });
     }
     if o.game == "skirmish" {

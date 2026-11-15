@@ -6,7 +6,7 @@
 //! ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
 //! ae-tool navbench [--scaling ...]   # runs ae_nav's navbench binary
 //! ae-tool catalog-fmt FILE...          # rewrite catalogue files in canonical form
-//! ae-tool pack DIR OUT [--module GAME]  # a package directory as a deterministic zip
+//! ae-tool pack DIR OUT [--module GAME] [--with DIR]...  # a package directory as a deterministic zip
 //! ae-tool map-export land|water CELLS DIR [NAME]  # a generated map as a map package
 //! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ```
@@ -27,7 +27,7 @@ const USAGE: &str = "usage:
   ae-tool bench-diff <base> <head> [--time-tolerance PCT] [--all]
   ae-tool navbench [navbench arguments, e.g. --scaling]
   ae-tool catalog-fmt FILE...
-  ae-tool pack DIR OUT [--module GAME]
+  ae-tool pack DIR OUT [--module GAME] [--with DIR]...
   ae-tool map-export land|water CELLS DIR [NAME]
   ae-tool unpack-list FILE";
 
@@ -171,18 +171,37 @@ fn bench_diff(args: &[String]) -> Result<ExitCode> {
     Ok(if result.regressions() > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
 }
 
-/// `ae-tool pack DIR OUT [--module GAME]`: DIR (a package: it needs a
-/// valid `manifest.json`) as a deterministic zip archive at OUT; with
-/// `--module`, game GAME (`games/GAME`, or a `.wasm` file) built and added
-/// as `module.wasm`, so the archive alone is the game.
+/// `ae-tool pack DIR OUT [--module GAME] [--with DIR]...`: DIR (a
+/// package: it needs a valid `manifest.json`) as a deterministic zip
+/// archive at OUT; with `--module`, game GAME (`games/GAME`, or a `.wasm`
+/// file) built and added as `module.wasm`; with `--with`, another
+/// package's files (not its manifest) bundled in, e.g. a map. So one
+/// archive can be the whole game.
 fn pack(args: &[String]) -> Result<()> {
-    let (dir, out, module) = match args {
-        [dir, out] => (dir, out, None),
-        [dir, out, flag, game] if flag == "--module" => (dir, out, Some(game)),
-        _ => anyhow::bail!("usage: ae-tool pack DIR OUT [--module GAME]"),
-    };
+    let [dir, out, rest @ ..] = args else { anyhow::bail!("usage: ae-tool pack DIR OUT [--module GAME] [--with DIR]...") };
+    let (mut module, mut with) = (None, Vec::new());
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        let v = it.next().with_context(|| format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--module" => module = Some(v),
+            "--with" => with.push(v),
+            f => anyhow::bail!("unknown pack option {f} (--module GAME, --with DIR)"),
+        }
+    }
     let p = ae_vfs::Package::open(dir)?;
     let mut files = ae_vfs::dir_files(std::path::Path::new(dir))?;
+    // Other packages' files bundled in (their manifests left out): one
+    // archive that is the whole game, e.g. with its map.
+    for w in &with {
+        for (path, bytes) in ae_vfs::dir_files(std::path::Path::new(w))? {
+            if path == ae_vfs::MANIFEST {
+                continue;
+            }
+            anyhow::ensure!(!files.contains_key(&path), "{path} is in {dir} and in {w}");
+            files.insert(path, bytes);
+        }
+    }
     if let Some(game) = module {
         anyhow::ensure!(!files.contains_key("module.wasm"), "{dir} already has a module.wasm");
         files.insert("module.wasm".into(), ae_sim::build::game(game)?);
