@@ -2189,7 +2189,7 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
   - Scored against it now: the sort 1.66 (max 22) in the cluster, 1.62 (max 70) in the crossing.
 - **Slices** (`ParticleBlend::Slices`, `--particle-blend slices`), the per-pixel blend that accounts
   for thickness. Three passes at half resolution, no sort:
-  - Range: each pixel's nearest front (as a reciprocal) and farthest back, max-blended (RG32F).
+  - Range: each pixel's nearest front (as a reciprocal) and farthest back, max-blended (RG16F; RG32F at first).
   - Slices: four equal slices of that range (RGBA16F each, additive). Each fragment adds its
     light and optical depth to each slice, by the length of its chord inside.
   - Resolve: each slice is a homogeneous medium, front to back.
@@ -2198,14 +2198,20 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
     metre was infinite and multiplying by an overlap of 0 gave NaN in the sums. The chord helper now
     returns a length of 1 when empty.
 - **Slices, measured against the volume:**
-  - Cluster: 0.57 (max 10).
-  - Crossing: pops 6 (0 over 40), 0.19 (max 7).
+  - Cluster: 0.57 (max 10); 0.59 with the RG16F range.
+  - Crossing: pops 6 (0 over 40), 0.19 (max 7); 0.27 with the RG16F range.
   - Emitted in reverse: identical.
 - **Cost** (`bench battle`, about 40k particles; `m7-vol-sorted`, `m7-vol-slices`): slices 16 µs sim
   (no sort) + 494 µs draw, against sorted 58 + 82 µs.
   - That is about the moments' cost (552 µs). Against the volume the slices are much closer than
     the moments: in the crossing 0.19 (max 7) against 1.79 (max 70), popping 6 against 115; in the
     cluster 0.57 (max 10) against 1.16 (max 29).
+  - Split (each pass skipped in turn): 32 µs fixed (depth, resolve, composite), the range pass
+    about 210 µs, the slices pass about 250 µs. The slices pass falls to 75 µs when its outputs are
+    all zero (framebuffer compression), so it is bound by the bandwidth of four RGBA16F blends.
+  - The range as RG16F halves the range pass (about 96 µs): 378 µs in all (`m7-vol-slices-rg16`).
+    The global range the simulation already has would save the rest of it, but one far puff
+    would stretch every pixel's slices.
 - **Next:**
   - Froxels (a 3D grid in camera space, Hillaire), measured the same way.
   - Then choose: the sort stays the default unless a volume method's cost comes down.

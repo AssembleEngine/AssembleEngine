@@ -331,7 +331,7 @@ struct HalfTargets {
     color: OwnedImage,
     /// The farthest scene depth of each 2x2 block (R32F, reverse-Z).
     depth: OwnedImage,
-    /// [`ParticleBlend::Slices`]: the range (RG32F), the slices
+    /// [`ParticleBlend::Slices`]: the range (RG16F), the slices
     /// (RGBA16F each).
     /// [`ParticleBlend::Moments`]: b0 (R32F), b1..b4 (RGBA32F), the media
     /// and the emissive sums (RGBA16F).
@@ -353,7 +353,7 @@ impl HalfTargets {
     }
 }
 
-const SLICE_FORMATS: [vk::Format; 1 + SLICES] = [vk::Format::R32G32_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
+const SLICE_FORMATS: [vk::Format; 1 + SLICES] = [vk::Format::R16G16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
 const MOMENT_FORMATS: [vk::Format; 4] = [vk::Format::R32_SFLOAT, vk::Format::R32G32B32A32_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
 
 const HALF_COLOR: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
