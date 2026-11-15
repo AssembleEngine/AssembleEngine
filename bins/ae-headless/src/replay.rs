@@ -2,7 +2,8 @@
 //!
 //! Recording runs one worker count and writes a replay ([`ae_replay`]):
 //! the header (module and schema hashes, parameter, map configuration),
-//! every tick's command bundle (from `--script orders`, or none), and a
+//! every tick's command bundle (from `--script orders` or `--script bot`,
+//! or none), and a
 //! checkpoint digest every `--checkpoint-every` ticks and at the end.
 //!
 //! Replaying builds the world the header names (parameter, map, size and
@@ -11,7 +12,7 @@
 //! checkpoint: the first mismatch is reported with the digest parts that
 //! differ, and the exit status is 1.
 
-use super::Opts;
+use super::{Opts, Script};
 use ae_abi::engine::MOVE_ORDER;
 use ae_replay::{Checkpoint, Header, Recorder, Replay};
 use ae_sdk::Entity;
@@ -136,9 +137,13 @@ pub fn record(o: &Opts, path: &str) -> Result<bool> {
     let file = std::fs::File::create(path).with_context(|| format!("create {path}"))?;
     let mut rec = Recorder::new(std::io::BufWriter::new(file), &header)?;
     let (mut commands, mut checkpoints) = (0usize, 0usize);
+    let bots = if o.script == Script::Bot { ae_bot::SkirmishBot::pair(&rt)?.to_vec() } else { Vec::new() };
     let started = Instant::now();
     for _ in 0..o.ticks {
-        let bundle = if o.script { orders(&rt, &world, 2)? } else { TickBundle::new(world.tick) };
+        let mut bundle = if o.script == Script::Orders { orders(&rt, &world, 2)? } else { TickBundle::new(world.tick) };
+        for b in &bots {
+            b.commands(&rt, &world, &mut bundle.commands)?;
+        }
         commands += bundle.commands.len();
         rec.bundle(&bundle)?;
         rt.tick_with(&mut world, o.workers[0], &bundle)?;

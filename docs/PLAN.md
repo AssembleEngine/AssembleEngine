@@ -1327,8 +1327,43 @@ Skirmish rules (all in the game crate; content in `games/skirmish/content/defs/u
   one tank's hp changed (two hashes named). Recorded handicap match: 2,600 ticks, 87 checkpoints,
   48 KB, verifies at 1 worker (end-to-end test in `tests/replay.rs`). `Header::check` was being
   called from the wrong side, which reversed its messages; fixed.
-- Not done: units do not retarget after the rally point (no attack-move), no unit AI; no human or
-  bot input.
+- Since then: units take commands, the client plays allyteam 0 and bots play the rest (below).
+
+Command queues, attack-move and bots:
+- `UnitCommand { entity, kind, append, x, y }` is the game's own command stream (move, attack-move,
+  stop; `append` 0 replaces the queue, 1 queues behind it); `Queue` holds up to 4 commands and what
+  the unit is doing about the head. The `orders` system (after `scan`, so it reads this tick's
+  `Presence`; nav takes its orders next tick) replaces `rally`/`Orders`: a new unit queues a move
+  to its allyteam's rally point (220 m in front of its base); a move's head pops when nav reports the
+  unit `ARRIVED` or `UNREACHABLE`; an attack-move looks for the nearest enemy within 1.5× weapon
+  range every 8 ticks (staggered by entity): out of range it chases (re-ordered when the enemy moved
+  32 m), in range it stops and holds, with none left it goes on. Orders to the same point in one tick
+  share a nav group (one flow field). Nothing attacks on its own any more.
+- `ae_bot::SkirmishBot` (new crate): a host-side command generator for one allyteam. Every 30 ticks
+  (its own phase) it counts its idle units (empty queue, past the rally) and, with `wave` or more,
+  attack-moves all of them at the enemy base. It reads only its own `Team`/`Queue` rows and the base
+  positions every player knows; its commands go into the tick bundle like a player's, so replays
+  record them and lockstep peers do not run each other's bots. `SkirmishBot::pair`: waves of 8 for
+  allyteam 0, 16 for allyteam 1.
+- Golden (`ae_services/tests/skirmish.rs`): the pair plays a 2 km land map from 6 tanks each;
+  allyteam 1 wins at tick 6,363, digest `40c9e1b9faa89d3b33ab7d8aee5eb74e`, the same at 1 and 2
+  workers and in dev and release builds. It replaces the handicap match (bits 48..56 still work).
+  The test also checks that attack-moves engage (24,411 unit-ticks chasing, 2,070 holding, 106
+  returns to heading on), since weapons fire regardless of orders and a wave that only walked would
+  win too. A second test checks the queue: replace, append, pop on arrival, stop.
+- `ae-headless --script bot` (record, and `--connect` where player P is bot P): a recorded bot match,
+  6,400 ticks with 184 commands and 214 checkpoints, 133 KB, verifies at another worker count; the
+  replay end-to-end test records 1,200 ticks of it. Over the relay (2 bot clients, 30 ms + 0..20 ms
+  jitter + 5% loss, 1,500 ticks): 29.9 Hz, 40 commands, 50 of 50 digest rounds in sync, and the
+  relay's recording verifies at 2 workers (run by hand, not a test). A lockstep client sends at most
+  32 commands per order tick, so a larger idle pool goes over several bot decisions.
+- `ae_bot::unit_command` encodes a `UnitCommand` for the bot, the client and the tests.
+- `ae-client --game skirmish`: right click moves, ctrl+right click attack-moves, shift queues;
+  allyteam 1 is the bot (with `--observer all` both are). Clicks carry shift/ctrl state.
+- Not done: no ownership check on commands (the game cannot see who sent an event, and the relay does
+  not check either; runtime-supplied sender metadata is the fix); idle units do not guard (they
+  only shoot what comes in range); the bot does not scout, defend or build; archives and manifests
+  in `ae_vfs`, and `.aemap`, are still to do for the exit criterion "defined only by an archive".
 
 M2's exit command also runs as `ae-tool navbench --scaling` (forwards to `ae_nav`'s `navbench` binary in
 the same target directory).

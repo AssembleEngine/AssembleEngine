@@ -63,8 +63,10 @@ pub struct SimOptions {
 pub enum UiInput {
     /// Select the observer's own units within `radius` of `(x, y)`.
     Select { x: f32, y: f32, radius: f32 },
-    /// Order the selection to `(x, y)`.
-    Move { x: f32, y: f32 },
+    /// Order the selection to `(x, y)`: in the skirmish game an
+    /// attack-move with `attack`, added to each unit's queue with `append`
+    /// (other games: a plain nav move).
+    Move { x: f32, y: f32, attack: bool, append: bool },
 }
 
 /// What the window hands the sim thread.
@@ -187,6 +189,10 @@ pub struct Sim {
     streamer: Streamer,
     view: Option<ViewState>,
     classes: u32,
+    /// Skirmish: the bots of the allyteams no player plays, and the game's
+    /// unit command stream.
+    bots: Vec<ae_bot::SkirmishBot>,
+    unit_command: Option<u64>,
 }
 
 /// One observer's copy layer: the pipeline, the observer, what it has ever
@@ -239,7 +245,13 @@ impl Sim {
             None => None,
         };
         let classes = o.own_classes().len() as u32;
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes })
+        let (bots, unit_command) = if o.skirmish() {
+            let bots = ae_bot::SkirmishBot::pair(&rt)?.into_iter().filter(|b| o.observer != Some(b.ally)).collect();
+            (bots, rt.schema.components.iter().find(|c| c.name == "UnitCommand").map(|c| c.id))
+        } else {
+            (Vec::new(), None)
+        };
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -283,18 +295,25 @@ impl Sim {
                             .collect();
                         eprintln!("selected {} units", v.selected.len());
                     }
-                    UiInput::Move { x, y } => {
+                    UiInput::Move { x, y, attack, append } => {
                         let group = 1u64 << 43 | self.world.tick << 8 | ally as u64;
                         for &id in &v.selected {
-                            if let Some(e) = v.observer[0].entity_of(id) {
-                                let order = MoveOrder::move_to(Entity(e), x, y, group);
-                                let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
-                                bundle.commands.push(Command { player: ally, stream: ae_abi::engine::MOVE_ORDER, bytes });
-                            }
+                            let Some(e) = v.observer[0].entity_of(id) else { continue };
+                            bundle.commands.push(match self.unit_command {
+                                Some(stream) => ae_bot::unit_command(ally, stream, e, if attack { ae_bot::ATTACK } else { ae_bot::MOVE }, append, x, y),
+                                None => {
+                                    let order = MoveOrder::move_to(Entity(e), x, y, group);
+                                    let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
+                                    Command { player: ally, stream: ae_abi::engine::MOVE_ORDER, bytes }
+                                }
+                            });
                         }
                     }
                 }
             }
+        }
+        for b in &self.bots {
+            b.commands(&self.rt, &self.world, &mut bundle.commands)?;
         }
         self.rt.tick_with(&mut self.world, self.workers, &bundle)?;
         Ok(())

@@ -1,0 +1,10 @@
+[package]
+name = "ae_bot"
+description = "Host-side bots: command generators that play an allyteam through tick commands, like a player (the skirmish bot)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_sim.workspace = true
+anyhow.workspace = true

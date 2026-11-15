@@ -20,3 +20,4 @@ anyhow.workspace = true
 
 [dev-dependencies]
 ae_vfs.workspace = true
+ae_bot.workspace = true

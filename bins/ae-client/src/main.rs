@@ -47,8 +47,12 @@
 //!
 //! `--game skirmish` plays the skirmish game (`games/skirmish`, its content
 //! from `--content`, default `games/skirmish/content`; `--param` overrides
-//! the game parameter) as allyteam 0: left click selects your units near
-//! the clicked ground (white), right click orders them there.
+//! the game parameter) as allyteam 0 against allyteam 1's bot
+//! (`ae_bot::SkirmishBot`; with `--observer all` the two bots play each
+//! other): left click selects your units near the clicked ground (white),
+//! right click moves them there, ctrl+right click attack-moves, and with
+//! shift either is queued after their current commands. New units gather
+//! at your rally point in front of the base.
 //!
 //! `--teams N` splits the crossing maps' units into N allyteams (with
 //! sensors); `--observer K` (default 0 with teams; `all` for everything)
@@ -590,12 +594,12 @@ fn run(o: Options) -> Result<ExitCode> {
             println!("vsync {}", if vsync { "on" } else { "off" });
         }
         // Clicks: left selects own units near the ground point, right
-        // orders the selection there.
+        // orders the selection there (ctrl: attack-move, shift: queued).
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let view = *view.lock().unwrap_or_else(|p| p.into_inner());
             for click in events.clicks.iter().flatten() {
                 let Some(at) = ground_at(&view, source, window.pixel_size(), click.x, click.y) else { continue };
-                let input = if click.button == ae_render::window::Click::LEFT { sim::UiInput::Select { x: at.x, y: at.y, radius: 120.0 } } else { sim::UiInput::Move { x: at.x, y: at.y } };
+                let input = if click.button == ae_render::window::Click::LEFT { sim::UiInput::Select { x: at.x, y: at.y, radius: 120.0 } } else { sim::UiInput::Move { x: at.x, y: at.y, attack: click.ctrl, append: click.shift } };
                 ui.lock().unwrap_or_else(|p| p.into_inner()).push(input);
             }
         }

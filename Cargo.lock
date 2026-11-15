@@ -18,6 +18,7 @@ dependencies = [
  "ae-sdk",
  "ae_abi",
  "ae_bench",
+ "ae_bot",
  "ae_catalog",
  "ae_nav",
  "ae_render",
@@ -37,6 +38,7 @@ version = "0.0.1"
 dependencies = [
  "ae-sdk",
  "ae_abi",
+ "ae_bot",
  "ae_catalog",
  "ae_nav",
  "ae_net",
@@ -116,6 +118,14 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ae_bot"
+version = "0.0.1"
+dependencies = [
+ "ae_sim",
+ "anyhow",
 ]
 
 [[package]]
@@ -217,6 +227,7 @@ version = "0.0.1"
 dependencies = [
  "ae-sdk",
  "ae_abi",
+ "ae_bot",
  "ae_catalog",
  "ae_ecs",
  "ae_nav",

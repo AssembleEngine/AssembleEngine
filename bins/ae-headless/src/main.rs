@@ -19,7 +19,8 @@
 //! coverage time and view build time (all K together and per observer).
 //!
 //! `--record FILE` writes a replay of one run (with `--script orders`,
-//! synthetic player commands; a checkpoint digest every
+//! synthetic player commands; with `--script bot`, the skirmish game's
+//! bots play both allyteams (`ae_bot`); a checkpoint digest every
 //! `--checkpoint-every` ticks, default 30); `--replay FILE --verify` plays
 //! it back from the file alone and checks every checkpoint (see
 //! `replay.rs`). `--bisect --inject TICK:Component.field:ROW` flips a bit
@@ -53,10 +54,20 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "usage: ae-headless --game NAME|PATH.wasm [--units N] [--ticks N] [--workers 1,2,4,8] [--digest] [--every N] [--fuel] [--range-rows N] [--param-hi N] [--nav water|land] [--map-cells N] [--compare] [--overlap on|off] [--teams N] [--observers K]
-       ae-headless --game NAME --nav water ... --record FILE.aerep [--script orders] [--checkpoint-every N]
+       ae-headless --game NAME --nav water ... --record FILE.aerep [--script orders|bot] [--checkpoint-every N]
        ae-headless --game NAME --replay FILE.aerep [--verify] [--workers N]
        ae-headless --game NAME --replay FILE.aerep --bisect --inject TICK:Component.field:ROW
-       ae-headless --game NAME --nav water ... --connect RELAY_ADDR --player P [--script orders] [--latency MS] [--jitter MS] [--loss PCT]";
+       ae-headless --game NAME --nav water ... --connect RELAY_ADDR --player P [--script orders|bot] [--latency MS] [--jitter MS] [--loss PCT]";
+
+/// Who sends player commands (`--script`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Script {
+    None,
+    /// Synthetic move orders ([`replay::orders`]).
+    Orders,
+    /// The skirmish bots ([`ae_bot::SkirmishBot`]).
+    Bot,
+}
 
 struct Opts {
     game: String,
@@ -79,8 +90,8 @@ struct Opts {
     record: Option<String>,
     replay: Option<String>,
     verify: bool,
-    /// `--script orders`: synthetic player commands while recording.
-    script: bool,
+    /// `--script orders|bot`: player commands while recording or playing.
+    script: Script,
     checkpoint_every: u64,
     bisect: bool,
     inject: Option<replay::Inject>,
@@ -95,7 +106,7 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: false, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
+    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: Script::None, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: None, player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -139,8 +150,9 @@ fn parse() -> Result<Opts> {
             "--inject" => o.inject = Some(replay::Inject::parse(&value()?)?),
             "--checkpoint-every" => o.checkpoint_every = value()?.parse()?,
             "--script" => match value()?.as_str() {
-                "orders" => o.script = true,
-                s => bail!("unknown script {s} (orders)"),
+                "orders" => o.script = Script::Orders,
+                "bot" => o.script = Script::Bot,
+                s => bail!("unknown script {s} (orders, bot)"),
             },
             "--digest" => o.digest = true,
             "--fuel" => o.fuel = true,

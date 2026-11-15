@@ -49,12 +49,15 @@ pub struct WindowEvents {
 }
 
 /// A click: the button (`LEFT`, `RIGHT`, ...) and where, as fractions of
-/// the window (0..1 from the top-left), independent of pixel density.
+/// the window (0..1 from the top-left), independent of pixel density, and
+/// whether shift or ctrl was held when it was released.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Click {
     pub button: u8,
     pub x: f32,
     pub y: f32,
+    pub shift: bool,
+    pub ctrl: bool,
 }
 
 impl Click {
@@ -224,7 +227,9 @@ impl SdlWindow {
                             let (mut w, mut h) = (0, 0);
                             sdl::SDL_GetWindowSize(self.window, &mut w, &mut h);
                             if let Some(slot) = events.clicks.iter_mut().find(|c| c.is_none()) {
-                                *slot = Some(Click { button: b as u8, x: x / w.max(1) as f32, y: y / h.max(1) as f32 });
+                                let m = sdl::SDL_GetModState();
+                                let (shift, ctrl) = (m.0 & sdl::SDL_KMOD_SHIFT.0 != 0, m.0 & sdl::SDL_KMOD_CTRL.0 != 0);
+                                *slot = Some(Click { button: b as u8, x: x / w.max(1) as f32, y: y / h.max(1) as f32, shift, ctrl });
                             }
                         }
                     }

@@ -20,5 +20,6 @@ ae_replay.workspace = true
 ae_net.workspace = true
 ae_vfs.workspace = true
 ae_catalog.workspace = true
+ae_bot.workspace = true
 ae_abi.workspace = true
 ae-sdk = { workspace = true, features = ["nav"] }

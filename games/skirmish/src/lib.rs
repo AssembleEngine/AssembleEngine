@@ -13,9 +13,14 @@
 //! * `produce`: a factory earns `income` metal a tick; when it has `cost`
 //!   it starts a unit of def `builds` and spawns it `build_ticks` later
 //!   beside itself.
-//! * `rally`: a unit with `Orders.given == 0` is sent to the enemy base.
-//! * `scan` → `fire` → `armor` → `apply`: every damageable unit publishes
-//!   where it is (`Presence`); a weapon off cooldown targets the nearest
+//! * `scan`: every damageable unit publishes where it is (`Presence`).
+//! * `orders`: players' `UnitCommand`s (move, attack-move, stop; replace
+//!   or append) into each unit's `Queue`, and the queue's head into nav
+//!   orders (nav takes them next tick). A new unit first gathers at its
+//!   allyteam's rally point; an attack-move diverts to enemies within
+//!   acquisition range, then goes on. Nothing attacks on its own: players
+//!   and bots (`ae_bot`) send the attacks.
+//! * `fire` → `armor` → `apply`: a weapon off cooldown targets the nearest
 //!   enemy in range (`DamageRequest`); armor reduces each request
 //!   (`Damage`, at least 1); damage lowers health, and a unit at 0 is
 //!   despawned. Each step is a stream the next reads, in event order, so
@@ -25,7 +30,7 @@
 //!   their last in the same tick it is a draw (`DRAW`).
 
 use ae_sdk::catalog::{SpawnRequest, def_id};
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, MoveOrder, MovementClass, Team};
+use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, MoveOrder, MovementClass, NavAgent, Team, mode};
 use ae_sdk::{Component, Entity, Run, Spawn, despawn, emit, schedule, system};
 
 ae_sdk::movement_classes![
@@ -104,13 +109,73 @@ pub struct Factory {
     pub reserved: u32,
 }
 
-/// Whether the unit was given its rally order.
+/// A unit's command queue: up to [`QUEUE`] commands (`kind`, `x`, `y`;
+/// the head first) and what it is doing about the head (`state`). All
+/// zeros is a unit fresh from the factory ([`state::NEW`]).
 #[repr(C)]
 #[derive(Clone, Copy, Component)]
-pub struct Orders {
+pub struct Queue {
+    pub kind: [u32; QUEUE],
+    pub x: [f32; QUEUE],
+    pub y: [f32; QUEUE],
     #[field(view = "owner")]
-    pub given: u32,
+    pub len: u32,
+    #[field(view = "owner")]
+    pub state: u32,
+    /// The enemy being chased or held against ([`state::CHASE`], [`state::HOLD`]).
+    pub target: Entity,
+    /// Tick of the last nav order.
+    pub since: u64,
+    /// Where the last nav order sent it.
+    pub ox: f32,
+    pub oy: f32,
 }
+
+pub const QUEUE: usize = 4;
+
+/// [`Queue::state`].
+pub mod state {
+    /// Fresh from the factory: gets its rally order.
+    pub const NEW: u32 = 0;
+    /// Nothing ordered to nav for the head (an empty queue: idle).
+    pub const IDLE: u32 = 1;
+    /// Ordered to the head's point.
+    pub const HEADING: u32 = 2;
+    /// Attack-moving, diverted toward an enemy out of range.
+    pub const CHASE: u32 = 3;
+    /// Attack-moving, stopped with an enemy in range.
+    pub const HOLD: u32 = 4;
+}
+
+/// A player's command for one of their units ([`UnitCommand::kind`]).
+pub mod command {
+    /// Go to `(x, y)`, ignoring enemies on the way.
+    pub const MOVE: u32 = 1;
+    /// Go to `(x, y)`, engaging every enemy that comes within acquisition
+    /// range ([`super::ACQUIRE`] × weapon range) on the way, then going on.
+    pub const ATTACK: u32 = 2;
+    /// Clear the queue and stop.
+    pub const STOP: u32 = 3;
+}
+
+/// A command for a unit (sent by players and bots as tick commands):
+/// `append` 0 replaces the queue, 1 adds to its end (dropped when full).
+/// Commands for entities that are gone or have no queue are ignored.
+#[repr(C)]
+#[derive(Clone, Copy, Component)]
+#[component(event, command)]
+pub struct UnitCommand {
+    pub entity: Entity,
+    pub kind: u32,
+    pub append: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Attack-move acquisition range as a multiple of the weapon's range.
+pub const ACQUIRE: f32 = 1.5;
+/// How far in front of its base (toward the enemy) a new unit gathers, metres.
+pub const RALLY: f32 = 220.0;
 
 /// The match: the winning allyteam (`NO_WINNER` until decided) and when.
 #[repr(C)]
@@ -236,19 +301,154 @@ fn produce(run: &Run) {
     }
 }
 
-#[system(serial, read(Team), write(Orders), emits(MoveOrder))]
-fn rally(run: &Run) {
-    let (teams, orders, ids) = (run.read::<Team>(), run.write::<Orders>(), run.entities());
+/// Where allyteam `ally`'s new units gather: [`RALLY`] metres from its
+/// base toward the enemy's.
+pub fn rally_point(run: &Run, ally: u32) -> (f32, f32) {
+    let ((bx, by), (ex, ey)) = (base(run, ally), base(run, (ally + 1) % ALLIES));
+    let (dx, dy) = (ex - bx, ey - by);
+    let d = (dx * dx + dy * dy).sqrt().max(1.0);
+    (bx + dx / d * RALLY, by + dy / d * RALLY)
+}
+
+/// Nav order groups of one tick: orders to the same point share a group
+/// (one flow field); a group id is never reused (tick in the high bits).
+struct Groups {
+    tick: u64,
+    points: Vec<(u32, u32)>,
+}
+
+impl Groups {
+    fn of(&mut self, x: f32, y: f32) -> u64 {
+        let key = (x.to_bits(), y.to_bits());
+        let k = self.points.iter().position(|&p| p == key).unwrap_or_else(|| {
+            self.points.push(key);
+            self.points.len() - 1
+        });
+        1u64 << 62 | self.tick << 16 | k as u64
+    }
+}
+
+fn pop(q: &mut Queue) {
+    for k in 1..QUEUE {
+        q.kind[k - 1] = q.kind[k];
+        q.x[k - 1] = q.x[k];
+        q.y[k - 1] = q.y[k];
+    }
+    q.len = q.len.saturating_sub(1);
+    q.kind[QUEUE - 1] = 0;
+    q.state = state::IDLE;
+    q.target = Entity(0);
+}
+
+fn push(q: &mut Queue, kind: u32, x: f32, y: f32) {
+    let n = q.len as usize;
+    if n < QUEUE {
+        (q.kind[n], q.x[n], q.y[n]) = (kind, x, y);
+        q.len += 1;
+    }
+}
+
+/// Players' commands into queues, then each unit's head into nav orders:
+/// * a new unit queues a move to its allyteam's rally point;
+/// * a move goes to its point; on arrival (or when it cannot get there)
+///   the queue moves on;
+/// * an attack-move also looks for the nearest enemy within acquisition
+///   range every 8 ticks (staggered by entity): out of weapon range it
+///   chases it, in range it stops and holds (the weapon fires on its
+///   own); with none left it goes on to its point.
+///
+/// Runs after `scan` (this tick's `Presence`); nav takes its orders next
+/// tick.
+#[system(serial, read(Team, Body, NavAgent, Weapon), write(Queue), reads_events(UnitCommand, Presence), emits(MoveOrder))]
+fn orders(run: &Run) {
+    let (teams, bodies, agents, weapons, queues, ids) = (run.read::<Team>(), run.read::<Body>(), run.read::<NavAgent>(), run.read::<Weapon>(), run.write::<Queue>(), run.entities());
+    let tick = run.tick();
+    let mut cmds: Vec<(u64, usize)> = run.events::<UnitCommand>().iter().enumerate().map(|(k, c)| (c.entity.0, k)).collect();
+    cmds.sort_unstable();
+    let all = run.events::<UnitCommand>();
+    let seen = run.events::<Presence>();
+    let mut groups = Groups { tick, points: Vec::new() };
     for i in run.rows() {
-        if orders[i].given != 0 {
+        let (q, e, ally, b) = (&mut queues[i], ids[i], teams[i].ally, bodies[i]);
+        if q.state == state::NEW {
+            let (x, y) = rally_point(run, ally);
+            push(q, command::MOVE, x, y);
+            q.state = state::IDLE;
+        }
+        let from = cmds.partition_point(|c| c.0 < e.0);
+        for &(_, k) in cmds[from..].iter().take_while(|c| c.0 == e.0) {
+            let c = all[k];
+            if c.kind == command::STOP {
+                q.len = 0;
+                q.state = state::IDLE;
+                q.target = Entity(0);
+                q.since = tick;
+                emit(&MoveOrder::stop(e, groups.of(f32::NAN, 0.0)));
+                continue;
+            }
+            if c.kind != command::MOVE && c.kind != command::ATTACK {
+                continue;
+            }
+            if c.append == 0 {
+                q.len = 0;
+                q.state = state::IDLE;
+                q.target = Entity(0);
+            }
+            push(q, c.kind, c.x, c.y);
+        }
+        if q.len == 0 {
             continue;
         }
-        orders[i].given = 1;
-        let ally = teams[i].ally;
-        let (x, y) = base(run, (ally + 1) % ALLIES);
-        // One group per allyteam and tick: units sent together share a flow field.
-        let group = 1u64 << 41 | run.tick() << 8 | ally as u64;
-        emit(&MoveOrder::move_to(ids[i], x, y, group));
+        // The head reached: next command.
+        let settled = matches!(agents[i].mode, mode::ARRIVED | mode::UNREACHABLE) && tick > q.since + 2;
+        if q.state == state::HEADING && settled {
+            pop(q);
+            if q.len == 0 {
+                continue;
+            }
+        }
+        let (kind, hx, hy) = (q.kind[0], q.x[0], q.y[0]);
+        if kind == command::ATTACK && (e.0 + tick).is_multiple_of(8) {
+            let w = weapons[i];
+            let reach = w.range * ACQUIRE;
+            let mut best: Option<(f32, Presence)> = None;
+            for p in seen {
+                if p.ally == ally {
+                    continue;
+                }
+                let (dx, dy) = (p.x - b.x, p.y - b.y);
+                let d2 = dx * dx + dy * dy;
+                if d2 <= reach * reach && best.is_none_or(|(bd, _)| d2 < bd) {
+                    best = Some((d2, *p));
+                }
+            }
+            match best {
+                Some((d2, p)) if d2 <= (w.range * 0.9) * (w.range * 0.9) => {
+                    if q.state != state::HOLD {
+                        q.state = state::HOLD;
+                        q.target = p.entity;
+                        q.since = tick;
+                        emit(&MoveOrder::stop(e, groups.of(f32::NAN, 0.0)));
+                    }
+                }
+                Some((_, p)) => {
+                    let moved = (p.x - q.ox) * (p.x - q.ox) + (p.y - q.oy) * (p.y - q.oy) > 32.0 * 32.0;
+                    if q.state != state::CHASE || q.target != p.entity || moved {
+                        (q.state, q.target, q.since, q.ox, q.oy) = (state::CHASE, p.entity, tick, p.x, p.y);
+                        emit(&MoveOrder::move_to(e, p.x, p.y, groups.of(p.x, p.y)));
+                    }
+                }
+                None => {
+                    if q.state != state::HEADING {
+                        q.state = state::IDLE;
+                    }
+                }
+            }
+        }
+        if q.state == state::IDLE {
+            (q.state, q.target, q.since, q.ox, q.oy) = (state::HEADING, Entity(0), tick, hx, hy);
+            emit(&MoveOrder::move_to(e, hx, hy, groups.of(hx, hy)));
+        }
     }
 }
 
@@ -356,4 +556,4 @@ fn judge(run: &Run) {
     }
 }
 
-schedule!(start, produce, host(catalog_spawn), rally, host(nav), host(spatial), scan, fire, armor, apply, census, judge);
+schedule!(start, produce, host(catalog_spawn), host(nav), host(spatial), scan, orders, fire, armor, apply, census, judge);

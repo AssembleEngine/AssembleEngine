@@ -8,9 +8,11 @@
 //! reports them taken. Digests go to the relay at every checkpoint tick
 //! and at the end. `--latency/--jitter/--loss` emulate a bad network on
 //! what this client sends; `--inject TICK:Component.field:ROW` makes this
-//! client diverge (the relay must notice).
+//! client diverge (the relay must notice). With `--script bot` (the
+//! skirmish game) player P is allyteam P's bot of `ae_bot::SkirmishBot::pair`
+//! instead, sending what it decides the same way.
 
-use super::Opts;
+use super::{Opts, Script};
 use super::replay::{content, header, orders, runtime};
 use ae_net::{Emulator, Packet, micros};
 use ae_sim::input::{Command, TickBundle};
@@ -44,6 +46,7 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let workers = o.workers[0];
     let mut rt = runtime(&wasm, nav, content.as_ref(), workers, o.range_rows)?;
     let mut world = rt.world_for(param, workers)?;
+    let bot = if o.script == Script::Bot { Some(ae_bot::SkirmishBot::pair(&rt)?.into_iter().nth(player as usize).context("--script bot plays player 0 or 1")?) } else { None };
 
     let socket = UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(Duration::from_millis(1)))?;
@@ -85,8 +88,14 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
         // Run every tick whose bundle is here.
         most_queued = most_queued.max(bundles.len());
         while let Some(bundle) = bundles.remove(&world.tick) {
-            if o.script {
-                let mine: Vec<Command> = orders(&rt, &world, 16)?.commands.into_iter().filter(|c| c.player == player).take(MAX_ORDERS).collect();
+            if o.script != Script::None {
+                let mine: Vec<Command> = if let Some(bot) = &bot {
+                    let mut c = Vec::new();
+                    bot.commands(&rt, &world, &mut c)?;
+                    c.into_iter().take(MAX_ORDERS).collect()
+                } else {
+                    orders(&rt, &world, 16)?.commands.into_iter().filter(|c| c.player == player).take(MAX_ORDERS).collect()
+                };
                 if !mine.is_empty() {
                     let delay = ((rtt_ms / 2.0) / (period.as_secs_f64() * 1000.0)).ceil() as u64 + 2;
                     let at = schedule(world.tick, delay, last_intended);

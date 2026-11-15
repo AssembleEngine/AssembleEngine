@@ -70,6 +70,8 @@ terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M3 progress".
 | `sdk/ae-sdk`, `sdk/ae-sdk-macros` | Guest SDK: `#[derive(Component)]`, `#[system(...)]`, `schedule!` (with `host(..)` entries), typed columns, commands, events, spatial queries; engine components and `movement_classes!` in `ae_sdk::nav` (feature `nav`) | new |
 | `games/sandbox` | The M1 exit workload (built for wasm32 by the tools; not a workspace member) | new |
 | `games/crossing` | The M2 exit workload: orders of every kind, neighbour counts and terrain edits in WASM, the units moved by the nav host system | new |
+| `games/skirmish` | The M6 workload: two allyteams with factories, weapons, armour and command queues (move, attack-move, stop), units and buildings defined by `content/defs/*.json` | new |
+| `crates/ae_bot` | Host-side bots that play an allyteam through tick commands, like a player (`SkirmishBot`; `ae-headless --script bot`, the client's opponent) | new |
 | `games/alloc` | Guest heap allocation probe for `tests/guest_alloc.rs` | new |
 | `bins/ae-headless` | Runs a game module at several worker counts; prints digests, timings, speedups | new |
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
