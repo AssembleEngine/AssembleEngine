@@ -1,6 +1,6 @@
 //! Engine pass library: the passes a scene's graph wires up by name (the
-//! terrain, the units, the water surface, readback, present), with the resources each needs
-//! and the roles it uses them in.
+//! terrain, the units and their shadows, the water surface, readback,
+//! present), with the resources each needs and the roles it uses them in.
 //!
 //! A graph, native or declared by a render module, uses a library pass by
 //! naming it ([`LibraryPass::from_name`]) and giving it its resources in
@@ -12,6 +12,12 @@
 //! [`check`] rejects a graph that wires a library pass without its
 //! resources and roles, gives it other resources, or declares a library
 //! resource as something else; errors name the pass and the resource.
+//!
+//! The units' shadow map (`shadows.map`, written by `shadows.draw`) is
+//! the graph's choice: a graph that declares it must have every receiver
+//! (`terrain.draw`, `units.draw`, `water.draw`) sample it
+//! ([`LibraryPass::receives`], [`check_shadows`]), and the host then
+//! shades by it; a graph without it renders without the units' shadows.
 
 use ae_framegraph::{BufferDesc, FrameGraph, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage};
 use ash::vk;
@@ -30,10 +36,13 @@ pub enum LibraryResource {
     /// checked against the target) and the host buffer it is copied to.
     ReadbackTarget,
     ReadbackBuffer,
+    /// The units' shadow map: a depth image of fixed size
+    /// ([`ae_render_abi::module::shadow_map_spec`]).
+    ShadowMap,
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 8] = [
+    pub const ALL: [LibraryResource; 9] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
         Self::UnitInstances,
@@ -42,6 +51,7 @@ impl LibraryResource {
         Self::UnitCounts,
         Self::ReadbackTarget,
         Self::ReadbackBuffer,
+        Self::ShadowMap,
     ];
 
     pub fn name(self) -> &'static str {
@@ -54,6 +64,7 @@ impl LibraryResource {
             Self::UnitCounts => "units.counts",
             Self::ReadbackTarget => "readback.target",
             Self::ReadbackBuffer => "readback.buffer",
+            Self::ShadowMap => ae_render_abi::module::SHADOW_MAP_NAME,
         }
     }
 
@@ -62,7 +73,7 @@ impl LibraryResource {
     }
 
     pub fn is_image(self) -> bool {
-        self == Self::ReadbackTarget
+        matches!(self, Self::ReadbackTarget | Self::ShadowMap)
     }
 }
 
@@ -75,6 +86,9 @@ pub enum LibraryPass {
     UnitsCull,
     UnitsDraw,
     UnitsCount,
+    /// The units' shadow map: every unit (not only the visible ones) drawn
+    /// from the sun into [`LibraryResource::ShadowMap`], depth only.
+    ShadowsDraw,
     /// The water surface over the terrain and units: tests against their
     /// depth read-only and blends into the colour target.
     WaterDraw,
@@ -103,13 +117,14 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 10] = [
+    pub const ALL: [LibraryPass; 11] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
         Self::UnitsCull,
         Self::UnitsDraw,
         Self::UnitsCount,
+        Self::ShadowsDraw,
         Self::WaterDraw,
         Self::ReadbackCopy,
         Self::HostRead,
@@ -124,6 +139,7 @@ impl LibraryPass {
             Self::UnitsCull => "units.cull",
             Self::UnitsDraw => "units.draw",
             Self::UnitsCount => "units.count",
+            Self::ShadowsDraw => "shadows.draw",
             Self::WaterDraw => "water.draw",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
@@ -138,7 +154,7 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod | Self::UnitsCull => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw => PassKind::Graphics,
+            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::WaterDraw => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -162,6 +178,7 @@ impl LibraryPass {
                 (R::UnitIndirect, Role::IndirectBuffer),
             ],
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
+            Self::ShadowsDraw => &[(R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)), (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear))],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
             Self::WaterDraw | Self::HostRead | Self::Present => &[],
         }
@@ -179,7 +196,14 @@ impl LibraryPass {
 
     /// Whether it needs the unit renderer.
     pub fn uses_units(self) -> bool {
-        matches!(self, Self::UnitsReset | Self::UnitsCull | Self::UnitsDraw | Self::UnitsCount)
+        matches!(self, Self::UnitsReset | Self::UnitsCull | Self::UnitsDraw | Self::UnitsCount | Self::ShadowsDraw)
+    }
+
+    /// Whether it shades by the units' shadow map: in a graph that
+    /// declares [`LibraryResource::ShadowMap`] it must sample it in this
+    /// role.
+    pub fn receives(self) -> Option<Role> {
+        matches!(self, Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw).then_some(Role::Sampled(ShaderStage::Fragment))
     }
 }
 
@@ -209,6 +233,8 @@ pub struct LibraryEnv {
     pub units: bool,
     /// The scene draws water (the renderer has its pipeline).
     pub water: bool,
+    /// The units cast shadows (the renderer has the units' shadow map).
+    pub shadows: bool,
 }
 
 /// Library resource of each graph resource (by `ResourceId` index).
@@ -216,9 +242,10 @@ pub type ResourceMap = Vec<Option<LibraryResource>>;
 
 /// Fill in library buffer sizes (declared as 0) from `desc` and map every
 /// resource to its library resource. A library resource must be declared
-/// `External`, as a buffer of size 0 (or exactly its size), or for
+/// `External`, as a buffer of size 0 (or exactly its size), for
 /// [`LibraryResource::ReadbackTarget`] as an image of the target's extent
-/// and colour format.
+/// and colour format, and for [`LibraryResource::ShadowMap`] as its spec
+/// (in a scene whose units cast shadows).
 pub fn resolve<R>(graph: &mut FrameGraph<R>, env: &LibraryEnv, desc: impl Fn(LibraryResource) -> Option<BufferDesc>) -> Result<ResourceMap, LibraryError> {
     let mut map = Vec::with_capacity(graph.resources.len());
     for resource in &mut graph.resources {
@@ -230,6 +257,19 @@ pub fn resolve<R>(graph: &mut FrameGraph<R>, env: &LibraryEnv, desc: impl Fn(Lib
             return Err(error(format!("library resource `{}` must be External, not {:?}", resource.name, resource.class)));
         }
         match (&mut resource.desc, lib.is_image()) {
+            (ResourceDesc::Image(image), true) if lib == LibraryResource::ShadowMap => {
+                use ae_render_abi::module as m;
+                if !env.shadows {
+                    return Err(error(format!("library resource `{}` does not exist in this scene (its units cast no shadows)", resource.name)));
+                }
+                let format = vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32);
+                if image.format != format || image.width != m::SHADOW_MAP_WIDTH || image.height != m::SHADOW_MAP_HEIGHT || !image.aspect.contains(vk::ImageAspectFlags::DEPTH) {
+                    return Err(error(format!(
+                        "`{}` is {:?} {}x{}; the library's is {format:?} {}x{} with a depth aspect (shadow_map_spec)",
+                        resource.name, image.format, image.width, image.height, m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT
+                    )));
+                }
+            }
             (ResourceDesc::Image(image), true) => {
                 if image.format != env.color_format || image.width != env.extent.width || image.height != env.extent.height {
                     return Err(error(format!(
@@ -268,16 +308,22 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     if lib == LibraryPass::WaterDraw && !env.water {
         return Err(error(format!("pass `{name}` (water.draw) needs water; this scene draws none")));
     }
+    if lib == LibraryPass::ShadowsDraw && !env.shadows {
+        return Err(error(format!("pass `{name}` (shadows.draw) needs units that cast shadows; this scene's cast none")));
+    }
     let resource = |id: ResourceId| &graph.resources[id.index()];
-    for &(needed, role) in lib.requires() {
+    // The shadow map, for a receiver in a graph that declares it.
+    let receives = lib.receives().filter(|_| map.contains(&Some(LibraryResource::ShadowMap))).map(|role| (LibraryResource::ShadowMap, role));
+    for &(needed, role) in lib.requires().iter().chain(&receives) {
         if !p.intents.iter().any(|i| map[i.resource.index()] == Some(needed) && i.role == role) {
-            return Err(error(format!("pass `{name}` ({}) must use `{}` as {role:?}", lib.name(), needed.name())));
+            let why = if receives.is_some_and(|r| r.0 == needed) { " (the graph declares the units' shadow map: every receiver samples it)" } else { "" };
+            return Err(error(format!("pass `{name}` ({}) must use `{}` as {role:?}{why}", lib.name(), needed.name())));
         }
     }
     let (mut color, mut depth) = (0, 0);
     for intent in &p.intents {
         let r = resource(intent.resource);
-        if lib.requires().iter().any(|&(needed, role)| map[intent.resource.index()] == Some(needed) && intent.role == role) {
+        if lib.requires().iter().chain(&receives).any(|&(needed, role)| map[intent.resource.index()] == Some(needed) && intent.role == role) {
             continue;
         }
         match (lib, intent.role) {
@@ -321,13 +367,22 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     Ok(())
 }
 
+/// Graph-wide: a graph that declares the units' shadow map has a
+/// `shadows.draw` pass write it (`libs`: each pass's library pass).
+pub fn check_shadows<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(usize) -> Option<LibraryPass>) -> Result<(), LibraryError> {
+    if map.contains(&Some(LibraryResource::ShadowMap)) && !(0..graph.passes.len()).any(|i| libs(i) == Some(LibraryPass::ShadowsDraw)) {
+        return Err(error("the graph declares `shadows.map` but no `shadows.draw` pass writes it".into()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::terrain::app::{TerrainOutput, native_graph};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {

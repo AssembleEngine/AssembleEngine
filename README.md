@@ -65,7 +65,8 @@ over the terrain and units (a `water.draw` library pass that render modules can 
 waves that fade into roughness with distance, sky reflection by fresnel, sun glints, shore foam, fog of
 war, and caustics on the ground under it; O toggles it, `--no-water` leaves it out. The hills cast the
 sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
-toggles, `--no-shadows`). The units' own shadows, particles and decals are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
+toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
+shadow map later). Particles and decals are next. Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
 | Crate | What it is | Origin |
 |---|---|---|

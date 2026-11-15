@@ -254,7 +254,11 @@ void main() {
     vec3 L = normalize(u.sun.xyz);
     // On the ground, against the ground as the heights texture has it (the
     // mesh's LOD error would read as shadow on convex slopes).
-    float diff = max(dot(n, L), 0.0) * sunAt(inWorld.xz, sampleHeight(inWorld.xz / u.map.w));
+    // Both shadows at the bilinear ground under the pixel (what the hills'
+    // shadow heights and the units' feet are measured against), not the
+    // LOD mesh's height. The darker one wins (they are the same sun).
+    vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
+    float diff = max(dot(n, L), 0.0) * min(sunAt(ground.xz, ground.y), unitSunAt(ground, n));
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * n.y));
 

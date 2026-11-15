@@ -5,7 +5,7 @@
 //! declares natively (`ae_render::terrain::app::native_graph`), which the
 //! host's tests check pass for pass.
 
-use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, ProgramTable, RenderModule, ResourceRef, Role, ShaderStage, render_module, vk};
+use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, SHADOW_MAP_NAME, ShaderStage, render_module, shadow_map_spec, vk};
 
 #[derive(Default)]
 struct Scene;
@@ -28,22 +28,31 @@ impl RenderModule for Scene {
         } else {
             g.image("target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT), Class::Backbuffer)
         };
+        // The unit buffers, then the units' shadow map.
+        let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts"].map(|name| library(&mut g, name)));
+        let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
             .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
             .id();
+        // The units' shadows: every unit drawn from the sun, before the
+        // passes that sample the map.
+        if let (Some([instances, ..]), Some(map)) = (units, map) {
+            let shadows = p.library("shadows.draw");
+            g.pass("shadows", PassKind::Graphics, shadows).access(instances, Role::StorageBufferRead(ShaderStage::Vertex)).depth(map, LoadOp::Clear).id();
+        }
         let draw = p.library("terrain.draw");
-        g.pass("terrain", PassKind::Graphics, draw)
-            .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
-            .access(indirect, Role::IndirectBuffer)
-            .color(target, LoadOp::Clear)
-            .depth(depth, LoadOp::Clear)
-            .id();
-        if env.units {
-            let instances = library(&mut g, "units.instances");
-            let visible = library(&mut g, "units.visible");
-            let draws = library(&mut g, "units.indirect");
+        receive(
+            g.pass("terrain", PassKind::Graphics, draw)
+                .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(indirect, Role::IndirectBuffer)
+                .color(target, LoadOp::Clear)
+                .depth(depth, LoadOp::Clear),
+            map,
+        )
+        .id();
+        if let Some([instances, visible, draws, counts]) = units {
             let reset = p.library("units.reset");
             g.pass("units reset", PassKind::Transfer, reset).access(draws, Role::TransferDst).id();
             let cull = p.library("units.cull");
@@ -53,14 +62,16 @@ impl RenderModule for Scene {
                 .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
                 .id();
             let units = p.library("units.draw");
-            g.pass("units", PassKind::Graphics, units)
-                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(draws, Role::IndirectBuffer)
-                .color(target, LoadOp::Load)
-                .depth(depth, LoadOp::Load)
-                .id();
-            let counts = library(&mut g, "units.counts");
+            receive(
+                g.pass("units", PassKind::Graphics, units)
+                    .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(draws, Role::IndirectBuffer)
+                    .color(target, LoadOp::Load)
+                    .depth(depth, LoadOp::Load),
+                map,
+            )
+            .id();
             let count = p.library("units.count");
             g.pass("units count", PassKind::Transfer, count).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
             let read = p.library("host.read");
@@ -68,7 +79,7 @@ impl RenderModule for Scene {
         }
         if env.water {
             let water = p.library("water.draw");
-            g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth).id();
+            receive(g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth), map).id();
         }
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
@@ -81,6 +92,14 @@ impl RenderModule for Scene {
             g.pass("present", PassKind::Present, present).present(target).root().id();
         }
         Some(Declaration { graph: g, programs: p })
+    }
+}
+
+/// A receiver samples the units' shadow map when the graph has it.
+fn receive(pass: PassWriter<'_>, map: Option<ResourceRef>) -> PassWriter<'_> {
+    match map {
+        Some(map) => pass.sampled(map, ShaderStage::Fragment),
+        None => pass,
     }
 }
 

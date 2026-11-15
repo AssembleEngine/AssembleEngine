@@ -28,7 +28,8 @@
 //! ```
 //!
 //! * **Resources** are declared in file order. `library`: an engine library
-//!   buffer by its name (`External`, size 0; the host sizes it). `image`:
+//!   buffer by its name (`External`, size 0; the host sizes it), or the
+//!   units' shadow map `shadows.map` (its fixed spec). `image`:
 //!   the target's size times `scale` (default 1), `format` a Vulkan format
 //!   name or `target` (the target's colour format), `usage` flag names,
 //!   `class` `transient` (default) or `persistent`. `output`: the image the
@@ -51,13 +52,15 @@
 //!   `vertex_buffer`, `index_buffer`, `indirect`, `transfer_src`,
 //!   `transfer_dst`, `host_read`; `flag` n makes the pass conditional, run
 //!   only while bit n of the application's flags is set; `root` keeps a
-//!   pass whose results nothing reads.
+//!   pass whose results nothing reads. An access to a resource the scene
+//!   leaves out (its `when` does not hold) is left out with it, so a pass
+//!   can sample `shadows.map` only where the map exists.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
-//!   `readback`, `present`, `water` or `no_water`, to exist only in such
-//!   scenes.
+//!   `readback`, `present`, `water`, `no_water`, `shadows` or `no_shadows`
+//!   (the units cast shadows), to exist only in such scenes.
 
 use crate::module::{Declared, ModuleFrame};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
@@ -118,11 +121,13 @@ enum When {
     Present,
     Water,
     NoWater,
+    Shadows,
+    NoShadows,
 }
 
 impl When {
     fn holds(when: Option<When>, flags: u32) -> bool {
-        let (units, readback, water) = (flags & DECLARE_UNITS != 0, flags & DECLARE_READBACK != 0, flags & DECLARE_WATER != 0);
+        let (units, readback, water, shadows) = (flags & DECLARE_UNITS != 0, flags & DECLARE_READBACK != 0, flags & DECLARE_WATER != 0, flags & DECLARE_SHADOWS != 0);
         match when {
             None => true,
             Some(When::Units) => units,
@@ -131,12 +136,15 @@ impl When {
             Some(When::Present) => !readback,
             Some(When::Water) => water,
             Some(When::NoWater) => !water,
+            Some(When::Shadows) => shadows,
+            Some(When::NoShadows) => !shadows,
         }
     }
 }
 
-/// Every combination of the `declare` flags a scene can be asked for.
-pub const SCENE_FLAGS: [u32; 8] = [
+/// Every combination of the `declare` flags a scene can be asked for
+/// (shadows only with units).
+pub const SCENE_FLAGS: [u32; 12] = [
     0,
     DECLARE_UNITS,
     DECLARE_READBACK,
@@ -145,6 +153,10 @@ pub const SCENE_FLAGS: [u32; 8] = [
     DECLARE_UNITS | DECLARE_WATER,
     DECLARE_READBACK | DECLARE_WATER,
     DECLARE_UNITS | DECLARE_READBACK | DECLARE_WATER,
+    DECLARE_UNITS | DECLARE_SHADOWS,
+    DECLARE_UNITS | DECLARE_READBACK | DECLARE_SHADOWS,
+    DECLARE_UNITS | DECLARE_WATER | DECLARE_SHADOWS,
+    DECLARE_UNITS | DECLARE_READBACK | DECLARE_WATER | DECLARE_SHADOWS,
 ];
 
 #[derive(Debug, Deserialize)]
@@ -338,9 +350,10 @@ impl GraphFile {
         for flags in SCENE_FLAGS {
             file.build(64, 64, 50, flags).with_context(|| {
                 format!(
-                    "declaring for {}units, {}water, {}",
+                    "declaring for {}units, {}water, {}shadows, {}",
                     if flags & DECLARE_UNITS != 0 { "" } else { "no " },
                     if flags & DECLARE_WATER != 0 { "" } else { "no " },
+                    if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
                     if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
                 )
             })?;
@@ -359,8 +372,12 @@ impl GraphFile {
             let at = || format!("resource `{}`", r.name);
             let reference = match r.kind {
                 ResourceKind::Library => {
-                    ensure!(r.format.is_none() && r.usage.is_empty() && r.class.is_none() && r.scale.is_none(), "{}: a library buffer takes no format, usage, class or scale", at());
-                    g.buffer(&r.name, 0, 0, Class::External)
+                    ensure!(r.format.is_none() && r.usage.is_empty() && r.class.is_none() && r.scale.is_none(), "{}: a library resource takes no format, usage, class or scale", at());
+                    if r.name == ae_render_abi::module::SHADOW_MAP_NAME {
+                        g.image(&r.name, ae_render_abi::module::shadow_map_spec(), Class::External)
+                    } else {
+                        g.buffer(&r.name, 0, 0, Class::External)
+                    }
                 }
                 ResourceKind::Image => {
                     let fmt = format(r.format.as_deref().with_context(|| format!("{} needs a format", at()))?, color_format).with_context(at)?;
@@ -413,7 +430,11 @@ impl GraphFile {
             let mut w = g.pass(&p.name, kind, payload);
             for a in &p.access {
                 let (resource, role, discard) = access(a).with_context(at)?;
-                let reference = *refs.get(resource).with_context(|| format!("{}: no resource `{resource}` in this scene", at()))?;
+                let Some(&reference) = refs.get(resource) else {
+                    // Declared, but not in this scene: the access goes with it.
+                    ensure!(self.spec.resources.iter().any(|r| r.name == resource), "{}: no resource `{resource}`", at());
+                    continue;
+                };
                 w = if discard { w.discard(reference, role) } else { w.access(reference, role) };
             }
             if let Some(bit) = p.flag {

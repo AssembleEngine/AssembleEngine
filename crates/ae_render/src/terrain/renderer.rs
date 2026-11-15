@@ -30,6 +30,7 @@ use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, spirv};
+use crate::shadow::{Cascades, ShadowMap};
 use crate::upload;
 use ae_framegraph::BufferDesc;
 use anyhow::{Context as _, Result};
@@ -66,6 +67,8 @@ struct FrameUbo {
     water: [f32; 4],
     /// Vision grid: width, height (cells), cell size, u32 words per row.
     vision: [f32; 4],
+    /// The units' shadow cascades ([`crate::shadow`]).
+    unit_shadow: crate::shadow::CascadeUniforms,
 }
 
 /// The cell layout of the vision (fog of war) planes a renderer can show:
@@ -135,6 +138,9 @@ pub struct FrameParams {
     pub time: f32,
     /// Shade by the hills' shadows (when the renderer has them).
     pub shadows: bool,
+    /// Shade by the units' shadow map with these cascades (the graph
+    /// draws and samples it this frame).
+    pub unit_shadows: Option<Cascades>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -219,6 +225,8 @@ pub struct TerrainRenderer {
     /// World shadow height per corner ([`super::sun`]); 1x1 without shadows.
     shadow_img: OwnedImage,
     has_shadows: bool,
+    /// The units' shadow map (a 1x1 stand-in without it).
+    unit_shadow_map: ShadowMap,
     /// Per slot: line-of-sight and explored bit planes (host-visible;
     /// 16 bytes without a vision grid).
     vision_bufs: Vec<OwnedBuffer>,
@@ -269,6 +277,7 @@ impl TerrainRenderer {
         tileset: Option<&Tileset>,
         vision: Option<VisionGrid>,
         shadows: Option<&[f32]>,
+        unit_shadows: bool,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -337,6 +346,7 @@ impl TerrainRenderer {
             }
             None => upload::image(gpu, vk::Format::R32_SFLOAT, 1, 1, &[&[0; 4]], "terrain shadow heights")?,
         };
+        let unit_shadow_map = ShadowMap::new(gpu, unit_shadows)?;
         let array = vk::ImageViewType::TYPE_2D_ARRAY;
         let (tile_albedo, tile_normal, tile_table) = match tileset {
             Some(t) => {
@@ -404,6 +414,7 @@ impl TerrainRenderer {
                 b(12, vk::DescriptorType::UNIFORM_BUFFER),
                 b(13, vk::DescriptorType::STORAGE_BUFFER),
                 b(14, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(15, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
@@ -411,7 +422,7 @@ impl TerrainRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 6 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 7 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 8 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -451,6 +462,9 @@ impl TerrainRenderer {
                 let planes = [vk::DescriptorBufferInfo { buffer: vision_bufs[slot].buffer, offset: 0, range: vk::WHOLE_SIZE }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&planes));
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(14).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
+                let (view, sampler) = unit_shadow_map.texture();
+                let units = image(sampler, view);
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(15).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&units));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -459,9 +473,9 @@ impl TerrainRenderer {
         let prepare = pipeline::compute_pipeline(device, spirv!("cbt_prepare.comp"), pipeline_layout)?;
         let update = pipeline::compute_pipeline(device, spirv!("cbt_update.comp"), pipeline_layout)?;
         let reduce = pipeline::compute_pipeline(device, spirv!("cbt_reduce.comp"), pipeline_layout)?;
-        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false)?;
+        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows)?;
         let wire = if gpu.fill_mode_non_solid {
-            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true)?)
+            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true, false)?)
         } else {
             None
         };
@@ -519,6 +533,7 @@ impl TerrainRenderer {
             has_tileset: tileset.is_some(),
             shadow_img,
             has_shadows: shadows.is_some(),
+            unit_shadow_map,
             vision_bufs,
             vision,
             samplers,
@@ -549,6 +564,12 @@ impl TerrainRenderer {
     /// 1x1 when the renderer has no shadows. Lives as long as the renderer.
     pub fn shadow_texture(&self) -> (vk::ImageView, vk::Sampler) {
         (self.shadow_img.view, self.samplers[1])
+    }
+
+    /// The units' shadow map (the 1x1 stand-in unless made with
+    /// `unit_shadows`). Lives as long as the renderer.
+    pub fn unit_shadow_map(&self) -> &ShadowMap {
+        &self.unit_shadow_map
     }
 
     /// Whether it was made with the hills' shadows.
@@ -599,6 +620,7 @@ impl TerrainRenderer {
     pub fn write_frame(&mut self, slot: usize, p: &FrameParams) {
         let planes = frustum_planes;
         let i = &self.info;
+        let unit_shadow = Cascades::uniforms(p.unit_shadows.as_ref().filter(|_| self.unit_shadow_map.is_real()));
         let ubo = FrameUbo {
             view_proj: p.view_proj.to_cols_array(),
             cam_pos: p.cam_pos.extend(1.0).to_array(),
@@ -628,6 +650,7 @@ impl TerrainRenderer {
                 None => [0.0, 0.0, 0.0, 0.0],
             },
             vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
+            unit_shadow,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(bytes_of(&ubo));
@@ -782,6 +805,7 @@ impl TerrainRenderer {
         self.tile_normal.destroy(gpu);
         self.tile_ubo.destroy(gpu);
         self.shadow_img.destroy(gpu);
+        self.unit_shadow_map.destroy(gpu);
     }
 }
 
@@ -800,12 +824,18 @@ fn graphics_pipeline(
     depth_format: vk::Format,
     fragment: &[u8],
     wire: bool,
+    unit_shadows: bool,
 ) -> Result<vk::Pipeline> {
     let vert = pipeline::shader_module(device, spirv!("terrain.vert"))?;
     let frag = pipeline::shader_module(device, fragment)?;
+    // UNIT_SHADOWS (unit_shadows.glsl): without a shadow map the lookup is
+    // compiled out, not just skipped.
+    let spec_value = u32::from(unit_shadows).to_ne_bytes();
+    let spec_entries = [vk::SpecializationMapEntry { constant_id: 0, offset: 0, size: 4 }];
+    let spec = vk::SpecializationInfo::default().map_entries(&spec_entries).data(&spec_value);
     let stages = [
         vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(c"main"),
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(c"main").specialization_info(&spec),
     ];
     let vb = [vk::VertexInputBindingDescription { binding: 0, stride: 16, input_rate: vk::VertexInputRate::VERTEX }];
     let va = [vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32A32_SINT, offset: 0 }];

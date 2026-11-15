@@ -16,8 +16,8 @@
 //! ae_render_sdk::render_module!(Scene);
 //! ```
 
-pub use ae_render_abi::module::{FrameInput, Program, ProgramTable};
-pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
+pub use ae_render_abi::module::{FrameInput, Program, ProgramTable, SHADOW_MAP_NAME, shadow_map_spec};
+pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 pub use ae_render_abi as abi;
 
 /// Raw Vulkan values a module needs to describe images.
@@ -49,6 +49,13 @@ pub struct DeclareEnv {
     pub readback: bool,
     /// The scene draws water: the `water.draw` library pass exists.
     pub water: bool,
+    /// The units cast shadows (only with `units`): the `shadows.draw`
+    /// library pass and the `shadows.map` library image
+    /// ([`shadow_map_spec`], `External`) exist. Declaring the map, the
+    /// graph has `shadows.draw` write it (`depth:clear`, reading
+    /// `units.instances` in the vertex stage) and every terrain, unit and
+    /// water draw sample it (`sampled:fragment`).
+    pub shadows: bool,
 }
 
 pub struct Declaration {
@@ -106,7 +113,7 @@ pub mod rt {
 
     impl<M: RenderModule> Exports<M> {
         pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> u32 {
-            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0, water: flags & abi::module::DECLARE_WATER != 0 };
+            let env = DeclareEnv { width, height, color_format, units: flags & abi::module::DECLARE_UNITS != 0, readback: flags & abi::module::DECLARE_READBACK != 0, water: flags & abi::module::DECLARE_WATER != 0, shadows: flags & abi::module::DECLARE_SHADOWS != 0 };
             let Some(d) = self.module.declare(&env) else { return 0 };
             self.declaration = (d.graph.finish(), d.programs.finish());
             let (g, p) = &self.declaration;

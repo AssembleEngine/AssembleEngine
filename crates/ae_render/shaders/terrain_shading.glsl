@@ -1,10 +1,19 @@
 // Shading helpers shared by the terrain and the water surface (both
-// include terrain_common.glsl first): the hills' shadows, fog of war,
+// include terrain_common.glsl first): the hills' and the units' shadows, fog of war,
 // distance fog, noise.
 
 // Shadow heights (src/terrain/sun.rs): per heightmap corner, the highest
 // point above it that the terrain toward the sun shades (world units).
 layout(set = 0, binding = 14) uniform sampler2D sunShadowTex;
+// The units' shadow map (src/shadow.rs; a 1x1 stand-in when off).
+layout(set = 0, binding = 15) uniform sampler2DShadow unitShadowTex;
+
+#include "unit_shadows.glsl"
+
+// Sunlight reaching world point p (normal n) past the units.
+float unitSunAt(vec3 p, vec3 n) {
+    return unitShadowAt(unitShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n);
+}
 
 // Sunlight reaching height `y` over world point `xz` past the hills: 1 lit,
 // 0 in shadow, over a metre or so (a third of a cell on coarse maps) of

@@ -15,9 +15,9 @@
 //! `declare` returns the address of four `u32`s: graph pointer and length
 //! (the frame graph declaration, [`crate::GraphBuilder`]), program table
 //! pointer and length ([`ProgramTable`]); 0 if the module cannot render
-//! that target. `flags` holds [`DECLARE_UNITS`], [`DECLARE_READBACK`] and
-//! [`DECLARE_WATER`] (added later; a module that ignores it simply draws no
-//! water).
+//! that target. `flags` holds [`DECLARE_UNITS`], [`DECLARE_READBACK`],
+//! [`DECLARE_WATER`] and [`DECLARE_SHADOWS`] (the last two added later; a
+//! module that ignores them simply draws no water, or no unit shadows).
 //! `frame` returns the address of [`FrameOutput`] as four `u32`s: pointer
 //! and word count of a bitset of *disabled* programs (a conditional pass
 //! whose payload's bit is set is skipped), pointer and length of the
@@ -48,6 +48,29 @@ pub const DECLARE_READBACK: u32 = 1 << 1;
 /// `declare` flag: the scene draws water (the `water.draw` library pass
 /// exists).
 pub const DECLARE_WATER: u32 = 1 << 2;
+/// `declare` flag: the units cast shadows (set only with
+/// [`DECLARE_UNITS`]): the `shadows.draw` library pass and the
+/// `shadows.map` library image exist. A graph that declares `shadows.map`
+/// has `shadows.draw` write it and every `terrain.draw`, `units.draw` and
+/// `water.draw` pass sample it (`sampled:fragment`); a graph that does not
+/// simply renders without the units' shadows.
+pub const DECLARE_SHADOWS: u32 = 1 << 3;
+
+/// The `shadows.map` library image as a graph declares it (`External`):
+/// [`SHADOW_MAP_FORMAT`], [`SHADOW_MAP_WIDTH`] × [`SHADOW_MAP_HEIGHT`],
+/// usage depth attachment and sampled, depth aspect.
+pub const SHADOW_MAP_FORMAT: u32 = 126; // VK_FORMAT_D32_SFLOAT
+/// The map's cascades side by side, each [`SHADOW_MAP_HEIGHT`] square.
+pub const SHADOW_CASCADES: u32 = 3;
+pub const SHADOW_MAP_HEIGHT: u32 = 1536;
+pub const SHADOW_MAP_WIDTH: u32 = SHADOW_CASCADES * SHADOW_MAP_HEIGHT;
+
+/// The name and spec a graph declares `shadows.map` with (class `External`).
+pub const SHADOW_MAP_NAME: &str = "shadows.map";
+pub fn shadow_map_spec() -> crate::ImageSpec {
+    // Usage: sampled (0x4) | depth-stencil attachment (0x20).
+    crate::ImageSpec::depth_2d(SHADOW_MAP_FORMAT, SHADOW_MAP_WIDTH, SHADOW_MAP_HEIGHT, 0x4 | 0x20)
+}
 
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
 pub const PROGRAM_VERSION: u32 = 1;

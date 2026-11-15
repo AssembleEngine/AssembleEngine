@@ -1,6 +1,6 @@
 //! Golden frame graph `.dot` output: the baked plans of the engine's own
 //! graphs (the terrain scene as the client runs it, with and without
-//! units and water, presenting and reading back; the frame graph demo) are compared
+//! units, water and the units' shadows, presenting and reading back; the frame graph demo) are compared
 //! with the files in `tests/golden/`. A change to the bake (order, edges,
 //! aliasing) or to a native graph shows up as a diff in review.
 //!
@@ -19,8 +19,8 @@ fn dot_of<R>(graph: &FrameGraph<R>) -> String {
     dot::to_dot(graph, &baked)
 }
 
-fn scene(units: bool, water: bool, output: TerrainOutput) -> String {
-    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water };
+fn scene(units: bool, water: bool, shadows: bool, output: TerrainOutput) -> String {
+    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows };
     let mut graph = native_graph(&env, output);
     // Fixed library sizes (the renderers' real ones depend on the map), with
     // every usage a library buffer may need.
@@ -55,12 +55,14 @@ fn check(name: &str, dot: &str) -> Option<String> {
 
 #[test]
 fn baked_plans_match_the_golden_dot_files() {
-    let cases: [(&str, fn() -> String); 7] = [
-        ("scene_units_present", || scene(true, false, TerrainOutput::Present)),
-        ("scene_units_readback", || scene(true, false, TerrainOutput::Readback)),
-        ("scene_present", || scene(false, false, TerrainOutput::Present)),
-        ("scene_units_water_present", || scene(true, true, TerrainOutput::Present)),
-        ("scene_water_readback", || scene(false, true, TerrainOutput::Readback)),
+    let cases: [(&str, fn() -> String); 9] = [
+        ("scene_units_present", || scene(true, false, false, TerrainOutput::Present)),
+        ("scene_units_readback", || scene(true, false, false, TerrainOutput::Readback)),
+        ("scene_present", || scene(false, false, false, TerrainOutput::Present)),
+        ("scene_units_water_present", || scene(true, true, false, TerrainOutput::Present)),
+        ("scene_water_readback", || scene(false, true, false, TerrainOutput::Readback)),
+        ("scene_units_shadows_present", || scene(true, false, true, TerrainOutput::Present)),
+        ("scene_units_water_shadows_readback", || scene(true, true, true, TerrainOutput::Readback)),
         ("demo_present", || dot_of(&build_demo_graph(vk::Extent2D { width: 1280, height: 720 }, DemoOutput::Present { format: vk::Format::B8G8R8A8_SRGB }).0)),
         ("demo_readback", || dot_of(&build_demo_graph(vk::Extent2D { width: 256, height: 256 }, DemoOutput::Readback).0)),
     ];

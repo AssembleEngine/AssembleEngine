@@ -970,7 +970,7 @@ fn cull_on_gpu(
     let counts = app.last_unit_counts().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
     let view = lod_view(&source, &cam, extent.width, extent.height);
-    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4], shadows: false };
+    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4], shadows: false, unit_shadows: None };
     (counts, stream, frame)
 }
 
@@ -1848,3 +1848,190 @@ fn hills_shade_away_from_the_sun() {
 /// rectangle) and the camera (target x, z, distance).
 const TOWER_B: (usize, usize, usize, usize) = (27, 70, 32, 75);
 const CAMERA: (f32, f32, f32) = (560.0, 520.0, 520.0);
+
+/// The units' shadows (`shadows.draw` into the cascaded `shadows.map`): on
+/// flat ground seen from 75° up, a unit in view (A, pointing at the sun),
+/// a big one placed just off the left edge of the view (B, every corner
+/// of it off screen) and one in the sun away from both (C).
+/// * Shadows made but switched off draw exactly as none.
+/// * Ground the CPU (a ray toward the sun against each dart) puts deep in
+///   A's or B's shadow darkens by a quarter or more, B's included: a
+///   unit out of view casts into it. Ground with no shadow within 2 m does
+///   not change.
+/// * C's faces turned to the sun do not change (no self-shadowing acne).
+///
+/// Forcing the lookup to 1 in `unit_shadows.glsl`, or drawing no casters
+/// in `UnitRenderer::record_shadows`, fails it.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn units_cast_shadows() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::terrain::sun;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 1.3, fov_y: 0.8 };
+    {
+        // As the app sets it up (the ground under the target).
+        let defaults = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+        camera.fov_y = defaults.view().lock().unwrap().camera.fov_y;
+    }
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let eye = camera.eye(|_| ground);
+    let project = |p: Vec3| -> Option<(f32, f32)> {
+        let clip = view_proj * p.extend(1.0);
+        (clip.w > 0.0).then(|| ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32))
+    };
+    let on_screen = |p: Vec3| project(p).is_some_and(|(u, v)| u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32);
+    let pixel = |p: Vec3| -> Option<usize> {
+        let (u, v) = project(p)?;
+        (u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+
+    // The darts as units.vert builds them: (x, z, heading x, heading z, radius).
+    const CORNERS: [[f32; 3]; 4] = [[1.3, 0.25, 0.0], [-0.9, 0.0, -0.8], [-0.9, 0.0, 0.8], [-0.5, 0.9, 0.0]];
+    const FACES: [usize; 12] = [0, 1, 3, 0, 3, 2, 1, 2, 3, 0, 2, 1];
+    let corners = |(x, z, hx, hz, r): (f32, f32, f32, f32, f32)| -> [Vec3; 4] {
+        let (forward, side) = (Vec3::new(hx, 0.0, hz), Vec3::new(-hz, 0.0, hx));
+        CORNERS.map(|c| Vec3::new(x, ground, z) + (forward * c[0] + Vec3::Y * c[1] + side * c[2]) * r)
+    };
+    let triangles = |unit| {
+        let c = corners(unit);
+        (0..4).map(move |f| [c[FACES[f * 3]], c[FACES[f * 3 + 1]], c[FACES[f * 3 + 2]]])
+    };
+    // Möller–Trumbore: whether the ray o + t d (t > 0) hits the triangle.
+    let hits = |o: Vec3, d: Vec3, [a, b, c]: [Vec3; 3]| {
+        let (e1, e2) = (b - a, c - a);
+        let p = d.cross(e2);
+        let det = e1.dot(p);
+        if det.abs() < 1e-8 {
+            return false;
+        }
+        let s = o - a;
+        let u = s.dot(p) / det;
+        let q = s.cross(e1);
+        let v = d.dot(q) / det;
+        u >= 0.0 && v >= 0.0 && u + v <= 1.0 && e2.dot(q) / det > 1e-3
+    };
+
+    // A points at the sun: its top, behind its middle, casts past its tails.
+    let toward_sun = Vec2::new(sun::direction().x, sun::direction().z).normalize();
+    let a = (128.0f32, 128.0f32, toward_sun.x, toward_sun.y, 10.0f32);
+    let c = (88.0f32, 160.0f32, 0.0f32, 1.0f32, 8.0f32);
+    // B, heading away from the view: as far toward +x (the way shadows
+    // fall, to the right on screen) as it can stand with every corner
+    // still off the left edge.
+    let mut b = (0.0f32, 128.0f32, -1.0f32, 0.0f32, 20.0f32);
+    while !corners((b.0 + 0.25, b.1, b.2, b.3, b.4)).iter().any(|&p| on_screen(p)) {
+        b.0 += 0.25;
+    }
+    assert!(b.0 > 5.0, "B starts in view");
+    let units = [a, b, c];
+    let sun_dir = sun::direction();
+    let shaded = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, sun_dir, t)));
+    let hidden = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, eye - p, t)));
+
+    let render = |shadows: bool, view_shadows: bool| -> Vec<u8> {
+        let mut columns: [Vec<u32>; 8] = Default::default();
+        for &(x, z, hx, hz, r) in &units {
+            for (k, word) in [x, z, x, z, hx, hz, r].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+                columns[k].push(word);
+            }
+        }
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        if shadows {
+            app = app.with_shadows();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+            view.shadows = view_shadows;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        run.frames(&mut app, 8).unwrap();
+        run.wait().unwrap();
+        run.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("unit-shadows-{}{}.ppm", shadows as u8, view_shadows as u8)), ppm).unwrap();
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let plain = render(false, true);
+    let switched_off = render(true, false);
+    let on = render(true, true);
+
+    // The ground on a 0.5 m grid: deep in a dart's shadow (and its
+    // neighbours 0.75 m away), or lit with no shadow within 2 m; visible
+    // (no dart between it and the camera, 0.5 m around).
+    let at = |x: f32, z: f32| Vec3::new(x, ground + 0.01, z);
+    let ring = |x: f32, z: f32, d: f32| [(-d, -d), (d, -d), (-d, d), (d, d), (0.0, 0.0)].map(|(dx, dz)| at(x + dx, z + dz));
+    let (mut deep_a, mut deep_b, mut lit) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+    for iz in 0..=480 {
+        for ix in 0..=480 {
+            let (x, z) = (8.0 + ix as f32 * 0.5, 8.0 + iz as f32 * 0.5);
+            let Some(i) = pixel(at(x, z)) else { continue };
+            if ring(x, z, 0.5).iter().any(|&p| hidden(p)) {
+                continue;
+            }
+            if ring(x, z, 0.75).iter().all(|&p| shaded(p)) {
+                if x < 64.0 { deep_b.insert(i) } else { deep_a.insert(i) };
+            } else if !ring(x, z, 2.0).iter().chain(&ring(x, z, 1.0)).any(|&p| shaded(p)) && (x - c.0).hypot(z - c.1) > 2.5 * c.4 {
+                lit.insert(i);
+            }
+        }
+    }
+    println!("B at x {:.2}; {} lit points, {} deep in A's shadow, {} in B's (B off screen)", b.0, lit.len(), deep_a.len(), deep_b.len());
+    assert!(lit.len() > 5000 && deep_a.len() > 50 && deep_b.len() > 15, "{} lit, {} A, {} B", lit.len(), deep_a.len(), deep_b.len());
+
+    let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    assert_eq!(plain.iter().zip(&switched_off).filter(|(x, y)| x != y).count(), 0, "shadows switched off draw as none");
+    let changed = lit.iter().filter(|&&i| rgb(&plain, i) != rgb(&on, i)).count();
+    assert_eq!(changed, 0, "lit ground changes");
+    for (name, points) in [("A", &deep_a), ("B (off screen)", &deep_b)] {
+        let darker = points.iter().filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i)).count();
+        println!("{name}: {darker} of {} shaded points a quarter darker or more", points.len());
+        assert!(darker * 10 >= points.len() * 9, "{name}'s shadow: {darker} of {}", points.len());
+    }
+    // C's faces turned to the sun, at their centres (pulled a little in).
+    let mut faces = 0;
+    for t in triangles(c) {
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize();
+        let centre = (t[0] + t[1] + t[2]) / 3.0;
+        let outward = if normal.dot(centre - Vec3::new(c.0, ground + 0.3 * c.4, c.1)) < 0.0 { -normal } else { normal };
+        if outward.dot(sun_dir) <= 0.1 || outward.dot(eye - centre) <= 0.0 {
+            continue;
+        }
+        for w in [[0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6], [1.0 / 3.0; 3]] {
+            let p = t[0] * w[0] + t[1] * w[1] + t[2] * w[2];
+            let i = pixel(p).expect("C in view");
+            assert_eq!(rgb(&plain, i), rgb(&on, i), "C's sunlit face at {p:?}");
+        }
+        faces += 1;
+    }
+    assert!(faces >= 1, "C shows a sunlit face");
+    assert_clean(&gpu);
+}

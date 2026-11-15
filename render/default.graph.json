@@ -8,24 +8,27 @@
     { "name": "units.instances", "kind": "library", "when": "units" },
     { "name": "units.visible", "kind": "library", "when": "units" },
     { "name": "units.indirect", "kind": "library", "when": "units" },
-    { "name": "units.counts", "kind": "library", "when": "units" }
+    { "name": "units.counts", "kind": "library", "when": "units" },
+    { "name": "shadows.map", "kind": "library", "when": "shadows" }
   ],
   "passes": [
     { "name": "terrain lod", "kind": "compute", "library": "terrain.lod",
       "access": ["terrain.leaves storage_buffer_write:compute", "terrain.indirect storage_buffer_write:compute"] },
+    { "name": "shadows", "kind": "graphics", "library": "shadows.draw", "when": "shadows",
+      "access": ["units.instances storage_buffer_read:vertex", "shadows.map depth:clear"] },
     { "name": "terrain", "kind": "graphics", "library": "terrain.draw",
-      "access": ["terrain.leaves storage_buffer_read:vertex", "terrain.indirect indirect", "target color:clear", "depth depth:clear"] },
+      "access": ["terrain.leaves storage_buffer_read:vertex", "terrain.indirect indirect", "target color:clear", "depth depth:clear", "shadows.map sampled:fragment"] },
     { "name": "units reset", "kind": "transfer", "library": "units.reset", "when": "units",
       "access": ["units.indirect transfer_dst"] },
     { "name": "units cull", "kind": "compute", "library": "units.cull", "when": "units",
       "access": ["units.instances storage_buffer_read:compute", "units.visible storage_buffer_write:compute", "units.indirect storage_buffer_write:compute"] },
     { "name": "units", "kind": "graphics", "library": "units.draw", "when": "units",
-      "access": ["units.instances storage_buffer_read:vertex", "units.visible storage_buffer_read:vertex", "units.indirect indirect", "target color:load", "depth depth:load"] },
+      "access": ["units.instances storage_buffer_read:vertex", "units.visible storage_buffer_read:vertex", "units.indirect indirect", "target color:load", "depth depth:load", "shadows.map sampled:fragment"] },
     { "name": "units count", "kind": "transfer", "library": "units.count", "when": "units",
       "access": ["units.indirect transfer_src", "units.counts transfer_dst discard"] },
     { "name": "units count read", "kind": "transfer", "library": "host.read", "when": "units", "root": true,
       "access": ["units.counts host_read"] },
     { "name": "water", "kind": "graphics", "library": "water.draw", "when": "water",
-      "access": ["target color:load", "depth depth_read"] }
+      "access": ["target color:load", "depth depth_read", "shadows.map sampled:fragment"] }
   ]
 }

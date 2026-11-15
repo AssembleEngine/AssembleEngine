@@ -25,6 +25,10 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 fog;         // rgb, density (0 = off)
     uvec4 counts;     // instances, capacity, flags (1: hills' shadows)
     vec4 classes[MAX_CLASSES]; // rgb; w = 1: floats on the water surface
+    // The units' shadow cascades (src/shadow.rs, unit_shadows.glsl).
+    vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
+    vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
+    vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; } inst;
@@ -39,6 +43,15 @@ layout(std430, set = 0, binding = 2) readonly buffer Visible { uint visible[]; }
 layout(set = 0, binding = 4) uniform sampler2D heightTex;
 // Shadow heights (src/terrain/sun.rs), world units; used when counts.z & 1.
 layout(set = 0, binding = 5) uniform sampler2D sunShadowTex;
+// The units' own shadow map (a 1x1 stand-in when off).
+layout(set = 0, binding = 6) uniform sampler2DShadow unitShadowTex;
+
+#include "unit_shadows.glsl"
+
+// Sunlight reaching world point p (normal n) past the units.
+float unitSunAt(vec3 p, vec3 n) {
+    return unitShadowAt(unitShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n);
+}
 
 // Sunlight reaching world point p past the hills (terrain_shading.glsl's
 // sunAt with the units' uniforms).

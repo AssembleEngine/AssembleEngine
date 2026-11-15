@@ -1176,8 +1176,8 @@ add 0.84 ms, so the full copy-layer step for two observers is 2.4 ms.
   explored cells are remembered by the client's sim thread, not by the copy layer; there is no key
   to switch observers while running; radar shows no coverage on the terrain; jammers, sonar and
   seismic sensors are not modelled; the sensors run on the view side, not as a sim service (the
-  plan lists them under native services); fog does not hide the units' own shadows or decals,
-  which do not exist yet.
+  plan lists them under native services); decals do not exist yet. (The units' own shadows, M7,
+  follow fog for free: casters are the observer's stream, so a hidden unit casts none.)
 
 M4 is complete with the caveats above. Next is M5 (lockstep and replay).
 
@@ -1560,10 +1560,51 @@ The hills' shadows (`cargo test -p ae_render --lib sun`, `cargo test -p ae_rende
 - Cost (`--bench all --label m7-hill-shadows` against `m7-water`): the terrain draw +3–5 % in five
   scenes (5–13 µs: two more texture reads per pixel) and +20 % in `palette` (45 to 54 µs, the
   cheapest terrain shader, flagged by `bench-diff`); 85 of 86 metrics unchanged.
-- Not done: the units' own shadows (next); the shadow edge is a cell soft whatever the distance
+- Not done: the shadow edge is a cell soft whatever the distance
   to the caster (no contact hardening); the sun is fixed (a moving sun would recompute, 51 ms);
   `TerrainApp::create` builds the textures from the load-time map, so a renderer made again after
   edits loses them (as the heights did already).
+
+The units' shadows (`cargo test -p ae_render --lib shadow`, `cargo test -p ae_render --test gpu units_cast -- --ignored`):
+- A shadow map of the units only (the hills keep their shadow heights): library image
+  `shadows.map` (D32, three 1536² cascades side by side, `shadow_map_spec()`), written by library
+  pass `shadows.draw` (depth only, every row of the unit stream: casters off screen or behind the
+  camera still cast into the view). Depth grows toward the sun, cleared to 0, GREATER_OR_EQUAL; the
+  receivers read it with a comparison sampler (linear: 2x2 PCF), pushed off their surface by
+  `(1.5 n + sun)` texels, and take `min(hills, units)`.
+- Cascades (`src/shadow.rs`): slices at 0.95, 1.55 and 2.8 times the camera distance, each a
+  sphere computed from the camera's intrinsics (not its corners: the radius moved with float noise
+  as the camera panned, and the map shimmered), its centre snapped to whole texels in light space;
+  casters reach 400 m toward the sun. Receivers take the first cascade that holds them; the last
+  fades out at its edge. Unit tests: the view lands in the cascades; panning moves by whole texels
+  and turning keeps the size.
+- Graph contract: a graph that declares `shadows.map` must have every receiver (`terrain.draw`,
+  `units.draw`, `water.draw`) sample it in the fragment stage and some `shadows.draw` write it
+  (`library::check`, `check_shadows`); `DECLARE_SHADOWS` (set with units and shadows on) tells a
+  module to declare them; graph files take `when: shadows`. A module that declares nothing keeps
+  working, without unit shadows. The default and post modules and both `.graph.json` files do;
+  two new goldens, the old ones unchanged. The renderer always binds an image (a 1x1 stand-in when
+  off: terrain binding 15, units binding 6).
+- Toggles with the hills' shadows (`--no-shadows`, H). Fog of war needs nothing: the casters are
+  the observer's stream.
+- GPU test `units_cast_shadows` (flat map, a unit pointing at the sun in view, one whose every
+  corner is just off screen, one in the sun; a CPU ray cast over the darts splits the ground into
+  deep shadow and lit; validation on): 75 of 75 and 110 of 110 deep-shadow points darken; the lit
+  ground and the sunlit unit's lit faces are byte-identical; shadows made but switched off are
+  byte-identical to none. Making the lookup return 1 fails it, as does drawing no casters. All 18
+  GPU tests pass with validation (one at a time: in parallel they run out of memory on this 8 GB
+  card with a desktop running, at HEAD too); the client with 2,000 units, 0 messages.
+- Cost (`--bench all --label m7-unit-shadows-3` against the previous commit): in the three unit
+  scenes the `shadows` pass is 36–43 µs and the terrain draw +17–28 µs (+9–11 %), totals
+  +12–14 %; the scenes without units unchanged. The lookup's mere presence in the terrain shader
+  cost 18 % even where it returned at once (`cliffs`, 377 to 448 µs: registers, not work), so it is
+  a specialization constant (`UNIT_SHADOWS`) and the terrain pipeline is built without it when
+  there is no map. Sampling once after choosing the cascade, or `textureLod`, changed nothing.
+- Not done: the cascades are a stand-in. The intended shadow map is a virtual one
+  (https://graphics-programming.org/blog/virtual-shadow-maps: one huge virtual map, pages
+  allocated where the view needs them, cached while nothing moves); it will replace the cascades
+  behind the same `shadows.map` / `shadows.draw` contract. No contact hardening; the water and
+  units shaders keep the lookup compiled in (they exist only with units or water).
 
 ### M0 risk spikes
 

@@ -36,7 +36,7 @@ use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
 use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
@@ -447,7 +447,15 @@ impl TerrainApp {
             water: view.water && self.water,
             time,
             shadows: view.shadows && self.shadows,
+            // The units' shadows when the graph draws them.
+            unit_shadows: (view.shadows && self.shadows && self.graph_has_shadow_map()).then(|| crate::shadow::cascades(eye, (camera.target3() - eye).normalize(), ((camera.fov_y * 0.5).tan() * aspect, (camera.fov_y * 0.5).tan()), camera.distance, sun::direction())),
         }
+    }
+
+    /// Whether the graph in use declares the units' shadow map (and so
+    /// draws and samples it).
+    fn graph_has_shadow_map(&self) -> bool {
+        self.wiring.as_ref().is_some_and(|w| w.resources.contains(&Some(LibraryResource::ShadowMap)))
     }
 }
 
@@ -492,7 +500,7 @@ impl RenderApp for TerrainApp {
         let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         let s = &self.source;
         let shadows = self.shadows.then(|| sun::shadow_heights(&s.heightmap, s.info.cell_size, s.info.height_scale, s.info.height_offset, sun::direction()));
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), color, DEPTH_FORMAT, frames_in_flight)
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), color, DEPTH_FORMAT, frames_in_flight)
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
             self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
@@ -594,6 +602,7 @@ impl RenderApp for TerrainApp {
                 proj_scale: view.camera.proj_scale(self.extent.height as f32),
                 fog: fog(&self.source.info, params.fog),
                 shadows: params.shadows,
+                unit_shadows: params.unit_shadows,
             };
             units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
         }
@@ -652,6 +661,7 @@ impl RenderApp for TerrainApp {
                 let o = offscreen()?;
                 Binding::Buffer(BufferBinding { buffer: o.buffer.buffer, offset: 0, size: o.buffer.size, identity: (0xAE7 << 40) | 11 })
             }
+            LibraryResource::ShadowMap => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().binding()),
         })
     }
 
@@ -768,6 +778,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::UnitsCull => units()?.record_cull(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
                 LibraryPass::UnitsCount => units()?.record_count(ctx),
+                LibraryPass::ShadowsDraw => units()?.record_shadows(ctx),
                 LibraryPass::WaterDraw => {
                     if self.water {
                         terrain()?.record_water(ctx);
@@ -799,9 +810,10 @@ pub enum ScenePassSource {
     Fullscreen,
 }
 
-/// The scene's graph as the engine declares it natively: the terrain, the
-/// units when the scene has them, the water surface when it draws water,
-/// and present or readback. Library buffers
+/// The scene's graph as the engine declares it natively: the units'
+/// shadow map when they cast shadows, the terrain, the units when the
+/// scene has them, the water surface when it draws water, and present or
+/// readback. Library buffers
 /// are declared with size 0 ([`crate::library::resolve`] sizes them). A
 /// render module that declares the same graph gets the same bake.
 pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<LibraryPass> {
@@ -818,22 +830,37 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             ResourceClass::External,
         ),
     };
+    // The unit buffers, then the units' shadow map.
+    let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts].map(|r| library_buffer(&mut graph, r)));
+    let map = (env.units && env.shadows).then(|| library_shadow_map(&mut graph));
+    // A receiver samples the map when the graph has it.
+    fn receive(pass: ae_framegraph::PassBuilder<'_, LibraryPass>, map: Option<ResourceId>) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
+        match map {
+            Some(map) => pass.sampled(map, ShaderStage::Fragment),
+            None => pass,
+        }
+    }
     graph
         .pass("terrain lod", PassKind::Compute, LibraryPass::TerrainLod)
         .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
         .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
         .id();
-    graph
-        .pass("terrain", PassKind::Graphics, LibraryPass::TerrainDraw)
-        .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
-        .access(indirect, Role::IndirectBuffer)
-        .color(target, LoadOp::Clear)
-        .depth(depth, LoadOp::Clear)
-        .id();
-    if env.units {
-        let instances = library_buffer(&mut graph, LibraryResource::UnitInstances);
-        let visible = library_buffer(&mut graph, LibraryResource::UnitVisible);
-        let draws = library_buffer(&mut graph, LibraryResource::UnitIndirect);
+    // The units' shadows: every unit drawn from the sun, before anything
+    // that samples the map.
+    if let (Some([instances, ..]), Some(map)) = (units, map) {
+        graph.pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw).access(instances, Role::StorageBufferRead(ShaderStage::Vertex)).depth(map, LoadOp::Clear).id();
+    }
+    receive(
+        graph
+            .pass("terrain", PassKind::Graphics, LibraryPass::TerrainDraw)
+            .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(indirect, Role::IndirectBuffer)
+            .color(target, LoadOp::Clear)
+            .depth(depth, LoadOp::Clear),
+        map,
+    )
+    .id();
+    if let Some([instances, visible, draws, counts]) = units {
         graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
         graph
             .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
@@ -843,22 +870,24 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .id();
         // Declared after the terrain draw: a second writer of the target
         // and the depth buffer, ordered after it.
-        graph
-            .pass("units", PassKind::Graphics, LibraryPass::UnitsDraw)
-            .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
-            .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
-            .access(draws, Role::IndirectBuffer)
-            .color(target, LoadOp::Load)
-            .depth(depth, LoadOp::Load)
-            .id();
-        let counts = library_buffer(&mut graph, LibraryResource::UnitCounts);
+        receive(
+            graph
+                .pass("units", PassKind::Graphics, LibraryPass::UnitsDraw)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .color(target, LoadOp::Load)
+                .depth(depth, LoadOp::Load),
+            map,
+        )
+        .id();
         graph.pass("units count", PassKind::Transfer, LibraryPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
         graph.pass("units count read", PassKind::Transfer, LibraryPass::HostRead).access(counts, Role::HostRead).root().id();
     }
     if env.water {
         // After the units (a third writer of the target), testing against
         // the depth they leave without writing it.
-        graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(target, LoadOp::Load).depth_read(depth).id();
+        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(target, LoadOp::Load).depth_read(depth), map).id();
     }
     match output {
         TerrainOutput::Present => {
@@ -876,6 +905,14 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
 /// A library buffer as a graph declares it: `External`, size 0.
 pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> ResourceId {
     graph.buffer(r.name(), BufferDesc { size: 0, usage: vk::BufferUsageFlags::empty() }, ResourceClass::External)
+}
+
+/// The units' shadow map as a graph declares it (`External`).
+pub fn library_shadow_map<R>(graph: &mut FrameGraph<R>) -> ResourceId {
+    use ae_render_abi::module as m;
+    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
+    let desc = ImageDesc::depth_2d(vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32), m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT, usage);
+    graph.image(LibraryResource::ShadowMap.name(), desc, ResourceClass::External)
 }
 
 impl TerrainApp {
@@ -915,7 +952,8 @@ impl TerrainApp {
     /// The module's graph for `env`, decoded and wired, with its fullscreen
     /// programs reflected, checked and built.
     fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
-        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 };
+        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 }
+            | if env.shadows { DECLARE_SHADOWS } else { 0 };
         let declared = module
             .declare(env.extent.width, env.extent.height, env.color_format.as_raw() as u32, flags)?
             .with_context(|| format!("the module declines a {}x{} {:?} target", env.extent.width, env.extent.height, env.color_format))?;
@@ -979,7 +1017,10 @@ impl TerrainApp {
     /// What the library needs to agree with for `target`.
     fn env(&self, target: TargetInfo) -> Result<LibraryEnv> {
         let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
-        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(), water: self.water && renderer.has_water() })
+        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(),
+            water: self.water && renderer.has_water(),
+            shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
+        })
     }
 
     /// Size the library resources of `graph`, check its library passes and
@@ -996,7 +1037,7 @@ impl TerrainApp {
             LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
             LibraryResource::UnitCounts => units.map(|u| u.counts_desc()),
             LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc { size: o.buffer.size, usage: vk::BufferUsageFlags::TRANSFER_DST }),
-            LibraryResource::ReadbackTarget => None,
+            LibraryResource::ReadbackTarget | LibraryResource::ShadowMap => None,
         })?;
         if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {
             anyhow::bail!("`readback.target` needs an offscreen target of the graph's extent (create_offscreen)");
@@ -1034,6 +1075,10 @@ impl TerrainApp {
             };
             passes.push(ScenePass { program, work });
         }
+        library::check_shadows(&graph, &resources, |i| match passes[i].work {
+            PassWork::Library(lib) => Some(lib),
+            _ => None,
+        })?;
         let graph = FrameGraph {
             resources: graph.resources,
             passes: graph.passes.into_iter().zip(passes).map(|(p, record)| ae_framegraph::Pass { name: p.name, kind: p.kind, scope: p.scope, intents: p.intents, conditional: p.conditional, record }).collect(),

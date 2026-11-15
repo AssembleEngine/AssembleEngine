@@ -13,6 +13,9 @@
 //! * Positions are interpolated between the previous and the latest tick
 //!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
 //!
+//! With shadows, a `shadows` pass first (`shadows.draw`: every row, depth
+//! only, into each cascade of the units' shadow map, [`crate::shadow`]).
+//!
 //! In the frame graph, five passes: `units reset` (transfer: the indirect
 //! instance count to 0), `units cull` (compute: frustum test per unit,
 //! appends visible indices and counts them), `units` (graphics: draws
@@ -135,6 +138,9 @@ pub struct UnitFrame {
     pub fog: [f32; 4],
     /// Shade by the hills' shadows (when the terrain has them).
     pub shadows: bool,
+    /// Draw and shade by the units' shadow map with these cascades (the
+    /// graph has it this frame).
+    pub unit_shadows: Option<crate::shadow::Cascades>,
 }
 
 #[repr(C)]
@@ -149,6 +155,7 @@ struct FrameUbo {
     fog: [f32; 4],
     counts: [u32; 4],
     classes: [[f32; 4]; MAX_CLASSES],
+    unit_shadow: crate::shadow::CascadeUniforms,
 }
 
 pub struct UnitRenderer {
@@ -164,6 +171,11 @@ pub struct UnitRenderer {
     sets: Vec<vk::DescriptorSet>,
     cull: vk::Pipeline,
     draw: vk::Pipeline,
+    /// Into the units' shadow map (`None` when the terrain renderer has
+    /// only its stand-in).
+    caster: Option<vk::Pipeline>,
+    /// Per slot: the frame draws the units' shadows.
+    casting: Vec<bool>,
     /// Per slot: the stream's columns, `capacity` words each.
     instances: Vec<OwnedBuffer>,
     /// Per slot: `(tick, rows)` of the stream in `instances`.
@@ -205,6 +217,7 @@ impl UnitRenderer {
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (height_view, height_sampler) = terrain.height_texture();
         let (shadow_view, shadow_sampler) = terrain.shadow_texture();
+        let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
@@ -215,14 +228,16 @@ impl UnitRenderer {
                     (vk::DescriptorType::STORAGE_BUFFER, all),
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
+                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                 ],
             )?;
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], 0, vk::ShaderStageFlags::empty())?;
+            // The caster's push constant: the cascade it draws.
+            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 3 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -242,6 +257,8 @@ impl UnitRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image));
                 let shadow = [vk::DescriptorImageInfo { sampler: shadow_sampler, image_view: shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
+                let units = [vk::DescriptorImageInfo { sampler: unit_shadow_sampler, image_view: unit_shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&units));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -260,6 +277,24 @@ impl UnitRenderer {
             },
         )
         .context("unit pipeline")?;
+        let caster = match terrain.unit_shadow_map().is_real() {
+            true => Some(
+                pipeline::graphics_pipeline(
+                    device,
+                    &GraphicsDesc {
+                        vertex: spirv!("units_shadow.vert"),
+                        fragment: spirv!("units_shadow.frag"),
+                        layout: pipeline_layout,
+                        color_formats: &[],
+                        depth: Some(DepthState { format: crate::shadow::format(), write: true, compare: vk::CompareOp::GREATER_OR_EQUAL }),
+                        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                        blend: Blend::Off,
+                    },
+                )
+                .context("unit shadow pipeline")?,
+            ),
+            false => None,
+        };
         Ok(Self {
             capacity,
             info: *terrain.info(),
@@ -272,6 +307,8 @@ impl UnitRenderer {
             sets,
             cull,
             draw,
+            caster,
+            casting: vec![false; frames_in_flight],
             instances,
             uploaded: vec![None; frames_in_flight],
             ubos,
@@ -362,6 +399,9 @@ impl UnitRenderer {
             None => self.uploaded[slot] = None,
         }
         let i = &self.info;
+        let cascades = frame.unit_shadows.filter(|_| self.caster.is_some());
+        self.casting[slot] = cascades.is_some();
+        let unit_shadow = crate::shadow::Cascades::uniforms(cascades.as_ref());
         let ubo = FrameUbo {
             view_proj: frame.view_proj.to_cols_array(),
             cam_pos: frame.cam_pos.extend(frame.proj_scale).to_array(),
@@ -372,6 +412,7 @@ impl UnitRenderer {
             fog: frame.fog,
             counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, 0],
             classes: self.classes,
+            unit_shadow,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
@@ -419,9 +460,34 @@ impl UnitRenderer {
         }
     }
 
+    /// Every unit into each cascade of the units' shadow map (nothing when
+    /// the frame casts no shadows: the map stays cleared). Records inside
+    /// a depth-only graphics pass that reads [`Self::instances`] in the
+    /// vertex stage and writes the map.
+    pub fn record_shadows(&self, ctx: &PassContext<'_>) {
+        let rows = self.rows(ctx.slot);
+        let Some(caster) = self.caster.filter(|_| self.casting[ctx.slot] && rows > 0) else { return };
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let side = crate::shadow::CASCADE_TEXELS;
+        unsafe {
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            for k in 0..crate::shadow::CASCADES as u32 {
+                let viewport = vk::Viewport { x: (k * side) as f32, y: 0.0, width: side as f32, height: side as f32, min_depth: 0.0, max_depth: 1.0 };
+                device.cmd_set_viewport(cmd, 0, &[viewport]);
+                device.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: (k * side) as i32, y: 0 }, extent: vk::Extent2D { width: side, height: side } }]);
+                device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, &k.to_le_bytes());
+                device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
+            }
+        }
+    }
+
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
+            if let Some(caster) = self.caster.take() {
+                device.destroy_pipeline(caster, None);
+            }
             device.destroy_pipeline(self.cull, None);
             device.destroy_pipeline(self.draw, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);

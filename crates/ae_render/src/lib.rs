@@ -22,6 +22,7 @@ pub mod library;
 pub mod memory;
 pub mod module;
 pub mod pipeline;
+pub mod shadow;
 pub mod swapchain;
 pub mod terrain;
 pub mod thread;

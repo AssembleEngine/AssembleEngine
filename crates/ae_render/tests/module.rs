@@ -6,7 +6,7 @@ use ae_framegraph::{BakeOptions, BufferDesc, FrameGraph, bake};
 use ae_render::library::{LibraryEnv, LibraryPass, LibraryResource, check, resolve};
 use ae_render::module::{RenderModule, build, engine};
 use ae_render::terrain::app::{TerrainOutput, native_graph};
-use ae_render_abi::module::{DECLARE_READBACK, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use ash::vk;
 
 fn size(r: LibraryResource) -> Option<BufferDesc> {
@@ -35,10 +35,13 @@ fn the_default_module_declares_the_native_graph() {
     let wasm = build("default").expect("build render/default");
     let engine = engine();
     let mut module = RenderModule::load(&engine, &wasm).unwrap();
-    let scenes = [true, false].into_iter().flat_map(|units| [true, false].into_iter().flat_map(move |water| [TerrainOutput::Present, TerrainOutput::Readback].map(|output| (units, water, output))));
-    for (units, water, output) in scenes {
-        let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water };
-        let flags = if units { DECLARE_UNITS } else { 0 } | if output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if water { DECLARE_WATER } else { 0 };
+    // (units, shadows): shadows only with units.
+    let scenes = [(true, false), (true, true), (false, false)]
+        .into_iter()
+        .flat_map(|(units, shadows)| [true, false].into_iter().flat_map(move |water| [TerrainOutput::Present, TerrainOutput::Readback].map(|output| (units, shadows, water, output))));
+    for (units, shadows, water, output) in scenes {
+        let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows };
+        let flags = if units { DECLARE_UNITS } else { 0 } | if output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if water { DECLARE_WATER } else { 0 } | if shadows { DECLARE_SHADOWS } else { 0 };
         let declared = module.declare(1280, 720, env.color_format.as_raw() as u32, flags).unwrap().expect("the module renders this target");
         let programs = ProgramTable::decode(&declared.programs).unwrap();
         let graph = ae_framegraph::descriptor::decode(&declared.graph).unwrap();
@@ -47,7 +50,7 @@ fn the_default_module_declares_the_native_graph() {
             other => panic!("{other:?}"),
         });
         let native = wire(native_graph(&env, output), &env, |&p| p);
-        assert_eq!(from_module.signature(), native.signature(), "units {units}, water {water}, {output:?}: same topology");
+        assert_eq!(from_module.signature(), native.signature(), "units {units}, shadows {shadows}, water {water}, {output:?}: same topology");
         assert_eq!(bake(&from_module, BakeOptions::default()).unwrap(), bake(&native, BakeOptions::default()).unwrap());
         let libs = |g: &FrameGraph<LibraryPass>| g.passes.iter().map(|p| p.record).collect::<Vec<_>>();
         assert_eq!(libs(&from_module), libs(&native), "the same library pass in every position");
