@@ -12,7 +12,8 @@
 //! * `animate`: the clips and manual joints from what the unit does, with
 //!   no script: the standing clip always on layer 0, the walking clip on
 //!   layer 1 by the metre while it walks (blended in and out), the head
-//!   turned about the unit's up axis while it stands (taken from the clips), turned back to the front
+//!   turned to look to the front left while it stands (taken from the
+//!   clips; `dir_in` and `turn_toward`), turned back to the front
 //!   and given back to them when it walks.
 //! * `host(anim)`: the engine advances the channels.
 
@@ -77,6 +78,9 @@ fn steer(run: &Run) {
     }
 }
 
+/// Where a standing unit looks, in its frame (forward and to the left).
+const LOOK: [f32; 3] = [0.6, 0.0, -0.8];
+
 #[system(read(Body), write(Anim))]
 fn animate(run: &Run) {
     let (bodies, anims) = (run.read::<Body>(), run.write::<Anim>());
@@ -107,7 +111,13 @@ fn animate(run: &Run) {
             if a.playing(1) != 0 && a.target[1] != 0.0 {
                 a.stop(1, 300);
             }
-            a.turn(head, Axis::UP, 0.7, 2.0).ramp(8.0);
+            // Look once to the front left: the direction as the head sees
+            // it (its parents where the clips have them), then the
+            // shortest turn there.
+            if !a.is_manual(head) {
+                let d = a.dir_in(head, LOOK);
+                a.turn_toward(head, Axis::FORWARD, d, 2.0).ramp(8.0);
+            }
         }
     }
 }

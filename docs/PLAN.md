@@ -2672,6 +2672,17 @@ Design:
     `.ramp`; `Axis::{UP, FORWARD, RIGHT, model, bone}`, `deg`. Test game: the head turned
     while standing, turned back and released when walking. Not yet: the client debug view
     of bone axes; keeping clips' original keys (with step 3).
+  - Aiming helpers — done (2026-11-16). `Rig::dir_in` (the direction as a bone sees it, in
+    its turns' frame, with the parents where they are going: a pending or moving turn at its
+    target, a clipped parent at its clips' value); `manual_flags::SHORT` (`.short()`: the
+    target's sign set by the current rotation). Generic pure host queries: `HostPlugin::
+    queries`/`query` and the import `ae_query(op, in, in_len, out, out_len)` (`ae_abi::query`);
+    the anim plugin answers `anim:dir_in`. SDK: `Anim::dir_in`, `turn_toward` (shortest, for
+    one free joint; short), `aim_angle(axis, pointing, dir)`; `libm` under feature `anim`.
+    Test game: a standing Fox looks once to its front left through the import. Not yet
+    (with step 5 and the weapons): the aim callin with the world direction, `to_unit` (the
+    unit's orientation), the aim-from / fire-from fields and their world positions, the
+    pointing axis from the per-model content file.
 
 ## Later improvements
 

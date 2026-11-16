@@ -355,6 +355,9 @@ impl Runtime {
             for (scope, name, value) in plugin.names() {
                 ids.names.insert((scope, name), value);
             }
+            for op in plugin.queries() {
+                ids.queries.0.insert(op, plugin.clone());
+            }
         }
         let ecs = |stable: u64| ids.components[&stable].0;
         let mut queries = Vec::new();

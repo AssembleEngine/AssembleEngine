@@ -10,7 +10,7 @@
 //! advances, as a model without clips (phases stay at 0).
 
 use ae_abi::engine::{ANIM, BODY};
-use ae_abi::{lookup, name_id, name_id_from};
+use ae_abi::{lookup, name_id, name_id_from, query};
 use ae_ecs::Access;
 use ae_model::anim::{Channels, LAYERS, Layer, MANUAL, Manual, Rig};
 use ae_sdk::Component;
@@ -18,7 +18,7 @@ use ae_sdk::anim::Anim;
 use ae_sdk::nav::Body;
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, expect_component};
 use ae_sim::schema::Schema;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -91,6 +91,26 @@ impl HostPlugin for AnimPlugin {
             out.extend(rig.masks().iter().enumerate().map(|(k, m)| (model, key(lookup::MASK, &m.name), k as u32 + 1)));
         }
         out
+    }
+
+    fn queries(&self) -> Vec<u64> {
+        vec![name_id(query::ANIM_DIR_IN)]
+    }
+
+    fn query(&self, op: u64, input: &[u8], out: &mut [u8]) -> Result<usize> {
+        ensure!(op == name_id(query::ANIM_DIR_IN), "query {op:#x} is not the animation plugin's");
+        let n = size_of::<Anim>();
+        ensure!(input.len() == n + 16 && out.len() >= 12, "dir_in: {} bytes in, {} out", input.len(), out.len());
+        let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
+        let word = |k: usize| u32::from_le_bytes(input[n + 4 * k..n + 4 * k + 4].try_into().unwrap());
+        let (bone, d) = (word(0), [1, 2, 3].map(|k| f32::from_bits(word(k))));
+        let rig = self.rigs.get(&a.model).map(|(_, r)| r).with_context(|| format!("dir_in: no model {:#x}", a.model))?;
+        ensure!((bone as usize) < rig.bones(), "dir_in: no bone {bone}");
+        let v = rig.dir_in(&channels(&a), bone as u16, d);
+        for (k, x) in v.iter().enumerate() {
+            out[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        Ok(12)
     }
 }
 

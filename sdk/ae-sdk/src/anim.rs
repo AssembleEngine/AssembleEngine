@@ -74,6 +74,7 @@ pub mod manual_flags {
     pub const FRESH: u8 = 2;
     pub const RELATIVE: u8 = 4;
     pub const BONE_AXIS: u8 = 8;
+    pub const SHORT: u8 = 16;
 }
 
 /// An axis for a turn or a spin: in the unit's frame (x forward, y up,
@@ -275,6 +276,46 @@ impl Anim {
         let set = self.turn(bone, axis, angle, speed);
         set.anim.manual_flags[set.slot] |= manual_flags::RELATIVE;
         set
+    }
+
+    /// Turn `bone` the shortest way so that `pointing` (where it points at
+    /// rest, usually [`Axis::FORWARD`]) points along `dir`, a direction as
+    /// the bone sees it ([`Anim::dir_in`]). For one free joint (a head
+    /// looking); a joint that turns about one axis takes [`aim_angle`].
+    pub fn turn_toward(&mut self, bone: u16, pointing: Axis, dir: [f32; 3], speed: f32) -> ManualSet<'_> {
+        let (p, d) = (norm(pointing.v), norm(dir));
+        let c = cross(p, d);
+        let (s, cos) = (libm::sqrtf(dot(c, c)), dot(p, d));
+        let axis = if s > 1e-6 {
+            [c[0] / s, c[1] / s, c[2] / s]
+        } else {
+            // Along or against it: any axis across it.
+            let o = if p[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+            norm(cross(p, o))
+        };
+        self.turn(bone, Axis { v: axis, bone: pointing.bone }, libm::atan2f(s, cos), speed).short()
+    }
+
+    /// Direction `dir` (in the unit's frame) as `bone` sees it, with its
+    /// parents where they are going (a turn given to a parent counts as
+    /// done, a clipped parent is where its clips have it now): what
+    /// [`aim_angle`] and [`Anim::turn_toward`] take. Give the parents'
+    /// turns first: a barrel's direction is then against the turned turret.
+    /// The engine evaluates the pose (`ae_model::anim::Rig::dir_in`).
+    pub fn dir_in(&self, bone: u16, dir: [f32; 3]) -> [f32; 3] {
+        const N: usize = size_of::<Anim>();
+        let mut input = [0u8; N + 16];
+        // SAFETY: `Anim` is plain data (`repr(C)`, no padding read back).
+        input[..N].copy_from_slice(unsafe { core::slice::from_raw_parts((self as *const Anim).cast::<u8>(), N) });
+        input[N..N + 4].copy_from_slice(&(bone as u32).to_le_bytes());
+        for (k, x) in dir.iter().enumerate() {
+            input[N + 4 + 4 * k..N + 8 + 4 * k].copy_from_slice(&x.to_le_bytes());
+        }
+        let mut out = [0f32; 3];
+        let op = abi::name_id(abi::query::ANIM_DIR_IN);
+        let n = unsafe { crate::host::ae_query(op, input.as_ptr() as usize as u32, input.len() as u32, out.as_mut_ptr() as usize as u32, 12) };
+        assert!(n == 12, "the engine has no animation service (`ae_query` {})", n);
+        out
     }
 
     /// Spin `bone` about `axis` at `rate` radians a second (signed), for
@@ -496,6 +537,41 @@ impl ManualSet<'_> {
     pub fn ramp(self, accel: f32) -> Self {
         self.accel(accel).decel(accel)
     }
+
+    /// A turn the short way from where the bone is, whatever the angle
+    /// says (aiming: tracking a target round the back).
+    pub fn short(self) -> Self {
+        self.anim.manual_flags[self.slot] |= manual_flags::SHORT;
+        self
+    }
+}
+
+/// The angle to turn a bone about `axis` (from its rest pose) so that
+/// `pointing` (where it points at rest) comes closest to `dir`, a direction
+/// as the bone sees it ([`Anim::dir_in`]): both across the axis, one
+/// `atan2`. A turret about [`Axis::UP`], a barrel about [`Axis::RIGHT`],
+/// both pointing [`Axis::FORWARD`]. 0 when `dir` is along the axis.
+pub fn aim_angle(axis: Axis, pointing: Axis, dir: [f32; 3]) -> f32 {
+    let a = norm(axis.v);
+    let across = |v: [f32; 3]| {
+        let k = dot(a, v);
+        [v[0] - a[0] * k, v[1] - a[1] * k, v[2] - a[2] * k]
+    };
+    let (p, d) = (across(pointing.v), across(dir));
+    libm::atan2f(dot(a, cross(p, d)), dot(p, d))
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn norm(v: [f32; 3]) -> [f32; 3] {
+    let len = libm::sqrtf(dot(v, v));
+    if len > 0.0 { [v[0] / len, v[1] / len, v[2] / len] } else { v }
 }
 
 /// A model's id: [`abi::name_id`] of its name (`models/<name>.*` in the

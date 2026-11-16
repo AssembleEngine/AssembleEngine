@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 ae_abi.workspace = true
 ae-sdk-macros.workspace = true
+# `anim`'s aiming helpers (atan2, sqrt without std; the same bits everywhere).
+libm = { version = "0.2.16", optional = true }
 
 [features]
 # Engine service components (`ae_sdk::nav`). Opt-in: the derive writes a
@@ -18,4 +20,4 @@ nav = []
 catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`
 # service.
-anim = []
+anim = ["dep:libm"]

@@ -501,6 +501,44 @@ mod anim_tests {
         assert!((p[3][11] - 2.0).abs() < 1e-5, "about the bone's Z (the model's -Y): onto +Z: {:?}", p[3]);
     }
 
+    /// Aiming: a direction as a bone sees it, with its parents where they
+    /// are going (a pending turn included, a clip's value now); a short turn
+    /// goes the short way whatever the angles say.
+    #[test]
+    fn aiming() {
+        let rig = Rig::new(&model());
+        let pi = std::f32::consts::PI;
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        let mut ch = Channels::default();
+        assert!(close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]), "parents at rest");
+        // `left` told to turn a quarter about up: the tip sees the model's +X
+        // where its own +Z was at rest.
+        ch.manual[0] = command(1, manual_kind::TURN, [0.0, 1.0, 0.0, pi / 2.0], 1.0);
+        let d = rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]);
+        assert!(close(d, [0.0, 0.0, 1.0]), "{d:?}");
+        rig.advance(&mut ch, 1.0 / 30.0, 0.0);
+        assert!(close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), d), "where it is going, not where it is");
+        // A clip turning `left` a quarter: the same, now.
+        let mut ch = Channels::default();
+        ch.layers[0] = layer(1, 1.0 - 1e-6);
+        let d = rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]);
+        assert!(close(d, [0.0, 0.0, 1.0]), "{d:?}");
+        // From 170° to -170°: the long way (340°) by the numbers, 20° short.
+        let up = |deg: f32| [0.0, 1.0, 0.0, deg.to_radians()];
+        let mut ch = Channels::default();
+        ch.manual[0] = command(1, manual_kind::TURN, up(170.0), 0.0);
+        rig.advance(&mut ch, 1.0 / 30.0, 0.0);
+        let mut long = ch;
+        reissue(&mut long.manual[0], up(-170.0));
+        long.manual[0].speed = 1.0;
+        let mut short = long;
+        short.manual[0].flags |= manual_flags::SHORT;
+        let (lt, st) = (ticks_until_done(&rig, &mut long, 0), ticks_until_done(&rig, &mut short, 0));
+        assert_eq!((lt, st), (179, 11), "340° and 20° at 1 rad/s (178.02 and 10.5 ticks)");
+        let (pl, ps) = (palette_of(&rig, &long), palette_of(&rig, &short));
+        assert!(pl.iter().flatten().zip(ps.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-4), "the same place");
+    }
+
     /// A bone with a manual entry takes no clip (its children still do); a
     /// clip played later takes it back; a turn on a clipped bone starts where
     /// the clip had it; spins, moves and scales.

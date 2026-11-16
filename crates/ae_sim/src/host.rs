@@ -81,6 +81,18 @@ pub trait HostPlugin: Send + Sync {
     fn names(&self) -> Vec<(u64, u64, u32)> {
         Vec::new()
     }
+    /// Ops module systems can call with `ae_query` (`ae_abi::query`): ids
+    /// this plugin answers in [`Self::query`].
+    fn queries(&self) -> Vec<u64> {
+        Vec::new()
+    }
+    /// Answer op `op` on `input` into `out`; returns the bytes written. Must
+    /// be a pure function of the content and the input (it runs on any
+    /// worker, mid-system), and must not panic on bad input: return an
+    /// error (the module traps).
+    fn query(&self, op: u64, _input: &[u8], _out: &mut [u8]) -> Result<usize> {
+        anyhow::bail!("query {op:#x} is not answered here")
+    }
 }
 
 pub trait HostSystem: Send {

@@ -83,6 +83,9 @@ pub mod manual_flags {
     pub const RELATIVE: u8 = 4;
     /// The axis is in the bone's own frame, not the model's.
     pub const BONE_AXIS: u8 = 8;
+    /// A turn the short way from where the bone is, whatever the angle's
+    /// sign says (aiming: tracking round the back).
+    pub const SHORT: u8 = 16;
 }
 
 /// One clip layer. 28 bytes.
@@ -454,47 +457,92 @@ impl Rig {
     fn start_manual(&self, ch: &mut Channels) {
         let before = *ch;
         for k in 0..MANUAL {
-            let mut m = ch.manual[k];
-            if m.is_empty() || m.flags & manual_flags::PENDING == 0 {
-                continue;
+            let m = ch.manual[k];
+            if !m.is_empty() && m.flags & manual_flags::PENDING != 0 {
+                ch.manual[k] = self.resolve(&before, m).unwrap_or_default();
             }
-            let b = m.bone as usize;
-            if b >= self.bones() {
-                ch.manual[k] = Manual::default();
-                continue;
-            }
-            let rest = self.rest[b];
-            if m.flags & manual_flags::FRESH != 0 {
-                let manual = before.manual.iter().any(|o| o.shows() && o.bone == m.bone);
-                let shown = if manual { rest } else { self.clip_local(&before, b) };
-                m.value = match m.kind {
-                    manual_kind::TURN | manual_kind::SPIN if dot4(shown.r, rest.r) < 0.0 => neg4(shown.r),
-                    manual_kind::TURN | manual_kind::SPIN => shown.r,
-                    manual_kind::MOVE => [shown.t[0], shown.t[1], shown.t[2], 0.0],
-                    _ => [shown.s[0], shown.s[1], shown.s[2], 0.0],
-                };
-                m.rate = 0.0;
-            }
-            let v = [m.target[0], m.target[1], m.target[2]];
-            let axis = || norm3(if m.flags & manual_flags::BONE_AXIS != 0 { v } else { self.in_rest_frame(b, v, false) });
-            m.target = match m.kind {
-                manual_kind::TURN => {
-                    let q = axis_angle(axis(), m.target[3]);
-                    qnorm(qmul(if m.flags & manual_flags::RELATIVE != 0 { m.value } else { rest.r }, q))
-                }
-                manual_kind::SPIN => {
-                    let a = axis();
-                    [a[0], a[1], a[2], 0.0]
-                }
-                manual_kind::MOVE => {
-                    let o = self.in_rest_frame(b, v, true);
-                    [rest.t[0] + o[0], rest.t[1] + o[1], rest.t[2] + o[2], 0.0]
-                }
-                _ => [rest.s[0] * v[0], rest.s[1] * v[1], rest.s[2] * v[2], 0.0],
-            };
-            m.flags = 0;
-            ch.manual[k] = m;
         }
+    }
+
+    /// Pending entry `m` in its bone's terms, against channels `before`
+    /// (`None`: no such bone).
+    fn resolve(&self, before: &Channels, mut m: Manual) -> Option<Manual> {
+        let b = m.bone as usize;
+        let rest = *self.rest.get(b)?;
+        if m.flags & manual_flags::FRESH != 0 {
+            let manual = before.manual.iter().any(|o| o.shows() && o.bone == m.bone);
+            let shown = if manual { rest } else { self.clip_local(before, b) };
+            m.value = match m.kind {
+                manual_kind::TURN | manual_kind::SPIN if dot4(shown.r, rest.r) < 0.0 => neg4(shown.r),
+                manual_kind::TURN | manual_kind::SPIN => shown.r,
+                manual_kind::MOVE => [shown.t[0], shown.t[1], shown.t[2], 0.0],
+                _ => [shown.s[0], shown.s[1], shown.s[2], 0.0],
+            };
+            m.rate = 0.0;
+        }
+        let v = [m.target[0], m.target[1], m.target[2]];
+        let axis = || norm3(if m.flags & manual_flags::BONE_AXIS != 0 { v } else { self.in_rest_frame(b, v, false) });
+        m.target = match m.kind {
+            manual_kind::TURN => {
+                let q = axis_angle(axis(), m.target[3]);
+                let t = qnorm(qmul(if m.flags & manual_flags::RELATIVE != 0 { m.value } else { rest.r }, q));
+                if m.flags & manual_flags::SHORT != 0 && dot4(m.value, t) < 0.0 { neg4(t) } else { t }
+            }
+            manual_kind::SPIN => {
+                let a = axis();
+                [a[0], a[1], a[2], 0.0]
+            }
+            manual_kind::MOVE => {
+                let o = self.in_rest_frame(b, v, true);
+                [rest.t[0] + o[0], rest.t[1] + o[1], rest.t[2] + o[2], 0.0]
+            }
+            _ => [rest.s[0] * v[0], rest.s[1] * v[1], rest.s[2] * v[2], 0.0],
+        };
+        m.flags = 0;
+        Some(m)
+    }
+
+    /// Direction `d` (in the unit's frame) as `bone` sees it, in the frame
+    /// its turns are given in (the unit's axes as at rest), with the bone's
+    /// parents **where they are going**: a manual rotation at its target
+    /// (pending commands included), a clipped bone at its clips' value now.
+    /// Turning the bone so that a direction given at rest points along the
+    /// result points it along `d`. With the parents at rest it is `d`.
+    pub fn dir_in(&self, ch: &Channels, bone: u16, d: [f32; 3]) -> [f32; 3] {
+        let b = bone as usize;
+        if b >= self.bones() {
+            return d;
+        }
+        // The parents' chain, root first.
+        let mut chain = [0u32; 64];
+        let mut n = 0;
+        let mut p = self.parents[b];
+        while p != u32::MAX && n < chain.len() {
+            chain[n] = p;
+            n += 1;
+            p = self.parents[p as usize];
+        }
+        let mut g = [0.0, 0.0, 0.0, 1.0];
+        for &a in chain[..n].iter().rev() {
+            g = qnorm(qmul(g, self.going(ch, a as usize)));
+        }
+        // The bone's frame at rest under its parents' pose, back to the
+        // unit's axes as they are at rest.
+        let frame = qnorm(qmul(g, self.rest[b].r));
+        qrot(self.rest_frame[b], qrot(qconj(frame), d))
+    }
+
+    /// Bone `b`'s local rotation where it is going (see [`Rig::dir_in`]).
+    fn going(&self, ch: &Channels, b: usize) -> [f32; 4] {
+        let mut manual = false;
+        for m in ch.manual.iter().filter(|m| !m.is_empty() && m.bone as usize == b) {
+            manual |= m.shows();
+            if matches!(m.kind, manual_kind::TURN | manual_kind::SPIN) {
+                let m = if m.flags & manual_flags::PENDING != 0 { self.resolve(ch, *m).unwrap_or(*m) } else { *m };
+                return if m.kind == manual_kind::TURN { m.target } else { m.value };
+            }
+        }
+        if manual { self.rest[b].r } else { self.clip_local(ch, b).r }
     }
 
     /// Bone `b`'s local transform from the layers alone.

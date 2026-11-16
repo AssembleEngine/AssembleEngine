@@ -193,6 +193,8 @@ mod host {
         pub fn ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32;
         #[allow(dead_code)]
         pub fn ae_lookup(scope: u64, name: u64) -> u32;
+        #[allow(dead_code)]
+        pub fn ae_query(op: u64, input: u32, input_len: u32, out: u32, out_len: u32) -> u32;
     }
 }
 
@@ -222,6 +224,10 @@ mod host {
     }
     #[allow(dead_code)]
     pub unsafe fn ae_lookup(_: u64, _: u64) -> u32 {
+        native()
+    }
+    #[allow(dead_code)]
+    pub unsafe fn ae_query(_: u64, _: u32, _: u32, _: u32, _: u32) -> u32 {
         native()
     }
 }

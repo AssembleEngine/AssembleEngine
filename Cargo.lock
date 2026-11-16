@@ -84,6 +84,7 @@ version = "0.0.1"
 dependencies = [
  "ae-sdk-macros",
  "ae_abi",
+ "libm",
 ]
 
 [[package]]

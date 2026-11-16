@@ -358,3 +358,15 @@ pub mod lookup {
     /// What the lookup returns for a name it does not have.
     pub const MISSING: u32 = u32::MAX;
 }
+
+/// Queries (`ae_query(op, input, input_len, out, out_len) -> u32`): pure
+/// functions host plugins answer for module systems (`HostPlugin::query`),
+/// by op id (`name_id` of the op's name). The return is the bytes written
+/// to `out`; a malformed query traps.
+pub mod query {
+    /// What `ae_query` returns for an op no plugin answers.
+    pub const MISSING: u32 = u32::MAX;
+    /// `ae_model::anim::Rig::dir_in`. Input: the unit's `Anim` value, then
+    /// the bone (`u32`) and the direction (3 × `f32`); output: 3 × `f32`.
+    pub const ANIM_DIR_IN: &str = "anim:dir_in";
+}

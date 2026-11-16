@@ -10,6 +10,7 @@
 //! | `ae_emit(stream: u64, data: u32, len: u32)` | emit an event |
 //! | `ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32` | entities near a point, from the host's spatial index |
 //! | `ae_lookup(scope: u64, name: u64) -> u32` | a name host plugins published (`HostPlugin::names`), `u32::MAX` when missing |
+//! | `ae_query(op: u64, input: u32, input_len: u32, out: u32, out_len: u32) -> u32` | a pure function a host plugin answers (`HostPlugin::query`): bytes written, `u32::MAX` for an unknown op |
 //! | `wasi_snapshot_preview1::sched_yield()` | yield the thread (wasi-libc's malloc lock waits with it) |
 //!
 //! Spawn record (little-endian): `u32 count, u32 reserved`, then `count`
@@ -22,7 +23,7 @@
 //! every value's size. Without one, component ids are ECS ids, passed through.
 
 use crate::command::{Command, CommandBuffer};
-use crate::host::SpatialIndex;
+use crate::host::{HostPlugin, SpatialIndex};
 use ae_ecs::{ComponentId, EntityId};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
@@ -31,6 +32,19 @@ use wasmtime::{Caller, Linker, SharedMemory};
 
 pub const MAX_SPAWN_COMPONENTS: usize = 32;
 pub const MAX_COMPONENT_BYTES: usize = 4096;
+
+/// Host plugins by the query ops they answer (`ae_query`).
+#[derive(Clone, Default)]
+pub struct Queries(pub BTreeMap<u64, Arc<dyn HostPlugin>>);
+
+impl std::fmt::Debug for Queries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys().map(|k| format!("{k:#x}"))).finish()
+    }
+}
+
+/// Query input and output limit, bytes.
+pub const MAX_QUERY_BYTES: usize = 4096;
 
 /// Stable schema ids -> ECS component ids and value sizes.
 #[derive(Clone, Debug, Default)]
@@ -42,6 +56,7 @@ pub struct IdMap {
     pub emits: Vec<Vec<u64>>,
     /// `(scope, name)` -> value, from the host plugins (`ae_lookup`).
     pub names: BTreeMap<(u64, u64), u32>,
+    pub queries: Queries,
 }
 
 impl IdMap {
@@ -207,6 +222,27 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
     linker.func_wrap("env", "ae_lookup", |caller: Caller<'_, WorkerCtx>, scope: u64, name: u64| -> u32 {
         caller.data().ids.as_ref().and_then(|m| m.names.get(&(scope, name)).copied()).unwrap_or(u32::MAX)
     })?;
+    linker.func_wrap(
+        "env",
+        "ae_query",
+        |caller: Caller<'_, WorkerCtx>, op: u64, input: u32, input_len: u32, out: u32, out_len: u32| -> wasmtime::Result<u32> {
+            let run = || -> Result<u32> {
+                let ctx = caller.data();
+                let Some(plugin) = ctx.ids.as_ref().and_then(|m| m.queries.0.get(&op)) else { return Ok(ae_abi::query::MISSING) };
+                ensure!(input_len as usize <= MAX_QUERY_BYTES && out_len as usize <= MAX_QUERY_BYTES, "query of {input_len} -> {out_len} bytes");
+                let data = read_guest(&ctx.memory, input, input_len as usize)?;
+                let mut result = vec![0u8; out_len as usize];
+                let n = plugin.query(op, &data, &mut result)?;
+                ensure!(n <= result.len(), "query {op:#x} wrote past its output");
+                let end = out as usize + n;
+                ensure!(end <= ctx.memory.data_size(), "query output {out:#x}+{n} is out of bounds");
+                // The output buffer is the calling system's own memory.
+                unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), (ctx.memory.data().as_ptr() as *mut u8).add(out as usize), n) };
+                Ok(n as u32)
+            };
+            run().map_err(trap)
+        },
+    )?;
     // wasi-libc's malloc lock calls this while it waits for another
     // instance to release the heap. Yielding has no effect on results, only
     // on how the wait is spent. (Every other WASI import traps.)
