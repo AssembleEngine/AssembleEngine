@@ -721,7 +721,7 @@ Units (the 10k-unit instance stream):
   and gets the same final digest as without capturing (with a cached query it differs: checked);
   the captured words equal the components' bytes by entity.
 - Render side (`ae_render::units`): an `InstanceStream` is a fixed set of 4-byte attributes per row
-  (`x, y, prev_x, prev_y, heading_x, heading_y, radius, class`), column by column; whoever feeds it
+  (`x, y, prev_x, prev_y, heading_x, heading_y, radius, class`; M11 adds `clip, clip_time`), column by column; whoever feeds it
   maps its own fields onto them, so the renderer never sees the sim, and M4's view tables replace
   the feeder, not the renderer. `UnitFeed` holds the latest stream behind a mutex held only to swap an
   `Arc`: the producer publishes after each tick, the render thread takes the latest at `prepare`;
