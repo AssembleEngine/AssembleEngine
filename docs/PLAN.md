@@ -2402,6 +2402,37 @@ that in.
     - a fixed depth distribution instead of one fitted to each frame;
     - a filter better than bilinear between columns (tricubic, or guided by depth).
   - The bar stays the same: no popping, close to the volume reference, and a cost near the sort's.
+- **Pie in the sky, some time: zstd-backed archives instead of zip** (`ae_vfs`; the mount/read
+  abstraction stays, the container changes).
+  - Why: archives are now how a whole game ships, and deflate is the weak link: modest ratios, a
+    slow decoder, and every read inflates again. zstd at a high level (packing is offline) should
+    shrink `module.wasm` and the JSON defs, and at any level it decompresses several times faster
+    than `miniz_oxide`, in a smaller archive held in memory. The KTX2/PNG payloads are already
+    compressed and would be stored, so expect the gain in the small-file tail, not across the board.
+  - Container: a small native format (`AEPKG` magic + version), a sorted path table (path, method,
+    uncompressed size, xxh3-128, offset) in a footer, and one independent zstd frame per file (or
+    stored when zstd does not shrink it), so a read decompresses one file and a corrupt entry fails
+    only itself. Same path rules and duplicate checks as the zip reader; no zip64 or central-directory
+    scan. Large files can be split into independent frames later if range reads are wanted.
+  - Unchanged: mounts and override order, `manifest.json`, `content_hash` over the uncompressed
+    visible files, `Library::scan`/`resolve`, replay and lockstep headers, `ae-tool pack`/
+    `unpack-list`. Because the hash is over files, switching the container keeps every existing
+    replay valid; only the committed packages need repacking. Zip stays a read-only mount (found by
+    magic), so old packages and third-party tooling keep working, and `ae-tool pack --format zip`
+    keeps interop.
+  - Determinism: sorted paths, fixed metadata, one thread and a pinned zstd level and version make a
+    package's bytes follow from its files again. A zstd upgrade that changes the output is a repack
+    diff only, never a content or replay change.
+  - Optional: a per-package zstd dictionary (trained on `defs/*.json` and other small files, shipped
+    as package metadata, not content) for the small-file tail; long-distance matching for the wasm
+    module.
+  - Alternatives: ZIP method 93 (zstd inside zip) keeps the familiar container but not the interop
+    (tool support varies, `miniz_oxide` has no zstd), so it buys little; tar.zst is trivial but has
+    no per-file random access, so mounting decompresses all of it.
+  - Gate: a pack/unpack bench (ratio, pack time, cold and warm read time, peak RSS) over the
+    skirmish game package, the map package, the Fox model and a texture-heavy library against
+    today's deflate; adopt zstd as the default only if the win is clear. "If possible" is the point
+    of the item: the format work is small once the numbers ask for it.
 
 ## Not yet researched
 
