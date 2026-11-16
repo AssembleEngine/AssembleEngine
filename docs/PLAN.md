@@ -2481,8 +2481,8 @@ Design:
     machine and in the sim's on-demand queries.
 - **The pose is a pure function of the channels and the tick**, in strict f32 (the determinism
   rules: nlerp, no FMA, `libm` for the trig of angle targets), evaluated on the CPU:
-  - by the sim, **on demand**: a script asking where a joint is (a muzzle, a foot on the ground),
-    per-joint collision volumes if a game wants them. Clips are kept on the CPU (no GPU baking),
+  - by the sim, **on demand**: a script asking where a joint is (a muzzle, a foot on the ground).
+    Clips are kept on the CPU (no GPU baking),
     and the headless sim loads models without textures;
   - by the client, for every unit in view, from the channel columns in the view (same code, same
     result); the GPU gets the previous and current tick's 3x4 joint palettes and only
@@ -2517,8 +2517,12 @@ Design:
   pass (0.31 ms). If missed: no posing off screen and out of the shadows, distant units every n
   ticks, units at rest keep their palette. Matrices interpolated between ticks shrink fast turns
   (over about 90° a tick, e.g. a rotor): spins get an angular rate the shader applies.
-- Open questions: aim by joint turns only, or also look-at / IK on a joint chain later; whether
-  the sim keeps per-joint collision volumes.
+- Aiming is by joint turns and clips only (decided with the user, 2026-11-16); look-at / IK on
+  a joint chain is a pie-in-the-sky TODO under Later improvements.
+- No per-joint collision volumes in the sim (decided with the user, 2026-11-16): a skinned mesh
+  does not split well into per-joint volumes. Units keep their one volume; the pose's reach
+  stays within it (the cull sphere already covers every clip frame), and joint positions are
+  for scripts' aiming and effects only.
 - Verification: a scripted test unit (walk, stop, a multi-step aim while running: an upper-body
   override plus additive turns; fire with a flash at the muzzle; die holding the last frame) in a GPU test; save→load→continue with coroutines
   suspended; digests equal at 1/2/4/8 workers; `army-fox` with scripts against the M11 numbers.
@@ -2580,6 +2584,8 @@ Design:
   - Drive particle, decal fade/glow and other effect timers by the interpolated sim time
     (`(tick + alpha) × tick seconds`, as clips now are), so they speed up, slow down and stop with
     the sim. Purely visual time (water ripples, UI) may stay on wall time; choose per effect.
+- **Pie in the sky, some time: look-at / IK for unit scripts** (TODO, not planned in detail;
+  after M14). Aiming a joint chain at a point, feet on uneven ground.
 - **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).
   - Seen in play, they look poor: too coarse and too discrete, as if the smoke updated at a lower
     frame rate than the rest of the scene.
