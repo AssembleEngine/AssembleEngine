@@ -2531,6 +2531,28 @@ Design:
   plain game system; (3) the client poses on the CPU from the view, `--clip` goes; (4) a
   coroutine spike (a future per unit, resumed on another worker, digests at 1/2/4/8 workers);
   (5) the script API and callins; (6) the death sequence and the test unit.
+- Palette traffic (step 3, decided with the user, 2026-11-16):
+  - **Two stamped slots per unit, the older one overwritten.** Each unit in view owns a stable
+    pair of palette ranges; each slot carries the tick it was posed at (one stamp per unit and
+    slot, in the instance row, not per matrix). A tick writes only the slot with the older
+    stamp. The draw interpolates older → newer when the newer stamp is the stream's tick, and
+    otherwise draws the newer slot alone. That halves the upload (one palette per unit per tick,
+    not two). It stays right across skipped ticks: a unit that did not change at N-1 still has
+    its N-1 pose in its last slot.
+  - **Unchanged units are neither posed nor uploaded.** The pose is a pure function of the
+    channels, so the test is exact. A unit whose `Anim` (its model and channels) is the same
+    bytes as at its last pose keeps its slots. This is not about standing still: an idle loop
+    changes every tick, and the palette is in model space, so a unit can walk on a held pose.
+    A unit coming into view gets the same pose in both slots.
+  - **No extrapolation.** It would only save uploads on ticks the client guesses right, and a
+    wrong guess pops. Matrices extrapolated linearly shear and shrink. The two points above
+    cover the held cases exactly. This can be reopened.
+  - Measure first: the CPU cost of 240 000 joints a tick and the writes into host-visible
+    memory are likelier limits than PCIe. If they miss, the alternative is to upload inputs,
+    not outputs: channels are 280 bytes a unit against a 24-joint palette's 1152. That means
+    a GPU evaluator, which the plan decided against.
+  - Step 3 poses every unit the view shows (line of sight). A coarse CPU frustum test comes only
+    if the numbers ask for it.
 - Progress:
   - Step 1, the pose evaluator — done (2026-11-16). `ae_model::anim`: `Channels` (4 layers of
     28 bytes, 8 tweens of 20; 272 bytes a unit), `Rig` (a model's bones, joints, clips resampled
