@@ -53,8 +53,11 @@ of another version is refused ("convert it again").
   - The same image used as colour and as data is stored twice (sRGB and UNORM).
 - **Clips**: glTF animations as data: per channel a bone, a path (translation, rotation, scale), the
   interpolation (step, linear, cubic spline) and the keys as they are. `pose::Pose::sample` plays
-  them (slerp for linear rotations; held at the first and last key outside them). No runtime
-  player yet: the sim will drive bones (`PieceTransform`, not yet in the sim).
+  them (slerp for linear rotations; held at the first and last key outside them).
+  `pose::bake` samples a clip at 60 frames per second or a little more (so the last frame falls on
+  its duration) into per-frame TRS of the bones it animates; `BakedClip::locals` plays that the
+  way the renderer's pose pass does (two frames blended: lerp, nlerp; clips loop). Baking shifts a
+  step-interpolated key by up to a frame. The sim does not drive bones yet (`PieceTransform`).
 
 ## The renderer (`ae_render::models`, the units)
 
@@ -66,7 +69,8 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 
 - **Resources**: one geometry buffer (every model's vertices packed per primitive in its layout,
   read by vertex pulling, then every index); one material table; one partially bound array of
-  1024 textures the materials index; per frame slot a palette buffer and a rows buffer.
+  1024 textures the materials index; an animation table (bones, joints, clips, baked frames); one
+  palette buffer (`units.palette`); per frame slot a rows buffer.
 - **Commands**: one `VkDrawIndexedIndirectCommand` per (class, primitive), with a draw record
   (material, class, vertex base and layout, the class's region of the visible list) the shaders
   read by `gl_DrawID`. Opaque commands first, then alpha-masked ones: two pipelines, because a
@@ -79,10 +83,21 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   when a new tick arrives) give each class's instances. The darts' caster skips model classes.
   Opaque and masked commands in a multi-draw each per cascade; the masked caster tests alpha as
   the camera does, so what is masked away casts no shadow.
-- **Poses**: each row has a palette offset (rows buffer); the vertex shader skins by
-  `palette[offset + joint]`, normals by the cofactor matrix (right under non-uniform scale). Step
-  2 points every unit of a class at the class's rest palette; step 3 adds per-unit ranges and a
-  compute pass resolving bone transforms (interpolating ticks once per bone, not per vertex).
+- **Poses**: the stream's `clip` and `clip_time` attributes pick a unit's pose: `clip` 0 (or past
+  its model's clips) the rest pose, `k` the model's clip `k - 1` at `clip_time` seconds (at the
+  stream's tick; drawn a tick behind as positions are, clamped at 0; clips loop). The palette
+  holds 3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units
+  at rest point there), then a range per unit playing a clip, then the pose pass's scratch. When a
+  new tick arrives the CPU gives each row its offset and lists the units playing a clip (pose
+  jobs). The `units pose` pass (`units.pose`, compute, before the shadows and the draws) runs one
+  invocation per job: rest local matrices, the clip's animated bones blended from two baked
+  frames, the hierarchy walked in place, each joint's bone times its inverse bind. So bones are
+  interpolated once per unit and frame; the vertex shader only blends up to four matrices
+  (`palette[offset + joint]`), normals by the cofactor matrix (right under non-uniform scale).
+  Memory: the palette is sized for every unit playing a clip of the largest animated model
+  (capacity × (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB).
+- **Cull sphere**: a model with clips is culled with a sphere covering every vertex in every baked
+  frame of every clip, 5% larger (motion between frames), for all units of its class.
 - **Fit and frame**: model space is the dart's local frame (+X along the heading, +Y up, +Z to the
   right). The model's footprint radius (its rest bounds' largest extent from the origin along x or
   z) is drawn at the unit's drawn size, so the minimum pixel size applies as for darts.
@@ -96,11 +111,18 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   start without them), 1028 samplers per shader stage (checked), and `textureCompressionBC` for BC
   textures. A model without triangles is refused.
 
-Test: `units_draw_models` (`crates/ae_render/tests/gpu.rs`, validation on): a piece model built in
+Tests (`crates/ae_render/tests/gpu.rs`, validation on): `units_draw_models`, a piece model built in
 the test (opaque front, masked right side, a block masked away), the Fox and a dart in one frame,
 without and with the units' shadow map; front and right land where the heading puts them (not
 turned, not mirrored), the mask discards, the Fox shows its texture, the blocks cast shadows and
-the masked-away block none.
+the masked-away block none. `units_pose_models`: a base-and-arm model built in the test (two
+clips, one moving the base and so the arm), the Fox and BoxAnimated playing clips, units at rest
+and with a clip their model lacks, drawn on time and a tick behind; every row's palette read back
+equals the CPU's (`ae_model::pose`) to 1e-3 relative; the arm is drawn where its pose puts it; a
+unit whose rest sphere is off screen but whose arm reaches in is drawn. Checked to fail without
+the lag and without the padded sphere. `ae_model` tests: baked clips against the sampler (linear
+translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
+the animated reach.
 
 ## The converter: what it reads, drops and refuses
 

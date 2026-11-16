@@ -433,6 +433,16 @@ impl TerrainApp {
         Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
     }
 
+    /// Each row's skinning palette in the last frame (empty for a dart),
+    /// once the device is idle (after `run_headless`); for tests and tools.
+    pub fn last_unit_poses(&mut self, gpu: &GpuDevice) -> Result<Vec<Vec<[f32; 12]>>> {
+        let slot = self.last_slot;
+        match self.unit_renderer.as_mut() {
+            Some(units) => units.read_poses(gpu, slot),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// The shared view; the main thread writes it, the render thread reads
     /// it once per frame.
     pub fn view(&self) -> Arc<Mutex<TerrainView>> {

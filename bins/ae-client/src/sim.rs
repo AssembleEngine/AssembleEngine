@@ -593,7 +593,9 @@ impl Streamer {
             let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
             let (px, py) = moved.map_or((x, y), |b| (b.1, b.2));
             let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.3, b.4)) };
-            for (column, word) in columns.iter_mut().zip([x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class]) {
+            // At rest: no clip (models play none yet).
+            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, 0, 0.0f32.to_bits()];
+            for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
             next.push((row.key, x, y, hx, hy, row.state));

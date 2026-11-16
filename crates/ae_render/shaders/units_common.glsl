@@ -13,6 +13,8 @@
 #define ATTR_HEADING_Y 5u
 #define ATTR_RADIUS 6u
 #define ATTR_CLASS 7u
+#define ATTR_CLIP 8u
+#define ATTR_CLIP_TIME 9u
 #define MAX_CLASSES 16u
 
 layout(std140, set = 0, binding = 0) uniform Frame {
@@ -29,6 +31,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
     vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
+    vec4 anim;                // x: seconds the frame is drawn behind the stream's tick
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; } inst;

@@ -2334,7 +2334,8 @@ that in.
     KTX2 already in a GPU format is kept; Basis-compressed KTX2 is transcoded by the converter to
     BC7, so the runtime needs no transcoder.
 - Not in the sim yet: no `PieceTransform` column exists. In M11 the renderer takes a pose per
-  class (the rest pose, or a clip sampled at a time); the sim columns come later.
+  unit (the rest pose, or a clip at a time: the stream's `clip` and `clip_time`); the sim
+  columns come later (their per-bone interpolation goes in the same pose pass).
 - Decided with the user (2026-11-16, after reading RecoilEngine's GL4 model path: one global
   vertex and index buffer, per-unit transform ranges in one buffer, multi-draw per bin; its
   per-vertex quaternion interpolation and transform chains are the part not to copy):
@@ -2343,9 +2344,7 @@ that in.
     per material) and skinned (four joints and weights, 80 bytes). Replaces "one uniform format";
   - per-unit poses: each unit's palette range in one big buffer, its offset per instance; a
     compute pass resolves bone transforms to matrices once per bone per frame (interpolating
-    sim ticks there, not per vertex); vertices only blend matrices. Step 2 points every unit of a
-    class at the class's rest palette; step 3 adds the resolve pass and per-unit ranges (the
-    palette is `mat4` now; 3x4 rows, 48 bytes, when per-unit ranges make its size matter);
+    sim ticks there, not per vertex); vertices only blend matrices (3x4 rows, 48 bytes);
   - all models' vertices and indices in one GPU buffer.
 - Progress (details: `docs/models.md`):
   - Step 1, format and converter — done (2026-11-16). `ae_model` is the format (JSON header +
@@ -2361,8 +2360,16 @@ that in.
     masked) draw them, the units' shadow caster draws them too. Opt-in per class
     (`UnitsSetup::models`): with none, the darts' renderer unchanged (24 GPU tests pass as
     before). New GPU test `units_draw_models`, validation clean.
-  - Next: step 3, per-unit palette ranges, the pose-resolve compute pass, clips sampled at a time;
-    step 4, `ae-client --model`, benches, a validation run.
+  - Step 3, poses — done (2026-11-16). Clips baked at load (`ae_model::pose::bake`, 60 fps or a
+    little more; the GPU blends two frames, no key search). Stream attributes `clip`,
+    `clip_time` (10 attributes now). Library pass `units.pose` and resource `units.palette` in
+    the native graph, both render modules and both graph files (`check_graph` rejects a graph
+    that draws units without posing them); the palette is one device-local buffer of 3x4
+    matrices: rest palettes, per-unit ranges for units playing a clip, scratch. Cull spheres
+    of animated models cover every baked frame (+5%). New GPU test `units_pose_models` (palettes
+    read back against the CPU, drawn poses, the lag, the padded cull); 26 GPU tests pass,
+    validation clean.
+  - Next: step 4, `ae-client --model`, benches against the darts, a validation run.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 

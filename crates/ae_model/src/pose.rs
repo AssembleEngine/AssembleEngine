@@ -1,7 +1,7 @@
 //! Poses: the bones' local transforms, from the rest pose or a clip, to
 //! model-space bone matrices and the skinning palette.
 
-use crate::{Interpolation, Model, Path};
+use crate::{Interpolation, Model, Path, Vertex};
 use glam::{Mat4, Quat, Vec3, Vec4};
 
 /// Local transforms of every bone. A bone a clip touched is composed from
@@ -79,6 +79,117 @@ pub fn palette(model: &Model, globals: &[Mat4]) -> Vec<Mat4> {
 pub fn rest_palette(model: &Model) -> Vec<Mat4> {
     let pose = Pose::rest(model);
     palette(model, &globals(model, &pose.locals(model)))
+}
+
+/// Frames per second clips are baked at, at least: each clip's rate is
+/// rounded up so its last frame falls on its duration.
+pub const BAKE_RATE: f32 = 60.0;
+
+/// A bone's local transform as translation, rotation and scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Trs {
+    pub t: Vec3,
+    pub r: Quat,
+    pub s: Vec3,
+}
+
+/// A clip sampled at a fixed rate ([`bake`]): per frame, the local TRS of
+/// each bone the clip animates (a track). Played by blending two frames
+/// (lerp, and nlerp for the rotation): what the renderer's pose pass does
+/// on the GPU, and [`BakedClip::locals`] on the CPU. Clips loop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BakedClip {
+    /// The bone of each track, increasing.
+    pub tracks: Vec<u32>,
+    pub frames: u32,
+    /// Frames per second (0 with a single frame).
+    pub rate: f32,
+    pub duration: f32,
+    /// `[frame][track]`; rotations of consecutive frames on one hemisphere
+    /// (so a plain nlerp takes the short way).
+    pub keys: Vec<Trs>,
+}
+
+/// Clip `clip` sampled with [`Pose::sample`] at [`BAKE_RATE`] or a little
+/// more, from 0 to its duration inclusive.
+pub fn bake(model: &Model, clip: usize) -> BakedClip {
+    let c = &model.clips[clip];
+    let mut tracks: Vec<u32> = c.channels.iter().map(|ch| ch.bone).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    let (frames, rate) = match c.duration > 0.0 {
+        true => {
+            let n = (c.duration * BAKE_RATE).ceil().max(1.0) as u32;
+            (n + 1, n as f32 / c.duration)
+        }
+        false => (1, 0.0),
+    };
+    let mut keys: Vec<Trs> = Vec::with_capacity(frames as usize * tracks.len());
+    for f in 0..frames {
+        let t = if f + 1 == frames { c.duration } else { f as f32 / rate };
+        let mut pose = Pose::rest(model);
+        pose.sample(model, clip, t);
+        for (i, &b) in tracks.iter().enumerate() {
+            let b = b as usize;
+            let mut r = pose.rotation[b];
+            if f > 0 && keys[(f as usize - 1) * tracks.len() + i].r.dot(r) < 0.0 {
+                r = -r;
+            }
+            keys.push(Trs { t: pose.translation[b], r, s: pose.scale[b] });
+        }
+    }
+    BakedClip { tracks, frames, rate, duration: c.duration, keys }
+}
+
+impl BakedClip {
+    /// The two frames around `time` seconds (wrapped into the clip: clips
+    /// loop) and the second one's weight; as the pose pass computes them.
+    pub fn frames_at(&self, time: f32) -> (usize, usize, f32) {
+        let t = if self.duration > 0.0 { time - self.duration * (time / self.duration).floor() } else { 0.0 };
+        let f = t * self.rate;
+        let last = self.frames as usize - 1;
+        let a = (f.max(0.0) as usize).min(last);
+        (a, (a + 1).min(last), (f - a as f32).clamp(0.0, 1.0))
+    }
+
+    /// Local matrices at `time`: each bone's rest matrix, the tracks'
+    /// bones blended from two frames.
+    pub fn locals(&self, model: &Model, time: f32) -> Vec<Mat4> {
+        let mut locals: Vec<Mat4> = model.bones.iter().map(|b| Mat4::from_cols_array(&b.rest)).collect();
+        let (a, b, s) = self.frames_at(time);
+        let n = self.tracks.len();
+        for (i, &bone) in self.tracks.iter().enumerate() {
+            let (ka, kb) = (self.keys[a * n + i], self.keys[b * n + i]);
+            let r = Quat::from_vec4(Vec4::from(ka.r).lerp(Vec4::from(kb.r), s).normalize());
+            locals[bone as usize] = Mat4::from_scale_rotation_translation(ka.s.lerp(kb.s, s), r, ka.t.lerp(kb.t, s));
+        }
+        locals
+    }
+}
+
+/// Vertex `v`'s position skinned by `palette`.
+pub fn skin(v: &Vertex, palette: &[Mat4]) -> Vec3 {
+    let m = (0..4).fold(Mat4::ZERO, |m, k| m + palette[v.joints[k] as usize] * (v.weights[k] as f32 / 65535.0));
+    m.transform_point3(Vec3::from(v.position))
+}
+
+/// The largest distance from `centre` of a vertex in any frame of any
+/// baked clip (0 without clips): how far animation reaches.
+pub fn animated_radius(model: &Model, centre: Vec3) -> f32 {
+    let mut radius = 0.0f32;
+    for clip in 0..model.clips.len() {
+        let baked = bake(model, clip);
+        for f in 0..baked.frames {
+            let time = if f + 1 == baked.frames { baked.duration } else { f as f32 / baked.rate.max(1e-9) };
+            // At the frame itself (the blend's weight 0).
+            let time = time.min(baked.duration * (1.0 - 1e-6));
+            let palette = palette(model, &globals(model, &baked.locals(model, time)));
+            for v in &model.vertices {
+                radius = radius.max((skin(v, &palette) - centre).length());
+            }
+        }
+    }
+    radius
 }
 
 /// One channel at time `t`; `n` components per value.

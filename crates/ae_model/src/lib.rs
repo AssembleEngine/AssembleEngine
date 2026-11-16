@@ -1,4 +1,4 @@
-//! The engine's model format: one skinned format for every model (M11).
+//! The engine's model format (M11).
 //!
 //! glTF 2.0 is converted offline (`ae_gltf`, `ae-tool model convert`) to a
 //! [`Model`]; the runtime reads it with [`Model::from_bytes`] (from the VFS,
@@ -11,13 +11,15 @@
 //! * **Joints** are the skinning palette: a bone and an inverse bind matrix.
 //!   A skinned glTF mesh references its skin's joints; a mesh hanging on a
 //!   node (a "piece") references one joint, the node with the identity, at
-//!   weight 1. So there is one vertex layout and one draw path, and moving a
-//!   bone moves both kinds.
+//!   weight 1. Moving a bone moves both kinds.
 //! * **Primitives** are triangle lists, one material each, in the one shared
-//!   vertex and index buffer.
+//!   vertex and index buffer. Each has a GPU [`Layout`]: rigid (one joint
+//!   per vertex: pieces, merged per material by
+//!   [`Model::merge_primitives`]) or skinned (four joints and weights).
 //! * **Textures** are KTX2 files in a GPU format ([`ktx`]).
 //! * **Clips** are glTF's animations as data: keyframes per bone and path,
-//!   with their interpolation ([`pose`] samples them).
+//!   with their interpolation ([`pose`] samples them, and bakes them at a
+//!   fixed rate for the renderer).
 //!
 //! Engine model space: +X forward, +Y up, +Z right (a unit's heading turns
 //! +X onto it), metres.

@@ -1,0 +1,83 @@
+#version 460
+// The units' poses (units.pose): one invocation per unit playing a clip (a
+// pose job, units.rs write_rows). Its bones' local matrices go into its
+// scratch range (the rest matrix, or for a bone the clip animates its
+// baked frames around the time blended: lerp, nlerp), are walked into
+// model space there (parents come first), and its palette range gets each
+// joint's bone times the joint's inverse bind. Mirrors
+// ae_model::pose::BakedClip::locals, globals and palette.
+#define POSE
+#include "units_common.glsl"
+#include "units_models.glsl"
+
+layout(local_size_x = 64) in;
+
+mat3x4 rowsAt(uint i) { return mat3x4(anim[i], anim[i + 1u], anim[i + 2u]); }
+
+// a * b, affine transforms as rows.
+mat3x4 mul(mat3x4 a, mat3x4 b) {
+    mat3x4 c;
+    for (int i = 0; i < 3; i++) {
+        c[i] = a[i].x * b[0] + a[i].y * b[1] + a[i].z * b[2] + vec4(0.0, 0.0, 0.0, a[i].w);
+    }
+    return c;
+}
+
+// Translation, rotation (unit quaternion xyzw), scale: T R S as rows.
+mat3x4 trs(vec3 t, vec4 q, vec3 s) {
+    vec3 q2 = q.xyz + q.xyz;
+    float xx = q.x * q2.x, yy = q.y * q2.y, zz = q.z * q2.z;
+    float xy = q.x * q2.y, xz = q.x * q2.z, yz = q.y * q2.z;
+    float wx = q.w * q2.x, wy = q.w * q2.y, wz = q.w * q2.z;
+    return mat3x4(
+        vec4((1.0 - (yy + zz)) * s.x, (xy - wz) * s.y, (xz + wy) * s.z, t.x),
+        vec4((xy + wz) * s.x, (1.0 - (xx + zz)) * s.y, (yz - wx) * s.z, t.y),
+        vec4((xz - wy) * s.x, (yz + wx) * s.y, (1.0 - (xx + yy)) * s.z, t.z));
+}
+
+void main() {
+    uint job = gl_GlobalInvocationID.x;
+    if (job >= pc.cascade) {
+        return;
+    }
+    uint cap = u.counts.y;
+    uint row = rows[MAX_CLASSES + 2u * cap + job];
+    uint scratch = rows[MAX_CLASSES + 3u * cap + job];
+    ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
+    // The clip (the CPU made a job only for a valid one) and its two frames
+    // around the time, drawn behind the tick as positions are; clips loop.
+    uint c = mc.pose.w + 2u * (attru(ATTR_CLIP, row) - 1u);
+    uvec4 clip = floatBitsToUint(anim[c]);  // first frame record, tracks, frames
+    vec4 timing = anim[c + 1u];             // rate, duration
+    float t = max(attrf(ATTR_CLIP_TIME, row) - u.anim.x, 0.0);
+    if (timing.y > 0.0) {
+        t -= timing.y * floor(t / timing.y);
+    }
+    float f = t * timing.x;
+    uint last = clip.z - 1u;
+    uint fa = min(uint(max(f, 0.0)), last);
+    uint fb = min(fa + 1u, last);
+    float s = clamp(f - float(fa), 0.0, 1.0);
+
+    uint bones = mc.pose.y;
+    for (uint k = 0u; k < bones; k++) {
+        palette[scratch + k] = rowsAt(mc.pose.x + 4u * k);
+    }
+    uint tracks = clip.y;
+    for (uint k = 0u; k < tracks; k++) {
+        uint a = clip.x + 3u * (fa * tracks + k);
+        uint b = clip.x + 3u * (fb * tracks + k);
+        vec4 q = normalize(mix(anim[a + 1u], anim[b + 1u], s));
+        palette[scratch + floatBitsToUint(anim[a].w)] = trs(mix(anim[a].xyz, anim[b].xyz, s), q, mix(anim[a + 2u].xyz, anim[b + 2u].xyz, s));
+    }
+    // Bone 0 is the root; every other bone's parent comes before it.
+    for (uint k = 1u; k < bones; k++) {
+        uint parent = floatBitsToUint(anim[mc.pose.x + 4u * k + 3u].x);
+        palette[scratch + k] = mul(palette[scratch + parent], palette[scratch + k]);
+    }
+    uint dst = poseOffset(row);
+    for (uint k = 0u; k < mc.cmd.w; k++) {
+        uint joint = mc.pose.z + 4u * k;
+        palette[dst + k] = mul(palette[scratch + floatBitsToUint(anim[joint + 3u].x)], rowsAt(joint));
+    }
+}

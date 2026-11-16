@@ -1,5 +1,5 @@
 use super::*;
-use crate::pose::{Pose, globals, palette, rest_palette};
+use crate::pose::{Pose, animated_radius, bake, globals, palette, rest_palette};
 
 fn bone(name: &str, parent: Option<u32>, t: [f32; 3]) -> Bone {
     Bone { name: name.into(), parent, rest: trs(t, [0.0, 0.0, 0.0, 1.0], [1.0; 3]).to_cols_array(), translation: t, rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }
@@ -120,6 +120,65 @@ fn step_slerp_and_cubic() {
     pose.sample(&m, 0, 0.25);
     let s: f32 = 0.25;
     assert!((pose.translation[1].x - 10.0 * (3.0 * s * s - 2.0 * s * s * s)).abs() < 1e-5);
+}
+
+#[test]
+fn baked_clips_match_the_sampler_and_loop() {
+    // Translation, linear: exact at every time (a lerp of lerps).
+    let m = sample_model();
+    let baked = bake(&m, 0);
+    assert_eq!(baked.tracks, vec![1]);
+    assert_eq!(baked.frames, 121);
+    assert!((baked.rate - 60.0).abs() < 1e-4);
+    for t in [0.0, 0.01, 0.5, 1.0, 1.337, 1.99] {
+        let mut pose = Pose::rest(&m);
+        pose.sample(&m, 0, t);
+        let want = pose.locals(&m);
+        let got = baked.locals(&m, t);
+        for (w, g) in want.iter().zip(&got) {
+            assert!(w.abs_diff_eq(*g, 1e-4), "t {t}: {w} vs {g}");
+        }
+        // Clips loop.
+        let again = baked.locals(&m, t + 2.0 * baked.duration);
+        assert!(again[1].abs_diff_eq(got[1], 1e-4), "t {t} two loops later");
+    }
+    // A duration that is not a whole number of frames: the rate rounds up
+    // so the last frame falls on it.
+    let mut m = sample_model();
+    m.clip_data[1] = 0.3337;
+    m.clips[0].duration = 0.3337;
+    let baked = bake(&m, 0);
+    assert_eq!(baked.frames, 22);
+    assert!(((baked.frames - 1) as f32 / baked.rate - 0.3337).abs() < 1e-6);
+
+    // Rotation: a quarter turn about +Y in two keys, the second stored
+    // negated (the same rotation): the baked frames stay on one hemisphere
+    // and the nlerp follows the slerp closely.
+    let mut m = sample_model();
+    let q = -Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    m.clip_data = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0, q.x, q.y, q.z, q.w];
+    m.clips[0].duration = 1.0;
+    m.clips[0].channels[0] = Channel { bone: 1, path: Path::Rotation, interpolation: Interpolation::Linear, times: Range { offset: 0, len: 2 }, values: Range { offset: 2, len: 8 } };
+    m.validate().unwrap();
+    let baked = bake(&m, 0);
+    assert!(baked.keys.windows(2).all(|k| k[0].r.dot(k[1].r) >= 0.0));
+    for t in [0.1, 0.25, 0.5, 0.77] {
+        let mut pose = Pose::rest(&m);
+        pose.sample(&m, 0, t);
+        let got = baked.locals(&m, t);
+        assert!(pose.locals(&m)[1].abs_diff_eq(got[1], 1e-4), "t {t}");
+    }
+}
+
+#[test]
+fn animation_reach() {
+    // The arm's tip (2, 0, 0) is carried up to (2, 4, 0) at the clip's end.
+    let m = sample_model();
+    let r = animated_radius(&m, Vec3::ZERO);
+    assert!((r - 20f32.sqrt()).abs() < 0.01, "{r}");
+    let mut still = sample_model();
+    still.clips.clear();
+    assert_eq!(animated_radius(&still, Vec3::ZERO), 0.0);
 }
 
 #[test]

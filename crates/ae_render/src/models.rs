@@ -12,10 +12,16 @@
 //!   region of the visible list) that the shaders find by `gl_DrawID`.
 //!   Commands are ordered opaque first, then alpha-masked (a pipeline that
 //!   discards loses early depth), so the camera draws with two multi-draws.
-//! * Each class has a palette range of its own (its pose); each unit is
-//!   given a palette offset per frame (`rows`), so per-unit poses need no
-//!   change in the shaders. For now every unit of a class points at the
-//!   class's rest palette.
+//! * Poses: the palette (`units.palette`) holds 3x4 matrices (rows). Its
+//!   head is each model's rest palette, written once; a unit at rest
+//!   points at it. A unit playing a clip gets a range of its own, which
+//!   the pose pass (`shaders/units_pose.comp`) fills each frame from the
+//!   clip baked at a fixed rate (`ae_model::pose::bake`): two frames
+//!   blended per animated bone, the hierarchy walked, the inverse binds
+//!   applied, once per unit and bone (vertices only blend matrices). The
+//!   animation table ([`ModelSet::anim`]) holds the bones, joints, clips
+//!   and baked frames. A model with clips is culled with a sphere that
+//!   covers every baked frame.
 //! * A model is fitted to the unit: its footprint radius (the largest
 //!   distance of its rest bounds from the origin along x or z) is drawn at
 //!   the unit's drawn size, as the dart's body radius is. Model space is
@@ -44,6 +50,11 @@ pub const COMMAND_BYTES: u64 = 20;
 /// Bytes before the first model command in the indirect buffer: the darts'
 /// `VkDrawIndirectCommand`.
 pub const DART_COMMAND_BYTES: u64 = 16;
+/// Bytes of a palette matrix: 3x4, the rows of an affine transform.
+pub const PALETTE_ENTRY_BYTES: u64 = 48;
+/// The cull sphere of a model with clips covers its baked frames and this
+/// much more (motion between frames).
+const ANIMATED_MARGIN: f32 = 1.05;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -64,13 +75,17 @@ struct GpuMaterial {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct GpuClass {
-    /// Bounding sphere at rest, in fitted units (centre, radius).
+    /// Bounding sphere (at rest, or over its clips), in fitted units
+    /// (centre, radius).
     sphere: [f32; 4],
     /// First entry in the class-commands list, commands (0: no model, a
-    /// dart), palette offset, unused.
+    /// dart), rest palette offset, joints.
     cmd: [u32; 4],
     /// x: 1 / footprint radius.
     fit: [f32; 4],
+    /// In the animation table (vec4s): the first bone, bones, the first
+    /// joint, the first clip.
+    pose: [u32; 4],
 }
 
 #[repr(C)]
@@ -98,13 +113,16 @@ pub struct Draw {
 #[derive(Clone, Debug)]
 pub struct ModelClass {
     pub class: u32,
+    /// Its model's rest palette (palette entries).
     pub palette_offset: u32,
+    pub joints: u32,
+    pub bones: u32,
+    /// Its model's clips (a unit's `clip` attribute is 1 + one of them).
+    pub clips: u32,
     /// Its region of the visible list.
     pub visible_base: u32,
     /// Its commands (indices into [`ModelSet::draws`]).
     pub commands: Vec<u32>,
-    /// Its rest palette (until poses are played).
-    pub rest: Vec<Mat4>,
 }
 
 pub struct ModelSet {
@@ -115,6 +133,12 @@ pub struct ModelSet {
     pub class_table: OwnedBuffer,
     pub draw_table: OwnedBuffer,
     pub class_commands: OwnedBuffer,
+    /// The animation table, vec4s: per model its bones (rest matrix rows,
+    /// then the parent), joints (inverse bind rows, then the bone), clips
+    /// (first frame record, tracks, frames; rate, duration) and baked
+    /// frames (per frame and track: translation with the bone in w,
+    /// rotation, scale).
+    pub anim: OwnedBuffer,
     images: Vec<OwnedImage>,
     samplers: Vec<vk::Sampler>,
     /// Texture descriptors (slot 0 first); the array's rest is unbound.
@@ -124,8 +148,14 @@ pub struct ModelSet {
     pub draws: Vec<Draw>,
     /// Commands drawn by the opaque pipeline (the rest: the masked one).
     pub opaque: u32,
-    /// Joints of all classes: the palette's length.
-    pub palette_len: u32,
+    /// The models' rest palettes: palette entries before the units' ranges.
+    pub rest_len: u32,
+    /// The most joints and bones of a model with clips (each unit playing
+    /// one needs that many palette entries and as many scratch ones).
+    pub max_joints: u32,
+    pub max_bones: u32,
+    /// The rest palettes, 12 floats per entry.
+    rest: Vec<f32>,
     /// The indirect buffer's initial contents: the darts' command, then
     /// the models' (instance counts 0).
     pub template: Vec<u8>,
@@ -167,6 +197,46 @@ pub fn fit(model: &Model) -> (f32, [f32; 4]) {
     let centre = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     (footprint, [centre.x, centre.y, centre.z, radius])
+}
+
+/// The rows of an affine matrix (its last row dropped): a palette entry.
+pub fn rows(m: Mat4) -> [f32; 12] {
+    let mut out = [0.0; 12];
+    for i in 0..3 {
+        out[i * 4..i * 4 + 4].copy_from_slice(&m.row(i).to_array());
+    }
+    out
+}
+
+/// Append `model`'s bones, joints, clips and baked frames to the animation
+/// table; its `GpuClass::pose`.
+fn animation(model: &Model, anim: &mut Vec<[f32; 4]>) -> [u32; 4] {
+    let word = |u: u32| f32::from_bits(u);
+    let bone_base = anim.len() as u32;
+    for b in &model.bones {
+        let r = rows(Mat4::from_cols_array(&b.rest));
+        anim.extend([[r[0], r[1], r[2], r[3]], [r[4], r[5], r[6], r[7]], [r[8], r[9], r[10], r[11]], [word(b.parent.unwrap_or(u32::MAX)), 0.0, 0.0, 0.0]]);
+    }
+    let joint_base = anim.len() as u32;
+    for j in &model.joints {
+        let r = rows(Mat4::from_cols_array(&j.inverse_bind));
+        anim.extend([[r[0], r[1], r[2], r[3]], [r[4], r[5], r[6], r[7]], [r[8], r[9], r[10], r[11]], [word(j.bone), 0.0, 0.0, 0.0]]);
+    }
+    let clip_base = anim.len() as u32;
+    let baked: Vec<_> = (0..model.clips.len()).map(|c| ae_model::pose::bake(model, c)).collect();
+    anim.resize(anim.len() + 2 * baked.len(), [0.0; 4]);
+    for (c, b) in baked.iter().enumerate() {
+        let first = anim.len() as u32;
+        let at = (clip_base as usize) + 2 * c;
+        anim[at] = [word(first), word(b.tracks.len() as u32), word(b.frames), 0.0];
+        anim[at + 1] = [b.rate, b.duration, 0.0, 0.0];
+        let n = b.tracks.len();
+        for (k, key) in b.keys.iter().enumerate() {
+            let bone = b.tracks[k % n];
+            anim.extend([key.t.extend(word(bone)).to_array(), key.r.to_array(), key.s.extend(0.0).to_array()]);
+        }
+    }
+    [bone_base, model.bones.len() as u32, joint_base, clip_base]
 }
 
 /// Images and samplers made so far, destroyed if building fails.
@@ -291,6 +361,12 @@ impl ModelSet {
         // Per unique model: per primitive (vertex base word, first index);
         // the base material.
         let mut placed: Vec<(Vec<(u32, u32)>, u32)> = Vec::new();
+        // Per unique model: its rest palette offset, its animation table
+        // entry (`GpuClass::pose`), its cull sphere.
+        let mut posed: Vec<(u32, [u32; 4], [f32; 4])> = Vec::new();
+        let mut anim: Vec<[f32; 4]> = Vec::new();
+        let mut rest: Vec<f32> = Vec::new();
+        let (mut max_joints, mut max_bones) = (0u32, 0u32);
         for model in models.iter().take(max_classes).flatten() {
             if unique.iter().any(|u| Arc::ptr_eq(u, model)) {
                 continue;
@@ -308,6 +384,17 @@ impl ModelSet {
             for mat in &model.materials {
                 materials.push(gpu_material(mat, tex, model, m)?);
             }
+            let rest_offset = (rest.len() / 12) as u32;
+            rest.extend(ae_model::pose::rest_palette(model).iter().flat_map(|p| rows(*p)));
+            let pose = animation(model, &mut anim);
+            let (footprint, mut sphere) = fit(model);
+            if !model.clips.is_empty() {
+                let reach = ae_model::pose::animated_radius(model, glam::Vec3::new(sphere[0], sphere[1], sphere[2]));
+                sphere[3] = sphere[3].max(reach * ANIMATED_MARGIN);
+                max_joints = max_joints.max(model.joints.len() as u32);
+                max_bones = max_bones.max(model.bones.len() as u32);
+            }
+            posed.push((rest_offset, pose, sphere.map(|v| v / footprint)));
             unique.push(model.clone());
         }
 
@@ -317,7 +404,6 @@ impl ModelSet {
         let mut class_model = vec![None; max_classes];
         // (masked, class, draw record, command)
         let mut pending: Vec<(bool, usize, GpuDraw, Draw)> = Vec::new();
-        let mut palette_len = 0u32;
         for (c, model) in models.iter().take(max_classes).enumerate() {
             let Some(model) = model else { continue };
             let m = unique.iter().position(|u| Arc::ptr_eq(u, model)).unwrap();
@@ -328,11 +414,20 @@ impl ModelSet {
                 let record = GpuDraw { material: base_material + p.material, class: c as u32, visible_base, vertex_base, words: p.layout.words() as u32, pad: [0; 3] };
                 pending.push((masked, classes.len(), record, Draw { class: c as u32, index_count: p.index_count, first_index }));
             }
-            let (footprint, sphere) = fit(model);
-            table[c] = GpuClass { sphere: sphere.map(|v| v / footprint), cmd: [0, model.primitives.len() as u32, palette_len, 0], fit: [1.0 / footprint, 0.0, 0.0, 0.0] };
+            let (footprint, _) = fit(model);
+            let (rest_offset, pose, sphere) = posed[m];
+            let joints = model.joints.len() as u32;
+            table[c] = GpuClass { sphere, cmd: [0, model.primitives.len() as u32, rest_offset, joints], fit: [1.0 / footprint, 0.0, 0.0, 0.0], pose };
             class_model[c] = Some(classes.len());
-            classes.push(ModelClass { class: c as u32, palette_offset: palette_len, visible_base, commands: Vec::new(), rest: ae_model::pose::rest_palette(model) });
-            palette_len += model.joints.len() as u32;
+            classes.push(ModelClass {
+                class: c as u32,
+                palette_offset: rest_offset,
+                joints,
+                bones: model.bones.len() as u32,
+                clips: model.clips.len() as u32,
+                visible_base,
+                commands: Vec::new(),
+            });
         }
         // Stable: within each pipeline, classes and primitives in order.
         pending.sort_by_key(|&(masked, ..)| masked);
@@ -374,6 +469,7 @@ impl ModelSet {
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&table), storage, "model classes")?);
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&records), storage, "model draws")?);
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&class_commands), storage, "model class commands")?);
+            made.push(upload::buffer(gpu, pipeline::slice_bytes(&anim), storage, "model animation")?);
             Ok(())
         })();
         if let Err(err) = result {
@@ -382,7 +478,7 @@ impl ModelSet {
             }
             return Err(err);
         }
-        let [geometry, materials, class_table, draw_table, class_commands]: [OwnedBuffer; 5] = made.try_into().ok().unwrap();
+        let [geometry, materials, class_table, draw_table, class_commands, anim]: [OwnedBuffer; 6] = made.try_into().ok().unwrap();
         Ok(Self {
             geometry,
             index_offset,
@@ -390,13 +486,17 @@ impl ModelSet {
             class_table,
             draw_table,
             class_commands,
+            anim,
             images: std::mem::take(&mut tex.images),
             samplers: tex.samplers.drain(..).map(|(_, s)| s).collect(),
             slots,
             classes,
             draws,
             opaque,
-            palette_len,
+            rest_len: (rest.len() / 12) as u32,
+            max_joints,
+            max_bones,
+            rest,
             template,
             class_model,
         })
@@ -407,11 +507,19 @@ impl ModelSet {
         self.draws.len() as u32
     }
 
-    /// The palette buffer's head: each class's rest palette at its offset
-    /// (written once; rows at rest point at it).
-    pub fn rest_palettes(&self) -> Vec<u8> {
-        let floats: Vec<f32> = self.classes.iter().flat_map(|c| c.rest.iter().flat_map(|m| m.to_cols_array())).collect();
-        pipeline::slice_bytes(&floats).to_vec()
+    /// The palette buffer's head: each model's rest palette (written once;
+    /// units at rest point at it).
+    pub fn rest_palettes(&self) -> &[u8] {
+        pipeline::slice_bytes(&self.rest)
+    }
+
+    /// The palette's layout for `capacity` units: the first entry of the
+    /// units' ranges, of the scratch ranges (the pose pass's bone
+    /// matrices), and the entries in all.
+    pub fn palette_layout(&self, capacity: u32) -> (u64, u64, u64) {
+        let ranges = self.rest_len as u64;
+        let scratch = ranges + capacity as u64 * self.max_joints as u64;
+        (ranges, scratch, scratch + capacity as u64 * self.max_bones as u64)
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
@@ -422,7 +530,7 @@ impl ModelSet {
             unsafe { gpu.device.destroy_sampler(s, None) };
         }
         self.samplers.clear();
-        for b in [&mut self.geometry, &mut self.materials, &mut self.class_table, &mut self.draw_table, &mut self.class_commands] {
+        for b in [&mut self.geometry, &mut self.materials, &mut self.class_table, &mut self.draw_table, &mut self.class_commands, &mut self.anim] {
             b.destroy(gpu);
         }
     }

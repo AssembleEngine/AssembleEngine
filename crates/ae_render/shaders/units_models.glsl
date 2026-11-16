@@ -1,6 +1,7 @@
 // Set 1 of a units renderer whose classes have models (src/models.rs):
-// shared by units_models_cull.comp, units_models.vert/.frag and
-// units_models_shadow.vert. Include after units_common.glsl.
+// shared by units_models_cull.comp, units_pose.comp (which defines POSE),
+// units_models.vert/.frag and units_models_shadow.vert. Include after
+// units_common.glsl.
 
 // Vertex words of every model, packed per primitive in its layout
 // (ae_model::Layout): position 0..2, normal 3..5, tangent 6..9 (w: the
@@ -18,13 +19,21 @@ struct Material {
     vec4 xform[8];  // per texture: 2x2 matrix (columns), offset
 };
 layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
-// Skinning matrices: per unit a range (rows' pose offsets point into it).
-layout(std430, set = 1, binding = 2) readonly buffer Palette { mat4 palette[]; };
+// Skinning matrices, 3x4: each column holds a row of the affine transform
+// (p' = vec4(p, 1) * m). The models' rest palettes, then a range per unit
+// playing a clip (rows' pose offsets point into either), then the pose
+// pass's scratch.
+#ifdef POSE
+layout(std430, set = 1, binding = 2) buffer Palette { mat3x4 palette[]; };
+#else
+layout(std430, set = 1, binding = 2) readonly buffer Palette { mat3x4 palette[]; };
+#endif
 
 struct ModelClass {
-    vec4 sphere; // bounding sphere at rest, fitted units
-    uvec4 cmd;   // first entry in classCommands, commands (0: a dart), palette offset
+    vec4 sphere; // bounding sphere (at rest, or over its clips), fitted units
+    uvec4 cmd;   // first entry in classCommands, commands (0: a dart), rest palette offset, joints
     vec4 fit;    // x: 1 / footprint radius
+    uvec4 pose;  // in anim[]: first bone, bones, first joint, first clip
 };
 layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
 
@@ -44,12 +53,21 @@ layout(std430, set = 1, binding = 4) readonly buffer Draws { DrawRecord draws[];
 layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classCommands[]; };
 // Per frame: [MAX_CLASSES] each class's first entry in the order, then
 // [capacity] the rows grouped by class (the shadow caster draws every
-// row), then [capacity] each row's palette offset.
+// row), [capacity] each row's palette offset, [capacity] the rows playing
+// a clip (the pose jobs), [capacity] each job's scratch offset.
 layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
 // Partially bound (models::MAX_TEXTURES); indexed per draw, so uniformly.
 layout(set = 1, binding = 7) uniform sampler2D textures[1024];
+#ifdef POSE
+// The animation table (models.rs, animation()): bones (rest rows 0..2,
+// parent in 3.x), joints (inverse bind rows 0..2, bone in 3.x), clips
+// (first frame record, tracks, frames; rate, duration), baked frames (per
+// frame and track: translation with the bone in w, rotation, scale).
+layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
+#endif
 
-// cascade: the shadow caster's; drawBase: the multi-draw's first command.
+// cascade: the shadow caster's (units_pose.comp: the number of jobs);
+// drawBase: the multi-draw's first command.
 layout(push_constant) uniform Push { uint cascade; uint drawBase; } pc;
 
 uint poseOffset(uint row) { return rows[MAX_CLASSES + u.counts.y + row]; }
@@ -71,7 +89,7 @@ Skinned skinVertex(DrawRecord d, uint v, uint paletteBase) {
     vec3 p = vec3(vword(b, 0u), vword(b, 1u), vword(b, 2u));
     vec3 n = vec3(vword(b, 3u), vword(b, 4u), vword(b, 5u));
     vec4 t = vec4(vword(b, 6u), vword(b, 7u), vword(b, 8u), vword(b, 9u));
-    mat4 m;
+    mat3x4 m;
     if (d.words == 17u) {
         m = palette[paletteBase + vwords[b + 16u]];
     } else {
@@ -84,8 +102,9 @@ Skinned skinVertex(DrawRecord d, uint v, uint paletteBase) {
           + palette[paletteBase + (j23 >> 16u)] * w.w;
     }
     Skinned s;
-    s.pos = (m * vec4(p, 1.0)).xyz;
-    mat3 a = mat3(m);
+    s.pos = vec4(p, 1.0) * m;
+    // The linear part (columns).
+    mat3 a = transpose(mat3(m[0].xyz, m[1].xyz, m[2].xyz));
     // Normals by the cofactor matrix (the inverse transpose up to scale):
     // right under non-uniform scale.
     mat3 cof = mat3(cross(a[1], a[2]), cross(a[2], a[0]), cross(a[0], a[1]));
