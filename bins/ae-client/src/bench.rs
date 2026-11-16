@@ -34,7 +34,13 @@
 //! CPU (and upload) time of building the renderer's model set
 //! (`ModelSet::new`: geometry, textures, cull spheres), median of 5, and
 //! `cpu_pose`, the client's time to read the channels and pose every unit
-//! for a stream (median over the last 10 ticks), with info `joint_keys`.
+//! for a stream (median over the last 10 ticks), with info `joint_keys` (the
+//! key table) and `key_writes` (keys written a tick). `live-fox` keeps the
+//! sim ticking (every second frame, in the `--warmup` frames and the
+//! measured ones) and reports `cpu_pose` and `key_writes` over the measured
+//! ticks, `cpu_key_publish` (the feed taking a tick's writes into its
+//! table, on the sim thread), `cpu_key_upload` (the render thread taking
+//! and staging them) and `keys_uploaded`.
 
 use super::models::{self, ClassModel};
 use super::{MapKind, Options, effects, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
@@ -323,16 +329,23 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     }
     // Live: a tick every `LIVE_FRAMES` frames, its posing time and key
     // writes.
-    let (mut live_pose, mut live_writes) = (Vec::new(), Vec::new());
+    let (mut live_pose, mut live_writes, mut live_publish) = (Vec::new(), Vec::new(), Vec::new());
     let mut tick_live = |frame: usize, measured: bool| -> Result<()> {
         let Some((sim, feed)) = live.as_mut().filter(|_| frame % LIVE_FRAMES == 0) else { return Ok(()) };
         sim.tick()?;
-        let stream = sim.stream(0.0)?;
-        if measured {
-            live_pose.push(sim.pose_ms());
-            live_writes.push(stream.keys.len() as f64);
+        if feed.wants_whole() {
+            sim.write_whole_keys();
         }
-        sim.recycle(feed.publish_reusing(stream));
+        let stream = sim.stream(0.0)?;
+        let writes = stream.keys.len();
+        let started = Instant::now();
+        let spare = feed.publish_reusing(stream);
+        if measured {
+            live_publish.push(started.elapsed().as_secs_f64() * 1e3);
+            live_pose.push(sim.pose_ms());
+            live_writes.push(writes as f64);
+        }
+        sim.recycle(spare);
         Ok(())
     };
     // Explosions (particles and scorch marks) only in scenes that set them off.
@@ -377,7 +390,11 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let mut warm_frames = 0;
     while warm_frames < b.warmup || warm.elapsed().as_secs_f32() < WARMUP_SECONDS {
         emit();
-        tick_live(warm_frames, false)?;
+        // The sim ticks in the `--warmup` frames only, so the measured
+        // ticks are the same whatever the frame rate.
+        if warm_frames < b.warmup {
+            tick_live(warm_frames, false)?;
+        }
         headless.frames(&mut app, 1)?;
         warm_frames += 1;
     }
@@ -430,6 +447,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     if scene.live {
         anyhow::ensure!(!live_pose.is_empty() && !upload_ms.is_empty(), "no live ticks measured");
         report.time_with_tolerance("cpu_pose", ns(&mut live_pose), CPU_TOLERANCE);
+        report.time_with_tolerance("cpu_key_publish", ns(&mut live_publish), CPU_TOLERANCE);
         report.time_with_tolerance("cpu_key_upload", ns(&mut upload_ms), CPU_TOLERANCE);
         report.info("key_writes", median(&mut live_writes), "");
         report.info("keys_uploaded", median(&mut uploaded), "");

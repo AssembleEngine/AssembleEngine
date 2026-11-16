@@ -10,9 +10,10 @@
 //! * [`UnitFeed`] holds the latest stream. The producer swaps in a new one
 //!   after each tick; the render thread takes whatever is latest at the
 //!   start of a frame, so neither waits for the other. It also keeps the
-//!   joint key table the streams write ([`KeyWrites`]), and hands the
-//!   renderer the keys changed since its last take, so a key is uploaded
-//!   once however many streams or frames pass.
+//!   joint key writes the streams carry ([`KeyWrites`]) until the renderer
+//!   takes them, each key once (its newest value) however many streams
+//!   passed; a renderer that missed writes asks the producer for its
+//!   whole table.
 //! * Positions are interpolated between the previous and the latest tick
 //!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
 //!
@@ -103,7 +104,8 @@ pub struct InstanceStream {
 /// order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct KeyWrites {
-    /// The table is emptied first (a new producer, or a whole table).
+    /// A whole table: every key a reader needs (what came before is
+    /// written over; a table it is applied to is emptied first).
     pub reset: bool,
     pub at: Vec<u32>,
     pub keys: Vec<Key>,
@@ -170,96 +172,121 @@ impl InstanceStream {
 }
 
 /// The latest stream, shared by its producer and the render thread, and
-/// the joint key table the streams wrote.
+/// the joint key writes its reader (the renderer) has not taken yet.
 #[derive(Default)]
 pub struct UnitFeed {
     state: Mutex<FeedState>,
 }
 
+/// Write batches kept for a reader that does not take them: past this,
+/// they are dropped and the producer asked for the whole table.
+const MAX_PENDING: usize = 64;
+
 #[derive(Default)]
 struct FeedState {
     latest: Option<Arc<InstanceStream>>,
-    /// The key table as of `latest`.
-    keys: Vec<Key>,
-    /// Keys written since the last take, and a bit per key for them.
-    dirty: Vec<u32>,
+    /// Key writes since the last take, in order.
+    pending: Vec<KeyWrites>,
+    /// Batches taken, for their memory.
+    pool: Vec<KeyWrites>,
+    /// A bit per key staged in a take (scratch: the newest write wins).
     marked: Vec<u64>,
-    /// Takes so far, and resets: a reader whose last take is not the
-    /// latest gets the whole table.
+    /// Takes so far: a reader whose last take is not the latest one has
+    /// missed writes.
     takes: u64,
-}
-
-impl UnitFeed {
-    /// Publish `stream`, its key writes applied to the table and handed
-    /// back for their memory (the producer's next stream overwrites them;
-    /// the published stream has none).
-    pub fn publish_reusing(&self, mut stream: InstanceStream) -> KeyWrites {
-        let keys = std::mem::take(&mut stream.keys);
-        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        s.apply(&keys);
-        s.latest = Some(Arc::new(stream));
-        keys
-    }
-
-    pub fn publish(&self, stream: Arc<InstanceStream>) {
-        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        s.apply(&stream.keys);
-        s.latest = Some(stream);
-    }
-
+    /// A reader missed writes and no whole table is pending.
+    want_whole: bool,
 }
 
 impl FeedState {
-    fn apply(&mut self, w: &KeyWrites) {
-        let s = self;
-        if w.reset {
-            s.keys.clear();
-            s.dirty.clear();
-            s.marked.clear();
-            s.takes += 1;
+    fn push(&mut self, keys: KeyWrites) {
+        if keys.reset {
+            // Older batches are written over.
+            self.pool.append(&mut self.pending);
+        } else if keys.is_empty() {
+            self.pool.push(keys);
+            return;
         }
-        for (&at, key) in w.at.iter().zip(&w.keys) {
-            let i = at as usize;
-            if i >= s.keys.len() {
-                s.keys.resize(i + 1, [0; 12]);
-                s.marked.resize(s.keys.len().div_ceil(64), 0);
-            }
-            s.keys[i] = *key;
-            if s.marked[i / 64] & (1 << (i % 64)) == 0 {
-                s.marked[i / 64] |= 1 << (i % 64);
-                s.dirty.push(at);
-            }
+        self.pending.push(keys);
+        if self.pending.len() > MAX_PENDING {
+            self.pool.append(&mut self.pending);
+            self.want_whole = true;
         }
     }
 }
 
 impl UnitFeed {
+    /// Publish `stream`; its key writes are kept for the reader, and
+    /// memory from batches already taken is handed back for the
+    /// producer's next stream (its contents stale; the published stream
+    /// has no writes).
+    pub fn publish_reusing(&self, mut stream: InstanceStream) -> KeyWrites {
+        let keys = std::mem::take(&mut stream.keys);
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.push(keys);
+        s.latest = Some(Arc::new(stream));
+        s.pool.pop().unwrap_or_default()
+    }
+
+    /// Publish `stream` (its key writes copied for the reader).
+    pub fn publish(&self, stream: Arc<InstanceStream>) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.push(stream.keys.clone());
+        s.latest = Some(stream);
+    }
+
     pub fn latest(&self) -> Option<Arc<InstanceStream>> {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).latest.clone()
     }
 
+    /// A reader missed key writes since the last whole table: the
+    /// producer is to write its whole table next (`KeyWrites::reset`).
+    /// Cleared by asking.
+    pub fn wants_whole(&self) -> bool {
+        std::mem::take(&mut self.state.lock().unwrap_or_else(|p| p.into_inner()).want_whole)
+    }
+
     /// The latest stream, and the joint keys its reader lacks: `write(at,
-    /// key)` for each key written since the reader's last take (`seen`,
-    /// 0 at first), or for the whole table when another take or a reset
-    /// came between. Under the feed's lock, so the keys are the stream's.
+    /// key)` once for each key written since the reader's last take
+    /// (`seen`, 0 at first), its newest value, in no particular order.
+    /// A reader that missed writes (its first take, a frame dropped,
+    /// another reader's take between) gets the keys from the last whole
+    /// table pending, or none and [`Self::wants_whole`] is set (its table
+    /// is stale until the whole one comes). Under the feed's lock, so the
+    /// keys are the stream's. One key reader per feed.
     pub fn take(&self, seen: &mut u64, mut write: impl FnMut(u32, &Key)) -> Option<Arc<InstanceStream>> {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let s = &mut *s;
-        if *seen != 0 && *seen == s.takes {
-            for &at in &s.dirty {
-                write(at, &s.keys[at as usize]);
+        let current = *seen != 0 && *seen == s.takes;
+        let from = match current {
+            true => Some(0),
+            false => s.pending.iter().rposition(|w| w.reset),
+        };
+        if let Some(from) = from {
+            for w in s.pending[from..].iter().rev() {
+                for (&at, key) in w.at.iter().zip(&w.keys).rev() {
+                    let i = at as usize;
+                    if i / 64 >= s.marked.len() {
+                        s.marked.resize(i / 64 + 1, 0);
+                    }
+                    if s.marked[i / 64] & (1 << (i % 64)) == 0 {
+                        s.marked[i / 64] |= 1 << (i % 64);
+                        write(at, key);
+                    }
+                }
             }
+            for w in &s.pending[from..] {
+                for &at in &w.at {
+                    s.marked[at as usize / 64] = 0;
+                }
+            }
+            s.takes += 1;
+            *seen = s.takes;
         } else {
-            for (at, key) in s.keys.iter().enumerate() {
-                write(at as u32, key);
-            }
+            s.want_whole = true;
+            *seen = 0;
         }
-        for &at in &s.dirty {
-            s.marked[at as usize / 64] = 0;
-        }
-        s.dirty.clear();
-        s.takes += 1;
-        *seen = s.takes;
+        s.pool.append(&mut s.pending);
         s.latest.clone()
     }
 }
@@ -1121,13 +1148,14 @@ mod tests {
         assert_eq!(stream(11, 0.025).sim_time(0.5), stream(11, 0.2).sim_time(0.5));
     }
 
-    /// The feed keeps the key table the streams write; a reader gets the
-    /// whole table at first, after a reset or after another reader's
-    /// take, else the keys written since its last take, once each.
+    /// The feed keeps the streams' key writes for its reader: each key
+    /// once, its newest value, from the last whole table on at first; a
+    /// reader that missed writes gets none and the producer is asked for
+    /// a whole table.
     #[test]
     fn feed_hands_out_key_writes() {
         let k = |v: u32| [v; 12];
-        let stream = |keys: KeyWrites| Arc::new(InstanceStream { tick: 1, published: Instant::now(), tick_seconds: 0.0, sim_seconds: 0.1, columns: Default::default(), keys });
+        let stream = |keys: KeyWrites| InstanceStream { tick: 1, published: Instant::now(), tick_seconds: 0.0, sim_seconds: 0.1, columns: Default::default(), keys };
         let writes = |w: &[(u32, u32)]| {
             let mut keys = KeyWrites::default();
             for &(at, v) in w {
@@ -1139,25 +1167,36 @@ mod tests {
         let take = |seen: &mut u64| {
             let mut got = Vec::new();
             feed.take(seen, |at, key| got.push((at, key[0])));
+            got.sort();
             got
         };
-        feed.publish(stream(writes(&[(2, 20), (0, 1)])));
         let (mut a, mut b) = (0, 0);
-        assert_eq!(take(&mut a), [(0, 1), (1, 0), (2, 20)], "the whole table at first");
+        feed.publish_reusing(stream(writes(&[(0, 1)])));
+        assert_eq!(take(&mut a), [], "no whole table yet");
+        assert!(feed.wants_whole() && !feed.wants_whole(), "asked once");
+        let mut whole = KeyWrites::whole(&[k(1), k(0), k(20)]);
+        whole.reset = true;
+        feed.publish_reusing(stream(whole));
+        assert_eq!(take(&mut a), [(0, 1), (1, 0), (2, 20)], "from the whole table");
         assert_eq!(take(&mut a), [], "nothing new");
-        feed.publish(stream(writes(&[(1, 10), (2, 21)])));
-        feed.publish(stream(writes(&[(1, 11), (4, 40)])));
-        assert_eq!(take(&mut a), [(1, 11), (2, 21), (4, 40)], "coalesced, the last write each");
-        feed.publish(stream(writes(&[(0, 2)])));
-        assert_eq!(take(&mut b).len(), 5, "another reader: the whole table");
-        assert_eq!(take(&mut a).len(), 5, "a take came between: the whole table");
-        let mut whole = KeyWrites::whole(&[k(7)]);
-        whole.at.push(1);
-        whole.keys.push(k(8));
-        feed.publish(stream(whole.clone()));
-        assert_eq!(take(&mut a), [(0, 7), (1, 8)], "a reset: the new table");
+        let spare = feed.publish_reusing(stream(writes(&[(1, 10), (2, 21)])));
+        assert!(spare.at.capacity() >= 3, "the taken batch's memory back");
+        feed.publish_reusing(stream(writes(&[(1, 11), (4, 40), (1, 12)])));
+        assert_eq!(take(&mut a), [(1, 12), (2, 21), (4, 40)], "coalesced, the newest write each");
+        feed.publish_reusing(stream(writes(&[(0, 2)])));
+        assert_eq!(take(&mut b), [], "another reader missed writes");
+        assert!(feed.wants_whole());
+        assert_eq!(take(&mut a), [], "a take came between");
+        feed.publish_reusing(stream(KeyWrites::whole(&[k(7), k(8)])));
+        feed.publish_reusing(stream(writes(&[(1, 9)])));
+        assert_eq!(take(&mut a), [(0, 7), (1, 9)], "the whole table and what came after");
+        // Too many batches for a reader that does not take: dropped.
+        for v in 0..=MAX_PENDING as u32 {
+            feed.publish_reusing(stream(writes(&[(0, v)])));
+        }
+        assert!(feed.wants_whole());
         let mut table = vec![k(9); 6];
-        whole.apply(&mut table);
+        KeyWrites::whole(&[k(7), k(8)]).apply(&mut table);
         assert_eq!(table, [k(7), k(8)]);
     }
 }

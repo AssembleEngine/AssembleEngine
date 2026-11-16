@@ -2711,19 +2711,24 @@ Design:
     rad, 1e-3 scale, 1e-3 of the model's reach); off it: keys at its last pose and this one, or
     one write over the older key when the newer is the last tick's; a new unit gets both keys
     at its pose; an unchanged `Anim` is not posed again (still checked). Streams carry writes
-    (`units::KeyWrites`); `UnitFeed` keeps the table and hands the renderer the keys changed
-    since its last take, coalesced (`take`; whole after a reset or another take);
-    `publish_reusing` hands the writes' memory back to the poser. The renderer keeps one
+    (`units::KeyWrites`); `UnitFeed` keeps the batches until the renderer takes them, each key
+    once at its newest value (`take`); a reader that missed writes gets the feed to ask for the
+    whole table (`wants_whole`, the poser writes its mirror); `publish_reusing` hands taken
+    batches' memory back to the poser. The renderer keeps one
     device-local table, stages each frame's writes per slot and scatters them at the head of
     `units.pose` (`units_keys.comp`, barriers against earlier frames' reads); a frame dropped
-    after staging makes the next take whole. Bench `live-fox` (a tick every second frame). Tests:
-    `feed_hands_out_key_writes`, `streams_carry_poses` (one and two writes, on the line,
-    skipped tick, unchanged, slot reuse), `units_pose_models` (a stale whole table, then writes).
-    Measured (`live-fox`): CPU posing 18.8 → 5.9 ms, 152 000 keys a tick (28%, 7.3 MB), upload
-    1.8 ms on the render thread, `units pose` 0.44 ms with the scatter. Posing is memory bound
+    after staging makes the next take ask for the whole table. Bench `live-fox` (a tick every
+    second frame, in the warm-up and measured frames only). Tests: `feed_hands_out_key_writes`,
+    `streams_carry_poses` (one and two writes, on the line, skipped tick, unchanged, the whole
+    table on request, slot reuse), `units_pose_models` (a stale whole table, then writes).
+    Measured (`live-fox`): CPU posing 18.8 → 6.5 ms, 154 000 keys a tick (28%, 7.4 MB), the feed
+    keeping them 4 µs (sim thread), upload 1.1 ms (render thread), `units pose` 0.43 ms with the
+    scatter. Validation (sync included) clean on `live-fox`. Posing is memory bound
     from about four threads (the 26 MB key mirror and last poses read each tick). Next: spins by
-    their rate; clips' original keys (Fox clips resampled at 60 fps break most lines every
-    tick); then regenerate the `gpu-*-fox` baselines.
+    their rate (with a GPU test of keys stored newer first, as one-write breaks leave them);
+    clips' original keys (Fox clips resampled at 60 fps break most lines every tick); then
+    regenerate the `gpu-*-fox` baselines (and a first `gpu-live-fox`). Not run yet: the
+    windowed client with the delta keys (the offscreen `live-fox` only).
 
 ## Later improvements
 

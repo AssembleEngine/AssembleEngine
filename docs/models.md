@@ -97,10 +97,12 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   for translation); only a bone that left it gets new keys: its pose at the last tick and this
   one, or this one only over the older key when the newer is the last tick's. A unit whose
   `Anim` is unchanged is not posed again (still checked); units are posed in parallel (rayon).
-  Streams carry the writes (`InstanceStream::keys`, `units::KeyWrites`); the `UnitFeed` applies
-  them to its copy of the table and hands the renderer the keys changed since its last take,
-  coalesced (`UnitFeed::take`; the whole table at first or after a reset), so every stream must
-  be published (`publish_reusing` gives the writes' memory back to the poser). The stream's
+  Streams carry the writes (`InstanceStream::keys`, `units::KeyWrites`); the `UnitFeed` keeps
+  them until the renderer takes them, each key once at its newest value (`UnitFeed::take`), so
+  every stream must be published (`publish_reusing` hands taken batches' memory back to the
+  poser). A renderer that missed writes (its first take with no whole table pending, a frame
+  dropped after staging, too many batches untaken) makes the feed ask the producer for the
+  whole table (`wants_whole`; the poser writes its mirror, `reset`). The stream's
   `pose` attribute is the unit's first key (`units::NO_POSE`: the rest pose). The palette holds
   3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units at
   rest point there), then a range per posed unit, then the pose pass's scratch. Each frame the
@@ -179,8 +181,9 @@ a tick every second frame, posed and uploaded as when playing. They also report 
 (`ModelSet::new` for the Fox: geometry, texture upload, cull spheres), `cpu_pose` (the client's
 time to read the channels, pose the units and find the bones off their lines, per stream),
 `joint_keys` (the table) and `key_writes` (keys written a tick); `live-fox` also
-`cpu_key_upload` (the render thread's time to take and stage a tick's keys) and
-`keys_uploaded`.
+`cpu_key_publish` (the feed keeping a tick's writes, on the sim thread), `cpu_key_upload` (the
+render thread's time to take and stage them) and `keys_uploaded`. The sim ticks in the
+`--warmup` frames and the measured ones only, so the workload does not follow the frame rate.
 
 M14 step 3 (RTX 3060 Ti, 24 threads, 2026-11-17):
 
@@ -188,10 +191,11 @@ M14 step 3 (RTX 3060 Ti, 24 threads, 2026-11-17):
 |---|---|---|---|---|
 | First cut (every key, one thread) | 18.8 ms | 540 000 (26 MB) | not measured | 0.39 ms |
 | In parallel (every key) | ~10 ms | 540 000 | not measured | 0.39 ms |
-| Lines, slots, unchanged skipped (`live-fox`) | 5.9 ms | 152 000 (7.3 MB) | 1.8 ms | 0.44 ms (scatter included) |
+| Lines, slots, unchanged skipped (`live-fox`) | 6.5 ms | 154 000 (7.4 MB) | 1.1 ms | 0.43 ms (scatter included) |
 
 Posing is memory bound from about four threads on (it reads the 26 MB key mirror and the
-bones' last poses each tick). Fox clips are resampled at 60 fps and keyed at 24/s, so most
+bones' last poses each tick); the feed keeping the writes costs microseconds (an earlier cut
+that applied them to a table of its own took 3.4 ms of the sim thread). Fox clips are resampled at 60 fps and keyed at 24/s, so most
 animated bones leave their lines every tick: keeping the clips' own keys comes next.
 Validation clean.
 

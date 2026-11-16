@@ -498,6 +498,14 @@ impl Sim {
         Ok(stream)
     }
 
+    /// The next stream writes the whole joint key table (its reader missed
+    /// writes: `UnitFeed::wants_whole`).
+    pub fn write_whole_keys(&mut self) {
+        if let Some(poser) = &mut self.streamer.poser {
+            poser.write_whole();
+        }
+    }
+
     /// The key writes of a published stream, back from
     /// `UnitFeed::publish_reusing`: the next stream writes into their
     /// memory.
@@ -803,6 +811,9 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Opti
         let inputs = std::mem::take(&mut *ui.lock().unwrap_or_else(|p| p.into_inner()));
         sim.tick_with(&inputs)?;
         let t1 = Instant::now();
+        if feed.wants_whole() {
+            sim.write_whole_keys();
+        }
         // Interpolate positions over the tick length the viewer actually sees.
         let stream = sim.stream(TICK_SECONDS / rate)?;
         let (tick, units) = (stream.tick, stream.len());
@@ -941,11 +952,17 @@ mod tests {
         // The same channels: not posed again, on its (flat) line.
         let fifth = s.stream(&capture(15, &rows), &anims(0.1), now, 0.1);
         assert!(fifth.keys.is_empty());
+        // The reader missed writes: the whole table, as it stands.
+        s.poser.as_mut().unwrap().write_whole();
+        let whole = s.stream(&capture(16, &rows), &anims(0.1), now, 0.1);
+        assert!(whole.keys.reset && whole.keys.at == [0, 1, 2, 3]);
+        assert_eq!(whole.keys.keys, table, "the keys as written");
+        assert!(s.stream(&capture(17, &rows), &anims(0.1), now, 0.1).keys.is_empty(), "then only what changes");
         // Unit 3 gone, unit 6 now an arm: it takes the freed slot, fresh.
         let rows2 = [(4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let mut moved = anims(0.1);
         moved[2].1.model = arm;
-        let sixth = s.stream(&capture(16, &rows2), &moved[1..], now, 0.1);
+        let sixth = s.stream(&capture(18, &rows2), &moved[1..], now, 0.1);
         assert_eq!(sixth.columns[8], [NO_POSE, 0]);
         assert_eq!(sixth.keys.at, [0, 1, 2, 3]);
         assert_eq!(sixth.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");

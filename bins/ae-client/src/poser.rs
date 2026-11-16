@@ -75,8 +75,10 @@ pub struct Poser {
     ticks: Vec<u32>,
     /// Per slot: a bit per key written this stream.
     written: Vec<u64>,
-    /// A stream was made (the first one resets the table).
+    /// A stream was made (the first one writes the whole table).
     started: bool,
+    /// The next stream writes the whole table ([`Self::write_whole`]).
+    whole_next: bool,
 }
 
 impl Poser {
@@ -98,6 +100,7 @@ impl Poser {
             ticks: Vec::new(),
             written: Vec::new(),
             started: false,
+            whole_next: false,
         }
     }
 
@@ -107,8 +110,9 @@ impl Poser {
     /// `writes` (replacing what it held; its memory is reused).
     pub fn pose(&mut self, tick: u64, units: &[(u64, u32, &Anim)], poses: &mut Vec<u32>, writes: &mut KeyWrites) {
         let now = tick as u32;
-        writes.reset = !self.started;
-        self.started = true;
+        let whole = !self.started || self.whole_next;
+        writes.reset = whole;
+        (self.started, self.whole_next) = (true, false);
         // Each unit's model, if posed.
         let models: Vec<Option<u64>> = units
             .iter()
@@ -198,6 +202,18 @@ impl Poser {
                 }
             }
         });
+        if whole {
+            writes.at.clear();
+            writes.at.extend(0..self.table.len() as u32);
+            writes.keys.clear();
+            writes.keys.extend_from_slice(&self.table);
+        }
+    }
+
+    /// The next stream writes the whole table, not only what changed (its
+    /// reader missed writes: `UnitFeed::wants_whole`).
+    pub fn write_whole(&mut self) {
+        self.whole_next = true;
     }
 
     /// A free slot, or a new one.
