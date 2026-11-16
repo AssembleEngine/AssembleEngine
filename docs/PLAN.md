@@ -2381,8 +2381,11 @@ that in.
     nearly every Fox is in all three nested cascades. Baselines `gpu-army-fox`, `gpu-near-fox`.
   - After M11: model shadows are still the largest cost with many models (vertex-bound). Not
     worked on further (decided 2026-11-16): the cascades are to be replaced by virtual shadow
-    maps (Later improvements). Clips always loop; holding, blending and choosing clips belongs to
-    unit scripts (M14).
+    maps (Later improvements). Blending and choosing clips belongs to unit scripts (M14).
+  - Fixed after step 4 (2026-11-16): clips jumped at every tick at any sim speed but 1x (drawn a
+    wall-clock tick behind, while clip time gains a sim tick); the stream now carries the sim
+    time of a tick. Play modes loop, ping-pong, once (`--clip 2,1:pingpong`); a unit's clip starts
+    when it switches to it, and the standing clip waits 6 still ticks.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
@@ -2411,73 +2414,79 @@ that in.
 
 ### M14 — Unit scripts (in design)
 
-What a unit does with its model in a given situation: choose, blend and hold clips; turn a
-joint to aim; react to firing (muzzle flash, recoil kick, particles, sound); deploy, die. An FSM
-per unit with coroutines and a scheduler, after Recoil's unit scripts
-(`RecoilEngine/rts/Sim/Units/Scripts`: COB and Lua scripts; callins `Create`, `StartMoving`,
-`StopMoving`, `AimWeapon`, `FireWeapon`, `Killed`, …; threads with `Sleep`, `WaitForTurn`,
-signal masks; engine-side `Move`/`Turn`/`Spin` of pieces with a speed). Replaces the client's
-`--clip MOVING[,STILL]`.
+What a unit does with its model in a given situation: choose, blend and hold clips; turn joints;
+aim (possibly a sequence: take the rifle off the back, turn the body, then aim); fire with a
+muzzle flash, recoil, particles, sound; deploy; die. An FSM per unit with coroutines and a
+scheduler, after Recoil's unit scripts (`RecoilEngine/rts/Sim/Units/Scripts`: callins
+`Create`, `StartMoving`, `StopMoving`, `AimWeapon`, `FireWeapon`, `Killed`, …; threads with
+`Sleep`, `WaitForTurn`, signal masks; engine-side `Move`/`Turn`/`Spin` of pieces at a speed).
+Replaces the client's `--clip`.
 
-- **What to copy from Recoil: scripts set targets, the engine animates.** `Turn(piece, axis,
-  angle, speed)` only records a target. A native ticker steps every animated piece every tick
-  without calling the script, and wakes the threads waiting in `WaitForTurn`. Here the same:
-  - per-unit animation channels: clip layers (clip, start tick, speed, loop / hold the last
-    frame / once, weight, joint mask, blend-in time) and joint tweens (turn, move, spin to a target
-    at a speed);
-  - the **pose fast path**: a native, parallel pass evaluates every unit's channels on the CPU
-    each tick (clip sampling, tweens, the joint hierarchy) into model-space 3x4 joint matrices. A
-    unit that only plays clips never calls its script. The GPU gets the previous and the current
-    tick's palettes and only interpolates between them per frame (the baked GPU frames and the
-    `units.pose` clip sampling of M11 step 3 go; clips live only on the CPU);
-  - the script runs only on events (callins), on timers and when an awaited tween or clip ends.
-- **What not to copy:** a callin per unit through the script runtime every tick, and a thread
-  stack that the sim must save. Callins are delivered batched (one call per tick with every
-  unit's events); the scheduler resumes woken coroutines inside the module, not one host call
-  per unit.
-- **Synced or not (the deciding question).** In Recoil all of it is sim: `FireWeapon` waits
-  for `AimWeapon` to return true, so turret turn rates are a game rule, and muzzles come from
-  piece positions. Here:
-  - a synced script must keep its suspended coroutines as data in components (the guest state
-    rule: save→load→continue, late join, split row ranges). Rust `async`/generator frames cannot
-    be saved, so a synced script means a small bytecode VM (thread = program counter + small
-    stack + wait condition + signal mask, in columns, as COB does) or hand-written FSMs whose
-    states and timers are columns;
-  - an unsynced script (presentation only) runs on the view: it sees only what the observer
-    sees, cannot desync, is not saved (a unit entering view gets `Create` with its current state
-    and the tick it started), and its coroutines can be ordinary Rust `async` in a WASM module
-    on the unsynced-script thread.
-  - Proposed: **split**. Gameplay facts stay in the sim as columns and systems (the game WASM
-    already owns "unit AI/state machines"): aim heading/pitch with turn rates, "aimed" gating
-    `fire`, deploy timers, muzzle offsets from the catalogue (no skeleton in the sim or in
-    `ae-headless`). The unit script is unsynced: it reads those columns from the view (aim
-    angles, weapon fired this tick, state + since tick) and turns them into clips, joint turns
-    and effects, so every client shows the same thing from the same sim facts. Today
-    `games/skirmish` `fire` has no aim step; the split adds one as sim data.
-- **Pose numbers to hold to** (the bench scene `army-fox`: 10 000 Foxes, 24 joints): 240 000
-  joint matrices per tick, 11.5 MB of palette per tick (48 B each; about 350 MB/s at 30 Hz),
-  sampled on the job pool. Budget to measure against: the M11 GPU pose pass, 0.31 ms. If the
-  CPU or the upload misses it: units off screen and outside the shadow cascades skip posing,
-  distant units pose every n ticks (`Staggered`), and units at rest keep last tick's palette.
-  Interpolating matrices between ticks shrinks fast rotations (a joint turning more than about
-  90° a tick, e.g. a spinning rotor, goes wrong): spins get a per-joint angular rate the shader
-  applies, or accept it.
-- **Effects:** scripts emit effects at a joint (`EmitAt(joint, effect)`); the CPU pose has the
-  joint's matrix, so muzzle flashes and particles start at the drawn muzzle. Effects go into the
-  particle / light streams (M7, M12).
-- **Death:** the sim keeps a dying unit's row for its death time (a sim rule), or the client
-  keeps a detached copy to finish the death clip. Open.
-- Open questions (to decide with the user before work starts):
-  1. Is aiming a game rule (turn rates delay shots; synced) or only looks? Proposed: synced as
-     sim data, scripts unsynced (above).
-  2. Script language: a Rust SDK module (`async` coroutines, unsynced) first; a bytecode VM only
-     if synced scripts are wanted.
-  3. CPU poses for every unit, as decided, or keep GPU sampling for units that only play clips
-     if the numbers above are not met.
-  4. Aim by joint turns only (Recoil) or also look-at constraints on a joint chain (IK) later.
-- Verification: a scripted test unit (walk, stop, aim at a target, fire with a flash at the
-  muzzle, die holding the last frame) in a GPU test; `army-fox` with scripts against the M11
-  numbers; determinism suite unchanged (scripts unsynced).
+Decided with the user (2026-11-16):
+- **Scripts are sim (synced)**, as in Recoil. A sequence like the rifle one is gameplay (the
+  shot waits for it), and a pose that only the client knows cannot be blended with script-driven
+  joints, nor checked against bounding and collision volumes. Running scripts outside the sim
+  (on the view) stays a maybe for later; the script API should not depend on where it runs.
+- Scripts are written in Rust (or anything that compiles to WASM), in the game's sim module. **No
+  custom bytecode.**
+- **One global scheduler**, not one per script, so woken coroutines run in parallel.
+- `Sleep` takes milliseconds, so scripts do not depend on the tick rate (chosen once per engine
+  start): `ceil(ms × rate / 1000)` ticks.
+- Clip play modes: loop, ping-pong, once (in the M11 path now, `ae_model::pose::PlayMode`;
+  carried over).
+- A death sequence is a must: a killed unit stays in the sim, not targetable and not colliding,
+  until its `Killed` script ends (with a cap), then it is removed (or leaves a corpse).
+
+Design:
+- **Animation channels are synced columns; the engine animates.** `Turn(joint, axis, angle,
+  speed)` and friends only set targets. Per unit: clip layers (clip, start tick, speed, play mode,
+  weight, joint mask, blend-in) and joint tweens (turn, move, spin to a target at a speed). A
+  native ticker advances them every tick without calling the script (the **fast path**: a unit
+  that only plays clips or tweens never runs script code) and wakes coroutines waiting on them.
+  A clip's speed can follow the unit's ground speed (no foot sliding).
+- **The pose is a pure function of the channels and the tick**, in strict f32 (the determinism
+  rules: nlerp, no FMA, `libm` for the trig of angle targets), evaluated on the CPU:
+  - by the sim, **on demand**: a script asking where a joint is (a muzzle, a foot on the ground),
+    per-joint collision volumes if a game wants them. Clips are kept on the CPU (no GPU baking),
+    and the headless sim loads models without textures;
+  - by the client, for every unit in view, from the channel columns in the view (same code, same
+    result); the GPU gets the previous and current tick's 3x4 joint palettes and only
+    interpolates them per frame. The cull sphere comes from the pose (or the model's reach over
+    its clips and tween limits).
+- **Coroutines without bytecode.** A suspended coroutine must survive save→load and be the same
+  at any worker count. Two ways:
+  - A (proposed): ordinary Rust `async` scripts. Each unit's future lives in a fixed slot of a
+    host-owned deterministic arena in the shared memory (stable address, so `Pin` holds; the
+    slot size is the script's `size_of` future). No heap across an `await`: per-worker arenas are
+    reset each tick and poisoned in dev builds, so a violation shows up at once. A save stores the
+    slot arena as a blob next to the columns; it loads only into the same module build (the save
+    header already names the module hash). Late join stays a fast-forward from the command log.
+  - B: a proc macro that compiles a restricted script function into a plain-data state enum (its
+    locals across awaits as fields), stored in a column and saved by the schema, so saves
+    survive a rebuild. More work, and only a subset of Rust.
+- **Scheduler and parallelism.** A global wake queue keyed by (due tick, entity): timers,
+  awaited tweens and clips, callins (events from the sim systems: started or stopped moving,
+  aim request, fired, hit, killed). Each tick, woken coroutines run in fixed row ranges on the
+  workers (the sim's usual rule, so the result never depends on worker count). A coroutine
+  writes only its own unit (its components and channels); everything else goes through commands
+  and events, applied in key order at the layer's sync point.
+- **Queries.** Recoil let a script read any sim data. Here: its own unit's components directly;
+  other entities through a read-only view of the state at the start of the script phase (by
+  entity id), the spatial service, and joint positions through the pose function. Random access
+  is slower than column scans, so this is for scripts' occasional questions, not per-tick loops
+  over many units.
+- **Effects** (particles, lights, sound) are events emitted at a joint, carried to the view and
+  started at the drawn joint.
+- Numbers to hold to (`army-fox`: 10 000 Foxes, 24 joints): 240 000 joint matrices per tick on
+  the client, 11.5 MB of palette per tick (about 350 MB/s at 30 Hz), against the M11 GPU pose
+  pass (0.31 ms). If missed: no posing off screen and out of the shadows, distant units every n
+  ticks, units at rest keep their palette. Matrices interpolated between ticks shrink fast turns
+  (over about 90° a tick, e.g. a rotor): spins get an angular rate the shader applies.
+- Open questions: coroutine storage A or B (proposed A); aim by joint turns only, or also
+  look-at / IK on a joint chain later; whether the sim keeps per-joint collision volumes.
+- Verification: a scripted test unit (walk, stop, a multi-step aim, fire with a flash at the
+  muzzle, die holding the last frame) in a GPU test; save→load→continue with coroutines
+  suspended; digests equal at 1/2/4/8 workers; `army-fox` with scripts against the M11 numbers.
 
 ## Later improvements
 
@@ -2510,8 +2519,12 @@ signal masks; engine-side `Move`/`Turn`/`Spin` of pieces with a speed). Replaces
       encoder and its settings, so a new encoder version re-encodes. The cache is local, never
       synced content. The first start with many textures is slow (BC7 encoding); encode on the
       job pool and show progress.
-    - KTX2 with Basis (`KHR_texture_basisu`) in a glTF needs the Basis transcoder (C++) in the
-      engine. Open: accept it (link the transcoder), or reject such glTFs.
+    - KTX2 with Basis (`KHR_texture_basisu`) in a glTF: accepted, so the engine needs a Basis
+      transcoder to BC7 (decided 2026-11-16). Candidate: the pure-Rust `basisu` crate (0.1.0,
+      a port of the C++ transcoder, upstream v2_1_0, claims bit-exact; very new): compare its BC7
+      output with the C++ transcoder's on the test textures. Fallback: the C++ transcoder the
+      converter links now (`basisu_c_sys`, transcoder only). Writing our own (UASTC to BC7 is
+      the small part, ETC1S the large one) only if both fail.
   - Axes: the synthetic root takes glTF's Y-up to the engine's axes (and any unit scale) at
     load, so nothing downstream converts.
   - Rigid and skinned layouts stay as they are.
@@ -2526,6 +2539,12 @@ signal masks; engine-side `Move`/`Turn`/`Spin` of pieces with a speed). Replaces
     (glTF parsing and image decoders linked in). If load time asks for it, the processed
     geometry can go into the same local cache; the cache is an implementation detail, not a
     content format.
+- **Effects follow the sim's speed** (requested 2026-11-16).
+  - Particles step by wall-clock frame time (`particles.rs`: `dt` from `frame.time`), so at 2x
+    or 0.5x sim speed, or with the sim paused or late, smoke and sparks run at their own pace.
+  - Drive particle, decal fade/glow and other effect timers by the interpolated sim time
+    (`(tick + alpha) × tick seconds`, as clips now are), so they speed up, slow down and stop with
+    the sim. Purely visual time (water ripples, UI) may stay on wall time; choose per effect.
 - **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).
   - Seen in play, they look poor: too coarse and too discrete, as if the smoke updated at a lower
     frame rate than the rest of the scene.
