@@ -142,7 +142,7 @@ Interpolation: previous + latest transforms uploaded per instance, lerped in the
   RedAlert `cbt.glsl`; surface appearance from the material tilesets below), `water_ra` (RedAlert
   `src/draw.cpp:189-610` pass order + shaders), cascaded shadows, fog of war (sensor grid → texture),
   decals, GPU particles, post, UI.
-- Models: glTF converted offline; piece animation = sim WASM writing `PieceTransform` columns.
+- Models: glTF converted offline to one skinned format (M11: skin + bones, basic piece models as one bone and weight 1); piece animation = sim WASM writing `PieceTransform` columns.
 - UI: RmlUi behind a C FFI crate, rendered in a frame graph pass; untrusted widget modules drive documents
   and data models through a validated API and read only view tables.
 
@@ -286,7 +286,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
-| Later | M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) — see "Planned milestones M11–M13" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
 
@@ -2283,6 +2283,67 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
 - From M1: `ae-headless` digest runs in CI on Linux x86-64, Windows x86-64, Linux aarch64.
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
+
+## Planned milestones M11–M13 (not started)
+
+Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
+it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
+
+The plan so far had only one line on models (Renderer: "glTF converted offline; piece animation =
+sim WASM writing `PieceTransform` columns"). No loader, format or skinning was planned. M11 fills
+that in.
+
+### M11 — glTF models and skinning
+
+- Scope: an offline converter (glTF 2.0 `.gltf`/`.glb` to an engine model in the archive) and the
+  runtime that draws it.
+- One uniform format: skinned. A basic model (meshes attached to nodes, the "pieces") is
+  converted on load to skin + bones + one weight: each mesh's vertices get the one bone of the
+  node it hangs on, weight 1. So the renderer has one path, and piece animation
+  (`PieceTransform` columns from the sim) drives bones the same way for both.
+- Supported:
+  - meshes attached to pieces (node hierarchy); skinned models with one or several skins, their
+    joints and inverse bind matrices;
+  - the glTF 2.0 PBR material: base colour, metallic-roughness, normal, occlusion and emissive
+    textures and factors; alpha modes (opaque, mask, blend); double-sided; texture samplers;
+  - the standard attributes: POSITION, NORMAL, TANGENT (generated when absent, as glTF
+    prescribes), TEXCOORD_0 and TEXCOORD_1 (UV1/UV2), COLOR_0 (vertex colours), JOINTS_n and
+    WEIGHTS_n; `KHR_texture_transform` and `KHR_materials_emissive_strength` to consider.
+- Skipped: morph targets (vertex morphs); the converter warns, and does not fail, when it meets
+  them.
+- Animation clips: out of scope here (the sim writes `PieceTransform`); decide whether glTF
+  animations are imported at all (see questions).
+- Ask the user about any attribute, extension or case the plan does not decide (for example
+  TEXCOORD_2 and above, COLOR_1, more than four influences per vertex, sparse accessors, cameras,
+  non-uniform node scale, extensions such as `KHR_materials_*`, `KHR_draco_mesh_compression`,
+  `EXT_meshopt_compression`, KTX2/Basis textures). Do not choose silently.
+- Verification: loader tests on the Khronos sample models (a basic piece model, a skinned one),
+  goldens for the drawn result, validation layers clean; the model's size and load time measured.
+
+### M12 — Lights and the HDR scene target (priority: medium)
+
+- Depends on M11 for glTF lights.
+- Lights: glTF lights (`KHR_lights_punctual`: point, spot, directional) are part of a model and
+  follow their piece's transform. The engine has its own kinds for effects (projectiles, lasers,
+  bullets): point, cone, beam. Effect lights come from the sim as view-table rows, culled and
+  uploaded like instance streams. Beams are capsules or lines; cones have an angular falloff.
+- Many lights through clustered forward or Forward+ (a compute pass bins the lights into
+  view-space tiles or clusters; lit passes read the per-cluster lists). Choose by measuring at the
+  RTS's light counts; terrain, units and water share the same light lists.
+- HDR rendering target: the scene is lit and blended in a floating-point target (RGBA16F or
+  R11G11B10F, to be measured) and tone-mapped by a post pass. Particles, water and fog keep their
+  blends and are checked against it. SDR output stays as it is.
+- Open: shadows for lights (none at first; the sun's cascades stay the only shadows), and how the
+  sun and sky light share units with the cluster lights.
+
+### M13 — HDR output on a supporting display (priority: lower)
+
+- After M12 (needs the HDR scene target).
+- The swapchain in an HDR colour space (`VK_EXT_swapchain_colorspace`: HDR10 ST.2084 or scRGB),
+  `VK_EXT_hdr_metadata`, and an output pass aimed at the display's peak and paper-white levels.
+  SDR displays keep today's path.
+- Settings: on/off, paper white, peak brightness. Check what Linux compositors (Wayland
+  `wp_color_management`) and Windows expose before choosing the format.
 
 ## Later improvements
 
