@@ -142,7 +142,7 @@ Interpolation: previous + latest transforms uploaded per instance, lerped in the
   RedAlert `cbt.glsl`; surface appearance from the material tilesets below), `water_ra` (RedAlert
   `src/draw.cpp:189-610` pass order + shaders), cascaded shadows, fog of war (sensor grid → texture),
   decals, GPU particles, post, UI.
-- Models: glTF converted offline to one bone-based format (M11: bones and joints; pieces are joints at weight 1), drawn in two GPU layouts (rigid: one joint per vertex; skinned: four), GPU-driven; piece animation = sim WASM writing `PieceTransform` columns.
+- Models: glTF converted offline to one bone-based format (M11: bones and joints; pieces are joints at weight 1), drawn in two GPU layouts (rigid: one joint per vertex; skinned: four), GPU-driven; piece animation = sim WASM writing `PieceTransform` columns. Superseded in part (2026-11-16): glTF loaded directly, no `.aemodel` (Later improvements, "glTF loaded at run time"); animation by unit scripts and a CPU pose fast path (M14), not `PieceTransform` columns.
 - UI: RmlUi behind a C FFI crate, rendered in a frame graph pass; untrusted widget modules drive documents
   and data models through a validated API and read only view tables.
 
@@ -286,7 +286,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
-| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) — see "Planned milestones M11–M13" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) — see "Planned milestones M11–M14" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
 
@@ -2284,10 +2284,11 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M13 (M11 in progress)
+## Planned milestones M11–M14 (M11 done, M14 in design)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
+M14 (unit scripts) needs M11; its order against M12/M13 is open.
 
 The plan so far had only one line on models (Renderer: "glTF converted offline; piece animation =
 sim WASM writing `PieceTransform` columns"). No loader, format or skinning was planned. M11 fills
@@ -2333,6 +2334,8 @@ that in.
     a KTX2 in a GPU format. PNG/JPEG become RGBA8 with mips (zstd supercompression, lossless);
     KTX2 already in a GPU format is kept; Basis-compressed KTX2 is transcoded by the converter to
     BC7, so the runtime needs no transcoder.
+  - Superseded (2026-11-16) by "glTF loaded at run time" under Later improvements: no `.aemodel`,
+    KTX2 only as an optional cache; and clips evaluated on the CPU (M14).
 - Not in the sim yet: no `PieceTransform` column exists. In M11 the renderer takes a pose per
   unit (the rest pose, or a clip at a time: the stream's `clip` and `clip_time`); the sim
   columns come later (their per-bone interpolation goes in the same pose pass).
@@ -2376,10 +2379,10 @@ that in.
     culls model units per shadow cascade (sides only) into per-cascade lists and commands
     (GPU test `units_model_shadows_culled`, 27 GPU tests pass): 4.4 ms in `army-fox`, since
     nearly every Fox is in all three nested cascades. Baselines `gpu-army-fox`, `gpu-near-fox`.
-  - Open after M11: model shadows are still the largest cost with many models (vertex-bound):
-    draw a caster only into the cascades its shadow is looked up in (needs the lookup to clamp
-    depth instead of falling through), or simpler caster meshes (LOD in the converter). Clips
-    always loop (no hold of the last frame yet).
+  - After M11: model shadows are still the largest cost with many models (vertex-bound). Not
+    worked on further (decided 2026-11-16): the cascades are to be replaced by virtual shadow
+    maps (Later improvements). Clips always loop; holding, blending and choosing clips belongs to
+    unit scripts (M14).
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
@@ -2406,6 +2409,76 @@ that in.
 - Settings: on/off, paper white, peak brightness. Check what Linux compositors (Wayland
   `wp_color_management`) and Windows expose before choosing the format.
 
+### M14 — Unit scripts (in design)
+
+What a unit does with its model in a given situation: choose, blend and hold clips; turn a
+joint to aim; react to firing (muzzle flash, recoil kick, particles, sound); deploy, die. An FSM
+per unit with coroutines and a scheduler, after Recoil's unit scripts
+(`RecoilEngine/rts/Sim/Units/Scripts`: COB and Lua scripts; callins `Create`, `StartMoving`,
+`StopMoving`, `AimWeapon`, `FireWeapon`, `Killed`, …; threads with `Sleep`, `WaitForTurn`,
+signal masks; engine-side `Move`/`Turn`/`Spin` of pieces with a speed). Replaces the client's
+`--clip MOVING[,STILL]`.
+
+- **What to copy from Recoil: scripts set targets, the engine animates.** `Turn(piece, axis,
+  angle, speed)` only records a target. A native ticker steps every animated piece every tick
+  without calling the script, and wakes the threads waiting in `WaitForTurn`. Here the same:
+  - per-unit animation channels: clip layers (clip, start tick, speed, loop / hold the last
+    frame / once, weight, joint mask, blend-in time) and joint tweens (turn, move, spin to a target
+    at a speed);
+  - the **pose fast path**: a native, parallel pass evaluates every unit's channels on the CPU
+    each tick (clip sampling, tweens, the joint hierarchy) into model-space 3x4 joint matrices. A
+    unit that only plays clips never calls its script. The GPU gets the previous and the current
+    tick's palettes and only interpolates between them per frame (the baked GPU frames and the
+    `units.pose` clip sampling of M11 step 3 go; clips live only on the CPU);
+  - the script runs only on events (callins), on timers and when an awaited tween or clip ends.
+- **What not to copy:** a callin per unit through the script runtime every tick, and a thread
+  stack that the sim must save. Callins are delivered batched (one call per tick with every
+  unit's events); the scheduler resumes woken coroutines inside the module, not one host call
+  per unit.
+- **Synced or not (the deciding question).** In Recoil all of it is sim: `FireWeapon` waits
+  for `AimWeapon` to return true, so turret turn rates are a game rule, and muzzles come from
+  piece positions. Here:
+  - a synced script must keep its suspended coroutines as data in components (the guest state
+    rule: save→load→continue, late join, split row ranges). Rust `async`/generator frames cannot
+    be saved, so a synced script means a small bytecode VM (thread = program counter + small
+    stack + wait condition + signal mask, in columns, as COB does) or hand-written FSMs whose
+    states and timers are columns;
+  - an unsynced script (presentation only) runs on the view: it sees only what the observer
+    sees, cannot desync, is not saved (a unit entering view gets `Create` with its current state
+    and the tick it started), and its coroutines can be ordinary Rust `async` in a WASM module
+    on the unsynced-script thread.
+  - Proposed: **split**. Gameplay facts stay in the sim as columns and systems (the game WASM
+    already owns "unit AI/state machines"): aim heading/pitch with turn rates, "aimed" gating
+    `fire`, deploy timers, muzzle offsets from the catalogue (no skeleton in the sim or in
+    `ae-headless`). The unit script is unsynced: it reads those columns from the view (aim
+    angles, weapon fired this tick, state + since tick) and turns them into clips, joint turns
+    and effects, so every client shows the same thing from the same sim facts. Today
+    `games/skirmish` `fire` has no aim step; the split adds one as sim data.
+- **Pose numbers to hold to** (the bench scene `army-fox`: 10 000 Foxes, 24 joints): 240 000
+  joint matrices per tick, 11.5 MB of palette per tick (48 B each; about 350 MB/s at 30 Hz),
+  sampled on the job pool. Budget to measure against: the M11 GPU pose pass, 0.31 ms. If the
+  CPU or the upload misses it: units off screen and outside the shadow cascades skip posing,
+  distant units pose every n ticks (`Staggered`), and units at rest keep last tick's palette.
+  Interpolating matrices between ticks shrinks fast rotations (a joint turning more than about
+  90° a tick, e.g. a spinning rotor, goes wrong): spins get a per-joint angular rate the shader
+  applies, or accept it.
+- **Effects:** scripts emit effects at a joint (`EmitAt(joint, effect)`); the CPU pose has the
+  joint's matrix, so muzzle flashes and particles start at the drawn muzzle. Effects go into the
+  particle / light streams (M7, M12).
+- **Death:** the sim keeps a dying unit's row for its death time (a sim rule), or the client
+  keeps a detached copy to finish the death clip. Open.
+- Open questions (to decide with the user before work starts):
+  1. Is aiming a game rule (turn rates delay shots; synced) or only looks? Proposed: synced as
+     sim data, scripts unsynced (above).
+  2. Script language: a Rust SDK module (`async` coroutines, unsynced) first; a bytecode VM only
+     if synced scripts are wanted.
+  3. CPU poses for every unit, as decided, or keep GPU sampling for units that only play clips
+     if the numbers above are not met.
+  4. Aim by joint turns only (Recoil) or also look-at constraints on a joint chain (IK) later.
+- Verification: a scripted test unit (walk, stop, aim at a target, fire with a flash at the
+  muzzle, die holding the last frame) in a GPU test; `army-fox` with scripts against the M11
+  numbers; determinism suite unchanged (scripts unsynced).
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
@@ -2424,6 +2497,35 @@ that in.
     the terrain pass costs +49 µs close, +62 µs overview, +136 µs cliffs (720p, about +32 %).
   - Not adopted: the first example's constant-overlap triplanar weights and RNM normals.
   - Details, the variants measured and not kept, are in `docs/antitiling.md`.
+- **glTF loaded at run time; `.aemodel` removed** (decided 2026-11-16; after M11, before the
+  pie-in-the-sky items, not immediately).
+  - What: the engine loads `.gltf`/`.glb` from the content as it is; `ae_model`'s file format,
+    `ae-tool model convert` and the client's conversion step go. The load does what the
+    converter does now (layouts, merged primitives, tangents, joints), in memory.
+  - Textures:
+    - default: PNG/JPEG decoded at load into RGBA8 with mips;
+    - option (a setting): KTX2. At engine start every PNG/JPEG texture not yet converted is
+      encoded to a GPU format (BC7) and cached; later loads read the cache. Cache key: a fast
+      hash of the source bytes (xxh3-128, already in the engine, rather than SHA-512), plus the
+      encoder and its settings, so a new encoder version re-encodes. The cache is local, never
+      synced content. The first start with many textures is slow (BC7 encoding); encode on the
+      job pool and show progress.
+    - KTX2 with Basis (`KHR_texture_basisu`) in a glTF needs the Basis transcoder (C++) in the
+      engine. Open: accept it (link the transcoder), or reject such glTFs.
+  - Axes: the synthetic root takes glTF's Y-up to the engine's axes (and any unit scale) at
+    load, so nothing downstream converts.
+  - Rigid and skinned layouts stay as they are.
+  - `KHR_materials_emissive_strength`: folded into the material's emissive factor.
+    `KHR_texture_transform`: folded into the UVs at load when every texture of a material that
+    reads that UV set has the same transform; otherwise the material keeps the transform (a
+    per-texture 2x3 in the material table) or the load warns. To decide when such a model shows
+    up.
+  - Clips: kept on the CPU only (M14), not baked for the GPU.
+  - Costs to measure: load time per model (the Fox reads in 0.08 ms as `.aemodel` today; parsing,
+    PNG decoding, mip generation and tangents now happen at every load), and the client's size
+    (glTF parsing and image decoders linked in). If load time asks for it, the processed
+    geometry can go into the same local cache; the cache is an implementation detail, not a
+    content format.
 - **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).
   - Seen in play, they look poor: too coarse and too discrete, as if the smoke updated at a lower
     frame rate than the rest of the scene.
