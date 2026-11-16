@@ -2578,7 +2578,12 @@ Design:
     (glTF parsing and image decoders linked in). If load time asks for it, the processed
     geometry can go into the same local cache; the cache is an implementation detail, not a
     content format.
-- **Effects follow the sim's speed** (requested 2026-11-16).
+- **Effects follow the sim's speed** (requested 2026-11-16) — done (2026-11-16): with a live
+  unit stream, the frame's effect time is the sim time drawn
+  (`InstanceStream::sim_time`, `FrameParams::effect_time`); particles step by it (at most 0.1 s
+  a frame, so past 6x at 60 fps they lag the sim), decals fade and cool by it (`u.effects.x`);
+  water and the render module stay on wall time; readback keeps the deterministic time. Seen
+  in the client under validation, not yet checked by eye at other speeds.
   - Particles step by wall-clock frame time (`particles.rs`: `dt` from `frame.time`), so at 2x
     or 0.5x sim speed, or with the sim paused or late, smoke and sparks run at their own pace.
   - Drive particle, decal fade/glow and other effect timers by the interpolated sim time

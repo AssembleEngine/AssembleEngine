@@ -475,6 +475,13 @@ impl TerrainApp {
             TerrainOutput::Readback => self.frames as f32 / 60.0,
             TerrainOutput::Present => self.started.elapsed().as_secs_f32(),
         });
+        // Effects follow the sim when presenting a live unit stream
+        // (readback keeps `time`: deterministic captures and tests).
+        let stream = match (self.output, view.time) {
+            (TerrainOutput::Present, None) => self.units.as_ref().and_then(|u| u.feed.latest()),
+            _ => None,
+        };
+        let effect_time = stream.map_or(time, |s| s.sim_time(s.alpha(Instant::now())) as f32);
         let aspect = self.extent.width as f32 / self.extent.height.max(1) as f32;
         let mut camera = view.camera;
         camera.ground = self.source.height_at(camera.target);
@@ -495,6 +502,7 @@ impl TerrainApp {
             vision: view.vision && self.vision.is_some(),
             water: view.water && self.water,
             time,
+            effect_time,
             shadows: view.shadows && self.shadows,
             // The units' shadows when the graph draws them.
             // (and the particles' coloured shadows when it draws those).
@@ -668,9 +676,9 @@ impl RenderApp for TerrainApp {
         }
         if let (Some(set), Some(setup)) = (self.decal_set.as_mut(), self.decals.as_ref()) {
             for decal in setup.feed.take() {
-                set.insert(decal, params.time);
+                set.insert(decal, params.effect_time);
             }
-            set.expire(params.time);
+            set.expire(params.effect_time);
             if self.decals_written.len() <= slot {
                 self.decals_written.resize(slot + 1, None);
             }
@@ -710,7 +718,7 @@ impl RenderApp for TerrainApp {
                 axes,
                 near: camera.near(),
                 extent: self.extent,
-                time: params.time,
+                time: params.effect_time,
                 fog: fog(&self.source.info, params.fog),
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows.filter(|c| c.tinted),

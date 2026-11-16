@@ -111,6 +111,14 @@ impl InstanceStream {
         }
         (now.saturating_duration_since(self.published).as_secs_f32() / self.tick_seconds).clamp(0.0, 1.0)
     }
+
+    /// The sim time drawn at `alpha` (seconds since tick 0; units are
+    /// drawn a tick behind, between the previous tick and this one). It
+    /// speeds up, slows down and stops with the sim, and never steps back
+    /// when the next stream replaces this one.
+    pub fn sim_time(&self, alpha: f32) -> f64 {
+        (self.tick as f64 - 1.0 + alpha as f64) * self.sim_seconds.max(0.0) as f64
+    }
 }
 
 /// The latest stream, shared by its producer and the render thread.
@@ -865,4 +873,19 @@ pub fn cull_margins(stream: &InstanceStream, frame: &UnitFrame, min_pixels: f32,
             (margin, plane, reach)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sim_time_follows_the_sim() {
+        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default() };
+        let (a, b) = (stream(10, 0.05), stream(11, 0.05));
+        assert!((a.sim_time(0.0) - 0.9).abs() < 1e-6 && (a.sim_time(1.0) - 1.0).abs() < 1e-6, "a tick behind, by sim seconds");
+        assert!(b.sim_time(0.0) >= a.sim_time(1.0), "the next stream never steps back");
+        // At 2x (half the wall time per tick) a tick still gains 0.1 s.
+        assert_eq!(stream(11, 0.025).sim_time(0.5), stream(11, 0.2).sim_time(0.5));
+    }
 }

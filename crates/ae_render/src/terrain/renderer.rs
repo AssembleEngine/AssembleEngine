@@ -70,6 +70,8 @@ struct FrameUbo {
     vision: [f32; 4],
     /// The units' shadow cascades ([`crate::shadow`]).
     unit_shadow: crate::shadow::CascadeUniforms,
+    /// x: effect time (decals).
+    effects: [f32; 4],
 }
 
 /// The cell layout of the vision (fog of war) planes a renderer can show:
@@ -137,6 +139,10 @@ pub struct FrameParams {
     pub water: bool,
     /// Animation time in seconds (waves, foam, caustics).
     pub time: f32,
+    /// Effect time in seconds (decals' fades and glow, particles): the sim
+    /// time drawn when a unit stream is live, so effects follow the sim's
+    /// speed; otherwise `time`.
+    pub effect_time: f32,
     /// Shade by the hills' shadows (when the renderer has them).
     pub shadows: bool,
     /// Shade by the units' shadow map with these cascades (the graph
@@ -718,11 +724,11 @@ impl TerrainRenderer {
             fog: [0.62, 0.70, 0.80, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }],
             water: match i.water_level {
                 Some(level) => [level, 1.0, 0.08, p.time],
-                // The time still: decals fade by it.
                 None => [0.0, 0.0, 0.0, p.time],
             },
             vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
             unit_shadow,
+            effects: [p.effect_time, 0.0, 0.0, 0.0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(bytes_of(&ubo));

@@ -391,7 +391,10 @@ pub struct ParticleFrame {
     /// The projection's near plane (infinite reverse-Z: depth = near / z).
     pub near: f32,
     pub extent: vk::Extent2D,
-    /// Simulation time in seconds (it steps by the difference, at most 0.1 s).
+    /// Effect time in seconds: the sim time drawn when the app has a live
+    /// unit stream, so particles follow the sim's speed and stop with it
+    /// (it steps by the difference, at most 0.1 s a frame: faster than 6x
+    /// at 60 fps, particles fall behind the sim rather than step coarsely).
     pub time: f32,
     /// Fog colour (linear) and density; density 0 turns fog off.
     pub fog: [f32; 4],

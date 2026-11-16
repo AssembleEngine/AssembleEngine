@@ -86,7 +86,7 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
     uint indexAt = bucketsAt + mask + 1u;
     uint entry = decalWords[bucketsAt + ((uint(c.x) * 73856093u ^ uint(c.y) * 19349663u) & mask)];
     uint first = entry >> 8u, count = entry & 255u;
-    float time = u.water.w;
+    float time = u.effects.x;
     float layers = float(textureSize(decalAtlas, 0).z);
     for (uint i = 0u; i < count; i++) {
         uint at = 4u + 16u * decalWords[indexAt + first + i];
