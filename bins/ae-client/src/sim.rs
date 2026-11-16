@@ -63,6 +63,10 @@ pub struct SimOptions {
     pub wasm: Option<Arc<Vec<u8>>>,
     /// A map package's terrain and start points ([`Map::Loaded`]).
     pub loaded_map: Option<(Arc<ae_nav::terrain::Terrain>, Vec<[f32; 2]>)>,
+    /// `--model`: classes drawn with a model.
+    pub models: Vec<crate::models::ClassModel>,
+    /// `--clip`: what units with a model play.
+    pub clip: crate::models::ClipChoice,
 }
 
 /// A player's action from the window, in world coordinates.
@@ -273,7 +277,7 @@ impl Sim {
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer::default(), view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None })
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { clip: if o.models.is_empty() { Default::default() } else { o.clip }, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -546,6 +550,8 @@ pub struct Streamer {
     /// Previous stream, sorted by key: `(key, x, y, heading x, heading y, state)`.
     previous: Vec<(u64, f32, f32, f32, f32, u8)>,
     order: Vec<u32>,
+    /// The clip units play (models only; nothing by default).
+    pub clip: crate::models::ClipChoice,
 }
 
 impl Streamer {
@@ -593,8 +599,9 @@ impl Streamer {
             let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
             let (px, py) = moved.map_or((x, y), |b| (b.1, b.2));
             let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.3, b.4)) };
-            // At rest: no clip (models play none yet).
-            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, 0, 0.0f32.to_bits()];
+            let clip = self.clip.of(vx != 0.0 || vy != 0.0);
+            let clip_time = if clip > 0 { crate::models::clip_time(row.key, tick, TICK_SECONDS) } else { 0.0 };
+            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, clip, clip_time.to_bits()];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
@@ -767,9 +774,25 @@ mod tests {
         assert_eq!(column(&second, "heading_y"), [0.0, 0.0, 1.0]);
         assert_eq!(second.columns[7], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
+        assert_eq!(second.columns[8], [0, 0, 0], "no clip without models");
         // 9 left.
         let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), now, 0.1);
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+    }
+
+    /// With a clip choice, moving units play one clip and standing ones
+    /// the other, each at its own phase that advances with the tick.
+    #[test]
+    fn streams_carry_clips() {
+        let mut s = Streamer { clip: crate::models::ClipChoice { moving: 2, still: 1 }, ..Streamer::default() };
+        let now = Instant::now();
+        let rows = [(4, 40.0, 0.0, 1.0, 0.0), (9, 90.0, 0.0, 0.0, 0.0)];
+        let first = s.stream(&capture(10, &rows), now, 0.1);
+        assert_eq!(first.columns[8], [2, 1], "4 moves, 9 stands");
+        let second = s.stream(&capture(11, &rows), now, 0.1);
+        let t = |st: &InstanceStream, r: usize| f32::from_bits(st.columns[9][r]);
+        assert!((t(&second, 0) - t(&first, 0) - TICK_SECONDS).abs() < 1e-4, "a tick of sim time");
+        assert_ne!(t(&first, 0) - 10.0 * TICK_SECONDS, t(&first, 1) - 10.0 * TICK_SECONDS, "own phases");
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

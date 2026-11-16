@@ -27,6 +27,7 @@ dependencies = [
  "ae_bot",
  "ae_catalog",
  "ae_map",
+ "ae_model",
  "ae_nav",
  "ae_render",
  "ae_sensors",

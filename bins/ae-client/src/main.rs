@@ -44,6 +44,13 @@
 //! water surface. The terrain shows at once, the units once the world is
 //! built.
 //!
+//! `--model [CLASS=]FILE` draws class CLASS (every class without it, but
+//! the observer's blips) with a model: an `.aemodel`, or a glTF converted
+//! once by `ae-tool` into `target/models` (`models.rs`). Units with a model
+//! play `--clip MOVING[,STILL]` (the model's clip numbers from 1, 0 the rest
+//! pose; default 1,0: the first clip while moving, at rest standing still),
+//! each at its own phase. A model replaces the class colour (no enemy tint).
+//!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
 //! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
@@ -91,6 +98,7 @@
 
 mod bench;
 mod ground;
+mod models;
 mod sim;
 mod watch;
 
@@ -184,15 +192,19 @@ struct Options {
     mounts: Vec<std::path::PathBuf>,
     wasm: Option<Arc<Vec<u8>>>,
     loaded_map: Option<(Arc<Terrain>, Vec<[f32; 2]>)>,
+    /// `--model [CLASS=]FILE`, in order.
+    models: Vec<models::ClassModel>,
+    /// `--clip MOVING[,STILL]`.
+    clip: models::ClipChoice,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), clip: models::ClipChoice { moving: 1, still: 0 } }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--clip MOVING[,STILL]] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -266,6 +278,8 @@ fn parse() -> Result<Options> {
             "--packages" => o.package_dirs.push(value("--packages", &mut args)?),
             "--content" => o.content = Some(value("--content", &mut args)?),
             "--param" => o.param = Some(value("--param", &mut args)?.parse().context("--param")?),
+            "--model" => o.models.push(models::parse_arg(&value("--model", &mut args)?)?),
+            "--clip" => o.clip = models::ClipChoice::parse(&value("--clip", &mut args)?)?,
             "--observer" => {
                 observer_given = true;
                 o.observer = match value("--observer", &mut args)?.as_str() {
@@ -338,11 +352,15 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Generated | MapKind::Demo => return None,
     };
     let mounts = o.mounts.iter().cloned().chain(o.content.iter().map(Into::into)).collect();
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone() })
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone(), models: o.models.clone(), clip: o.clip })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
-    UnitsSetup { feed, capacity: s.units, classes: s.classes(), min_pixels: 7.0, models: Vec::new() }
+    let classes = s.classes();
+    // With an observer the classes end with the blips' and the selection's.
+    let blip = s.observer.map(|_| classes.len() - 2);
+    let models = models::per_class(&s.models, classes.len(), blip);
+    UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models }
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with
