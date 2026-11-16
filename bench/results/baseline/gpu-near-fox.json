@@ -1,0 +1,176 @@
+{
+  "suite": "gpu-near-fox",
+  "commit": "125f5f4-dirty",
+  "machine": "local",
+  "records": [
+    {
+      "metric": "model_setup",
+      "kind": "time",
+      "value": 17177759.0,
+      "unit": "ns",
+      "spread": 0.072424930399827,
+      "tolerance": 0.5
+    },
+    {
+      "metric": "gpu_total",
+      "kind": "time",
+      "value": 6570687.931845896,
+      "unit": "ns",
+      "spread": 0.06648682814965601
+    },
+    {
+      "metric": "pass/units reset",
+      "kind": "time",
+      "value": 1376.0000001639128,
+      "unit": "ns",
+      "spread": 0.0697674654709279,
+      "tolerance": 1.488372092845957
+    },
+    {
+      "metric": "pass/units pose",
+      "kind": "time",
+      "value": 313567.99602508545,
+      "unit": "ns",
+      "spread": 2.3723848549212496
+    },
+    {
+      "metric": "pass/terrain lod",
+      "kind": "time",
+      "value": 225280.0017595291,
+      "unit": "ns",
+      "spread": 0.012357949330893021
+    },
+    {
+      "metric": "pass/units cull",
+      "kind": "time",
+      "value": 19711.999222636223,
+      "unit": "ns",
+      "spread": 0.047077904437190954,
+      "tolerance": 0.1038961079933579
+    },
+    {
+      "metric": "pass/units count",
+      "kind": "time",
+      "value": 2176.000038161874,
+      "unit": "ns",
+      "spread": 0.41176467755898905,
+      "tolerance": 0.9411764540822348
+    },
+    {
+      "metric": "pass/units count read",
+      "kind": "time",
+      "value": 1792.0000245794654,
+      "unit": "ns",
+      "spread": 0.03571429731498328,
+      "tolerance": 1.1428571271814636
+    },
+    {
+      "metric": "pass/shadows",
+      "kind": "time",
+      "value": 3942208.0516815186,
+      "unit": "ns",
+      "spread": 0.18150231943875528
+    },
+    {
+      "metric": "pass/terrain",
+      "kind": "time",
+      "value": 232447.99673557281,
+      "unit": "ns",
+      "spread": 3.3392072642136155
+    },
+    {
+      "metric": "pass/units",
+      "kind": "time",
+      "value": 1065984.0106964111,
+      "unit": "ns",
+      "spread": 0.038424660276386295
+    },
+    {
+      "metric": "pass/water",
+      "kind": "time",
+      "value": 3072.0001086592674,
+      "unit": "ns",
+      "spread": 253.33331820035258,
+      "tolerance": 0.6666666430860974
+    },
+    {
+      "metric": "cpu_frame",
+      "kind": "time",
+      "value": 110773.01974487331,
+      "unit": "ns",
+      "spread": 0.4260117448324696,
+      "tolerance": 0.5
+    },
+    {
+      "metric": "cpu_record",
+      "kind": "time",
+      "value": 83382.0030093193,
+      "unit": "ns",
+      "spread": 0.49352387823338095,
+      "tolerance": 0.5
+    },
+    {
+      "metric": "leaves",
+      "kind": "counter",
+      "value": 92700.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "drawn",
+      "kind": "counter",
+      "value": 11100.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units_visible",
+      "kind": "info",
+      "value": 4398.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units_cascade0",
+      "kind": "info",
+      "value": 6383.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units_cascade1",
+      "kind": "info",
+      "value": 9194.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "units_cascade2",
+      "kind": "info",
+      "value": 9500.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "frames",
+      "kind": "info",
+      "value": 300.0,
+      "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "width",
+      "kind": "info",
+      "value": 1280.0,
+      "unit": "px",
+      "spread": 0.0
+    },
+    {
+      "metric": "height",
+      "kind": "info",
+      "value": 720.0,
+      "unit": "px",
+      "spread": 0.0
+    }
+  ]
+}

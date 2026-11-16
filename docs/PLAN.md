@@ -2369,15 +2369,17 @@ that in.
     of animated models cover every baked frame (+5%). New GPU test `units_pose_models` (palettes
     read back against the CPU, drawn poses, the lag, the padded cull); 26 GPU tests pass,
     validation clean.
-  - Step 4, client and benches — in progress (2026-11-16). `ae-client --model [CLASS=]FILE`
+  - Step 4, client and benches — done (2026-11-16). `ae-client --model [CLASS=]FILE`
     (glTF converted by `ae-tool` on first use) and `--clip MOVING[,STILL]`; bench scenes
     `army-fox`, `near-fox`. Validation clean. Measured: pose pass 0.31 ms for 10 000 Foxes; model
     shadows 5 ms whatever the view (every unit drawn into every cascade). The cull now also
     culls model units per shadow cascade (sides only) into per-cascade lists and commands
     (GPU test `units_model_shadows_culled`, 27 GPU tests pass): 4.4 ms in `army-fox`, since
-    nearly every Fox is in all three nested cascades. Open: drawing a caster only into the
-    cascades its shadow is looked up in (needs the lookup to stop falling through on depth),
-    or simpler caster meshes.
+    nearly every Fox is in all three nested cascades. Baselines `gpu-army-fox`, `gpu-near-fox`.
+  - Open after M11: model shadows are still the largest cost with many models (vertex-bound):
+    draw a caster only into the cascades its shadow is looked up in (needs the lookup to clamp
+    depth instead of falling through), or simpler caster meshes (LOD in the converter). Clips
+    always loop (no hold of the last frame yet).
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
