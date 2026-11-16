@@ -40,7 +40,6 @@ struct Tap { vec4 albedo; vec3 normal; };
 // Anti-tiling (docs/antitiling.md) is compiled in only when a layer of the
 // tileset uses it, so tilesets without it pay nothing.
 layout(constant_id = 2) const bool ANTI_TILING = false;
-const float ANTI_TILING_SHARPNESS = 2.0;
 
 // One texel of a layer: albedo (a = height) and the tangent-space normal's
 // x, y (-1..1, before the layer's strength).
@@ -72,47 +71,65 @@ const vec4 ANTI_TILING_SEEDS[16] = vec4[](
     vec4(0.970873, -0.239594, 0.823165, 0.047604),
     vec4(-0.877735, -0.479146, 0.578043, 0.617445));
 
-// The layer at `uv` (in repeats), anti-tiled when the layer asks for it:
-// two copies of the texture, each offset (and rotated, if the layer's
-// texture has no direction to keep) by a seed from the table, crossfaded
-// by a value noise that walks through the seeds (triangle weights summing
-// to 1). Averaging two samples flattens the contrast, so
-// the blend is re-centred on the layer's mean and scaled by
-// 1 / |weights|, which keeps the variance (the normals' mean is taken as
-// flat: a tileable height field has no mean slope). The gradients rotate
-// with the uv (the offset has none), so mips do not jump where the seed
-// changes; the normals rotate back into the uv's frame. (A noise in world
-// space shared by the layers, computed once per pixel, measured slower:
-// held across the taps, it costs more than it saves.)
+// The layer at `uv` (in repeats), anti-tiled when the layer asks for it,
+// after Quilez's "texture repetition", technique 3: a smooth noise (one
+// fetch, features of about 3 repeats, values spread evenly over 0..1)
+// times the layer's amount is an index into versions of the texture, each
+// offset (and rotated, if the texture has no direction to keep) by a seed
+// from the table. Each pixel shows the two versions its index lies
+// between, mostly just one: they blend only in the middle of each step,
+// where the transition is pushed by the versions' difference so it
+// follows the texture's features. Blending flattens the contrast, so it is
+// re-centred on the layer's mean and scaled by 1 / |weights|, which keeps
+// the variance (the normals' mean is taken as flat: a tileable height
+// field has no mean slope). The gradients rotate with the uv (the offset
+// has none), so mips do not jump where the version changes; the normals
+// rotate back into the uv's frame.
+layout(set = 0, binding = 20) uniform sampler2D antiTilingNoise;
+const float ANTI_TILING_NOISE_SCALE = 1.0 / 48.0; // 16 features per texture
+// The part of each index step where two versions blend (Quilez: 0.2..0.8;
+// narrower, since the second version is most of the cost), and how far
+// the versions' difference may push it.
+const vec2 ANTI_TILING_BAND = vec2(0.4, 0.6);
+const float ANTI_TILING_PUSH = 0.05;
+
+Texel version(float l, uint seed, bool rotates, vec2 uv, vec2 gx, vec2 gy) {
+    vec4 h = ANTI_TILING_SEEDS[seed & 15u];
+    h.xy = rotates ? h.xy : vec2(1.0, 0.0);
+    mat2 r = mat2(h.x, h.y, -h.y, h.x);
+    Texel t = texel(l, r * uv + h.zw, r * gx, r * gy);
+    t.normal = t.normal * r; // transpose(r) * normal
+    return t;
+}
+
 Texel layerTexel(uint layer, vec2 uv, vec2 gx, vec2 gy) {
     float l = float(layer);
     float amount = tiles.layers[layer].w;
     if (!ANTI_TILING || amount <= 0.0) {
         return texel(l, uv, gx, gy);
     }
-    float t = valueNoise(uv * 8.0) * amount * 0.5;
-    vec2 ph = fract(vec2(t + 0.5, t));
-    vec2 seed = floor(vec2(t + 0.5, t)) * 2.0 + vec2(0.0, 1.0);
-    // Triangle weights, sharpened about 1/2 (they still sum to 1): over
-    // most of the ground one copy has weight 0 and is not sampled.
+    float s = ANTI_TILING_NOISE_SCALE;
+    float index = textureGrad(antiTilingNoise, uv * s, gx * s, gy * s).r * amount;
+    uint i = uint(index);
+    float f = fract(index);
     bool rotates = (uint(tiles.layers[layer].z) & 2u) != 0u;
-    vec2 wt = clamp((min(ph, 1.0 - ph) * 2.0 - 0.5) * ANTI_TILING_SHARPNESS + 0.5, 0.0, 1.0);
-    Texel s[2];
-    for (int i = 0; i < 2; i++) {
-        if (wt[i] <= 0.0) {
-            s[i] = Texel(vec4(0.0), vec2(0.0));
-            continue;
-        }
-        vec4 h = ANTI_TILING_SEEDS[int(seed[i]) & 15];
-        h.xy = rotates ? h.xy : vec2(1.0, 0.0);
-        mat2 r = mat2(h.x, h.y, -h.y, h.x);
-        s[i] = texel(l, r * uv + h.zw, r * gx, r * gy);
-        s[i].normal = s[i].normal * r; // transpose(r) * normal
+    // Near either end of a step only one version shows.
+    if (f < ANTI_TILING_BAND.x - ANTI_TILING_PUSH) {
+        return version(l, i, rotates, uv, gx, gy);
     }
+    if (f > ANTI_TILING_BAND.y + ANTI_TILING_PUSH) {
+        return version(l, i + 1u, rotates, uv, gx, gy);
+    }
+    Texel a = version(l, i, rotates, uv, gx, gy), b = version(l, i + 1u, rotates, uv, gx, gy);
+    // The difference term is clamped to the push, so the blend is 0 and 1
+    // where the early returns assume.
+    vec3 d = a.albedo.rgb - b.albedo.rgb;
+    float w = smoothstep(ANTI_TILING_BAND.x, ANTI_TILING_BAND.y, f - clamp(0.1 * (d.r + d.g + d.b), -ANTI_TILING_PUSH, ANTI_TILING_PUSH));
+    vec2 wt = vec2(1.0 - w, w);
     vec4 mean = tiles.means[layer];
-    float k = inversesqrt(max(dot(wt, wt), 1e-6));
-    vec4 albedo = (s[0].albedo * wt.x + s[1].albedo * wt.y - mean) * k + mean;
-    vec2 normal = (s[0].normal * wt.x + s[1].normal * wt.y) * k;
+    float k = inversesqrt(dot(wt, wt));
+    vec4 albedo = (a.albedo * wt.x + b.albedo * wt.y - mean) * k + mean;
+    vec2 normal = (a.normal * wt.x + b.normal * wt.y) * k;
     return Texel(clamp(albedo, 0.0, 1.0), normal);
 }
 

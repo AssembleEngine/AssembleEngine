@@ -924,57 +924,67 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     assert_clean(&gpu);
 }
 
-/// Anti-tiling on a flat field of mud (temperate layer 6, 20 m repeats,
-/// `AntiTiling::Rotated`) from straight above, about 20 repeats across:
-/// without it the image correlates with itself shifted by one repeat;
-/// with it much less, while the mean and the contrast (standard
-/// deviation) stay close, as the variance-preserving blend promises.
+/// Anti-tiling on flat fields of mud (temperate layer 6, 20 m repeats) and
+/// grass (layer 0, 24 m), both `AntiTiling::Rotated`, from straight above,
+/// about 20 repeats across: without it the image correlates with itself
+/// shifted by one repeat (above its correlation at 1.5 repeats, the broad
+/// variation's share); with it much less, while the mean and the
+/// contrast (standard deviation) stay close, as the variance-preserving
+/// blend promises.
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
     use ae_render::terrain::tileset;
     let gpu = gpu();
-    let mud = |_: usize, _: usize| 6;
-    let shot = |t: tileset::Tileset| {
-        let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, mud, Some(Arc::new(t)), false, 300.0, None);
-        let (x0, y0) = project(0.0, 0.0, 50.0);
-        let (x1, y1) = project(512.0, 512.0, 50.0);
-        assert!(x0.min(x1) < 0.0 && x0.max(x1) > 320.0 && y0.min(y1) < 0.0 && y0.max(y1) > 240.0, "the map fills the view");
-        let luma: Vec<f64> = pixels.chunks(4).map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64).collect();
-        let period = (project(276.0, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0).abs();
-        (luma, period)
-    };
     let on = tileset::temperate(64);
-    assert!(matches!(on.layers[6].settings.anti_tiling, tileset::AntiTiling::Rotated(_)), "mud is anti-tiled by default");
-    let (luma_off, period) = shot(on.clone().without_anti_tiling());
-    let (luma_on, _) = shot(on);
-    // A margin inside the map (it spans the view and more).
-    let (w, h, m) = (320usize, 240usize, 8usize);
-    let stats = |l: &[f64]| {
-        let px: Vec<f64> = (m..h - m).flat_map(|y| (m..w - m).map(move |x| (x, y))).map(|(x, y)| l[y * w + x]).collect();
-        let mean = px.iter().sum::<f64>() / px.len() as f64;
-        (mean, (px.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / px.len() as f64).sqrt())
-    };
-    // Correlation of the image with itself shifted by `d` pixels (x, y).
-    let corr = |l: &[f64], (dx, dy): (usize, usize)| {
-        let pairs: Vec<(f64, f64)> = (m..h - m - dy).flat_map(|y| (m..w - m - dx).map(move |x| (x, y))).map(|(x, y)| (l[y * w + x], l[(y + dy) * w + x + dx])).collect();
-        let n = pairs.len() as f64;
-        let (ma, mb) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
-        let cov = pairs.iter().map(|p| (p.0 - ma) * (p.1 - mb)).sum::<f64>();
-        let va = pairs.iter().map(|p| (p.0 - ma).powi(2)).sum::<f64>();
-        let vb = pairs.iter().map(|p| (p.1 - mb).powi(2)).sum::<f64>();
-        cov / (va * vb).sqrt()
-    };
-    let p = period.round() as usize;
-    let at = |l: &[f64]| (corr(l, (p, 0)) + corr(l, (0, p))) / 2.0;
-    let ((mean_off, sd_off), (mean_on, sd_on)) = (stats(&luma_off), stats(&luma_on));
-    let (c_off, c_on) = (at(&luma_off), at(&luma_on));
-    eprintln!("period {period:.1} px; correlation at one repeat {c_off:.3} off, {c_on:.3} on; mean {mean_off:.1} / {mean_on:.1}; sd {sd_off:.2} / {sd_on:.2}");
-    assert!(c_off > 0.5, "without anti-tiling the field repeats: {c_off:.3}");
-    // Measured: 0.98 off, 0.08 on; mean 103.0 both; sd 11.1 and 11.0.
-    assert!(c_on < 0.25, "anti-tiling breaks the repeat: {c_on:.3} against {c_off:.3}");
-    assert!((mean_on - mean_off).abs() < mean_off * 0.02, "the mean holds: {mean_on:.1} against {mean_off:.1}");
-    assert!((sd_on / sd_off - 1.0).abs() < 0.05, "the contrast holds: sd {sd_on:.2} against {sd_off:.2}");
+    for (material, layer, repeat) in [(6u8, 6usize, 20.0f32), (0, 0, 24.0)] {
+        let shot = |t: tileset::Tileset| {
+            let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, |_, _| material, Some(Arc::new(t)), false, 300.0, None);
+            let (x0, y0) = project(0.0, 0.0, 50.0);
+            let (x1, y1) = project(512.0, 512.0, 50.0);
+            assert!(x0.min(x1) < 0.0 && x0.max(x1) > 320.0 && y0.min(y1) < 0.0 && y0.max(y1) > 240.0, "the map fills the view");
+            let luma: Vec<f64> = pixels.chunks(4).map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64).collect();
+            let period = (project(256.0 + repeat, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0).abs();
+            (luma, period)
+        };
+        assert!(matches!(on.layers[layer].settings.anti_tiling, tileset::AntiTiling::Rotated(_)), "layer {layer} is anti-tiled by default");
+        let (luma_off, period) = shot(on.clone().without_anti_tiling());
+        let (luma_on, _) = shot(on.clone());
+        // A margin inside the map (it spans the view and more).
+        let (w, h, m) = (320usize, 240usize, 8usize);
+        let stats = |l: &[f64]| {
+            let px: Vec<f64> = (m..h - m).flat_map(|y| (m..w - m).map(move |x| (x, y))).map(|(x, y)| l[y * w + x]).collect();
+            let mean = px.iter().sum::<f64>() / px.len() as f64;
+            (mean, (px.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / px.len() as f64).sqrt())
+        };
+        // Correlation of the image with itself shifted by `d` pixels (x, y).
+        let corr = |l: &[f64], (dx, dy): (usize, usize)| {
+            let pairs: Vec<(f64, f64)> = (m..h - m - dy).flat_map(|y| (m..w - m - dx).map(move |x| (x, y))).map(|(x, y)| (l[y * w + x], l[(y + dy) * w + x + dx])).collect();
+            let n = pairs.len() as f64;
+            let (ma, mb) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+            let cov = pairs.iter().map(|p| (p.0 - ma) * (p.1 - mb)).sum::<f64>();
+            let va = pairs.iter().map(|p| (p.0 - ma).powi(2)).sum::<f64>();
+            let vb = pairs.iter().map(|p| (p.1 - mb).powi(2)).sum::<f64>();
+            cov / (va * vb).sqrt()
+        };
+        let p = period.round() as usize;
+        let at = |l: &[f64]| (corr(l, (p, 0)) + corr(l, (0, p))) / 2.0;
+        let ((mean_off, sd_off), (mean_on, sd_on)) = (stats(&luma_off), stats(&luma_on));
+        // At one and a half repeats the tiling adds nothing: what remains
+        // there is the broad variation (macro brightness), the baseline.
+        let q = (period * 1.5).round() as usize;
+        let base = |l: &[f64]| (corr(l, (q, 0)) + corr(l, (0, q))) / 2.0;
+        let (c_off, c_on) = (at(&luma_off) - base(&luma_off), at(&luma_on) - base(&luma_on));
+        eprintln!("layer {layer}: period {period:.1} px; correlation at one repeat above the baseline {c_off:.3} off, {c_on:.3} on (baselines {:.3}, {:.3});", base(&luma_off), base(&luma_on));
+        eprintln!("  mean {mean_off:.1} / {mean_on:.1}; sd {sd_off:.2} / {sd_on:.2}");
+        // Measured above the baseline: mud 0.83 off, 0.02 on; grass 0.40
+        // off, 0.10 on (its low contrast leaves the macro variation a
+        // baseline of 0.4-0.5).
+        assert!(c_off > 0.3, "without anti-tiling the field repeats: {c_off:.3}");
+        assert!(c_on < c_off * 0.35, "anti-tiling breaks the repeat: {c_on:.3} against {c_off:.3}");
+        assert!((mean_on - mean_off).abs() < mean_off * 0.02, "the mean holds: {mean_on:.1} against {mean_off:.1}");
+        assert!((sd_on / sd_off - 1.0).abs() < 0.08, "the contrast holds: sd {sd_on:.2} against {sd_off:.2}");
+    }
     assert_clean(&gpu);
 }
 

@@ -222,6 +222,9 @@ pub struct TerrainRenderer {
     tile_albedo: OwnedImage,
     tile_normal: OwnedImage,
     tile_ubo: OwnedBuffer,
+    /// The anti-tiling index noise (`tileset::anti_tiling_noise`; 1x1
+    /// without a tileset that uses it).
+    tile_noise: OwnedImage,
     has_tileset: bool,
     /// World shadow height per corner ([`super::sun`]); 1x1 without shadows.
     shadow_img: OwnedImage,
@@ -398,6 +401,14 @@ impl TerrainRenderer {
                 TilesetUbo::default(),
             ),
         };
+        let tile_noise = match tileset {
+            Some(t) if t.anti_tiled() => {
+                let mips = super::tileset::anti_tiling_noise();
+                let mips: Vec<&[u8]> = mips.iter().map(Vec::as_slice).collect();
+                upload::image(gpu, vk::Format::R8_UNORM, super::tileset::NOISE_SIZE, super::tileset::NOISE_SIZE, &mips, "anti-tiling noise")?
+            }
+            _ => upload::image(gpu, vk::Format::R8_UNORM, 1, 1, &[&[128u8][..]], "anti-tiling noise")?,
+        };
         let tile_ubo = upload::buffer(gpu, &bytes_of(&tile_table)[..TILESET_UBO_BYTES], vk::BufferUsageFlags::UNIFORM_BUFFER, "tileset table")?;
 
         let make_sampler = |filter: vk::Filter| unsafe {
@@ -452,6 +463,7 @@ impl TerrainRenderer {
                 b(17, vk::DescriptorType::STORAGE_BUFFER),
                 b(18, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(19, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(20, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
@@ -459,7 +471,7 @@ impl TerrainRenderer {
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 7 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 11 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 12 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
@@ -511,6 +523,8 @@ impl TerrainRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&atlas));
                 let normals = image(samplers[2], decal_normals.view);
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(19).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&normals));
+                let noise = image(samplers[2], tile_noise.view);
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(20).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&noise));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -581,6 +595,7 @@ impl TerrainRenderer {
             tile_albedo,
             tile_normal,
             tile_ubo,
+            tile_noise,
             has_tileset: tileset.is_some(),
             shadow_img,
             has_shadows: shadows.is_some(),
@@ -887,6 +902,7 @@ impl TerrainRenderer {
         self.tile_albedo.destroy(gpu);
         self.tile_normal.destroy(gpu);
         self.tile_ubo.destroy(gpu);
+        self.tile_noise.destroy(gpu);
         self.shadow_img.destroy(gpu);
         self.unit_shadow_map.destroy(gpu);
         self.decal_atlas.destroy(gpu);

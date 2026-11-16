@@ -42,12 +42,12 @@ pub struct LayerSettings {
     pub anti_tiling: AntiTiling,
 }
 
-/// Anti-tiling (`docs/antitiling.md`): each sample of the layer becomes
-/// two copies of the texture, each moved by a seed, crossfaded by a value
-/// noise that walks through the seeds; the blend keeps the texture's
-/// contrast. The amount (above 0, up to 16) is about how many seeds the
-/// noise's range walks through. It adds to the terrain pass's cost where
-/// the layer shows (about +27 % in the close-up bench with every layer on).
+/// Anti-tiling (`docs/antitiling.md`, after Quilez's technique 3): a
+/// smooth noise picks, per pixel, among versions of the texture each moved
+/// by a seed, blending two only near the steps between them; the blend
+/// keeps the texture's contrast. The amount (above 0, up to 16) is the
+/// number of versions. It adds to the terrain pass's cost where the layer
+/// shows (about +32 % in the close-up and overview benches).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AntiTiling {
     Off,
@@ -231,6 +231,54 @@ impl Tileset {
     pub fn bytes(&self) -> usize {
         self.layers.iter().map(|l| l.albedo.iter().chain(&l.normal).map(Vec::len).sum::<usize>()).sum()
     }
+}
+
+/// Side of the anti-tiling index noise ([`anti_tiling_noise`]).
+pub const NOISE_SIZE: u32 = 256;
+
+/// The anti-tiling index: a smooth noise that tiles, `R8_UNORM`, per mip
+/// (mip 0 [`NOISE_SIZE`] square), 16 features across. Its values are
+/// equalised (ranked onto 0..1), so each of a layer's versions covers about
+/// the same share of the ground. The octaves of the gradient noise are
+/// offset from one another by fractions of a cell: gradient noise is 0 at
+/// its lattice points, and with aligned octaves the sum would be too, a
+/// regular grid of one version.
+pub fn anti_tiling_noise() -> Vec<Vec<u8>> {
+    let n = NOISE_SIZE as usize;
+    let mut v: Vec<(f32, usize)> = (0..n * n)
+        .map(|i| {
+            let (x, y) = ((i % n) as f32 / n as f32, (i / n) as f32 / n as f32);
+            let (mut sum, mut amp, mut p) = (0.0, 1.0, 16);
+            for o in 0..3u32 {
+                let (ox, oy) = (0.37 + 0.29 * o as f32, 0.61 + 0.17 * o as f32);
+                sum += amp * gradient(x * p as f32 + ox, y * p as f32 + oy, p, 0xa71 + o * 977);
+                amp *= 0.5;
+                p *= 2;
+            }
+            (sum, i)
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut mip = vec![0u8; n * n];
+    for (rank, &(_, i)) in v.iter().enumerate() {
+        mip[i] = ((rank as f32 + 0.5) / (n * n) as f32 * 255.0).round() as u8;
+    }
+    let mut mips = vec![mip];
+    let mut side = n;
+    while side > 1 {
+        let half = side / 2;
+        let prev = mips.last().unwrap();
+        let next = (0..half * half)
+            .map(|i| {
+                let (x, y) = (i % half * 2, i / half * 2);
+                let sum: u32 = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().map(|&(a, b)| prev[b * side + a] as u32).sum();
+                ((sum + 2) / 4) as u8
+            })
+            .collect();
+        mips.push(next);
+        side = half;
+    }
+    mips
 }
 
 /// A procedural tileset by name (`temperate`, `desert`) with `size`-texel
@@ -494,6 +542,7 @@ fn downsample(albedo: &[u8], normal: &[u8], size: usize) -> (Vec<u8>, Vec<u8>) {
     (a, nm)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump: f32, projection: Projection, anti_tiling: AntiTiling) -> Layer {
     let (mut a, mut n) = generate(recipe, size, seed, bump);
     let (mut albedo, mut normal) = (Vec::new(), Vec::new());
@@ -531,13 +580,13 @@ const fn m(ground: u8, cliff: u8) -> MaterialLayers {
 pub fn temperate(size: u32) -> Tileset {
     use {AntiTiling::*, Projection::*};
     let specs = vec![
-        ("grass", Recipe::Grass { base: [0.08, 0.14, 0.03], tip: [0.20, 0.26, 0.06] }, 24.0, 1.0, ByOrientation, Off),
-        ("forest floor", Recipe::Forest, 20.0, 1.2, ByOrientation, Off),
-        ("sand", Recipe::Sand { light: [0.62, 0.52, 0.33], dark: [0.42, 0.34, 0.20], ripples: 9.0 }, 32.0, 0.8, ByOrientation, Shifted(2.0)),
+        ("grass", Recipe::Grass { base: [0.08, 0.14, 0.03], tip: [0.20, 0.26, 0.06] }, 24.0, 1.0, ByOrientation, Rotated(8.0)),
+        ("forest floor", Recipe::Forest, 20.0, 1.2, ByOrientation, Rotated(8.0)),
+        ("sand", Recipe::Sand { light: [0.62, 0.52, 0.33], dark: [0.42, 0.34, 0.20], ripples: 9.0 }, 32.0, 0.8, ByOrientation, Shifted(8.0)),
         ("rock", Recipe::Rock { light: [0.33, 0.31, 0.29], dark: [0.12, 0.11, 0.10], strata: 5.0 }, 48.0, 2.0, ByOrientation, Off),
-        ("river bed", Recipe::Pebbles { stone: [0.30, 0.28, 0.24], fill: [0.16, 0.14, 0.10], cells: 12 }, 16.0, 1.5, ByOrientation, Rotated(2.0)),
-        ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(2.0)),
-        ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation, Rotated(2.0)),
+        ("river bed", Recipe::Pebbles { stone: [0.30, 0.28, 0.24], fill: [0.16, 0.14, 0.10], cells: 12 }, 16.0, 1.5, ByOrientation, Rotated(8.0)),
+        ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(8.0)),
+        ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation, Rotated(8.0)),
     ];
     build("temperate", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
 }
@@ -547,13 +596,13 @@ pub fn temperate(size: u32) -> Tileset {
 pub fn desert(size: u32) -> Tileset {
     use {AntiTiling::*, Projection::*};
     let specs = vec![
-        ("dry scrub", Recipe::Grass { base: [0.30, 0.24, 0.12], tip: [0.42, 0.36, 0.18] }, 24.0, 0.9, ByOrientation, Off),
-        ("dark scrub", Recipe::Grass { base: [0.14, 0.13, 0.06], tip: [0.28, 0.24, 0.10] }, 20.0, 1.1, ByOrientation, Off),
-        ("dune sand", Recipe::Sand { light: [0.78, 0.55, 0.30], dark: [0.55, 0.36, 0.18], ripples: 14.0 }, 40.0, 0.9, ByOrientation, Shifted(2.0)),
+        ("dry scrub", Recipe::Grass { base: [0.30, 0.24, 0.12], tip: [0.42, 0.36, 0.18] }, 24.0, 0.9, ByOrientation, Rotated(8.0)),
+        ("dark scrub", Recipe::Grass { base: [0.14, 0.13, 0.06], tip: [0.28, 0.24, 0.10] }, 20.0, 1.1, ByOrientation, Rotated(8.0)),
+        ("dune sand", Recipe::Sand { light: [0.78, 0.55, 0.30], dark: [0.55, 0.36, 0.18], ripples: 14.0 }, 40.0, 0.9, ByOrientation, Shifted(8.0)),
         ("red rock", Recipe::Rock { light: [0.55, 0.28, 0.15], dark: [0.22, 0.10, 0.06], strata: 9.0 }, 56.0, 2.2, Triplanar, Off),
-        ("cracked clay", Recipe::Cracked { clay: [0.50, 0.38, 0.26], crack: [0.18, 0.12, 0.08] }, 18.0, 1.4, ByOrientation, Rotated(2.0)),
-        ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(2.0)),
-        ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation, Rotated(2.0)),
+        ("cracked clay", Recipe::Cracked { clay: [0.50, 0.38, 0.26], crack: [0.18, 0.12, 0.08] }, 18.0, 1.4, ByOrientation, Rotated(8.0)),
+        ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(8.0)),
+        ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation, Rotated(8.0)),
     ];
     build("desert", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
 }

@@ -121,24 +121,26 @@ existing terrain uniforms:
 against visible tiling), and the blended normal replaces the geometric one for lighting. Water
 tint, fog and the LOD/wireframe overlays then apply as before.
 
-**Anti-tiling** (`docs/antitiling.md`). A layer whose `anti_tiling` is not `Off` is sampled as
-two copies of its texture, each offset (and rotated, for `Rotated`) by a seed, crossfaded by a
-value noise in the layer's uv (8 features per repeat) that walks through the seeds; `amount` is
-about how many seeds the noise's range walks through. The blend is re-centred on the layer's mean
-albedo and height (from its last mip, in the table) and scaled to keep the contrast. Normals rotate
-back into the uv frame. `Shifted` keeps a texture's direction (strata, ripples). The path is a
-specialization constant, compiled in only when some layer uses it.
+**Anti-tiling** (`docs/antitiling.md`, after Quílez's "texture repetition", technique 3). A
+layer whose `anti_tiling` is not `Off` picks, per pixel, among `amount` versions of its texture,
+each offset (and rotated, for `Rotated`) by a seed. The index is a smooth tiling noise (one fetch
+from a generated 256² `R8_UNORM` texture at binding 20, 16 features, values spread evenly over
+0..1) read at 1/48 of the layer's uv, so its features span about 3 repeats. Two versions blend only
+in the middle fifth of each index step, the transition pushed by their colour difference so it
+follows the texture. The blend is re-centred on the layer's mean albedo and height (from its last
+mip, in the table) and scaled to keep the contrast. Normals rotate back into the uv frame.
+`Shifted` keeps a texture's direction (strata, ripples). The path is a specialization constant,
+compiled in only when some layer uses it.
 
-Defaults: on for the layers whose repeat shows (temperate: sand shifted; river bed, gravel, mud
-rotated. Desert: dune sand shifted; cracked clay, gravel, salt pan rotated). Off for grass, scrub
-and forest floor (their repeat does not show, and they cover most maps) and for the rocks (rotating
-breaks the strata; shifting barely changes the cliffs and cost about 105 µs more in the cliffs bench).
+Defaults: every ground layer on with 8 versions (temperate: sand shifted, the rest rotated;
+desert: dune sand shifted, the rest rotated). Off for the rocks: rotating breaks their strata, and
+shifting barely changed the cliffs for about 105 µs in the cliffs bench.
 
-Measured on mud from above (GPU test `anti_tiling_breaks_the_repeat_and_keeps_the_contrast`): the
-image's correlation with itself one repeat away falls from 0.98 to 0.08; mean and standard deviation
-of luminance stay within 1 %. Cost of the terrain pass (bench, 1280×720, against no anti-tiling):
-close +38 µs (155.7 → 193.8, half the view mud), overview +30 µs (200.7 → 230.4), cliffs +29 µs
-(376.5 → 405.8).
+Measured from above (GPU test `anti_tiling_breaks_the_repeat_and_keeps_the_contrast`), the image's
+correlation with itself one repeat away, above its correlation at 1.5 repeats: mud 0.83 → 0.02,
+grass 0.40 → 0.10. Mean and standard deviation of luminance stay within 1 %. Cost of the terrain
+pass (bench, 1280×720, against no anti-tiling): close +49 µs (155.7 → 205.1), overview +62 µs
+(200.7 → 263.2), cliffs +136 µs (376.5 → 512.6).
 
 **Cost control.** Where several corners share a layer, which is the case inside any material,
 the shader samples it once. The cliff layer is sampled only where the cliff mask is above 0.

@@ -14,44 +14,44 @@ What the example does:
 - Triplanar weights have a constant overlap zone (`BlendZone`).
 - Triplanar normals are combined with reoriented normal mapping (RNM) against the surface normal.
 
-How the implementation differs:
+How the implementation works (Íñigo Quílez, "texture repetition", 2015, technique 3; the
+example above is a variant of it):
+- A smooth noise times the layer's amount (8 by default) is an index into versions of the
+  texture, each moved by a seed: offset, and rotated for `Rotated` layers. Each pixel shows the
+  two versions its index lies between, mostly just one.
+- The noise is one fetch from a generated tiling texture (`tileset::anti_tiling_noise`: 256²
+  `R8_UNORM`, gradient noise with octaves offset from one another so their lattice zeros do not
+  line up into a grid, values ranked onto 0..1 so every version covers about the same share).
+  It is read at 1/48 of the layer's uv: features span about 3 repeats.
+- Two versions blend only in the middle fifth of each index step (0.4..0.6; Quílez: 0.2..0.8),
+  the transition pushed by up to 0.05 by the versions' colour difference (Quílez's
+  `f - 0.1*sum(cola-colb)`), so it follows the texture's features. Outside the band one version
+  is sampled. The band is narrow because the second version is most of the cost.
+- The blend is re-centred on the layer's mean (its last mip: albedo averaged in linear light,
+  height linearly; in the tileset table) and scaled by `1/|weights|`: the example's
+  variance-preserving blend. The normals' mean is taken as flat.
 - Sampled with `textureGrad`, the gradients rotated with the uv (the offset has none), so the mip
-  does not jump where the seed changes.
-- The tangent normals rotate back into the uv frame (the example used them as sampled, which
-  tilts rotated copies the wrong way).
-- Per layer: `Off`, `Shifted` (offsets only, for textures with a direction: strata, ripples) or
-  `Rotated`. The path is a specialization constant, compiled in only when a layer uses it; an
-  untaken path measured free.
-- Seeds come from a 16-entry table (golden-ratio angles, R2-sequence offsets), not a hash and
-  `sin`/`cos` per pixel: the terrain pass is bound by its arithmetic, and this saved about a
-  fifth of the overhead.
-- The triangle weights are sharpened about 1/2 (×2, still summing to 1), and a copy of weight 0
-  is not sampled.
-- The means are the layer's last mip (albedo averaged in linear light, height linearly), computed
-  on the CPU and kept in the tileset table. The normals' mean is taken as flat.
-- The noise is 8 features per repeat in the layer's uv, as in the example.
-- Not adopted: the constant-overlap triplanar weights and RNM. The tileset keeps its pow-4
-  weights and whiteout blend; the anti-tiled path does not change them.
+  does not jump where the version changes. The tangent normals rotate back into the uv frame
+  (the example used them as sampled, which tilts rotated copies the wrong way).
+- Seeds come from a 16-entry table (golden-ratio angles, R2-sequence offsets).
+- Per layer: `Off`, `Shifted` (textures with a direction: strata, ripples) or `Rotated`. The path is
+  a specialization constant, compiled in only when a layer uses it; an untaken path measured free.
+- Not adopted: the example's constant-overlap triplanar weights and RNM. The tileset keeps its
+  pow-4 weights and whiteout blend.
 
-Measurements (terrain pass, `ae-client --bench close,cliffs,overview`), of variants that were
-not kept:
-- Every layer anti-tiled, rotated: +47 % close, +38 % overview, +65 % cliffs. Per-layer selection
-  is the lever: the defaults cost +24 % close (half the view is an anti-tiled layer), +15 %
-  overview, +8 % cliffs.
-- The value noise is about a third of the overhead (replaced by a constant).
-- Sharpening the crossfade so one copy is sampled over most of the ground saves little (×2: a
-  few %, ×8: about as much): the cost is mostly arithmetic per call, not samples.
-- A noise in world space, computed once per pixel and shared by the layers: much slower
-  (+81 % close), presumably from holding it across the taps (register pressure).
-- Straight two-sample code without the skip: slightly slower than the loop with it.
-
-Next steps, if the cost matters:
-- Read the noise from a small tiling texture (one fetch) in place of four hashes, as Íñigo
-  Quílez's "texture repetition" article does in its cheapest technique. That article (from
-  memory: its URL returned 404 when checked) is the origin of this kind of method. Its
-  blend factor also subtracts a fraction of the two copies' colour difference before the
-  smoothstep, so the transition follows the texture's features. Worth trying against the
-  variance-preserving blend.
+Measurements (terrain pass, `ae-client --bench close,cliffs,overview`, 1280×720):
+- Defaults (every ground layer, rocks off): close +49 µs (+32 %), overview +62 µs (+31 %),
+  cliffs +136 µs (+36 %).
+- With Quílez's band (0.2..0.8): +46 %, +43 %, +51 %. One version only (no blend, an experiment):
+  +17 %, +20 %, +17 %, so the noise fetch and a moved sample cost about half, the second
+  version the rest. Branch-free (always two versions): no faster than with the early returns.
+- The first implementation, the example as given (a value noise of 8 features per repeat
+  computed per call, two seeds crossfaded everywhere): on grass and forest floor it cost too much
+  to leave on, and with them off it did nothing where tiling shows most. Its noise was about a
+  third of its cost. A world-space noise shared by the layers, computed once per pixel, was much
+  slower (+81 % close), presumably from register pressure.
+- Not measured yet: Quílez's techniques 1 (four samples per tile corner) and 2 (Voronoi, nine
+  samples); both cost more samples than technique 3.
 
 ```glsl
 // ============================================================================
