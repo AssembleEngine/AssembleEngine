@@ -2526,6 +2526,21 @@ Design:
 - Verification: a scripted test unit (walk, stop, a multi-step aim while running: an upper-body
   override plus additive turns; fire with a flash at the muzzle; die holding the last frame) in a GPU test; save→load→continue with coroutines
   suspended; digests equal at 1/2/4/8 workers; `army-fox` with scripts against the M11 numbers.
+  Save/load does not exist yet (M9): the save→load check waits for it.
+- Steps: (1) the pose evaluator; (2) channel components and the native ticker, driven by a
+  plain game system; (3) the client poses on the CPU from the view, `--clip` goes; (4) a
+  coroutine spike (a future per unit, resumed on another worker, digests at 1/2/4/8 workers);
+  (5) the script API and callins; (6) the death sequence and the test unit.
+- Progress:
+  - Step 1, the pose evaluator — done (2026-11-16). `ae_model::anim`: `Channels` (4 layers of
+    28 bytes, 8 tweens of 20; 272 bytes a unit), `Rig` (a model's bones, joints, clips resampled
+    at 60 fps in its own arithmetic, named masks), `Rig::advance` (the ticker: fades, phases,
+    play modes, ground speed, tweens the short way round) and `Rig::pose`/`globals`/`palette`
+    (3x4 rows). Scalar f32 and `libm`, no glam. Blend and override are one kind (a blend on a
+    mask is the override); additive adds the change from the clip's first frame. Tween over the
+    rest pose or additive, on a bone or a mask by its weights. Tests: the glam path's palettes
+    on the test model and on every Fox clip (1e-4 relative), masks, weights, additive, the
+    ticker, tweens, repeatable bits.
 
 ## Later improvements
 

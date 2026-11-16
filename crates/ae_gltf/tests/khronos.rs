@@ -101,3 +101,40 @@ fn fox_textured_skin_and_clips() {
         assert!(min_y.abs() < 10.0, "{}: lowest point {min_y}", clip.name);
     }
 }
+
+/// The sim's animation path (`ae_model::anim`, scalar and libm) poses the
+/// Fox as the glam path does: every clip at several times, and the rest.
+#[test]
+fn fox_anim_rig_matches_the_glam_path() {
+    use ae_model::anim::{Channels, IDENTITY, Layer, Rig, affine_of_cols};
+    use ae_model::pose::{PlayMode, bake, rest_palette};
+    let (m, _) = convert("Fox/Fox.glb");
+    let rig = Rig::new(&m);
+    let run = |ch: &Channels| {
+        let mut pose = rig.rest_pose();
+        rig.pose(ch, &mut pose);
+        let mut g = vec![IDENTITY; rig.bones()];
+        rig.globals(&pose, &mut g);
+        let mut p = vec![IDENTITY; rig.joints()];
+        rig.palette(&g, &mut p);
+        p
+    };
+    let check = |got: &[[f32; 12]], want: &[glam::Mat4], what: &str| {
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            let w = affine_of_cols(&w.to_cols_array());
+            // Relative to the matrix's largest entry (Fox units are centimetres).
+            let eps = 1e-4 * (1.0 + w.iter().fold(0.0f32, |a, x| a.max(x.abs())));
+            assert!(g.iter().zip(&w).all(|(a, b)| (a - b).abs() <= eps), "{what}: joint {k}: {g:?} vs {w:?}");
+        }
+    };
+    check(&run(&Channels::default()), &rest_palette(&m), "rest");
+    for (c, clip) in m.clips.iter().enumerate() {
+        let baked = bake(&m, c);
+        for f in [0.0, 0.13, 0.5, 0.91] {
+            let t = clip.duration * f;
+            let mut ch = Channels::default();
+            ch.layers[0] = Layer { clip: c as u16, weight: 1.0, target: 1.0, speed: 1.0, phase: t, ..Default::default() };
+            check(&run(&ch), &ae_model::pose::palette(&m, &globals(&m, &baked.locals(&m, t, PlayMode::Loop))), &format!("{} at {t}", clip.name));
+        }
+    }
+}

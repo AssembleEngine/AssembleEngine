@@ -28,6 +28,7 @@
 //! length (u32), the header (JSON, padded to 16 bytes), then the blob; the
 //! header's [`Range`]s are byte ranges in the blob, 16-byte aligned.
 
+pub mod anim;
 pub mod ktx;
 pub mod pose;
 

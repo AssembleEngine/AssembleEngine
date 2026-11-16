@@ -244,3 +244,234 @@ fn merge_by_material_and_layout() {
     m.primitives[1].layout = Layout::Rigid;
     assert!(m.validate().is_err());
 }
+
+mod anim_tests {
+    use super::*;
+    use crate::anim::*;
+
+    /// Root, `left` and `right` under it, `tip` under `left`. Clip 0 moves
+    /// `left` and `right` up by 2 over 2 s; clip 1 turns `left` a quarter
+    /// about +Y over 1 s; clip 2 lifts `tip` by 1 over 1 s.
+    fn model() -> Model {
+        let mut m = sample_model();
+        m.bones = vec![bone("root", None, [0.0; 3]), bone("left", Some(0), [0.0, 0.0, 1.0]), bone("right", Some(0), [0.0, 0.0, -1.0]), bone("tip", Some(1), [1.0, 0.0, 0.0])];
+        m.joints = (0..4).map(|b| Joint { bone: b, inverse_bind: Mat4::IDENTITY.to_cols_array() }).collect();
+        let q = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        #[rustfmt::skip]
+        let data = vec![
+            0.0, 2.0,                     // 0: times of clip 0
+            0.0, 0.0, 1.0, 0.0, 2.0, 1.0, // 2: left
+            0.0, 0.0, -1.0, 0.0, 2.0, -1.0, // 8: right
+            0.0, 1.0,                     // 14: times of clips 1 and 2
+            0.0, 0.0, 0.0, 1.0, q.x, q.y, q.z, q.w, // 16: left's turn
+            1.0, 0.0, 0.0, 1.0, 1.0, 0.0, // 24: tip's lift
+        ];
+        let r = |offset, len| Range { offset, len };
+        let ch = |bone, path, times, values| Channel { bone, path, interpolation: Interpolation::Linear, times, values };
+        m.clips = vec![
+            Clip { name: "rise".into(), duration: 2.0, channels: vec![ch(1, Path::Translation, r(0, 2), r(2, 6)), ch(2, Path::Translation, r(0, 2), r(8, 6))] },
+            Clip { name: "turn".into(), duration: 1.0, channels: vec![ch(1, Path::Rotation, r(14, 2), r(16, 8))] },
+            Clip { name: "lift".into(), duration: 1.0, channels: vec![ch(3, Path::Translation, r(14, 2), r(24, 6))] },
+        ];
+        m.clip_data = data;
+        m.validate().unwrap();
+        m
+    }
+
+    fn palette_of(rig: &Rig, ch: &Channels) -> Vec<Affine> {
+        let mut pose = rig.rest_pose();
+        rig.pose(ch, &mut pose);
+        let mut g = vec![IDENTITY; rig.bones()];
+        rig.globals(&pose, &mut g);
+        let mut p = vec![IDENTITY; rig.joints()];
+        rig.palette(&g, &mut p);
+        p
+    }
+
+    fn assert_close(got: &[Affine], want: &[Mat4], eps: f32, what: &str) {
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            let w = affine_of_cols(&w.to_cols_array());
+            assert!(g.iter().zip(&w).all(|(a, b)| (a - b).abs() <= eps), "{what}: joint {k}: {g:?} vs {w:?}");
+        }
+    }
+
+    fn layer(clip: u16, phase: f32) -> Layer {
+        Layer { clip, weight: 1.0, target: 1.0, speed: 1.0, phase, ..Default::default() }
+    }
+
+    /// The rest pose, and a clip at full weight, as the glam path draws them.
+    #[test]
+    fn matches_the_glam_path() {
+        let m = model();
+        let rig = Rig::new(&m);
+        assert_close(&palette_of(&rig, &Channels::default()), &rest_palette(&m), 1e-6, "rest");
+        for (clip, t) in [(0u16, 0.0f32), (0, 0.7), (0, 1.99), (1, 0.33), (1, 0.5)] {
+            let mut ch = Channels::default();
+            ch.layers[0] = layer(clip, t);
+            let want = palette(&m, &globals(&m, &bake(&m, clip as usize).locals(&m, t, PlayMode::Loop)));
+            assert_close(&palette_of(&rig, &ch), &want, 1e-5, &format!("clip {clip} at {t}"));
+        }
+        assert_eq!(rig.clip("turn"), Some(1));
+        assert_eq!(rig.duration(0), 2.0);
+        assert_eq!(rig.duration(NONE), 0.0);
+    }
+
+    /// An override on a mask leaves the other bones; a half-weight blend is
+    /// half way; a mask's own weights scale it per bone.
+    #[test]
+    fn masks_and_weights() {
+        let m = model();
+        let mut rig = Rig::new(&m);
+        let left = rig.bone("left").unwrap();
+        let only_left = rig.add_mask("left", rig.subtree(left));
+        assert_eq!(rig.mask("left"), Some(only_left));
+        assert_eq!(rig.subtree(left), vec![0.0, 1.0, 0.0, 1.0]);
+        let mut ch = Channels::default();
+        ch.layers[0] = Layer { mask: only_left, ..layer(0, 1.0) };
+        let p = palette_of(&rig, &ch);
+        assert_eq!(p[1][7], 1.0, "left risen half way");
+        assert_eq!(p[2], palette_of(&rig, &Channels::default())[2], "right untouched");
+        assert_eq!(p[3][7], 1.0, "the tip rides on left");
+        ch.layers[0] = Layer { weight: 0.5, ..layer(0, 2.0 - 1e-6) };
+        assert!((palette_of(&rig, &ch)[2][7] - 1.0).abs() < 1e-4, "half weight: half of the full rise");
+        let mut w = vec![0.0; 4];
+        w[2] = 0.25;
+        let quarter = rig.add_mask("quarter right", w);
+        ch.layers[0] = Layer { mask: quarter, ..layer(0, 2.0 - 1e-6) };
+        let p = palette_of(&rig, &ch);
+        assert!((p[2][7] - 0.5).abs() < 1e-4 && p[1][7] == 0.0);
+        // A second blend layer over the first.
+        ch.layers[0] = layer(0, 1.0);
+        ch.layers[1] = Layer { mask: only_left, ..layer(1, 1.0 - 1e-6) };
+        let p = palette_of(&rig, &ch);
+        assert_eq!(p[2][7], 1.0, "right still rises");
+        assert!(p[3][11].abs() < 1e-4 && (p[3][3]).abs() < 1e-4, "left turned a quarter: the tip at {:?}", p[3]);
+    }
+
+    /// An additive layer adds its clip's change from its first frame: at
+    /// that frame nothing changes, later it adds to what is below.
+    #[test]
+    fn additive_layers() {
+        let m = model();
+        let rig = Rig::new(&m);
+        let mut ch = Channels::default();
+        ch.layers[0] = layer(0, 1.0);
+        let base = palette_of(&rig, &ch);
+        ch.layers[1] = Layer { kind: kind::ADDITIVE, ..layer(0, 0.0) };
+        assert_close(&palette_of(&rig, &ch), &base.iter().map(|a| Mat4::from_cols_array(&cols_of(a))).collect::<Vec<_>>(), 1e-6, "additive at its reference");
+        ch.layers[1].phase = 1.0;
+        assert_eq!(palette_of(&rig, &ch)[1][7], 2.0, "half way plus half way");
+        ch.layers[1].weight = 0.5;
+        assert_eq!(palette_of(&rig, &ch)[1][7], 1.5);
+    }
+
+    fn cols_of(a: &Affine) -> [f32; 16] {
+        [a[0], a[4], a[8], 0.0, a[1], a[5], a[9], 0.0, a[2], a[6], a[10], 0.0, a[3], a[7], a[11], 1.0]
+    }
+
+    /// The ticker: fades, phases, play modes, ground speed.
+    #[test]
+    fn advance_layers() {
+        let rig = Rig::new(&model());
+        let dt = 1.0 / 30.0;
+        let mut ch = Channels::default();
+        ch.layers[0] = Layer { weight: 0.0, target: 1.0, fade: 5.0, ..layer(1, 0.0) };
+        let mut ticks = 0;
+        while ch.layers[0].weight < 1.0 {
+            rig.advance(&mut ch, dt, 0.0);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 6, "a 200 ms blend-in");
+        assert!((ch.layers[0].phase - 0.2).abs() < 1e-5);
+        for _ in 0..30 {
+            rig.advance(&mut ch, dt, 0.0);
+        }
+        assert!(ch.layers[0].phase >= 0.0 && ch.layers[0].phase < 1.0, "looped: {}", ch.layers[0].phase);
+        assert!((ch.layers[0].phase - 0.2).abs() < 1e-4);
+        // Fading out clears the layer.
+        ch.layers[0].target = 0.0;
+        for _ in 0..6 {
+            rig.advance(&mut ch, dt, 0.0);
+        }
+        assert!(ch.layers[0].is_empty());
+        // Once: ends and holds.
+        ch.layers[0] = Layer { mode: PlayMode::Once as u8, ..layer(1, 0.9) };
+        rig.advance(&mut ch, dt, 0.0);
+        assert!(!ch.layers[0].ended());
+        for _ in 0..3 {
+            rig.advance(&mut ch, dt, 0.0);
+        }
+        assert!(ch.layers[0].ended() && ch.layers[0].phase == 1.0);
+        // Ping-pong keeps two lengths; ground speed scales the clip.
+        ch.layers[0] = Layer { mode: PlayMode::PingPong as u8, ..layer(1, 1.9) };
+        rig.advance(&mut ch, 0.2, 0.0);
+        assert!((ch.layers[0].phase - 0.1).abs() < 1e-5);
+        ch.layers[0] = Layer { flags: layer_flags::GROUND_SPEED, speed: 0.1, ..layer(0, 0.0) };
+        rig.advance(&mut ch, 0.5, 6.0);
+        assert!((ch.layers[0].phase - 0.3).abs() < 1e-6, "6 m/s for 0.5 s at 0.1 s/m");
+    }
+
+    /// Tweens: a turn reaches its target in the ticks its speed needs, the
+    /// short way round; a spin wraps; additive and over-the-rest turns; a
+    /// turn spread over a mask.
+    #[test]
+    fn tweens() {
+        let mut rig = Rig::new(&model());
+        let dt = 1.0 / 30.0;
+        let pi = std::f32::consts::PI;
+        let mut ch = Channels::default();
+        ch.tweens[0] = Tween { bone: 1, kind: tween_kind::TURN, axis: 1, target: pi / 2.0, speed: pi, ..Default::default() };
+        let mut ticks = 0;
+        while !ch.tweens[0].done() {
+            rig.advance(&mut ch, dt, 0.0);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 15, "a quarter turn at half a turn a second");
+        let p = palette_of(&rig, &ch);
+        assert!((p[3][11] - 0.0).abs() < 1e-5 && (p[3][3]).abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
+        // From 170° to -170° goes through 180°, not back through 0.
+        ch.tweens[0] = Tween { value: 170f32.to_radians(), target: -170f32.to_radians(), speed: 1.0, ..ch.tweens[0] };
+        rig.advance(&mut ch, dt, 0.0);
+        assert!(ch.tweens[0].value > 170f32.to_radians() || ch.tweens[0].value < -170f32.to_radians());
+        ch.tweens[0] = Tween { kind: tween_kind::SPIN, value: 0.0, speed: 4.0 * pi, ..ch.tweens[0] };
+        for _ in 0..40 {
+            rig.advance(&mut ch, dt, 0.0);
+            assert!(ch.tweens[0].value >= -pi && ch.tweens[0].value < pi && !ch.tweens[0].done());
+        }
+        // Over the rest pose a turn replaces the clip's turn; additive adds.
+        ch.tweens[0] = Tween { bone: 1, kind: tween_kind::TURN, axis: 1, value: pi / 2.0, target: pi / 2.0, ..Default::default() };
+        ch.layers[0] = layer(1, 1.0 - 1e-6);
+        let over = palette_of(&rig, &ch);
+        assert!((over[3][11] - 0.0).abs() < 1e-4 && (over[3][3]).abs() < 1e-4, "a quarter only: {:?}", over[3]);
+        ch.tweens[0].flags = tween_flags::ADDITIVE;
+        let added = palette_of(&rig, &ch);
+        assert!((added[3][3] + 1.0).abs() < 1e-4, "half a turn: the tip behind: {:?}", added[3]);
+        // A move over a mask by its weights.
+        let mut w = vec![0.0; 4];
+        (w[1], w[2]) = (1.0, 0.5);
+        let both = rig.add_mask("both", w);
+        ch.layers[0] = Layer::default();
+        ch.tweens[0] = Tween { bone: NONE, mask: both, kind: tween_kind::MOVE, axis: 1, value: 2.0, target: 2.0, ..Default::default() };
+        let p = palette_of(&rig, &ch);
+        assert_eq!((p[1][7], p[2][7]), (2.0, 1.0));
+    }
+
+    /// The same channels give the same bits.
+    #[test]
+    fn repeatable() {
+        let rig = Rig::new(&model());
+        let mut ch = Channels::default();
+        ch.layers[0] = layer(0, 0.3);
+        ch.layers[1] = Layer { kind: kind::ADDITIVE, weight: 0.3, ..layer(1, 0.6) };
+        ch.tweens[0] = Tween { bone: 3, kind: tween_kind::TURN, axis: 2, value: 0.4, target: 1.0, speed: 2.0, ..Default::default() };
+        let mut a = ch;
+        let mut b = ch;
+        for _ in 0..100 {
+            rig.advance(&mut a, 1.0 / 30.0, 1.5);
+            rig.advance(&mut b, 1.0 / 30.0, 1.5);
+        }
+        assert_eq!(a, b);
+        let (pa, pb) = (palette_of(&rig, &a), palette_of(&rig, &b));
+        assert!(pa.iter().flatten().zip(pb.iter().flatten()).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+}
