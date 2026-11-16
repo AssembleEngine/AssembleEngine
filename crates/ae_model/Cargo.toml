@@ -1,0 +1,14 @@
+[package]
+name = "ae_model"
+description = "The engine's model format (one skinned format, converted offline from glTF by ae_gltf): reading, writing, KTX2 textures, poses and clips. No heavy dependencies; the runtime side."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+glam = "0.30"
+ktx2 = "0.5.0"
+ruzstd = "0.9.1"

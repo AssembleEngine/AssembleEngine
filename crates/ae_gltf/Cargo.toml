@@ -1,0 +1,21 @@
+[package]
+name = "ae_gltf"
+description = "Offline glTF 2.0 to engine model converter (ae_model); used by ae-tool. Pulls the image decoders and the Basis Universal transcoder (C++), which the runtime does not need."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae_model.workspace = true
+anyhow.workspace = true
+glam = "0.30"
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "names", "extensions", "allow_empty_texture", "KHR_texture_transform", "KHR_materials_emissive_strength"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
+zstd = "0.13"
+bevy_mikktspace = "1.0.0"
+basisu_c_sys = { version = "0.9.1", features = ["extra"] }
+
+[dev-dependencies]
+basisu_c_sys = { version = "0.9.1", features = ["extra", "encoder"] }
+serde_json.workspace = true

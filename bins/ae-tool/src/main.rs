@@ -9,6 +9,8 @@
 //! ae-tool pack DIR OUT [--module GAME] [--with DIR]...  # a package directory as a deterministic zip
 //! ae-tool map-export land|water CELLS DIR [NAME]  # a generated map as a map package
 //! ae-tool unpack-list FILE             # an archive's files and content hash
+//! ae-tool model convert IN.gltf|IN.glb OUT.aemodel  # glTF 2.0 to the engine model (M11)
+//! ae-tool model info FILE.aemodel      # its parts, sizes and load time
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -29,7 +31,9 @@ const USAGE: &str = "usage:
   ae-tool catalog-fmt FILE...
   ae-tool pack DIR OUT [--module GAME] [--with DIR]...
   ae-tool map-export land|water CELLS DIR [NAME]
-  ae-tool unpack-list FILE";
+  ae-tool unpack-list FILE
+  ae-tool model convert IN.gltf|IN.glb OUT.aemodel
+  ae-tool model info FILE.aemodel";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
 /// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
@@ -62,6 +66,63 @@ fn catalog_fmt(files: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `model convert IN OUT` / `model info FILE`.
+fn model(args: &[String]) -> Result<()> {
+    match args {
+        [cmd, input, output] if cmd == "convert" => {
+            let start = std::time::Instant::now();
+            let converted = ae_gltf::convert_file(Path::new(input)).with_context(|| input.clone())?;
+            for w in &converted.warnings {
+                eprintln!("warning: {w}");
+            }
+            let bytes = converted.model.to_bytes();
+            std::fs::write(output, &bytes).with_context(|| format!("write {output}"))?;
+            println!("{output}: {} bytes, converted in {:.1} ms", bytes.len(), start.elapsed().as_secs_f64() * 1e3);
+            model_info(output)
+        }
+        [cmd, file] if cmd == "info" => model_info(file),
+        _ => bail!("usage: ae-tool model convert IN OUT | ae-tool model info FILE"),
+    }
+}
+
+fn model_info(file: &str) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("read {file}"))?;
+    // Load time: parse and validate, best of five.
+    let mut best = f64::INFINITY;
+    let mut model = None;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let m = ae_model::Model::from_bytes(&bytes)?;
+        best = best.min(start.elapsed().as_secs_f64());
+        model = Some(m);
+    }
+    let m = model.unwrap();
+    let texture_bytes: usize = m.textures.iter().map(Vec::len).sum();
+    println!("{file}: {} bytes, loaded in {:.3} ms", bytes.len(), best * 1e3);
+    println!(
+        "  {} bones, {} joints, {} primitives, {} materials, {} vertices ({} bytes), {} triangles, {} textures ({} bytes), {} clips",
+        m.bones.len(),
+        m.joints.len(),
+        m.primitives.len(),
+        m.materials.len(),
+        m.vertices.len(),
+        m.vertices.len() * ae_model::VERTEX_BYTES,
+        m.indices.len() / 3,
+        m.textures.len(),
+        texture_bytes,
+        m.clips.len()
+    );
+    println!("  bounds {:?} .. {:?}", m.bounds.min, m.bounds.max);
+    for (i, t) in m.textures.iter().enumerate() {
+        let img = ae_model::ktx::read(t)?;
+        println!("  texture {i} {}: VkFormat {} {}x{}, {} levels, {} bytes", m.texture_names[i], img.format.0, img.width, img.height, img.levels.len(), t.len());
+    }
+    for c in &m.clips {
+        println!("  clip {}: {:.2} s, {} channels", c.name, c.duration, c.channels.len());
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -72,6 +133,7 @@ fn main() -> ExitCode {
         Some("pack") => pack(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("map-export") => map_export(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("model") => model(&args[1..]).map(|()| ExitCode::SUCCESS),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

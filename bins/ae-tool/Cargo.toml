@@ -10,6 +10,8 @@ tracy = ["ae_profile/tracy"]
 
 [dependencies]
 ae_catalog.workspace = true
+ae_gltf.workspace = true
+ae_model.workspace = true
 ae_vfs.workspace = true
 ae_map.workspace = true
 ae_nav.workspace = true

@@ -18,6 +18,8 @@ ae_replay = { path = "crates/ae_replay" }
 ae_net = { path = "crates/ae_net" }
 ae_vfs = { path = "crates/ae_vfs" }
 ae_catalog = { path = "crates/ae_catalog" }
+ae_model = { path = "crates/ae_model" }
+ae_gltf = { path = "crates/ae_gltf" }
 ae_bot = { path = "crates/ae_bot" }
 ae_map = { path = "crates/ae_map" }
 ae_render_abi = { path = "crates/ae_render_abi" }

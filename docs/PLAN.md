@@ -2284,7 +2284,7 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M13 (not started)
+## Planned milestones M11–M13 (M11 in progress)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
@@ -2335,6 +2335,16 @@ that in.
     BC7, so the runtime needs no transcoder.
 - Not in the sim yet: no `PieceTransform` column exists. In M11 the renderer takes a pose per
   class (the rest pose, or a clip sampled at a time); the sim columns come later.
+- Progress (details: `docs/models.md`):
+  - Step 1, format and converter — done (2026-11-16). `ae_model` is the format (JSON header +
+    aligned blob, versioned), KTX2 textures, poses and clips. `ae_gltf` is the converter (the C++
+    Basis transcoder stays out of the runtime). `ae-tool model convert|info`. Tests on glTFs built
+    in the tests and on three vendored Khronos samples (SimpleSkin CC0, BoxAnimated CC-BY, Fox
+    CC0/CC-BY; `assets/models/khronos`). Sizes and load times measured (Fox: 295 KB, 0.08 ms to
+    load).
+  - Next: step 2, the runtime upload and drawing at the rest pose (opt-in, the dart path and its
+    goldens unchanged); step 3, skinning with clips sampled at a time, and the units' shadows; step
+    4, `ae-client --model`, benches, a validation run.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
