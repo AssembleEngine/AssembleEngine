@@ -355,12 +355,15 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
     (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone(), models: o.models.clone(), clip: o.clip })
 }
 
-fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
+fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> Result<UnitsSetup> {
     let classes = s.classes();
+    if let Some(c) = s.models.iter().filter_map(|m| m.class).find(|&c| c as usize >= classes.len()) {
+        bail!("--model {c}=...: there are {} unit classes (0 to {})", classes.len(), classes.len() - 1);
+    }
     // With an observer the classes end with the blips' and the selection's.
     let blip = s.observer.map(|_| classes.len() - 2);
     let models = models::per_class(&s.models, classes.len(), blip);
-    UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models }
+    Ok(UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models })
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with
@@ -703,7 +706,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         );
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(stream));
-        app = app.with_units(units_setup(&s, feed));
+        app = app.with_units(units_setup(&s, feed)?);
     }
     place_camera(&app, o.camera);
     if let Some(feed) = &effects_feed {
@@ -779,7 +782,7 @@ fn run(o: Options) -> Result<ExitCode> {
             effects_feed = feed;
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
-                app = app.with_units(units_setup(&s, feed.clone()));
+                app = app.with_units(units_setup(&s, feed.clone())?);
                 let vision = s.observer.map(|_| Arc::new(VisionFeed::new(s.vision_grid())));
                 if let Some(v) = &vision {
                     app = app.with_vision(v.clone());

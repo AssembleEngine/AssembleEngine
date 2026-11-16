@@ -113,7 +113,8 @@ fn converted(gltf: &Path) -> Result<PathBuf> {
 
 /// `UnitsSetup::models` for `classes` classes: each class's model, the
 /// last `--model` naming it winning; a model without a class goes to
-/// every class but `blip`.
+/// every class but `blip`. Classes past `classes` are left out (the caller
+/// refuses them).
 pub fn per_class(models: &[ClassModel], classes: usize, blip: Option<usize>) -> Vec<Option<Arc<Model>>> {
     let mut out = vec![None; if models.is_empty() { 0 } else { classes }];
     for m in models {

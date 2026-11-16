@@ -244,7 +244,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     if let (Some(s), Some(stream)) = (sim_options(&o), cache.stream(&o)?) {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(stream);
-        app = app.with_units(units_setup(&s, feed));
+        app = app.with_units(units_setup(&s, feed)?);
     }
     // Explosions (particles and scorch marks) only in scenes that set them off.
     let feed = if scene.explosions > 0 {
