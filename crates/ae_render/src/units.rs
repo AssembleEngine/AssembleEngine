@@ -184,7 +184,8 @@ struct Models {
     template: OwnedBuffer,
     opaque: vk::Pipeline,
     masked: vk::Pipeline,
-    caster: Option<vk::Pipeline>,
+    /// Opaque and masked casters.
+    caster: Option<(vk::Pipeline, vk::Pipeline)>,
 }
 
 pub struct UnitRenderer {
@@ -464,7 +465,10 @@ impl UnitRenderer {
         let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true).context("unit model pipeline")?;
         let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true).context("unit masked model pipeline")?;
         let caster = match casts {
-            true => Some(graphics(spirv!("units_models_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit model shadow pipeline")?),
+            true => Some((
+                graphics(spirv!("units_models_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit model shadow pipeline")?,
+                graphics(spirv!("units_models_shadow_masked.vert"), spirv!("units_models_shadow_masked.frag"), false).context("unit masked model shadow pipeline")?,
+            )),
             false => None,
         };
         Ok(Models { set, set_layout, sets, palettes, rows, shadow_commands, template, opaque, masked, caster })
@@ -683,11 +687,19 @@ impl UnitRenderer {
                     device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, &k.to_le_bytes());
                 }
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
-                // Every row of each model class, every command in one
-                // multi-draw (the darts' caster skipped those rows).
-                if let Some((m, model_caster)) = model_caster {
-                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, model_caster);
-                    device.cmd_draw_indexed_indirect(cmd, m.shadow_commands[ctx.slot].buffer, 0, m.set.commands(), models::COMMAND_BYTES as u32);
+                // Every row of each model class (the darts' caster skipped
+                // those rows): the opaque commands in one multi-draw, the
+                // masked ones (alpha-tested) in another.
+                if let Some((m, (opaque_caster, masked_caster))) = model_caster {
+                    let (opaque, total) = (m.set.opaque, m.set.commands());
+                    for (pipeline, first, count) in [(opaque_caster, 0, opaque), (masked_caster, opaque, total - opaque)] {
+                        if count == 0 {
+                            continue;
+                        }
+                        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                        device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, pipeline::slice_bytes(&[k, first]));
+                        device.cmd_draw_indexed_indirect(cmd, m.shadow_commands[ctx.slot].buffer, first as u64 * models::COMMAND_BYTES, count, models::COMMAND_BYTES as u32);
+                    }
                 }
             }
         }
@@ -697,7 +709,7 @@ impl UnitRenderer {
         let device = &gpu.device;
         if let Some(mut m) = self.models.take() {
             unsafe {
-                for p in [m.opaque, m.masked].into_iter().chain(m.caster) {
+                for p in [m.opaque, m.masked].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
                     device.destroy_pipeline(p, None);
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);

@@ -142,7 +142,7 @@ Interpolation: previous + latest transforms uploaded per instance, lerped in the
   RedAlert `cbt.glsl`; surface appearance from the material tilesets below), `water_ra` (RedAlert
   `src/draw.cpp:189-610` pass order + shaders), cascaded shadows, fog of war (sensor grid → texture),
   decals, GPU particles, post, UI.
-- Models: glTF converted offline to one skinned format (M11: skin + bones, basic piece models as one bone and weight 1); piece animation = sim WASM writing `PieceTransform` columns.
+- Models: glTF converted offline to one bone-based format (M11: bones and joints; pieces are joints at weight 1), drawn in two GPU layouts (rigid: one joint per vertex; skinned: four), GPU-driven; piece animation = sim WASM writing `PieceTransform` columns.
 - UI: RmlUi behind a C FFI crate, rendered in a frame graph pass; untrusted widget modules drive documents
   and data models through a validated API and read only view tables.
 
@@ -2297,10 +2297,10 @@ that in.
 
 - Scope: an offline converter (glTF 2.0 `.gltf`/`.glb` to an engine model in the archive) and the
   runtime that draws it.
-- One uniform format: skinned. A basic model (meshes attached to nodes, the "pieces") is
-  converted on load to skin + bones + one weight: each mesh's vertices get the one bone of the
-  node it hangs on, weight 1. So the renderer has one path, and piece animation
-  (`PieceTransform` columns from the sim) drives bones the same way for both.
+- One bone-based format: a basic model (meshes attached to nodes, the "pieces") is converted to
+  bones and joints with one weight: each mesh's vertices get the one joint of the node it hangs
+  on, weight 1. So piece animation (`PieceTransform` columns from the sim) drives bones the same
+  way for pieces and skins. On the GPU two layouts (rigid, skinned; decided below, 2026-11-16).
 - Supported:
   - meshes attached to pieces (node hierarchy); skinned models with one or several skins, their
     joints and inverse bind matrices;
@@ -2342,9 +2342,10 @@ that in.
     vertex, 68 bytes; pieces sharing a material merged into one primitive, so a model draws once
     per material) and skinned (four joints and weights, 80 bytes). Replaces "one uniform format";
   - per-unit poses: each unit's palette range in one big buffer, its offset per instance; a
-    compute pass resolves bone transforms to 3x4 matrices once per bone per frame (interpolating
+    compute pass resolves bone transforms to matrices once per bone per frame (interpolating
     sim ticks there, not per vertex); vertices only blend matrices. Step 2 points every unit of a
-    class at the class's rest palette; step 3 adds the resolve pass and per-unit ranges;
+    class at the class's rest palette; step 3 adds the resolve pass and per-unit ranges (the
+    palette is `mat4` now; 3x4 rows, 48 bytes, when per-unit ranges make its size matter);
   - all models' vertices and indices in one GPU buffer.
 - Progress (details: `docs/models.md`):
   - Step 1, format and converter — done (2026-11-16). `ae_model` is the format (JSON header +

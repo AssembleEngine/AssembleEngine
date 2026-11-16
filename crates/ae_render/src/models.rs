@@ -264,6 +264,16 @@ impl ModelSet {
     /// units per visible-list region.
     pub fn new(gpu: &GpuDevice, models: &[Option<Arc<Model>>], capacity: u32, max_classes: usize) -> Result<Self> {
         ensure!(gpu.gpu_driven, "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound");
+        // The fragment stage sees the models' texture array and the units'
+        // four samplers.
+        let limits = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) }.limits;
+        let need = MAX_TEXTURES + 4;
+        ensure!(
+            limits.max_per_stage_descriptor_samplers >= need && limits.max_per_stage_descriptor_sampled_images >= need,
+            "the units' models need {need} samplers per shader stage; the device allows {} samplers and {} sampled images",
+            limits.max_per_stage_descriptor_samplers,
+            limits.max_per_stage_descriptor_sampled_images
+        );
         let mut tex = Textures { gpu, images: Vec::new(), samplers: Vec::new(), image_of: Vec::new(), slots: Vec::new() };
         match Self::build(gpu, models, capacity, max_classes, &mut tex) {
             Ok(set) => Ok(set),
@@ -289,6 +299,7 @@ impl ModelSet {
             }
             let m = unique.len();
             model.validate().context("model")?;
+            ensure!(!model.primitives.is_empty(), "a unit model without triangles");
             let mut prims = Vec::new();
             for p in &model.primitives {
                 prims.push((words.len() as u32, indices.len() as u32));

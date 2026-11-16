@@ -3249,7 +3249,9 @@ fn model_box(m: &mut ae_model::Model, min: [f32; 3], max: [f32; 3], material: u3
 /// alpha), the Khronos Fox (textured, skinned, at rest) and a dart in one
 /// frame. The front and the right land where the heading puts them (the
 /// model is neither turned nor mirrored), the masked-away block shows the
-/// ground, the Fox shows its texture, and every unit passes the cull.
+/// ground, the Fox shows its texture, and every unit passes the cull. With
+/// the units' shadow map the models cast shadows (the masked-away block
+/// none).
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn units_draw_models() {
@@ -3296,37 +3298,55 @@ fn units_draw_models() {
             columns[a].push(word);
         }
     }
-    let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
     let classes = vec![UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [1.0, 0.02, 1.0], floats: false }];
     let models = vec![Some(Arc::new(blocks)), Some(Arc::new(fox))];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models });
-    let camera = {
-        let view = app.view();
-        let mut view = view.lock().unwrap();
-        view.camera.target = Vec2::new(512.0, 512.0);
-        view.camera.pitch = 1.4;
-        view.camera.distance = 700.0;
-        view.fog = false;
-        view.camera
-    };
     let extent = vk::Extent2D { width: 320, height: 240 };
-    app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
-    run_headless(&gpu, &mut app, target, 8, config).unwrap();
-    let pixels = app.readback().unwrap();
-    if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
-        let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
-        ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-        std::fs::write(&path, ppm).unwrap();
-    }
+    let mut camera = None;
+    // The frame and the (rows, visible) counts, with or without the units'
+    // shadow map (the models' caster).
+    let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>) {
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns: columns.clone() }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: models.clone() });
+        if shadows {
+            app = app.with_shadows();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.4;
+            view.camera.distance = 700.0;
+            view.fog = false;
+            view.shadows = shadows;
+            camera = Some(view.camera);
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("models-{}.ppm", shadows as u8)), ppm).unwrap();
+        }
+        let counts = app.last_unit_counts();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        (pixels, counts)
+    };
+    let (pixels, counts) = render(false);
+    let (shaded, shaded_counts) = render(true);
+    let camera = camera.unwrap();
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
-    let pixel = |p: Vec3| -> [i32; 3] {
+    let index = |p: Vec3| -> usize {
         let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
         let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
         assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "{p} projects into the view");
-        let i = (v as usize * extent.width as usize + u as usize) * 4;
+        (v as usize * extent.width as usize + u as usize) * 4
+    };
+    let pixel = |p: Vec3| -> [i32; 3] {
+        let i = index(p);
         [pixels[i] as i32, pixels[i + 1] as i32, pixels[i + 2] as i32]
     };
     // Model point (forward, up, right) of a unit at (x, y) with heading h,
@@ -3352,7 +3372,28 @@ fn units_draw_models() {
     assert!(cr > cb + 30 && cr > 60, "the Fox's texture: {cr} {cg} {cb}");
     let [cr, cg, cb] = pixel(Vec3::new(560.0, 50.0, 580.0));
     assert!(cr > 2 * cg && cb > 2 * cg, "the dart: {cr} {cg} {cb}");
-    assert_eq!(app.last_unit_counts(), Some((4, 4)), "four rows, all pass the cull");
-    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_eq!(counts, Some((4, 4)), "four rows, all pass the cull");
+    assert_eq!(shaded_counts, Some((4, 4)));
+    // With the units' shadow map: the ground down-sun of the first block
+    // unit's red block (its top centre's shadow) darkens; open ground does
+    // not change.
+    let sun = ae_render::terrain::sun::direction();
+    let (x, y, h, r, _) = units[0];
+    let top = at(x, y, h, r, Vec3::new(0.78, 0.6, 0.0));
+    let ground = top - sun * ((top.y - 50.0) / sun.y);
+    let luma = |px: &[u8], p: Vec3| -> i32 {
+        let i = index(p);
+        px[i] as i32 + px[i + 1] as i32 + px[i + 2] as i32
+    };
+    let (lit, dark) = (luma(&pixels, ground), luma(&shaded, ground));
+    assert!(dark * 10 < lit * 8, "the red block's shadow at {ground}: {lit} without the map, {dark} with it");
+    // The green block, masked away, casts none (the masked caster tests
+    // alpha as the camera does).
+    let green = at(x, y, h, r, Vec3::new(0.0, 1.15, 0.0));
+    let ground = green - sun * ((green.y - 50.0) / sun.y);
+    let (lit, dark) = (luma(&pixels, ground), luma(&shaded, ground));
+    assert!((lit - dark).abs() <= 6, "no shadow of the masked-away block at {ground}: {lit} without the map, {dark} with it");
+    let open = Vec3::new(512.0, 50.0, 400.0);
+    assert!((luma(&pixels, open) - luma(&shaded, open)).abs() <= 6, "open ground unchanged");
     assert_clean(&gpu);
 }

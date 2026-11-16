@@ -77,7 +77,8 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   of its class's commands. The reset copies the commands' template (instance counts 0).
 - **Shadows**: the shadow caster draws every row; the rows grouped by class (written on the CPU
   when a new tick arrives) give each class's instances. The darts' caster skips model classes.
-  Masked materials cast whole shadows.
+  Opaque and masked commands in a multi-draw each per cascade; the masked caster tests alpha as
+  the camera does, so what is masked away casts no shadow.
 - **Poses**: each row has a palette offset (rows buffer); the vertex shader skins by
   `palette[offset + joint]`, normals by the cofactor matrix (right under non-uniform scale). Step
   2 points every unit of a class at the class's rest palette; step 3 adds per-unit ranges and a
@@ -88,14 +89,18 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 - **Materials**: base colour (factor × vertex colour × texture), alpha mask, normal map, occlusion,
   emissive, double-sided; lit like the darts (sun past the hills, units and particles, sky, fog).
   Not yet: metallic-roughness, blending (blended materials are drawn as masks at 0.5).
+  Implemented but not yet covered by a GPU test: normal maps, occlusion, emissive, the UV
+  transform, non-default samplers, BC7 textures on the GPU.
 - **Device**: needs `multiDrawIndirect`, `shaderDrawParameters` and
   `descriptorBindingPartiallyBound` (enabled when present; a units renderer with models refuses to
-  start without them), and `textureCompressionBC` for BC textures.
+  start without them), 1028 samplers per shader stage (checked), and `textureCompressionBC` for BC
+  textures. A model without triangles is refused.
 
 Test: `units_draw_models` (`crates/ae_render/tests/gpu.rs`, validation on): a piece model built in
-the test (opaque front, masked right side, a block masked away), the Fox and a dart in one frame;
-front and right land where the heading puts them (not turned, not mirrored), the mask discards,
-the Fox shows its texture.
+the test (opaque front, masked right side, a block masked away), the Fox and a dart in one frame,
+without and with the units' shadow map; front and right land where the heading puts them (not
+turned, not mirrored), the mask discards, the Fox shows its texture, the blocks cast shadows and
+the masked-away block none.
 
 ## The converter: what it reads, drops and refuses
 
