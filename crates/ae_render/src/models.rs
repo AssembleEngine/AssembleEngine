@@ -30,12 +30,10 @@ use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline;
 use crate::upload;
-use ae_framegraph::BufferDesc;
 use ae_model::{AlphaMode, Filter, Model, Sampler, TextureRef, Wrap, ktx};
 use anyhow::{Context as _, Result, ensure};
 use ash::vk;
 use glam::Mat4;
-use gpu_allocator::MemoryLocation;
 use std::sync::Arc;
 
 /// Texture descriptors in the models' set (partially bound; slot 0: a
@@ -404,28 +402,16 @@ impl ModelSet {
         })
     }
 
-    /// Bytes of one slot's palette buffer.
-    pub fn palette_bytes(&self) -> u64 {
-        (self.palette_len.max(1) as u64) * 64
-    }
-
     /// Commands among the models' (after the darts').
     pub fn commands(&self) -> u32 {
         self.draws.len() as u32
     }
 
-    /// A host-visible per-slot buffer for the palettes.
-    pub fn palette_buffer(&self, gpu: &GpuDevice) -> Result<OwnedBuffer> {
-        OwnedBuffer::new(gpu, BufferDesc { size: self.palette_bytes(), usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "model palette")
-    }
-
-    /// Write each class's palette (its rest pose for now) into `bytes`.
-    pub fn write_palettes(&self, bytes: &mut [u8]) {
-        for c in &self.classes {
-            let at = c.palette_offset as usize * 64;
-            let floats: Vec<f32> = c.rest.iter().flat_map(|m| m.to_cols_array()).collect();
-            bytes[at..at + floats.len() * 4].copy_from_slice(pipeline::slice_bytes(&floats));
-        }
+    /// The palette buffer's head: each class's rest palette at its offset
+    /// (written once; rows at rest point at it).
+    pub fn rest_palettes(&self) -> Vec<u8> {
+        let floats: Vec<f32> = self.classes.iter().flat_map(|c| c.rest.iter().flat_map(|m| m.to_cols_array())).collect();
+        pipeline::slice_bytes(&floats).to_vec()
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

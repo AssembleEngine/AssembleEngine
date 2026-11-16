@@ -44,7 +44,7 @@ impl RenderModule for Post {
             g.image("target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT), Class::Backbuffer)
         };
         // The unit buffers, then the units' shadow map.
-        let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts"].map(|name| library(&mut g, name)));
+        let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts", "units.palette"].map(|name| library(&mut g, name)));
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
         let particles = env.particles.then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
         // The particles' coloured shadows, with the map.
@@ -55,11 +55,23 @@ impl RenderModule for Post {
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
             .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
             .id();
+        // The units' poses, before anything draws them.
+        if let Some([instances, .., palette]) = units {
+            let pose = p.library("units.pose");
+            g.pass("units pose", PassKind::Compute, pose)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+                .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
+                .id();
+        }
         // The units' shadows: every unit drawn from the sun, before the
         // passes that sample the map.
-        if let (Some([instances, ..]), Some(map)) = (units, map) {
+        if let (Some([instances, .., palette]), Some(map)) = (units, map) {
             let shadows = p.library("shadows.draw");
-            g.pass("shadows", PassKind::Graphics, shadows).access(instances, Role::StorageBufferRead(ShaderStage::Vertex)).depth(map, LoadOp::Clear).id();
+            g.pass("shadows", PassKind::Graphics, shadows)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
+                .depth(map, LoadOp::Clear)
+                .id();
         }
         // The particles' coloured shadows: this frame's particles (the
         // simulation, declared later, is their state's only writer).
@@ -82,7 +94,7 @@ impl RenderModule for Post {
             maps,
         )
         .id();
-        if let Some([instances, visible, draws, counts]) = units {
+        if let Some([instances, visible, draws, counts, palette]) = units {
             let reset = p.library("units.reset");
             g.pass("units reset", PassKind::Transfer, reset).access(draws, Role::TransferDst).id();
             let cull = p.library("units.cull");
@@ -97,6 +109,7 @@ impl RenderModule for Post {
                     .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
                     .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                     .access(draws, Role::IndirectBuffer)
+                    .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
                     .color(scene, LoadOp::Load)
                     .depth(depth, LoadOp::Load),
                 maps,

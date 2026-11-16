@@ -1,26 +1,28 @@
 digraph frame_graph {
   rankdir=LR;
   node [shape=box, style=filled];
-  p2 [label="0: units reset\nTransfer", fillcolor="#fff3cd"];
-  p3 [label="1: units cull\nCompute", fillcolor="#d1e7dd"];
-  p5 [label="2: units count\nTransfer", fillcolor="#fff3cd"];
-  p6 [label="3: units count read\nTransfer", fillcolor="#fff3cd"];
-  p0 [label="4: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p1 [label="5: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p4 [label="6: units\nGraphics", fillcolor="#cfe2ff"];
-  p7 [label="7: water\nGraphics", fillcolor="#cfe2ff"];
-  p8 [label="8: present\nPresent", fillcolor="#e2e3e5"];
-  p0 -> p1 [label="terrain.leaves"];
-  p0 -> p1 [label="terrain.indirect"];
-  p1 -> p4 [label="depth"];
-  p1 -> p4 [label="target"];
-  p2 -> p3 [label="units.indirect"];
-  p3 -> p4 [label="units.visible"];
+  p3 [label="0: units reset\nTransfer", fillcolor="#fff3cd"];
+  p1 [label="1: units pose\nCompute", fillcolor="#d1e7dd"];
+  p4 [label="2: units cull\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="3: units count\nTransfer", fillcolor="#fff3cd"];
+  p7 [label="4: units count read\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="5: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p2 [label="6: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p5 [label="7: units\nGraphics", fillcolor="#cfe2ff"];
+  p8 [label="8: water\nGraphics", fillcolor="#cfe2ff"];
+  p9 [label="9: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p2 [label="terrain.leaves"];
+  p0 -> p2 [label="terrain.indirect"];
+  p1 -> p5 [label="units.palette"];
+  p2 -> p5 [label="depth"];
+  p2 -> p5 [label="target"];
   p3 -> p4 [label="units.indirect"];
-  p3 -> p5 [label="units.indirect"];
-  p4 -> p7 [label="depth"];
-  p4 -> p7 [label="target"];
-  p5 -> p6 [label="units.counts"];
-  p7 -> p8 [label="target"];
+  p4 -> p5 [label="units.visible"];
+  p4 -> p5 [label="units.indirect"];
+  p4 -> p6 [label="units.indirect"];
+  p5 -> p8 [label="depth"];
+  p5 -> p8 [label="target"];
+  p6 -> p7 [label="units.counts"];
+  p8 -> p9 [label="target"];
   // physical 0 Transient: depth
 }

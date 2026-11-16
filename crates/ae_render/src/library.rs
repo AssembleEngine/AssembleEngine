@@ -16,7 +16,7 @@
 //! The units' shadow map (`shadows.map`, written by `shadows.draw`) is
 //! the graph's choice: a graph that declares it must have every receiver
 //! (`terrain.draw`, `units.draw`, `water.draw`) sample it
-//! ([`LibraryPass::receives`], [`check_shadows`]), and the host then
+//! ([`LibraryPass::receives`], [`check_graph`]), and the host then
 //! shades by it; a graph without it renders without the units' shadows.
 //! The particles' coloured shadows (`shadows.color`, written by
 //! `shadows.particles`) come with it: a graph that declares them also
@@ -41,6 +41,9 @@ pub enum LibraryResource {
     UnitVisible,
     UnitIndirect,
     UnitCounts,
+    /// The skinning palettes of the units with models (`units.pose`
+    /// writes, `units.draw` and `shadows.draw` read).
+    UnitPalette,
     /// Offscreen output: the image (sized and formatted by the declaration,
     /// checked against the target) and the host buffer it is copied to.
     ReadbackTarget,
@@ -62,13 +65,14 @@ pub enum LibraryResource {
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 13] = [
+    pub const ALL: [LibraryResource; 14] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
         Self::UnitInstances,
         Self::UnitVisible,
         Self::UnitIndirect,
         Self::UnitCounts,
+        Self::UnitPalette,
         Self::ReadbackTarget,
         Self::ReadbackBuffer,
         Self::ShadowMap,
@@ -86,6 +90,7 @@ impl LibraryResource {
             Self::UnitVisible => "units.visible",
             Self::UnitIndirect => "units.indirect",
             Self::UnitCounts => "units.counts",
+            Self::UnitPalette => "units.palette",
             Self::ReadbackTarget => "readback.target",
             Self::ReadbackBuffer => "readback.buffer",
             Self::ShadowMap => ae_render_abi::module::SHADOW_MAP_NAME,
@@ -112,6 +117,9 @@ pub enum LibraryPass {
     TerrainDraw,
     UnitsReset,
     UnitsCull,
+    /// The units' poses: each animated unit's skinning palette, once per
+    /// bone per frame, into [`LibraryResource::UnitPalette`] (compute).
+    UnitsPose,
     UnitsDraw,
     UnitsCount,
     /// The units' shadow map: every unit (not only the visible ones) drawn
@@ -157,11 +165,12 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 14] = [
+    pub const ALL: [LibraryPass; 15] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
         Self::UnitsCull,
+        Self::UnitsPose,
         Self::UnitsDraw,
         Self::UnitsCount,
         Self::ShadowsDraw,
@@ -180,6 +189,7 @@ impl LibraryPass {
             Self::TerrainDraw => "terrain.draw",
             Self::UnitsReset => "units.reset",
             Self::UnitsCull => "units.cull",
+            Self::UnitsPose => "units.pose",
             Self::UnitsDraw => "units.draw",
             Self::UnitsCount => "units.count",
             Self::ShadowsDraw => "shadows.draw",
@@ -199,7 +209,7 @@ impl LibraryPass {
 
     pub fn kind(self) -> PassKind {
         match self {
-            Self::TerrainLod | Self::UnitsCull | Self::ParticlesSim => PassKind::Compute,
+            Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim => PassKind::Compute,
             Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
@@ -218,13 +228,19 @@ impl LibraryPass {
                 (R::UnitVisible, Role::StorageBufferWrite(ShaderStage::Compute)),
                 (R::UnitIndirect, Role::StorageBufferWrite(ShaderStage::Compute)),
             ],
+            Self::UnitsPose => &[(R::UnitInstances, Role::StorageBufferRead(ShaderStage::Compute)), (R::UnitPalette, Role::StorageBufferWrite(ShaderStage::Compute))],
             Self::UnitsDraw => &[
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitVisible, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitIndirect, Role::IndirectBuffer),
+                (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
             ],
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
-            Self::ShadowsDraw => &[(R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)), (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear))],
+            Self::ShadowsDraw => &[
+                (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear)),
+            ],
             Self::ShadowsParticles => &[
                 (R::ParticleState, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::ParticleKeys, Role::StorageBufferRead(ShaderStage::Vertex)),
@@ -259,7 +275,7 @@ impl LibraryPass {
 
     /// Whether it needs the unit renderer.
     pub fn uses_units(self) -> bool {
-        matches!(self, Self::UnitsReset | Self::UnitsCull | Self::UnitsDraw | Self::UnitsCount | Self::ShadowsDraw)
+        matches!(self, Self::UnitsReset | Self::UnitsCull | Self::UnitsPose | Self::UnitsDraw | Self::UnitsCount | Self::ShadowsDraw)
     }
 
     /// Whether it needs the particle renderer.
@@ -465,12 +481,16 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     Ok(())
 }
 
-/// Graph-wide: a graph that declares the units' shadow map has a
-/// `shadows.draw` pass write it, and one that declares the particles'
-/// coloured shadows declares the map too and has a `shadows.particles`
-/// pass write them (`libs`: each pass's library pass).
-pub fn check_shadows<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(usize) -> Option<LibraryPass>) -> Result<(), LibraryError> {
+/// Graph-wide: a graph that draws the units (or their shadows) poses them
+/// (`units.pose`, which alone writes their palettes); a graph that declares
+/// the units' shadow map has a `shadows.draw` pass write it, and one that
+/// declares the particles' coloured shadows declares the map too and has a
+/// `shadows.particles` pass write them (`libs`: each pass's library pass).
+pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(usize) -> Option<LibraryPass>) -> Result<(), LibraryError> {
     let written = |lib: LibraryPass| (0..graph.passes.len()).any(|i| libs(i) == Some(lib));
+    if (written(LibraryPass::UnitsDraw) || written(LibraryPass::ShadowsDraw)) && !written(LibraryPass::UnitsPose) {
+        return Err(error("the graph draws the units but no `units.pose` pass writes their palettes (`units.palette`)".into()));
+    }
     let (units, particles) = (map.contains(&Some(LibraryResource::ShadowMap)), map.contains(&Some(LibraryResource::ParticleShadows)));
     if units && !written(LibraryPass::ShadowsDraw) {
         return Err(error("the graph declares `shadows.map` but no `shadows.draw` pass writes it".into()));
@@ -642,7 +662,7 @@ mod tests {
         let shadows = |g: &FrameGraph<LibraryPass>| {
             let mut g = FrameGraph { resources: g.resources.clone(), passes: g.passes.clone(), roots: g.roots.clone(), plan_version: g.plan_version };
             let map = resolve(&mut g, &env(), size).unwrap();
-            check_shadows(&g, &map, |i| Some(g.passes[i].record)).map_err(|e| e.0)
+            check_graph(&g, &map, |i| Some(g.passes[i].record)).map_err(|e| e.0)
         };
         let g = base();
         assert_eq!(shadows(&g), Ok(()));
@@ -655,5 +675,10 @@ mod tests {
         g.resources[i].name = "not the map".into();
         let e = shadows(&g).unwrap_err();
         assert!(e.contains("without `shadows.map`"), "{e}");
+        // Units drawn but never posed.
+        let mut g = base();
+        g.passes.retain(|p| p.record != LibraryPass::UnitsPose);
+        let e = shadows(&g).unwrap_err();
+        assert!(e.contains("no `units.pose` pass"), "{e}");
     }
 }

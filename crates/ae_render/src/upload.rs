@@ -45,7 +45,14 @@ fn staging(gpu: &GpuDevice, bytes: &[u8], name: &str) -> Result<OwnedBuffer> {
 
 /// A device-local buffer holding `bytes` (`usage` gets `TRANSFER_DST` added).
 pub fn buffer(gpu: &GpuDevice, bytes: &[u8], usage: vk::BufferUsageFlags, name: &str) -> Result<OwnedBuffer> {
-    let desc = BufferDesc { size: bytes.len().max(4) as u64, usage: usage | vk::BufferUsageFlags::TRANSFER_DST };
+    buffer_sized(gpu, bytes.len() as u64, bytes, usage, name)
+}
+
+/// A device-local buffer of `size` bytes starting with `bytes` (the rest
+/// undefined; `usage` gets `TRANSFER_DST` added).
+pub fn buffer_sized(gpu: &GpuDevice, size: u64, bytes: &[u8], usage: vk::BufferUsageFlags, name: &str) -> Result<OwnedBuffer> {
+    anyhow::ensure!(bytes.len() as u64 <= size, "{name}: {} bytes into a buffer of {size}", bytes.len());
+    let desc = BufferDesc { size: size.max(4), usage: usage | vk::BufferUsageFlags::TRANSFER_DST };
     let target = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuOnly, name)?;
     let mut source = staging(gpu, bytes, "staging")?;
     let size = bytes.len() as u64;
@@ -68,6 +75,34 @@ pub fn buffer(gpu: &GpuDevice, bytes: &[u8], usage: vk::BufferUsageFlags, name: 
         return Err(err);
     }
     Ok(target)
+}
+
+/// `size` bytes of `buffer` from `offset`, copied to the host (for tests and
+/// tools: it waits for the device; `buffer` needs `TRANSFER_SRC`).
+pub fn read_buffer(gpu: &GpuDevice, buffer: vk::Buffer, offset: u64, size: u64) -> Result<Vec<u8>> {
+    let desc = BufferDesc { size: size.max(4), usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let mut host = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuToCpu, "readback")?;
+    let copied = one_shot(gpu, |cmd| unsafe {
+        // After every earlier use on this queue.
+        let before = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)];
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&before));
+        if size > 0 {
+            gpu.device.cmd_copy_buffer(cmd, buffer, host.buffer, &[vk::BufferCopy::default().src_offset(offset).size(size)]);
+        }
+        let after = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&after));
+    });
+    let bytes = copied.and_then(|()| Ok(host.mapped().context("readback buffer is not host-visible")?[..size as usize].to_vec()));
+    host.destroy(gpu);
+    bytes
 }
 
 /// A sampled 2D colour image with one mip per entry of `mips` (mip `i` is

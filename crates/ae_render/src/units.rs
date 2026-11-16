@@ -13,10 +13,12 @@
 //! * Positions are interpolated between the previous and the latest tick
 //!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
 //!
-//! With shadows, a `shadows` pass first (`shadows.draw`: every row, depth
+//! First a `units pose` pass (`units.pose`, compute: the skinning palettes
+//! of the units with models into `units.palette`, which the draws read).
+//! With shadows, a `shadows` pass next (`shadows.draw`: every row, depth
 //! only, into each cascade of the units' shadow map, [`crate::shadow`]).
 //!
-//! In the frame graph, five passes: `units reset` (transfer: the indirect
+//! Then five passes: `units reset` (transfer: the indirect
 //! instance count to 0), `units cull` (compute: frustum test per unit,
 //! appends visible indices and counts them), `units` (graphics: draws
 //! the visible list over the terrain, loading its colour target and depth
@@ -56,6 +58,7 @@ const IDENTITY_INSTANCES: u64 = (0xAE7 << 40) | (2 << 32);
 const IDENTITY_VISIBLE: u64 = (0xAE7 << 40) | (2 << 32) | 0x100;
 const IDENTITY_INDIRECT: u64 = (0xAE7 << 40) | (2 << 32) | 0x101;
 const IDENTITY_COUNTS: u64 = (0xAE7 << 40) | (2 << 32) | 0x200;
+const IDENTITY_PALETTE: u64 = (0xAE7 << 40) | (2 << 32) | 0x102;
 
 /// One snapshot of the units.
 #[derive(Clone, Debug)]
@@ -174,8 +177,6 @@ struct Models {
     set_layout: vk::DescriptorSetLayout,
     /// Per slot: set 1 (`shaders/units_models.glsl`).
     sets: Vec<vk::DescriptorSet>,
-    /// Per slot: the palettes (host-written each frame).
-    palettes: Vec<OwnedBuffer>,
     /// Per slot: class bases, rows grouped by class, pose offsets.
     rows: Vec<OwnedBuffer>,
     /// Per slot: the shadow caster's commands (every row of each class).
@@ -213,6 +214,9 @@ pub struct UnitRenderer {
     instances: Vec<OwnedBuffer>,
     /// Per slot: `(tick, rows)` of the stream in `instances`.
     uploaded: Vec<Option<(u64, u32)>>,
+    /// The skinning palettes (`units.palette`): with models, each class's
+    /// rest palette at its head; `units.pose` writes the rest.
+    palette: OwnedBuffer,
     ubos: Vec<OwnedBuffer>,
     visible: OwnedBuffer,
     /// `VkDrawIndirectCommand`: vertex count fixed, instance count from the cull.
@@ -301,6 +305,14 @@ impl UnitRenderer {
         let counts = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: initial.len() as u64, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "unit counts"))
             .collect::<Result<Vec<_>>>()?;
+        let palette_usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC;
+        let palette = match &model_set {
+            Some(set) => {
+                let rest = set.rest_palettes();
+                upload::buffer_sized(gpu, rest.len() as u64, &rest, palette_usage, "unit palette")?
+            }
+            None => OwnedBuffer::new(gpu, BufferDesc { size: 64, usage: palette_usage }, MemoryLocation::GpuOnly, "unit palette")?,
+        };
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (height_view, height_sampler) = terrain.height_texture();
@@ -401,7 +413,7 @@ impl UnitRenderer {
             false => None,
         };
         let models = match (model_set, model_layout) {
-            (Some(set), Some(layout)) => Some(Self::models(gpu, set, layout, desc_pool, frames_in_flight, capacity, &graphics, casts)?),
+            (Some(set), Some(layout)) => Some(Self::models(gpu, set, layout, desc_pool, frames_in_flight, capacity, &palette, &graphics, casts)?),
             _ => None,
         };
         Ok(Self {
@@ -421,6 +433,7 @@ impl UnitRenderer {
             casting: vec![false; frames_in_flight],
             instances,
             uploaded: vec![None; frames_in_flight],
+            palette,
             ubos,
             visible,
             indirect,
@@ -437,13 +450,13 @@ impl UnitRenderer {
         pool: vk::DescriptorPool,
         frames_in_flight: usize,
         capacity: u32,
+        palette: &OwnedBuffer,
         graphics: &PipelineMaker<'_>,
         casts: bool,
     ) -> Result<Models> {
         let device = &gpu.device;
         let host = |size: u64, usage: vk::BufferUsageFlags, name: &str| OwnedBuffer::new(gpu, BufferDesc { size, usage }, MemoryLocation::CpuToGpu, name);
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
-        let palettes = (0..frames_in_flight).map(|_| set.palette_buffer(gpu)).collect::<Result<Vec<_>>>()?;
         let rows_bytes = (MAX_CLASSES as u64 + 2 * capacity as u64) * 4;
         let rows = (0..frames_in_flight).map(|_| host(rows_bytes, storage, "unit model rows")).collect::<Result<Vec<_>>>()?;
         let shadow_bytes = (set.commands().max(1) as u64) * models::COMMAND_BYTES;
@@ -454,7 +467,7 @@ impl UnitRenderer {
         for (slot, &ds) in sets.iter().enumerate() {
             let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
             let geometry = [vk::DescriptorBufferInfo { buffer: set.geometry.buffer, offset: 0, range: set.index_offset.max(4) }];
-            let buffers = [geometry, info(&set.materials), info(&palettes[slot]), info(&set.class_table), info(&set.draw_table), info(&set.class_commands), info(&rows[slot])];
+            let buffers = [geometry, info(&set.materials), info(palette), info(&set.class_table), info(&set.draw_table), info(&set.class_commands), info(&rows[slot])];
             let mut writes: Vec<vk::WriteDescriptorSet> =
                 buffers.iter().enumerate().map(|(i, b)| vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(b)).collect();
             let images: Vec<vk::DescriptorImageInfo> =
@@ -471,7 +484,7 @@ impl UnitRenderer {
             )),
             false => None,
         };
-        Ok(Models { set, set_layout, sets, palettes, rows, shadow_commands, template, opaque, masked, caster })
+        Ok(Models { set, set_layout, sets, rows, shadow_commands, template, opaque, masked, caster })
     }
 
     fn indirect_usage() -> vk::BufferUsageFlags {
@@ -511,6 +524,15 @@ impl UnitRenderer {
 
     pub fn instances_desc(&self) -> BufferDesc {
         BufferDesc { size: self.instances[0].size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+    }
+
+    /// The skinning palettes (`units.pose` writes, the draws read).
+    pub fn palette(&self) -> BufferBinding {
+        BufferBinding { buffer: self.palette.buffer, offset: 0, size: self.palette.size, identity: IDENTITY_PALETTE }
+    }
+
+    pub fn palette_desc(&self) -> BufferDesc {
+        BufferDesc { size: self.palette.size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
     }
 
     /// Visible instance indices (cull writes, draw reads).
@@ -579,12 +601,6 @@ impl UnitRenderer {
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
         }
-        if let Some(m) = &mut self.models {
-            let Models { set, palettes, .. } = m;
-            if let Some(bytes) = palettes[slot].mapped() {
-                set.write_palettes(bytes);
-            }
-        }
     }
 
     /// Zero the instance count. Records inside a transfer pass that
@@ -604,6 +620,10 @@ impl UnitRenderer {
         let size = if self.models.is_some() { self.indirect.size } else { 16 };
         unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, self.indirect.buffer, self.counts[ctx.slot].buffer, &[vk::BufferCopy::default().size(size)]) };
     }
+
+    /// The units' poses. Records inside a compute pass that reads
+    /// [`Self::instances`] and writes [`Self::palette`].
+    pub fn record_pose(&self, _ctx: &PassContext<'_>) {}
 
     /// Frustum culling. Records inside a compute pass that reads
     /// [`Self::instances`] and writes [`Self::visible`] and
@@ -714,7 +734,7 @@ impl UnitRenderer {
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);
             }
-            for b in m.palettes.iter_mut().chain(m.rows.iter_mut()).chain(m.shadow_commands.iter_mut()) {
+            for b in m.rows.iter_mut().chain(m.shadow_commands.iter_mut()) {
                 b.destroy(gpu);
             }
             m.template.destroy(gpu);
@@ -735,6 +755,7 @@ impl UnitRenderer {
         }
         self.visible.destroy(gpu);
         self.indirect.destroy(gpu);
+        self.palette.destroy(gpu);
     }
 }
 

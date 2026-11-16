@@ -748,6 +748,7 @@ impl RenderApp for TerrainApp {
             LibraryResource::UnitVisible => Binding::Buffer(units()?.visible()),
             LibraryResource::UnitIndirect => Binding::Buffer(units()?.indirect()),
             LibraryResource::UnitCounts => Binding::Buffer(units()?.counts(slot)),
+            LibraryResource::UnitPalette => Binding::Buffer(units()?.palette()),
             LibraryResource::ReadbackTarget => {
                 let o = offscreen()?;
                 Binding::Image(ImageBinding { image: o.image.image, view: o.image.view, format: READBACK_FORMAT, extent: o.extent, range: o.image.range(), identity: (0xAE7 << 40) | 10 })
@@ -885,6 +886,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::TerrainDraw => terrain()?.record_draw(ctx, self.wireframe),
                 LibraryPass::UnitsReset => units()?.record_reset(ctx),
                 LibraryPass::UnitsCull => units()?.record_cull(ctx),
+                LibraryPass::UnitsPose => units()?.record_pose(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
                 LibraryPass::UnitsCount => units()?.record_count(ctx),
                 LibraryPass::ShadowsDraw => units()?.record_shadows(ctx),
@@ -946,7 +948,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         ),
     };
     // The unit buffers, then the units' shadow map.
-    let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts].map(|r| library_buffer(&mut graph, r)));
+    let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts, LibraryResource::UnitPalette].map(|r| library_buffer(&mut graph, r)));
     let map = (env.units && env.shadows).then(|| library_shadow_map(&mut graph));
     let particles = env.particles.then(|| [LibraryResource::ParticleState, LibraryResource::ParticleKeys, LibraryResource::ParticleIndirect].map(|r| library_buffer(&mut graph, r)));
     // The particles' coloured shadows, with the map.
@@ -964,10 +966,23 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
         .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
         .id();
+    // The units' poses, before anything draws them.
+    if let Some([instances, .., palette]) = units {
+        graph
+            .pass("units pose", PassKind::Compute, LibraryPass::UnitsPose)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+            .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
+    }
     // The units' shadows: every unit drawn from the sun, before anything
     // that samples the map.
-    if let (Some([instances, ..]), Some(map)) = (units, map) {
-        graph.pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw).access(instances, Role::StorageBufferRead(ShaderStage::Vertex)).depth(map, LoadOp::Clear).id();
+    if let (Some([instances, .., palette]), Some(map)) = (units, map) {
+        graph
+            .pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
+            .depth(map, LoadOp::Clear)
+            .id();
     }
     // The particles' coloured shadows: this frame's particles (the
     // simulation, declared later, is their state's only writer, so this
@@ -991,7 +1006,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         receivers,
     )
     .id();
-    if let Some([instances, visible, draws, counts]) = units {
+    if let Some([instances, visible, draws, counts, palette]) = units {
         graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
         graph
             .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
@@ -1007,6 +1022,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
                 .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
+                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
                 .color(target, LoadOp::Load)
                 .depth(depth, LoadOp::Load),
             receivers,
@@ -1190,6 +1206,7 @@ impl TerrainApp {
             LibraryResource::UnitVisible => units.map(|u| u.visible_desc()),
             LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
             LibraryResource::UnitCounts => units.map(|u| u.counts_desc()),
+            LibraryResource::UnitPalette => units.map(|u| u.palette_desc()),
             LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc { size: o.buffer.size, usage: vk::BufferUsageFlags::TRANSFER_DST }),
             LibraryResource::ParticleState => self.particle_renderer.as_ref().map(|p| p.state_desc()),
             LibraryResource::ParticleKeys => self.particle_renderer.as_ref().map(|p| p.keys_desc()),
@@ -1237,7 +1254,7 @@ impl TerrainApp {
             };
             passes.push(ScenePass { program, work });
         }
-        library::check_shadows(&graph, &resources, |i| match passes[i].work {
+        library::check_graph(&graph, &resources, |i| match passes[i].work {
             PassWork::Library(lib) => Some(lib),
             _ => None,
         })?;
