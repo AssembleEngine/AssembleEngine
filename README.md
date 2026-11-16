@@ -4,7 +4,8 @@ An RTS-first game engine: a deterministic lockstep simulation on an ECS, with ga
 that run on many cores at once, native services (navigation, spatial queries, sensors) behind batch
 APIs, and a frame-graph renderer whose topology a WASM render module declares.
 
-The architecture and roadmap are in [docs/PLAN.md](docs/PLAN.md). Spike results and measured numbers
+The architecture and roadmap are in [docs/PLAN.md](docs/PLAN.md); [docs/architecture.md](docs/architecture.md)
+draws the same structure level by level. Spike results and measured numbers
 are in [spikes/README.md](spikes/README.md).
 
 ## Status
