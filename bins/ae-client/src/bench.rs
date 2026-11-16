@@ -32,7 +32,7 @@
 //! time of building the renderer's model set (`ModelSet::new`: geometry,
 //! textures, baked clips, cull spheres), median of 5.
 
-use super::models::{self, ClassModel, ClipChoice, Model};
+use super::models::{self, ClassModel, ClipChoice, ClipPlay, Model};
 use super::{MapKind, Options, effects, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
 use ae_bench::Report;
 use ae_bench::diff::Thresholds;
@@ -117,7 +117,7 @@ const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 
 /// The Fox's clips (1 Survey, 2 Walk, 3 Run): walk while moving, survey
 /// standing still, so every unit plays one.
-const FOX_CLIPS: ClipChoice = ClipChoice { moving: 2, still: 1 };
+const FOX_CLIPS: ClipChoice = ClipChoice { moving: ClipPlay::looping(2), still: ClipPlay { clip: 1, mode: models::PlayMode::PingPong } };
 
 const SCENES: [Scene; 9] = [
     Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0, fox: false },

@@ -13,6 +13,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 pub use ae_model::Model;
+pub use ae_model::pose::PlayMode;
 
 /// A class's model (`None`: every class but the observer's blips).
 #[derive(Clone, Debug)]
@@ -21,25 +22,57 @@ pub struct ClassModel {
     pub model: Arc<Model>,
 }
 
-/// Which clip units play: the model's clip numbers from 1 (0: the rest
-/// pose), for units moving and units standing still.
+/// One clip choice: the model's clip number from 1 (0: the rest pose) and
+/// how it plays past its end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClipPlay {
+    pub clip: u32,
+    pub mode: PlayMode,
+}
+
+impl ClipPlay {
+    pub const fn looping(clip: u32) -> Self {
+        Self { clip, mode: PlayMode::Loop }
+    }
+
+    /// `N[:loop|pingpong|once]`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let (n, mode) = text.split_once(':').unwrap_or((text, "loop"));
+        let clip = n.trim().parse().with_context(|| format!("--clip: {n:?} is not a clip number"))?;
+        let mode = match mode.trim() {
+            "loop" => PlayMode::Loop,
+            "pingpong" | "ping-pong" => PlayMode::PingPong,
+            "once" => PlayMode::Once,
+            other => bail!("--clip: play mode {other:?}: expected loop, pingpong or once"),
+        };
+        Ok(Self { clip, mode })
+    }
+
+    /// The stream's `clip` word.
+    pub fn word(self) -> u32 {
+        ae_render::units::clip_word(self.clip, self.mode)
+    }
+}
+
+/// Which clip units play, for units moving and units standing still.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClipChoice {
-    pub moving: u32,
-    pub still: u32,
+    pub moving: ClipPlay,
+    pub still: ClipPlay,
 }
 
 impl ClipChoice {
+    /// `MOVING[,STILL]`, each `N[:loop|pingpong|once]`.
     pub fn parse(text: &str) -> Result<Self> {
-        let mut parts = text.split(',').map(|p| p.trim().parse::<u32>());
-        let moving = parts.next().context("--clip MOVING[,STILL]")?.context("--clip MOVING[,STILL]")?;
-        let still = parts.next().transpose().context("--clip MOVING[,STILL]")?.unwrap_or(0);
-        ensure!(parts.next().is_none(), "--clip takes one or two clip numbers");
+        let mut parts = text.split(',');
+        let moving = ClipPlay::parse(parts.next().context("--clip MOVING[,STILL]")?)?;
+        let still = parts.next().map(ClipPlay::parse).transpose()?.unwrap_or_default();
+        ensure!(parts.next().is_none(), "--clip takes one or two clips");
         Ok(Self { moving, still })
     }
 
-    /// The clip of a unit (stream attribute `clip`).
-    pub fn of(self, moving: bool) -> u32 {
+    /// The clip of a unit.
+    pub fn of(self, moving: bool) -> ClipPlay {
         if moving { self.moving } else { self.still }
     }
 }
@@ -136,12 +169,15 @@ pub fn per_class(models: &[ClassModel], classes: usize, blip: Option<usize>) -> 
     out
 }
 
-/// A unit's clip time at `tick` (seconds): the sim's time, offset per unit
-/// so a crowd does not move in step.
-pub fn clip_time(key: u64, tick: u64, tick_seconds: f32) -> f32 {
-    let h = key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
-    let phase = h as f64 / (1u64 << 24) as f64 * 8.0;
-    (tick as f64 * tick_seconds as f64 + phase) as f32
+/// A unit's clip time `ticks` after its clip started (seconds of sim
+/// time): looping clips start at a phase of their own per unit, so a crowd
+/// does not move in step; a clip played once starts at its beginning.
+pub fn clip_time(key: u64, play: ClipPlay, ticks: u64, tick_seconds: f32) -> f32 {
+    let phase = match play.mode {
+        PlayMode::Once => 0.0,
+        _ => (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40) as f64 / (1u64 << 24) as f64 * 8.0,
+    };
+    (ticks as f64 * tick_seconds as f64 + phase) as f32
 }
 
 #[cfg(test)]
@@ -150,18 +186,24 @@ mod tests {
 
     #[test]
     fn clips_and_classes() {
-        assert_eq!(ClipChoice::parse("2").unwrap(), ClipChoice { moving: 2, still: 0 });
-        assert_eq!(ClipChoice::parse("2,1").unwrap(), ClipChoice { moving: 2, still: 1 });
+        let (l, p, o) = (PlayMode::Loop, PlayMode::PingPong, PlayMode::Once);
+        assert_eq!(ClipChoice::parse("2").unwrap(), ClipChoice { moving: ClipPlay { clip: 2, mode: l }, still: ClipPlay { clip: 0, mode: l } });
+        assert_eq!(ClipChoice::parse("2,1:pingpong").unwrap(), ClipChoice { moving: ClipPlay { clip: 2, mode: l }, still: ClipPlay { clip: 1, mode: p } });
+        assert_eq!(ClipChoice::parse("3:once").unwrap().moving, ClipPlay { clip: 3, mode: o });
         assert!(ClipChoice::parse("2,1,3").is_err());
         assert!(ClipChoice::parse("x").is_err());
+        assert!(ClipChoice::parse("2:bounce").is_err());
+        assert_eq!(ClipPlay { clip: 1, mode: p }.word(), 1 | 1 << 30);
         let a = Arc::new(Model::default());
         let b = Arc::new(Model::default());
         let given = [ClassModel { class: None, model: a.clone() }, ClassModel { class: Some(1), model: b.clone() }];
         let per = per_class(&given, 4, Some(3));
         assert!(Arc::ptr_eq(per[0].as_ref().unwrap(), &a) && Arc::ptr_eq(per[1].as_ref().unwrap(), &b) && per[2].is_some() && per[3].is_none());
         assert!(per_class(&[], 4, None).is_empty());
-        let t = clip_time(7, 300, 1.0 / 30.0);
+        let walk = ClipPlay::looping(2);
+        let t = clip_time(7, walk, 300, 1.0 / 30.0);
         assert!((10.0..18.0).contains(&t), "{t}");
-        assert_ne!(clip_time(7, 0, 0.1), clip_time(8, 0, 0.1));
+        assert_ne!(clip_time(7, walk, 0, 0.1), clip_time(8, walk, 0, 0.1));
+        assert_eq!(clip_time(7, ClipPlay { clip: 2, mode: o }, 0, 0.1), 0.0, "once: from the start");
     }
 }

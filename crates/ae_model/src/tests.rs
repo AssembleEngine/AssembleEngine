@@ -1,5 +1,5 @@
 use super::*;
-use crate::pose::{Pose, animated_radius, bake, globals, palette, rest_palette};
+use crate::pose::{PlayMode, Pose, animated_radius, bake, globals, palette, rest_palette};
 
 fn bone(name: &str, parent: Option<u32>, t: [f32; 3]) -> Bone {
     Bone { name: name.into(), parent, rest: trs(t, [0.0, 0.0, 0.0, 1.0], [1.0; 3]).to_cols_array(), translation: t, rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }
@@ -134,13 +134,20 @@ fn baked_clips_match_the_sampler_and_loop() {
         let mut pose = Pose::rest(&m);
         pose.sample(&m, 0, t);
         let want = pose.locals(&m);
-        let got = baked.locals(&m, t);
+        let got = baked.locals(&m, t, PlayMode::Loop);
         for (w, g) in want.iter().zip(&got) {
             assert!(w.abs_diff_eq(*g, 1e-4), "t {t}: {w} vs {g}");
         }
-        // Clips loop.
-        let again = baked.locals(&m, t + 2.0 * baked.duration);
+        // Looping, ping-pong, once.
+        let again = baked.locals(&m, t + 2.0 * baked.duration, PlayMode::Loop);
         assert!(again[1].abs_diff_eq(got[1], 1e-4), "t {t} two loops later");
+        let back = baked.locals(&m, 2.0 * baked.duration - t, PlayMode::PingPong);
+        assert!(back[1].abs_diff_eq(got[1], 1e-4), "t {t} on the way back");
+        let forth = baked.locals(&m, 4.0 * baked.duration + t, PlayMode::PingPong);
+        assert!(forth[1].abs_diff_eq(got[1], 1e-4), "t {t} forwards again");
+        assert!(baked.locals(&m, t, PlayMode::Once)[1].abs_diff_eq(got[1], 1e-4), "t {t} once");
+        let held = baked.locals(&m, baked.duration + 5.0 + t, PlayMode::Once);
+        assert!(held[1].abs_diff_eq(baked.locals(&m, baked.duration, PlayMode::Once)[1], 1e-6), "t {t}: once holds the last frame");
     }
     // A duration that is not a whole number of frames: the rate rounds up
     // so the last frame falls on it.
@@ -165,7 +172,7 @@ fn baked_clips_match_the_sampler_and_loop() {
     for t in [0.1, 0.25, 0.5, 0.77] {
         let mut pose = Pose::rest(&m);
         pose.sample(&m, 0, t);
-        let got = baked.locals(&m, t);
+        let got = baked.locals(&m, t, PlayMode::Loop);
         assert!(pose.locals(&m)[1].abs_diff_eq(got[1], 1e-4), "t {t}");
     }
 }

@@ -15,6 +15,13 @@
 #define ATTR_CLASS 7u
 #define ATTR_CLIP 8u
 #define ATTR_CLIP_TIME 9u
+// A clip word: the clip number, its play mode in the top two bits
+// (ae_render::units::clip_word, ae_model::pose::PlayMode).
+#define CLIP_MASK 0x3fffffffu
+#define CLIP_MODE_SHIFT 30u
+#define CLIP_LOOP 0u
+#define CLIP_PING_PONG 1u
+#define CLIP_ONCE 2u
 #define MAX_CLASSES 16u
 
 layout(std140, set = 0, binding = 0) uniform Frame {

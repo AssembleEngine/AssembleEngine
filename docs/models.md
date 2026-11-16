@@ -90,7 +90,11 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   and the cull before the shadows.
 - **Poses**: the stream's `clip` and `clip_time` attributes pick a unit's pose: `clip` 0 (or past
   its model's clips) the rest pose, `k` the model's clip `k - 1` at `clip_time` seconds (at the
-  stream's tick; drawn a tick behind as positions are, clamped at 0; clips loop). The palette
+  stream's tick; drawn `(1 - alpha)` of a tick of sim time behind, as positions are, clamped at 0).
+  The top two bits of `clip` are its play mode (`ae_model::pose::PlayMode`, `units::clip_word`):
+  loop, ping-pong (backwards to the start, then forwards again) or once (holding the last frame).
+  The stream carries the sim time of a tick (`sim_seconds`) apart from its wall time, so at any
+  sim speed a clip moves on smoothly between ticks. The palette
   holds 3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units
   at rest point there), then a range per unit playing a clip, then the pose pass's scratch. When a
   new tick arrives the CPU gives each row its offset and lists the units playing a clip (pose
@@ -134,15 +138,18 @@ the animated reach.
 ## The client
 
 ```text
-ae-client --model [CLASS=]FILE.aemodel|.glb|.gltf [--clip MOVING[,STILL]]
+ae-client --model [CLASS=]FILE.aemodel|.glb|.gltf [--clip N[:loop|pingpong|once][,N[:MODE]]]
 ```
 
 `--model` draws class CLASS with the model; without CLASS every class (but the observer's blips).
 A glTF is converted once by `ae-tool model convert` into `target/models/<name>.aemodel` (again when
 the glTF is newer); the client does not link the converter. Units with a model play the model's
 clip MOVING while they move and STILL while they stand (clip numbers from 1, 0 the rest pose;
-default `1,0`), each unit at its own phase of the sim's time. For the Fox: `--clip 2,1` (walk,
-survey).
+default `1,0`), each with a play mode (`loop` by default, `pingpong`, `once`). A unit's clip
+starts when it switches to it (a looping clip at a phase of the unit's own, so a crowd does not
+move in step; a clip played once at its beginning); a unit plays the standing clip only after
+standing 6 ticks, so units pausing for a tick in a crowd keep walking. For the Fox:
+`--clip 2,1:pingpong` (walk; survey back and forth). The bench scenes use that too.
 
 ## Benches
 

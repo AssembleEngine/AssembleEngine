@@ -544,11 +544,32 @@ pub struct UnitRow {
     pub state: u8,
 }
 
+/// A unit as the last stream showed it.
+#[derive(Clone, Copy, Debug)]
+struct Shown {
+    key: u64,
+    x: f32,
+    y: f32,
+    hx: f32,
+    hy: f32,
+    state: u8,
+    /// The clip word it played, and the tick that clip started.
+    clip: u32,
+    start: u64,
+    /// Ticks it has stood still in a row.
+    still: u32,
+}
+
+/// Ticks a unit must stand before it plays the standing clip: units that
+/// stop for a tick or two in a crowd keep walking instead of flickering
+/// between the clips.
+pub const STILL_TICKS: u32 = 6;
+
 /// Turns captures into streams, remembering the last one by key.
 #[derive(Default)]
 pub struct Streamer {
-    /// Previous stream, sorted by key: `(key, x, y, heading x, heading y, state)`.
-    previous: Vec<(u64, f32, f32, f32, f32, u8)>,
+    /// Previous stream, sorted by key.
+    previous: Vec<Shown>,
     order: Vec<u32>,
     /// The clip units play (models only; nothing by default).
     pub clip: crate::models::ClipChoice,
@@ -591,24 +612,27 @@ impl Streamer {
         let mut next = Vec::with_capacity(rows.len());
         let mut p = 0;
         for row in rows {
-            while p < self.previous.len() && self.previous[p].0 < row.key {
+            while p < self.previous.len() && self.previous[p].key < row.key {
                 p += 1;
             }
-            let before = self.previous.get(p).filter(|prev| prev.0 == row.key);
-            let moved = before.filter(|b| b.5 == row.state);
+            let before = self.previous.get(p).filter(|prev| prev.key == row.key);
+            let moved = before.filter(|b| b.state == row.state);
             let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
-            let (px, py) = moved.map_or((x, y), |b| (b.1, b.2));
-            let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.3, b.4)) };
-            let clip = self.clip.of(vx != 0.0 || vy != 0.0);
-            let clip_time = if clip > 0 { crate::models::clip_time(row.key, tick, TICK_SECONDS) } else { 0.0 };
+            let (px, py) = moved.map_or((x, y), |b| (b.x, b.y));
+            let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.hx, b.hy)) };
+            let still = if vx != 0.0 || vy != 0.0 { 0 } else { before.map_or(STILL_TICKS, |b| b.still.saturating_add(1)) };
+            let play = self.clip.of(still < STILL_TICKS);
+            let clip = play.word();
+            let start = before.filter(|b| b.clip == clip).map_or(tick, |b| b.start);
+            let clip_time = if play.clip > 0 { crate::models::clip_time(row.key, play, tick.saturating_sub(start), TICK_SECONDS) } else { 0.0 };
             let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, clip, clip_time.to_bits()];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
-            next.push((row.key, x, y, hx, hy, row.state));
+            next.push(Shown { key: row.key, x, y, hx, hy, state: row.state, clip, start, still });
         }
         self.previous = next;
-        InstanceStream { tick, published, tick_seconds, columns }
+        InstanceStream { tick, published, tick_seconds, sim_seconds: TICK_SECONDS, columns }
     }
 }
 
@@ -781,18 +805,38 @@ mod tests {
     }
 
     /// With a clip choice, moving units play one clip and standing ones
-    /// the other, each at its own phase that advances with the tick.
+    /// the other, each at its own phase that advances with the tick; a unit
+    /// that stops plays the standing clip only after [`STILL_TICKS`], and a
+    /// clip played once starts at its beginning when the unit switches to it.
     #[test]
     fn streams_carry_clips() {
-        let mut s = Streamer { clip: crate::models::ClipChoice { moving: 2, still: 1 }, ..Streamer::default() };
+        use crate::models::{ClipChoice, ClipPlay, PlayMode};
+        let once = ClipPlay { clip: 1, mode: PlayMode::Once };
+        let mut s = Streamer { clip: ClipChoice { moving: ClipPlay::looping(2), still: once }, ..Streamer::default() };
         let now = Instant::now();
         let rows = [(4, 40.0, 0.0, 1.0, 0.0), (9, 90.0, 0.0, 0.0, 0.0)];
         let first = s.stream(&capture(10, &rows), now, 0.1);
-        assert_eq!(first.columns[8], [2, 1], "4 moves, 9 stands");
+        assert_eq!(first.columns[8], [2, once.word()], "4 moves, 9 stands");
+        assert_eq!(first.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
         let second = s.stream(&capture(11, &rows), now, 0.1);
         let t = |st: &InstanceStream, r: usize| f32::from_bits(st.columns[9][r]);
         assert!((t(&second, 0) - t(&first, 0) - TICK_SECONDS).abs() < 1e-4, "a tick of sim time");
-        assert_ne!(t(&first, 0) - 10.0 * TICK_SECONDS, t(&first, 1) - 10.0 * TICK_SECONDS, "own phases");
+        assert!((t(&second, 1) - TICK_SECONDS).abs() < 1e-6, "once: from its start, no phase");
+        assert_ne!(t(&first, 0), clip_time_of(9, 0), "own phases");
+        // 4 stops: it walks on for STILL_TICKS - 1 ticks, then plays the
+        // standing clip from its start.
+        let stopped = [(4, 40.0, 0.0, 0.0, 0.0)];
+        for k in 0..STILL_TICKS as u64 - 1 {
+            let st = s.stream(&capture(12 + k, &stopped), now, 0.1);
+            assert_eq!(st.columns[8], [2], "tick {k} after stopping: still walking");
+        }
+        let st = s.stream(&capture(12 + STILL_TICKS as u64 - 1, &stopped), now, 0.1);
+        assert_eq!(st.columns[8], [once.word()]);
+        assert_eq!(t(&st, 0), 0.0, "the standing clip starts");
+    }
+
+    fn clip_time_of(key: u64, ticks: u64) -> f32 {
+        crate::models::clip_time(key, crate::models::ClipPlay::looping(2), ticks, TICK_SECONDS)
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

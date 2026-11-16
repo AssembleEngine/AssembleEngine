@@ -141,22 +141,64 @@ pub fn bake(model: &Model, clip: usize) -> BakedClip {
     BakedClip { tracks, frames, rate, duration: c.duration, keys }
 }
 
+/// How a clip plays past its end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PlayMode {
+    /// From the start again.
+    #[default]
+    Loop = 0,
+    /// Backwards to the start, then forwards again.
+    PingPong = 1,
+    /// Once, then holding the last frame.
+    Once = 2,
+}
+
+impl PlayMode {
+    pub const ALL: [PlayMode; 3] = [PlayMode::Loop, PlayMode::PingPong, PlayMode::Once];
+
+    pub fn from_bits(bits: u32) -> Self {
+        match bits {
+            1 => PlayMode::PingPong,
+            2 => PlayMode::Once,
+            _ => PlayMode::Loop,
+        }
+    }
+
+    /// `time` seconds into a clip `duration` long, as a time in the clip
+    /// (`0..=duration`); as the pose pass computes it.
+    pub fn clip_time(self, time: f32, duration: f32) -> f32 {
+        if duration <= 0.0 {
+            return 0.0;
+        }
+        let time = time.max(0.0);
+        match self {
+            PlayMode::Loop => time - duration * (time / duration).floor(),
+            PlayMode::PingPong => {
+                let t = time - 2.0 * duration * (time / (2.0 * duration)).floor();
+                if t > duration { 2.0 * duration - t } else { t }
+            }
+            PlayMode::Once => time.min(duration),
+        }
+    }
+}
+
 impl BakedClip {
-    /// The two frames around `time` seconds (wrapped into the clip: clips
-    /// loop) and the second one's weight; as the pose pass computes them.
-    pub fn frames_at(&self, time: f32) -> (usize, usize, f32) {
-        let t = if self.duration > 0.0 { time - self.duration * (time / self.duration).floor() } else { 0.0 };
+    /// The two frames around `time` seconds (into the clip as `mode` plays
+    /// it) and the second one's weight; as the pose pass computes them.
+    pub fn frames_at(&self, time: f32, mode: PlayMode) -> (usize, usize, f32) {
+        let t = mode.clip_time(time, self.duration);
         let f = t * self.rate;
         let last = self.frames as usize - 1;
         let a = (f.max(0.0) as usize).min(last);
         (a, (a + 1).min(last), (f - a as f32).clamp(0.0, 1.0))
     }
 
-    /// Local matrices at `time`: each bone's rest matrix, the tracks'
-    /// bones blended from two frames.
-    pub fn locals(&self, model: &Model, time: f32) -> Vec<Mat4> {
+    /// Local matrices at `time` played as `mode`: each bone's rest matrix,
+    /// the tracks' bones blended from two frames.
+    pub fn locals(&self, model: &Model, time: f32, mode: PlayMode) -> Vec<Mat4> {
         let mut locals: Vec<Mat4> = model.bones.iter().map(|b| Mat4::from_cols_array(&b.rest)).collect();
-        let (a, b, s) = self.frames_at(time);
+        let (a, b, s) = self.frames_at(time, mode);
         let n = self.tracks.len();
         for (i, &bone) in self.tracks.iter().enumerate() {
             let (ka, kb) = (self.keys[a * n + i], self.keys[b * n + i]);
@@ -183,7 +225,7 @@ pub fn animated_radius(model: &Model, centre: Vec3) -> f32 {
             let time = if f + 1 == baked.frames { baked.duration } else { f as f32 / baked.rate.max(1e-9) };
             // At the frame itself (the blend's weight 0).
             let time = time.min(baked.duration * (1.0 - 1e-6));
-            let palette = palette(model, &globals(model, &baked.locals(model, time)));
+            let palette = palette(model, &globals(model, &baked.locals(model, time, PlayMode::Loop)));
             for v in &model.vertices {
                 radius = radius.max((skin(v, &palette) - centre).length());
             }

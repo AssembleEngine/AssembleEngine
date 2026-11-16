@@ -45,13 +45,24 @@ void main() {
     uint scratch = rows[2u * cap + job];
     ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
     // The clip (the CPU made a job only for a valid one) and its two frames
-    // around the time, drawn behind the tick as positions are; clips loop.
-    uint c = mc.pose.w + 2u * (attru(ATTR_CLIP, row) - 1u);
+    // around the time, drawn behind the tick as positions are, played as
+    // the word's mode (ae_model::pose::PlayMode::clip_time).
+    uint word = attru(ATTR_CLIP, row);
+    uint mode = word >> CLIP_MODE_SHIFT;
+    uint c = mc.pose.w + 2u * ((word & CLIP_MASK) - 1u);
     uvec4 clip = floatBitsToUint(anim[c]);  // first frame record, tracks, frames
     vec4 timing = anim[c + 1u];             // rate, duration
     float t = max(attrf(ATTR_CLIP_TIME, row) - u.anim.x, 0.0);
-    if (timing.y > 0.0) {
-        t -= timing.y * floor(t / timing.y);
+    float d = timing.y;
+    if (d <= 0.0) {
+        t = 0.0;
+    } else if (mode == CLIP_PING_PONG) {
+        t -= 2.0 * d * floor(t / (2.0 * d));
+        t = t > d ? 2.0 * d - t : t;
+    } else if (mode == CLIP_ONCE) {
+        t = min(t, d);
+    } else {
+        t -= d * floor(t / d);
     }
     float f = t * timing.x;
     uint last = clip.z - 1u;

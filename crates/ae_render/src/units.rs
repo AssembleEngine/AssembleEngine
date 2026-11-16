@@ -47,13 +47,24 @@ use std::time::Instant;
 /// x and z); `heading` need not be normalised (zero: facing +x); `class`
 /// is a `u32` indexing [`UnitsSetup::classes`]. `clip` (a `u32`) is the
 /// clip a unit with a model plays: 0 (or past the model's clips) the rest
-/// pose, `k` the model's clip `k - 1`; `clip_time` is its time in seconds
-/// at the stream's tick (clips loop; drawn a tick behind, as positions
-/// are). Every other attribute is an `f32`.
+/// pose, `k` the model's clip `k - 1`, with its [`PlayMode`] in the top two
+/// bits ([`clip_word`]); `clip_time` is the sim seconds it has played at the
+/// stream's tick (drawn a tick behind, as positions are). Every other
+/// attribute is an `f32`.
 pub const ATTRIBUTES: [&str; 10] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "clip", "clip_time"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 const ATTR_CLASS: usize = 7;
 const ATTR_CLIP: usize = 8;
+/// The clip number's bits of a `clip` word; the [`PlayMode`] is above them.
+pub const CLIP_MASK: u32 = (1 << 30) - 1;
+pub const CLIP_MODE_SHIFT: u32 = 30;
+
+pub use ae_model::pose::PlayMode;
+
+/// The `clip` word of clip `clip` (0: the rest pose) played as `mode`.
+pub fn clip_word(clip: u32, mode: PlayMode) -> u32 {
+    (clip & CLIP_MASK) | ((mode as u32) << CLIP_MODE_SHIFT)
+}
 /// Classes with their own colour; higher class ids use the last one.
 pub const MAX_CLASSES: usize = 16;
 /// Vertices of one unit (a four-faced dart).
@@ -73,8 +84,12 @@ pub struct InstanceStream {
     /// When it was published: interpolation runs from `prev` to the latest
     /// position over the `tick_seconds` after this.
     pub published: Instant,
-    /// Length of a tick; 0 shows the latest positions only.
+    /// Length of a tick in wall time (the sim's tick over its speed); 0
+    /// shows the latest positions only.
     pub tick_seconds: f32,
+    /// Sim time of a tick (what `clip_time` gains per tick, whatever the
+    /// sim's speed): clips are drawn `(1 - alpha) * sim_seconds` behind.
+    pub sim_seconds: f32,
     /// `columns[attribute][row]`, raw 4-byte words, every column the same
     /// length.
     pub columns: [Vec<u32>; ATTRIBUTE_COUNT],
@@ -247,7 +262,7 @@ impl Models {
         for r in 0..rows {
             let Some(mc) = self.set.class_model[class_of(r)] else { continue };
             let mc = &self.set.classes[mc];
-            let clip = stream.columns[ATTR_CLIP][r];
+            let clip = stream.columns[ATTR_CLIP][r] & CLIP_MASK;
             words[r] = match clip >= 1 && clip <= mc.clips {
                 true => {
                     words[capacity + jobs] = r as u32;
@@ -639,7 +654,7 @@ impl UnitRenderer {
             counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, self.models.as_ref().map_or(0, |m| m.set.commands())],
             classes: self.classes,
             unit_shadow,
-            anim: [(1.0 - alpha) * stream.map_or(0.0, |s| s.tick_seconds.max(0.0)), 0.0, 0.0, 0.0],
+            anim: [(1.0 - alpha) * stream.map_or(0.0, |s| s.sim_seconds.max(0.0)), 0.0, 0.0, 0.0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
