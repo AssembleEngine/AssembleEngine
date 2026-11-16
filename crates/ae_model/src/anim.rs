@@ -36,7 +36,7 @@ use crate::{Interpolation, Model, Path};
 pub const LAYERS: usize = 4;
 /// Tweens per unit.
 pub const TWEENS: usize = 8;
-/// No clip ([`Layer::clip`]), no bone ([`Tween::bone`]).
+/// No bone ([`Tween::bone`]).
 pub const NONE: u16 = u16::MAX;
 
 /// [`Layer::kind`].
@@ -77,7 +77,8 @@ pub mod tween_flags {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layer {
-    /// The model's clip, or [`NONE`] (an empty layer).
+    /// The model's clip `clip - 1`; 0: none (an empty layer; all zeros is
+    /// empty channels).
     pub clip: u16,
     /// 0: the whole model; `k`: the rig's mask `k` ([`Rig::add_mask`]).
     pub mask: u16,
@@ -103,13 +104,13 @@ pub struct Layer {
 
 impl Default for Layer {
     fn default() -> Self {
-        Self { clip: NONE, mask: 0, mode: 0, kind: kind::BLEND, flags: 0, reserved: 0, weight: 0.0, target: 0.0, fade: 0.0, speed: 0.0, phase: 0.0 }
+        Self { clip: 0, mask: 0, mode: 0, kind: kind::BLEND, flags: 0, reserved: 0, weight: 0.0, target: 0.0, fade: 0.0, speed: 0.0, phase: 0.0 }
     }
 }
 
 impl Layer {
     pub fn is_empty(&self) -> bool {
-        self.clip == NONE
+        self.clip == 0
     }
 
     pub fn ended(&self) -> bool {
@@ -259,17 +260,31 @@ impl Rig {
         self.names.iter().position(|n| n == name).map(|b| b as u16)
     }
 
+    /// The clip named `name`, numbered from 1 as [`Layer::clip`].
     pub fn clip(&self, name: &str) -> Option<u16> {
-        self.clip_names.iter().position(|n| n == name).map(|c| c as u16)
+        self.clip_names.iter().position(|n| n == name).map(|c| c as u16 + 1)
     }
 
+    /// The model's clip names (clip `k + 1` is `clip_names()[k]`).
     pub fn clip_names(&self) -> &[String] {
         &self.clip_names
     }
 
+    pub fn bone_names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub fn masks(&self) -> &[Mask] {
+        &self.masks
+    }
+
+    fn baked(&self, clip: u16) -> Option<&Baked> {
+        self.clips.get((clip as usize).wrapping_sub(1))
+    }
+
     /// Clip `clip`'s length in seconds (0 for none).
     pub fn duration(&self, clip: u16) -> f32 {
-        self.clips.get(clip as usize).map_or(0.0, |c| c.duration)
+        self.baked(clip).map_or(0.0, |c| c.duration)
     }
 
     /// Weight 1 on `root` and every bone under it, 0 elsewhere.
@@ -360,7 +375,7 @@ impl Rig {
             if l.is_empty() || l.weight <= 0.0 {
                 continue;
             }
-            let Some(c) = self.clips.get(l.clip as usize) else { continue };
+            let Some(c) = self.baked(l.clip) else { continue };
             let mask = self.mask_weights(l.mask);
             let (a, b, s) = c.frames_at(l.phase, PlayMode::from_bits(l.mode as u32));
             for (i, &bone) in c.tracks.iter().enumerate() {

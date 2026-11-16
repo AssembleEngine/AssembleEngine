@@ -74,6 +74,13 @@ pub trait HostPlugin: Send + Sync {
     /// the module's, with the data it declares for services
     /// ([`Schema::data`]).
     fn instantiate(&self, init: &HostInit, schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>>;
+    /// Names module systems can look up with `ae_lookup(scope, name)`:
+    /// `(scope, name, value)` (see `ae_abi::lookup`). Content, so the same
+    /// on every peer. Every plugin's names are published, whether the
+    /// module schedules its systems or not.
+    fn names(&self) -> Vec<(u64, u64, u32)> {
+        Vec::new()
+    }
 }
 
 pub trait HostSystem: Send {

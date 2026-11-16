@@ -10,9 +10,13 @@
 //!   every `Body`, for module systems' `ae_sdk::spatial_radius` queries.
 //! * [`catalog::CatalogPlugin`]: `catalog_spawn` spawns catalogue defs
 //!   from `SpawnRequest` events, with their allyteam and position.
+//! * [`anim::AnimPlugin`]: `anim` advances every unit's animation channels
+//!   (`ae_sdk::anim::Anim`) with its model, and publishes the models' clip,
+//!   bone and mask names for lookups.
 //! * [`view::ViewPipeline`]: the copy layer over the sim: captures the
 //!   viewed fields, stamps sensor coverage, builds observers' view tables.
 
+pub mod anim;
 pub mod catalog;
 pub mod nav;
 pub mod spatial;

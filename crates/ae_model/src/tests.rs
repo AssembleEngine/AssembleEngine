@@ -296,7 +296,8 @@ mod anim_tests {
     }
 
     fn layer(clip: u16, phase: f32) -> Layer {
-        Layer { clip, weight: 1.0, target: 1.0, speed: 1.0, phase, ..Default::default() }
+        // `clip` is the model's index; layers number clips from 1.
+        Layer { clip: clip + 1, weight: 1.0, target: 1.0, speed: 1.0, phase, ..Default::default() }
     }
 
     /// The rest pose, and a clip at full weight, as the glam path draws them.
@@ -311,9 +312,9 @@ mod anim_tests {
             let want = palette(&m, &globals(&m, &bake(&m, clip as usize).locals(&m, t, PlayMode::Loop)));
             assert_close(&palette_of(&rig, &ch), &want, 1e-5, &format!("clip {clip} at {t}"));
         }
-        assert_eq!(rig.clip("turn"), Some(1));
-        assert_eq!(rig.duration(0), 2.0);
-        assert_eq!(rig.duration(NONE), 0.0);
+        assert_eq!(rig.clip("turn"), Some(2));
+        assert_eq!(rig.duration(1), 2.0);
+        assert_eq!(rig.duration(0), 0.0);
     }
 
     /// An override on a mask leaves the other bones; a half-weight blend is

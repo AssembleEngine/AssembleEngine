@@ -201,8 +201,14 @@ pub const fn get_u64(buf: &[u8], at: usize) -> u64 {
 
 /// FNV-1a 64: default stable id of a component, stream or field, from its name.
 pub const fn name_id(name: &str) -> u64 {
+    name_id_from(0xcbf2_9ce4_8422_2325, name)
+}
+
+/// FNV-1a 64 of `name` continuing from `h`: `name_id_from(name_id(a), b)`
+/// is `name_id` of `a` followed by `b`.
+pub const fn name_id_from(h: u64, name: &str) -> u64 {
     let bytes = name.as_bytes();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = h;
     let mut i = 0;
     while i < bytes.len() {
         h ^= bytes[i] as u64;
@@ -333,4 +339,22 @@ pub mod engine {
     /// Event `MapStart { index, count: u32, x, y, extent: f32, reserved }`:
     /// a start point of the loaded map (the nav plugin's `map_starts`).
     pub const MAP_START: u64 = 0xAE00_0000_0000_000D;
+    /// `Anim { model: u64, ... }`: a unit's animation channels (M14; the
+    /// layout is `ae_sdk::anim::Anim`'s).
+    pub const ANIM: u64 = 0xAE00_0000_0000_000E;
+}
+
+/// Name lookups (`ae_lookup(scope, name)`): host plugins publish names in
+/// scopes, a module asks for them by hashes. The animation service's
+/// scope is the model's id ([`name_id`] of its name), its names
+/// [`name_id_from`] one of these prefixes and the name.
+pub mod lookup {
+    /// A clip, numbered from 1.
+    pub const CLIP: &str = "clip:";
+    /// A bone.
+    pub const BONE: &str = "bone:";
+    /// A joint mask, numbered from 1.
+    pub const MASK: &str = "mask:";
+    /// What the lookup returns for a name it does not have.
+    pub const MISSING: u32 = u32::MAX;
 }

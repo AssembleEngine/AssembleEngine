@@ -9,6 +9,7 @@
 //! | `ae_remove(entity: u64, component: u64)` | remove a component |
 //! | `ae_emit(stream: u64, data: u32, len: u32)` | emit an event |
 //! | `ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32` | entities near a point, from the host's spatial index |
+//! | `ae_lookup(scope: u64, name: u64) -> u32` | a name host plugins published (`HostPlugin::names`), `u32::MAX` when missing |
 //! | `wasi_snapshot_preview1::sched_yield()` | yield the thread (wasi-libc's malloc lock waits with it) |
 //!
 //! Spawn record (little-endian): `u32 count, u32 reserved`, then `count`
@@ -39,6 +40,8 @@ pub struct IdMap {
     pub streams: BTreeMap<u64, usize>,
     /// Streams each system (by schedule position) declared in `emits`.
     pub emits: Vec<Vec<u64>>,
+    /// `(scope, name)` -> value, from the host plugins (`ae_lookup`).
+    pub names: BTreeMap<(u64, u64), u32>,
 }
 
 impl IdMap {
@@ -201,6 +204,9 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
             run().map_err(trap)
         },
     )?;
+    linker.func_wrap("env", "ae_lookup", |caller: Caller<'_, WorkerCtx>, scope: u64, name: u64| -> u32 {
+        caller.data().ids.as_ref().and_then(|m| m.names.get(&(scope, name)).copied()).unwrap_or(u32::MAX)
+    })?;
     // wasi-libc's malloc lock calls this while it waits for another
     // instance to release the heap. Yielding has no effect on results, only
     // on how the wait is spent. (Every other WASI import traps.)

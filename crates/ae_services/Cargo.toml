@@ -12,12 +12,14 @@ ae_nav.workspace = true
 ae_profile.workspace = true
 ae_sim.workspace = true
 ae_catalog.workspace = true
+ae_model.workspace = true
+ae_vfs.workspace = true
 ae_sensors.workspace = true
 ae_spatial.workspace = true
 ae_view.workspace = true
-ae-sdk = { workspace = true, features = ["nav", "catalog"] }
+ae-sdk = { workspace = true, features = ["nav", "catalog", "anim"] }
 anyhow.workspace = true
 
 [dev-dependencies]
-ae_vfs.workspace = true
 ae_bot.workspace = true
+ae_gltf.workspace = true

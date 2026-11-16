@@ -6,7 +6,8 @@
 //! The stack decides the rest:
 //! * a `module.wasm` in it is the sim module (else `--game NAME` is built);
 //! * `defs/*.json` are the catalogue, loaded against the module's schema;
-//! * a `map.json` (a map package, `ae_map`) is the map (else `--nav`).
+//! * a `map.json` (a map package, `ae_map`) is the map (else `--nav`);
+//! * `models/*.aemodel` are the animation service's models.
 //!
 //! The header records the content hash (every visible file, so module,
 //! defs and map), the packages by `name@version`, and the map. A replay
@@ -50,6 +51,8 @@ pub struct Content {
     /// `name@version` of each package, in mount order.
     pub packages: Vec<String>,
     pub catalog: Option<Arc<ae_catalog::Catalog>>,
+    /// The content's models (`models/*.aemodel`), for the animation service.
+    pub anim: Option<ae_services::anim::AnimPlugin>,
 }
 
 pub struct Setup {
@@ -107,7 +110,8 @@ impl Setup {
         } else {
             o.nav.map(|m| NavPlugin { teams, ..NavPlugin::new(m, o.map_cells) })
         };
-        let content = if mounted { Some(Content { hash: vfs.content_hash()?, packages: packages.iter().map(|p| format!("{}@{}", p.manifest.name, p.manifest.version)).collect(), catalog }) } else { None };
+        let anim = ae_services::anim::AnimPlugin::from_content(&vfs, ae_nav::math::TICK_SECONDS)?;
+        let content = if mounted { Some(Content { hash: vfs.content_hash()?, packages: packages.iter().map(|p| format!("{}@{}", p.manifest.name, p.manifest.version)).collect(), catalog, anim }) } else { None };
         Ok(Self { wasm, nav, content })
     }
 
@@ -130,7 +134,7 @@ impl Setup {
     }
 
     /// The host plugins: nav and spatial with a map, the catalogue with
-    /// content defs.
+    /// content defs, animation with content models.
     pub fn plugins(&self) -> Vec<Arc<dyn HostPlugin>> {
         let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
         if let Some(n) = &self.nav {
@@ -139,6 +143,9 @@ impl Setup {
         }
         if let Some(c) = self.content.as_ref().and_then(|c| c.catalog.clone()) {
             plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(c)));
+        }
+        if let Some(a) = self.content.as_ref().and_then(|c| c.anim.clone()) {
+            plugins.push(Arc::new(a));
         }
         plugins
     }

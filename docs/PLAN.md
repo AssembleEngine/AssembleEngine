@@ -2540,7 +2540,21 @@ Design:
     mask is the override); additive adds the change from the clip's first frame. Tween over the
     rest pose or additive, on a bone or a mask by its weights. Tests: the glam path's palettes
     on the test model and on every Fox clip (1e-4 relative), masks, weights, additive, the
-    ticker, tweens, repeatable bits.
+    ticker, tweens, repeatable bits. Clips are numbered from 1 (0: an empty layer), so all
+    zeros is nothing playing.
+  - Step 2, channel columns and the ticker — done (2026-11-16). Engine component `Anim`
+    (`ae_abi::engine::ANIM`; `ae_sdk::anim`, feature `anim`): the model's id and the channels
+    by field (280 bytes), viewed in line of sight, with a builder (`play(..).per_metre(..)
+    .blend_in(ms)`, `stop(layer, ms)`, `turn(..).additive()`, `spin`, `move_to`,
+    `tween_done`, `ended`). Name lookups: host plugins publish `(scope, name, value)`
+    (`HostPlugin::names`), modules ask with the new import `ae_lookup`; `ae_sdk::anim::{clip,
+    bone, mask}` by the model's name. Host system `anim` (`ae_services::anim::AnimPlugin`,
+    from `models/*.aemodel` in the content, wired into ae-headless) advances every unit by
+    `Rig::advance` with its ground speed. Test game `games/scripted`: Foxes walk and stand,
+    a plain system picks the clips and turns the head; test `ae_services/tests/anim.rs`
+    (layers, fades, clearing, tweens; digests equal at 1/2/4/8 workers). The ticker runs on
+    the coordinating thread (rows are independent: a parallel split is easy if it shows).
+    Not yet: masks from content (a mask file per model).
 
 ## Later improvements
 

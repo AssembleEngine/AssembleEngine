@@ -16,3 +16,6 @@ ae-sdk-macros.workspace = true
 nav = []
 # Catalogue spawning (`ae_sdk::catalog`): spawn requests and def ids. Needs nav.
 catalog = ["nav"]
+# Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`
+# service.
+anim = []

@@ -133,7 +133,7 @@ fn fox_anim_rig_matches_the_glam_path() {
         for f in [0.0, 0.13, 0.5, 0.91] {
             let t = clip.duration * f;
             let mut ch = Channels::default();
-            ch.layers[0] = Layer { clip: c as u16, weight: 1.0, target: 1.0, speed: 1.0, phase: t, ..Default::default() };
+            ch.layers[0] = Layer { clip: c as u16 + 1, weight: 1.0, target: 1.0, speed: 1.0, phase: t, ..Default::default() };
             check(&run(&ch), &ae_model::pose::palette(&m, &globals(&m, &baked.locals(&m, t, PlayMode::Loop))), &format!("{} at {t}", clip.name));
         }
     }

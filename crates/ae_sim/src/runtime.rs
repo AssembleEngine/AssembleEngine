@@ -351,6 +351,11 @@ impl Runtime {
             emits[self.schedule.position[i] as usize] = s.decl.emits.clone();
         }
         ids.emits = emits;
+        for plugin in &self.plugins {
+            for (scope, name, value) in plugin.names() {
+                ids.names.insert((scope, name), value);
+            }
+        }
         let ecs = |stable: u64| ids.components[&stable].0;
         let mut queries = Vec::new();
         for s in &self.systems {

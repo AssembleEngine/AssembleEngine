@@ -1,0 +1,20 @@
+# Scripted game: units with animated models (M14), the engine's animation
+# and unit-script test workload. A sim module built for wasm32-wasip1-threads
+# by the tests. Not part of the main workspace.
+[package]
+name = "ae_game_scripted"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

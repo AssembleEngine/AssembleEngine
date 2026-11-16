@@ -37,6 +37,9 @@ pub mod nav;
 #[cfg(feature = "catalog")]
 pub mod catalog;
 
+#[cfg(feature = "anim")]
+pub mod anim;
+
 use abi::RunDesc;
 
 /// Engine entity id.
@@ -188,6 +191,8 @@ mod host {
         pub fn ae_remove(entity: u64, component: u64);
         pub fn ae_emit(stream: u64, data: u32, len: u32);
         pub fn ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32;
+        #[allow(dead_code)]
+        pub fn ae_lookup(scope: u64, name: u64) -> u32;
     }
 }
 
@@ -213,6 +218,10 @@ mod host {
         native()
     }
     pub unsafe fn ae_spatial_radius(_: f32, _: f32, _: f32, _: u32, _: u32) -> u32 {
+        native()
+    }
+    #[allow(dead_code)]
+    pub unsafe fn ae_lookup(_: u64, _: u64) -> u32 {
         native()
     }
 }

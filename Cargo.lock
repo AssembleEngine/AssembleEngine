@@ -289,6 +289,8 @@ dependencies = [
  "ae_bot",
  "ae_catalog",
  "ae_ecs",
+ "ae_gltf",
+ "ae_model",
  "ae_nav",
  "ae_profile",
  "ae_sensors",
