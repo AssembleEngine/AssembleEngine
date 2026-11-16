@@ -2544,6 +2544,57 @@ Design:
   missed: no posing off screen and out of the shadows, distant units every n ticks.
 - Aiming is by joint turns and clips only (decided with the user, 2026-11-16); look-at / IK on
   a joint chain is a pie-in-the-sky TODO under Later improvements.
+- **Aiming, the script side** (requested by the user, 2026-11-16; the weapons system is designed
+  later, so its side here is only what aiming needs). Recoil had `AimFromWeapon` and
+  `QueryWeapon` (queries: the bone aim is measured from, and the bone projectiles leave from)
+  and the callin `AimWeapon(heading, pitch)`. Heading and pitch go (they are ill-defined per
+  bone and on a tilted unit); the rest maps as follows:
+  - **Aim-from and fire-from bones are fields the script writes** (per weapon, in a weapon
+    component), not callins: the engine reads them with no module call, and a script
+    alternates barrels by writing the fire-from field after each shot. The engine finds their
+    world positions on demand by the pose function (the unit's transform times the bone's
+    model-space matrix at that tick): where the aim direction is measured from, and where
+    projectiles and muzzle effects start.
+  - **The aim callin gets a world-space unit vector**, from the aim-from bone towards the
+    target (the way the gun must point), not angles. It comes again while the target moves
+    (Recoil re-called `AimWeapon` every few frames). The script turns bones, awaits them, and
+    says the weapon is aimed (Recoil's `AimWeapon` returning true): a weapon fires only then.
+  - **Helpers** to get from that vector to a turn:
+    - `unit.to_unit(dir)`: world to the unit's frame, by its full orientation (tilt
+      included).
+    - `anim.dir_in(bone, d)`: a unit-frame direction in `bone`'s own (rest) frame, with the
+      bone's parents **where they are going**: a manual parent at its turn's target, a clipped
+      one at the clips' value this tick. So after turning a turret, the barrel's direction is
+      already against the turned turret, and both joints turn at once. This evaluates the
+      pose function on the unit's channels: a host import (pure, so the same on every peer
+      and worker).
+    - `aim_angle(axis, pointing, d)`: the angle about one bone axis that brings `pointing`
+      closest to `d` (both projected onto the plane across the axis; one `atan2`). For a
+      turret about its up and a barrel about its right. `turn_toward(bone, pointing, d)`:
+      the shortest rotation, for a single free joint (a head looking).
+    - `pointing` is the bone's rest forward (the unit's `FORWARD` at rest) unless the model
+      names another (the per-model content file, next to the masks).
+    - Turns from aiming take the short way from where the bone is (a `short()` option on
+      `turn`: the target's sign set by the current rotation), so tracking a target round the
+      back does not swing the long way.
+  - Sketch:
+
+    ```rust
+    async fn aim(unit: &mut Unit, weapon: usize, dir: Vec3) -> bool {
+        let d = unit.to_unit(dir);
+        let anim = unit.anim();
+        let yaw = aim_angle(Axis::UP, Axis::FORWARD, anim.dir_in(TURRET, d));
+        anim.turn(TURRET, Axis::UP, yaw, deg_per_s(90)).short().ramp(deg_per_s2(360));
+        let up = aim_angle(Axis::RIGHT, Axis::FORWARD, anim.dir_in(BARREL, d));
+        anim.turn(BARREL, Axis::RIGHT, up, deg_per_s(60)).short();
+        anim.turned(TURRET).await;
+        anim.turned(BARREL).await;
+        true
+    }
+    ```
+
+  - Parents that clips move (a spine while running) shift the aim after it is solved; the
+    next aim call corrects it. Exact aim keeps the aim chain manual (a turret on a hull).
 - No per-joint collision volumes in the sim (decided with the user, 2026-11-16): a skinned mesh
   does not split well into per-joint volumes. Units keep their one volume; the pose's reach
   stays within it (the cull sphere already covers every clip frame), and joint positions are
