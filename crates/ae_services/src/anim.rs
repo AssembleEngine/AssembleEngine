@@ -12,7 +12,7 @@
 use ae_abi::engine::{ANIM, BODY};
 use ae_abi::{lookup, name_id, name_id_from};
 use ae_ecs::Access;
-use ae_model::anim::{Channels, LAYERS, Layer, Rig, TWEENS, Tween};
+use ae_model::anim::{Channels, LAYERS, Layer, MANUAL, Manual, Rig};
 use ae_sdk::Component;
 use ae_sdk::anim::Anim;
 use ae_sdk::nav::Body;
@@ -134,17 +134,17 @@ pub fn channels(a: &Anim) -> Channels {
             phase: a.phase[i],
         };
     }
-    for (k, t) in ch.tweens.iter_mut().enumerate() {
-        *t = Tween {
+    for (k, m) in ch.manual.iter_mut().enumerate() {
+        *m = Manual {
             bone: a.bone[k],
-            mask: a.tween_mask[k],
-            kind: a.tween_kind[k],
-            axis: a.axis[k],
-            flags: a.tween_flags[k],
-            reserved: 0,
+            kind: a.manual_kind[k],
+            flags: a.manual_flags[k],
             value: a.value[k],
-            target: a.tween_target[k],
-            speed: a.tween_speed[k],
+            target: a.goal[k],
+            speed: a.top_speed[k],
+            accel: a.accel[k],
+            decel: a.decel[k],
+            rate: a.rate[k],
         };
     }
     ch
@@ -156,9 +156,9 @@ pub fn store(ch: &Channels, a: &mut Anim) {
         (a.clip[i], a.mask[i], a.mode[i], a.kind[i], a.flags[i]) = (l.clip, l.mask, l.mode, l.kind, l.flags);
         (a.weight[i], a.target[i], a.fade[i], a.speed[i], a.phase[i]) = (l.weight, l.target, l.fade, l.speed, l.phase);
     }
-    for (k, t) in ch.tweens.iter().enumerate().take(TWEENS) {
-        (a.bone[k], a.tween_mask[k], a.tween_kind[k], a.axis[k], a.tween_flags[k]) = (t.bone, t.mask, t.kind, t.axis, t.flags);
-        (a.value[k], a.tween_target[k], a.tween_speed[k]) = (t.value, t.target, t.speed);
+    for (k, m) in ch.manual.iter().enumerate().take(MANUAL) {
+        (a.bone[k], a.manual_kind[k], a.manual_flags[k], a.value[k], a.goal[k]) = (m.bone, m.kind, m.flags, m.value, m.target);
+        (a.top_speed[k], a.accel[k], a.decel[k], a.rate[k]) = (m.speed, m.accel, m.decel, m.rate);
     }
 }
 
@@ -168,24 +168,32 @@ mod tests {
 
     #[test]
     fn layouts_agree() {
-        assert_eq!((ae_sdk::anim::LAYERS, ae_sdk::anim::TWEENS), (LAYERS, TWEENS));
-        assert_eq!(ae_sdk::anim::NO_BONE, ae_model::anim::NONE);
+        use ae_sdk::anim::{Axis, deg};
+        assert_eq!((ae_sdk::anim::LAYERS, ae_sdk::anim::MANUAL), (LAYERS, MANUAL));
+        assert_eq!(size_of::<Anim>(), 8 + size_of::<Channels>(), "the model id and the channels: 536 bytes");
         let mut a = Anim::new(7);
         a.play(1, 3).once().per_metre(0.25).mask(2).blend_in(100).at(0.5);
-        a.turn(5, 4, ae_sdk::anim::axis::Z, 1.0, 2.0).additive();
-        a.spin(6, 9, ae_sdk::anim::axis::Y, 3.0).mask(1);
+        a.turn(4, Axis::RIGHT, 1.0, 2.0).ramp(3.0);
+        a.spin(9, Axis::bone([0.0, 1.0, 0.0]), 3.0);
+        a.yaw(4, deg(90.0), 1.0);
         let ch = channels(&a);
-        assert_eq!(ch.layers[1], Layer { clip: 3, mask: 2, mode: 2, kind: 0, flags: 1, reserved: 0, weight: 0.0, target: 1.0, fade: 10.0, speed: 0.25, phase: 0.5 });
-        assert!(ch.layers[0].is_empty() && ch.tweens[0].is_empty());
-        assert_eq!(ch.tweens[5], Tween { bone: 4, mask: 0, kind: 1, axis: 2, flags: 1, reserved: 0, value: 0.0, target: 1.0, speed: 2.0 });
-        assert_eq!(ch.tweens[6].bone, ae_model::anim::NONE);
+        assert_eq!(ch.layers[1], Layer { clip: 3, mask: 2, mode: 2, kind: 0, flags: 5, reserved: 0, weight: 0.0, target: 1.0, fade: 10.0, speed: 0.25, phase: 0.5 });
+        assert!(ch.layers[0].is_empty());
+        let fresh = manual_flags::PENDING | manual_flags::FRESH;
+        let pi = std::f32::consts::PI;
+        assert_eq!(ch.manual[0], Manual { bone: 4, kind: 1, flags: fresh, target: [0.0, 1.0, 0.0, deg(90.0)], speed: 1.0, ..Default::default() }, "the yaw replaced the turn");
+        assert!((deg(90.0) - pi / 2.0).abs() < 1e-6);
+        assert_eq!(ch.manual[1], Manual { bone: 9, kind: 2, flags: fresh | manual_flags::BONE_AXIS, target: [0.0, 1.0, 0.0, 0.0], speed: 3.0, ..Default::default() });
+        assert!(ch.manual[2].is_empty());
         let mut back = Anim::new(7);
         store(&ch, &mut back);
         assert_eq!(back, a);
         // The SDK's constants are the evaluator's.
-        use ae_model::anim::{kind, layer_flags, tween_flags, tween_kind};
-        assert_eq!((ae_sdk::anim::kind::ADDITIVE, ae_sdk::anim::layer_flags::GROUND_SPEED, ae_sdk::anim::layer_flags::ENDED), (kind::ADDITIVE, layer_flags::GROUND_SPEED, layer_flags::ENDED));
-        assert_eq!((ae_sdk::anim::tween_kind::TURN, ae_sdk::anim::tween_kind::MOVE, ae_sdk::anim::tween_kind::SPIN, ae_sdk::anim::tween_flags::ADDITIVE), (tween_kind::TURN, tween_kind::MOVE, tween_kind::SPIN, tween_flags::ADDITIVE));
+        use ae_model::anim::{kind, layer_flags, manual_flags, manual_kind};
+        use ae_sdk::anim as sdk;
+        assert_eq!((sdk::kind::ADDITIVE, sdk::layer_flags::GROUND_SPEED, sdk::layer_flags::ENDED, sdk::layer_flags::NEW), (kind::ADDITIVE, layer_flags::GROUND_SPEED, layer_flags::ENDED, layer_flags::NEW));
+        assert_eq!((sdk::manual_kind::TURN, sdk::manual_kind::SPIN, sdk::manual_kind::MOVE, sdk::manual_kind::SCALE), (manual_kind::TURN, manual_kind::SPIN, manual_kind::MOVE, manual_kind::SCALE));
+        assert_eq!((sdk::manual_flags::PENDING, sdk::manual_flags::FRESH, sdk::manual_flags::RELATIVE, sdk::manual_flags::BONE_AXIS), (manual_flags::PENDING, manual_flags::FRESH, manual_flags::RELATIVE, manual_flags::BONE_AXIS));
         assert_eq!(ae_sdk::anim::mode::ONCE as u32, ae_model::pose::PlayMode::Once as u32);
         assert_eq!(ae_sdk::anim::mode::PING_PONG as u32, ae_model::pose::PlayMode::PingPong as u32);
     }

@@ -3,14 +3,25 @@
 //! [`Anim::play`], [`Anim::turn`] and friends; the engine's `anim` service
 //! (`host(anim)`, `ae_services::anim`) advances them every tick without
 //! calling the module: clip phases (by time, or by the unit's ground speed
-//! for no foot sliding), layer fades, tweens toward their targets. The pose
-//! is a pure function of these columns (`ae_model::anim`), evaluated by the
-//! client for drawing and by the engine for joint queries.
+//! for no foot sliding), layer fades, manual joints toward their targets.
+//! The pose is a pure function of these columns (`ae_model::anim`),
+//! evaluated by the client for drawing and by the engine for joint queries.
 //!
 //! Per unit: [`LAYERS`] clip layers, applied in index order (each a clip
 //! with a play mode, a weight and a joint mask; blended over the layers
-//! below, or added to them), then [`TWEENS`] procedural channels (turn, move
-//! or spin a bone, or every bone of a mask). All zeros is nothing playing.
+//! below, or added to them), and [`MANUAL`] manual entries.
+//!
+//! **A bone is either clipped or manual.** Turning, spinning, moving or
+//! scaling a bone takes it away from the clips (its children keep theirs);
+//! [`Anim::release`] gives it back, and so does playing a clip that
+//! animates it (from the next tick; a command given in the same tick as the
+//! `play` stays). A bone the clips were driving starts from where they had
+//! it. A bone has at most one rotation entry (turn or spin), one move and
+//! one scale: the next command replaces it.
+//!
+//! Axes are in the unit's frame ([`Axis::UP`], [`Axis::FORWARD`],
+//! [`Axis::RIGHT`]), as the bone is at rest; the engine turns them into the
+//! bone's own frame (glTF bone frames are arbitrary).
 //!
 //! Clips, bones and masks are the model's, found by name with [`clip`],
 //! [`bone`] and [`mask`] (the service publishes them from the content's
@@ -19,9 +30,7 @@
 use crate::{Component, abi};
 
 pub const LAYERS: usize = 4;
-pub const TWEENS: usize = 8;
-/// No bone: a tween over a mask ([`TweenSet::mask`]).
-pub const NO_BONE: u16 = u16::MAX;
+pub const MANUAL: usize = 8;
 
 /// [`Anim::mode`].
 pub mod mode {
@@ -45,31 +54,62 @@ pub mod layer_flags {
     pub const GROUND_SPEED: u8 = 1;
     /// Set by the engine when a clip played once reached its end.
     pub const ENDED: u8 = 2;
+    /// Just played: the engine hands the clip's bones back from manual
+    /// entries, then clears it.
+    pub const NEW: u8 = 4;
 }
 
-/// [`Anim::tween_kind`].
-pub mod tween_kind {
+/// [`Anim::manual_kind`].
+pub mod manual_kind {
     pub const NONE: u8 = 0;
     pub const TURN: u8 = 1;
-    pub const MOVE: u8 = 2;
-    pub const SPIN: u8 = 3;
+    pub const SPIN: u8 = 2;
+    pub const MOVE: u8 = 3;
+    pub const SCALE: u8 = 4;
 }
 
-/// [`Anim::tween_flags`].
-pub mod tween_flags {
-    /// On top of the layers' result, not over the rest pose.
-    pub const ADDITIVE: u8 = 1;
+/// [`Anim::manual_flags`] (the engine's bookkeeping).
+pub mod manual_flags {
+    pub const PENDING: u8 = 1;
+    pub const FRESH: u8 = 2;
+    pub const RELATIVE: u8 = 4;
+    pub const BONE_AXIS: u8 = 8;
 }
 
-/// A bone's local axis.
-pub mod axis {
-    pub const X: u8 = 0;
-    pub const Y: u8 = 1;
-    pub const Z: u8 = 2;
+/// An axis for a turn or a spin: in the unit's frame (x forward, y up,
+/// z right) or in the bone's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Axis {
+    pub v: [f32; 3],
+    pub bone: bool,
+}
+
+impl Axis {
+    /// Turning about it by a positive angle turns forward to the left.
+    pub const UP: Axis = Axis::model([0.0, 1.0, 0.0]);
+    /// Turning about it by a positive angle rolls up to the right.
+    pub const FORWARD: Axis = Axis::model([1.0, 0.0, 0.0]);
+    /// Turning about it by a positive angle pitches forward up.
+    pub const RIGHT: Axis = Axis::model([0.0, 0.0, 1.0]);
+
+    /// In the unit's (the model's) frame.
+    pub const fn model(v: [f32; 3]) -> Axis {
+        Axis { v, bone: false }
+    }
+
+    /// In the bone's own frame (as the model file has it).
+    pub const fn bone(v: [f32; 3]) -> Axis {
+        Axis { v, bone: true }
+    }
+}
+
+/// Degrees in radians.
+pub const fn deg(degrees: f32) -> f32 {
+    degrees * (core::f32::consts::PI / 180.0)
 }
 
 /// A unit's animation channels. Layer `i` is the `[i]` of the layer
-/// arrays, tween `k` the `[k]` of the tween arrays (the engine's
+/// arrays, manual entry `k` the `[k]` of the manual arrays (the engine's
 /// `ae_model::anim::Channels`, by field).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
@@ -108,29 +148,33 @@ pub struct Anim {
     /// Seconds into the clip.
     #[field(view = "los")]
     pub phase: [f32; LAYERS],
-    /// The bone, or [`NO_BONE`] with a mask.
     #[field(view = "los")]
-    pub bone: [u16; TWEENS],
+    pub bone: [u16; MANUAL],
+    /// [`manual_kind`]; [`manual_kind::NONE`]: an empty entry.
     #[field(view = "los")]
-    pub tween_mask: [u16; TWEENS],
-    /// [`tween_kind`].
+    pub manual_kind: [u8; MANUAL],
+    /// [`manual_flags`].
     #[field(view = "los")]
-    pub tween_kind: [u8; TWEENS],
-    /// [`axis`].
+    pub manual_flags: [u8; MANUAL],
+    /// Now, in the bone's terms (a quaternion, or xyz).
     #[field(view = "los")]
-    pub axis: [u8; TWEENS],
-    /// [`tween_flags`].
+    pub value: [[f32; 4]; MANUAL],
+    /// The command until the engine takes it, then the goal in the bone's
+    /// terms (`ae_model::anim::Manual`).
     #[field(view = "los")]
-    pub tween_flags: [u8; TWEENS],
-    pub tween_reserved: [u8; TWEENS],
-    /// Radians (turn, spin) or distance (move) now.
+    pub goal: [[f32; 4]; MANUAL],
+    /// Top speed a second (a spin's rate, signed); 0: at once.
     #[field(view = "los")]
-    pub value: [f32; TWEENS],
+    pub top_speed: [f32; MANUAL],
+    /// Speed gained a second; 0: at once.
     #[field(view = "los")]
-    pub tween_target: [f32; TWEENS],
-    /// A second (0: at once).
+    pub accel: [f32; MANUAL],
+    /// Speed lost a second closing in or spinning down; 0: stops dead.
     #[field(view = "los")]
-    pub tween_speed: [f32; TWEENS],
+    pub decel: [f32; MANUAL],
+    /// The speed now.
+    #[field(view = "los")]
+    pub rate: [f32; MANUAL],
 }
 
 impl Anim {
@@ -149,26 +193,28 @@ impl Anim {
             fade: [0.0; LAYERS],
             speed: [0.0; LAYERS],
             phase: [0.0; LAYERS],
-            bone: [0; TWEENS],
-            tween_mask: [0; TWEENS],
-            tween_kind: [0; TWEENS],
-            axis: [0; TWEENS],
-            tween_flags: [0; TWEENS],
-            tween_reserved: [0; TWEENS],
-            value: [0.0; TWEENS],
-            tween_target: [0.0; TWEENS],
-            tween_speed: [0.0; TWEENS],
+            bone: [0; MANUAL],
+            manual_kind: [0; MANUAL],
+            manual_flags: [0; MANUAL],
+            value: [[0.0; 4]; MANUAL],
+            goal: [[0.0; 4]; MANUAL],
+            top_speed: [0.0; MANUAL],
+            accel: [0.0; MANUAL],
+            decel: [0.0; MANUAL],
+            rate: [0.0; MANUAL],
         }
     }
 
     /// Play `clip` on `layer` from its start, looping, at full weight over
-    /// the whole model; adjust with the returned [`LayerSet`].
+    /// the whole model; adjust with the returned [`LayerSet`]. Bones the
+    /// clip animates (within its mask) leave their manual entries, unless
+    /// the layer is made additive.
     pub fn play(&mut self, layer: usize, clip: u16) -> LayerSet<'_> {
         self.clip[layer] = clip;
         self.mask[layer] = 0;
         self.mode[layer] = mode::LOOP;
         self.kind[layer] = kind::BLEND;
-        self.flags[layer] = 0;
+        self.flags[layer] = layer_flags::NEW;
         self.weight[layer] = 1.0;
         self.target[layer] = 1.0;
         self.fade[layer] = 0.0;
@@ -215,57 +261,143 @@ impl Anim {
         self.flags[layer] & layer_flags::ENDED != 0
     }
 
-    /// Turn `bone` about its local `axis` to `angle` radians at `speed`
-    /// radians a second (the short way; 0: at once), over its rest pose.
-    pub fn turn(&mut self, slot: usize, bone: u16, axis: u8, angle: f32, speed: f32) -> TweenSet<'_> {
-        self.set_tween(slot, bone, tween_kind::TURN, axis, angle, speed)
+    /// Turn `bone` about `axis` to `angle` radians from its rest pose, at
+    /// up to `speed` radians a second (0: at once). From where the bone is
+    /// to `angle` as the numbers say: from -100° to 170° is 270° the long
+    /// way. A bone a clip or a spin left is taken as within ±180°. Less
+    /// than a full turn; more is a spin.
+    pub fn turn(&mut self, bone: u16, axis: Axis, angle: f32, speed: f32) -> ManualSet<'_> {
+        self.command(bone, manual_kind::TURN, axis.bone, [axis.v[0], axis.v[1], axis.v[2], angle], speed)
     }
 
-    /// Move `bone` along its local `axis` to `distance` from its rest
-    /// position at `speed` a second (0: at once).
-    pub fn move_to(&mut self, slot: usize, bone: u16, axis: u8, distance: f32, speed: f32) -> TweenSet<'_> {
-        self.set_tween(slot, bone, tween_kind::MOVE, axis, distance, speed)
+    /// Turn `bone` by `angle` from where it is.
+    pub fn turn_by(&mut self, bone: u16, axis: Axis, angle: f32, speed: f32) -> ManualSet<'_> {
+        let set = self.turn(bone, axis, angle, speed);
+        set.anim.manual_flags[set.slot] |= manual_flags::RELATIVE;
+        set
     }
 
-    /// Spin `bone` about its local `axis` at `speed` radians a second.
-    pub fn spin(&mut self, slot: usize, bone: u16, axis: u8, speed: f32) -> TweenSet<'_> {
-        let value = if self.tween_kind[slot] == tween_kind::SPIN && self.bone[slot] == bone { self.value[slot] } else { 0.0 };
-        let t = self.set_tween(slot, bone, tween_kind::SPIN, axis, 0.0, speed);
-        t.anim.value[slot] = value;
-        t
+    /// Turn `bone` about the unit's up axis (positive: to the left).
+    pub fn yaw(&mut self, bone: u16, angle: f32, speed: f32) -> ManualSet<'_> {
+        self.turn(bone, Axis::UP, angle, speed)
     }
 
-    fn set_tween(&mut self, slot: usize, bone: u16, kind: u8, axis: u8, target: f32, speed: f32) -> TweenSet<'_> {
-        // A tween that was already turning this bone this way goes on from
-        // where it is.
-        if self.tween_kind[slot] != kind || self.bone[slot] != bone || self.axis[slot] != axis {
-            self.value[slot] = 0.0;
+    /// Turn `bone` about the unit's right axis (positive: forward up).
+    pub fn pitch(&mut self, bone: u16, angle: f32, speed: f32) -> ManualSet<'_> {
+        self.turn(bone, Axis::RIGHT, angle, speed)
+    }
+
+    /// Spin `bone` about `axis` at `rate` radians a second (signed), for
+    /// ever; reached at once unless [`ManualSet::accel`].
+    pub fn spin(&mut self, bone: u16, axis: Axis, rate: f32) -> ManualSet<'_> {
+        self.command(bone, manual_kind::SPIN, axis.bone, [axis.v[0], axis.v[1], axis.v[2], 0.0], rate)
+    }
+
+    /// Slow `bone`'s spin to a stop at `decel` radians a second squared
+    /// (0: at once); it then holds where it stopped.
+    pub fn stop_spin(&mut self, bone: u16, decel: f32) {
+        if let Some(k) = self.find(bone, manual_kind::SPIN) {
+            self.top_speed[k] = 0.0;
+            self.decel[k] = decel;
         }
-        self.bone[slot] = bone;
-        self.tween_mask[slot] = 0;
-        self.tween_kind[slot] = kind;
-        self.axis[slot] = axis;
-        self.tween_flags[slot] = 0;
-        self.tween_target[slot] = target;
-        self.tween_speed[slot] = speed;
-        TweenSet { anim: self, slot }
     }
 
-    /// Clear tween `slot` (the bone goes back to what the layers give).
-    pub fn stop_tween(&mut self, slot: usize) {
-        self.bone[slot] = 0;
-        self.tween_mask[slot] = 0;
-        self.tween_kind[slot] = 0;
-        self.axis[slot] = 0;
-        self.tween_flags[slot] = 0;
-        self.value[slot] = 0.0;
-        self.tween_target[slot] = 0.0;
-        self.tween_speed[slot] = 0.0;
+    /// Move `bone` to `offset` from its rest position, in the unit's frame,
+    /// at up to `speed` a second (0: at once).
+    pub fn move_to(&mut self, bone: u16, offset: [f32; 3], speed: f32) -> ManualSet<'_> {
+        self.command(bone, manual_kind::MOVE, false, [offset[0], offset[1], offset[2], 0.0], speed)
     }
 
-    /// Tween `slot` has reached its target (a spin never does).
-    pub fn tween_done(&self, slot: usize) -> bool {
-        matches!(self.tween_kind[slot], tween_kind::TURN | tween_kind::MOVE) && self.value[slot] == self.tween_target[slot]
+    /// Scale `bone` to `factor` times its rest scale (on its own axes), at
+    /// up to `speed` a second (0: at once).
+    pub fn scale_to(&mut self, bone: u16, factor: [f32; 3], speed: f32) -> ManualSet<'_> {
+        self.command(bone, manual_kind::SCALE, false, [factor[0], factor[1], factor[2], 0.0], speed)
+    }
+
+    /// Give `bone` back to the clips (its manual entries cleared).
+    pub fn release(&mut self, bone: u16) {
+        for k in 0..MANUAL {
+            if self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone {
+                self.clear_manual(k);
+            }
+        }
+    }
+
+    /// `bone` is not turning (its turn reached, its spin at its rate, or
+    /// neither).
+    pub fn turned(&self, bone: u16) -> bool {
+        self.find(bone, manual_kind::TURN).is_none_or(|k| self.manual_done(k))
+    }
+
+    /// `bone`'s move has arrived (or it has none).
+    pub fn moved(&self, bone: u16) -> bool {
+        self.find(bone, manual_kind::MOVE).is_none_or(|k| self.manual_done(k))
+    }
+
+    /// `bone`'s scale has arrived (or it has none).
+    pub fn scaled(&self, bone: u16) -> bool {
+        self.find(bone, manual_kind::SCALE).is_none_or(|k| self.manual_done(k))
+    }
+
+    /// `bone` is manual: the clips do not move it.
+    pub fn is_manual(&self, bone: u16) -> bool {
+        (0..MANUAL).any(|k| self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone)
+    }
+
+    fn manual_done(&self, k: usize) -> bool {
+        match self.manual_kind[k] {
+            manual_kind::NONE => true,
+            _ if self.manual_flags[k] & manual_flags::PENDING != 0 => false,
+            manual_kind::SPIN => self.rate[k] == self.top_speed[k],
+            _ => self.value[k] == self.goal[k],
+        }
+    }
+
+    /// The entry for `bone`'s part that `kind` drives (turn and spin are
+    /// one: the rotation).
+    fn find(&self, bone: u16, kind: u8) -> Option<usize> {
+        let part = |k: u8| if k == manual_kind::SPIN { manual_kind::TURN } else { k };
+        (0..MANUAL).find(|&k| self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone && part(self.manual_kind[k]) == part(kind))
+    }
+
+    fn command(&mut self, bone: u16, kind: u8, bone_axis: bool, goal: [f32; 4], speed: f32) -> ManualSet<'_> {
+        // The bone's entry for this part, else a free one, else the last.
+        let found = self.find(bone, kind);
+        let k = found.or_else(|| (0..MANUAL).find(|&k| self.manual_kind[k] == manual_kind::NONE)).unwrap_or(MANUAL - 1);
+        let mut flags = manual_flags::PENDING;
+        if found.is_none() {
+            self.clear_manual(k);
+            flags |= manual_flags::FRESH;
+        } else {
+            // Still waiting for its start, or now a different motion.
+            flags |= self.manual_flags[k] & manual_flags::FRESH;
+            if self.manual_kind[k] != kind {
+                self.rate[k] = 0.0;
+            }
+        }
+        if bone_axis {
+            flags |= manual_flags::BONE_AXIS;
+        }
+        self.bone[k] = bone;
+        self.manual_kind[k] = kind;
+        self.manual_flags[k] = flags;
+        self.goal[k] = goal;
+        self.top_speed[k] = speed;
+        self.accel[k] = 0.0;
+        self.decel[k] = 0.0;
+        ManualSet { anim: self, slot: k }
+    }
+
+    fn clear_manual(&mut self, k: usize) {
+        self.bone[k] = 0;
+        self.manual_kind[k] = 0;
+        self.manual_flags[k] = 0;
+        self.value[k] = [0.0; 4];
+        self.goal[k] = [0.0; 4];
+        self.top_speed[k] = 0.0;
+        self.accel[k] = 0.0;
+        self.decel[k] = 0.0;
+        self.rate[k] = 0.0;
     }
 }
 
@@ -306,7 +438,8 @@ impl LayerSet<'_> {
         self
     }
 
-    /// Added to the layers below (its change from the clip's first frame).
+    /// Added to the layers below (its change from the clip's first frame);
+    /// it leaves manual bones alone.
     pub fn additive(self) -> Self {
         self.anim.kind[self.layer] = kind::ADDITIVE;
         self
@@ -349,30 +482,29 @@ impl LayerSet<'_> {
     }
 }
 
-/// Settings of one tween ([`Anim::turn`]).
-pub struct TweenSet<'a> {
+/// Settings of one manual entry ([`Anim::turn`] and friends).
+pub struct ManualSet<'a> {
     anim: &'a mut Anim,
     slot: usize,
 }
 
-impl TweenSet<'_> {
-    /// On top of the layers' result instead of over the rest pose.
-    pub fn additive(self) -> Self {
-        self.anim.tween_flags[self.slot] |= tween_flags::ADDITIVE;
+impl ManualSet<'_> {
+    /// Speed up at `accel` a second squared (0: at once).
+    pub fn accel(self, accel: f32) -> Self {
+        self.anim.accel[self.slot] = accel;
         self
     }
 
-    /// Every bone of mask `mask` by its weight, instead of one bone.
-    pub fn mask(self, mask: u16) -> Self {
-        self.anim.tween_mask[self.slot] = mask;
-        self.anim.bone[self.slot] = NO_BONE;
+    /// Slow down to stop at the target at `decel` a second squared (0:
+    /// stop dead).
+    pub fn decel(self, decel: f32) -> Self {
+        self.anim.decel[self.slot] = decel;
         self
     }
 
-    /// Start from `value` instead of where the tween is.
-    pub fn from(self, value: f32) -> Self {
-        self.anim.value[self.slot] = value;
-        self
+    /// The same both ways.
+    pub fn ramp(self, accel: f32) -> Self {
+        self.accel(accel).decel(accel)
     }
 }
 

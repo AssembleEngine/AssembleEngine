@@ -2606,6 +2606,20 @@ Design:
     (layers, fades, clearing, tweens; digests equal at 1/2/4/8 workers). The ticker runs on
     the coordinating thread (rows are independent: a parallel split is easy if it shows).
     Not yet: masks from content (a mask file per model).
+  - Manual joints — done (2026-11-16). Tweens replaced by `ae_model::anim::Manual` (52 bytes:
+    bone, kind, flags, value and target as quaternion or xyz, top speed, accel, decel, rate);
+    `Channels` 528 bytes, `Anim` 536. Kinds turn, spin, move, scale; one rotation, one move
+    and one scale entry per bone. The SDK writes the command (`PENDING`; `FRESH` for a new
+    entry); `Rig::advance` turns it into the bone's terms (model-frame axes through the
+    bone's rest rotation; a fresh entry starts from the clips' value, on the rest pose's
+    side), then steps it (great arc as signed, the trapezoid by accel/decel; a spin stays on
+    the rest side). `play` sets `layer_flags::NEW`; the ticker then clears entries (given
+    before that tick) on the bones the clip animates within its mask, additive clips
+    excepted. SDK: `turn`, `turn_by`, `yaw`, `pitch`, `spin`, `stop_spin`, `move_to`,
+    `scale_to`, `release`, `turned` / `moved` / `scaled`, `is_manual`; `.accel`, `.decel`,
+    `.ramp`; `Axis::{UP, FORWARD, RIGHT, model, bone}`, `deg`. Test game: the head yawed
+    while standing, turned back and released when walking. Not yet: the client debug view
+    of bone axes; keeping clips' original keys (with step 3).
 
 ## Later improvements
 

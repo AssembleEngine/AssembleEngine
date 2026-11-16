@@ -9,10 +9,11 @@
 //!   and an `Anim` on [`MODEL`].
 //! * `steer`: a unit walks for [`WALK_TICKS`], then stands for
 //!   [`STAND_TICKS`] (staggered by entity), turning back each time.
-//! * `animate`: the clips and tweens from what the unit does, with no
-//!   script: the standing clip always on layer 0, the walking clip on layer
-//!   1 by the metre while it walks (blended in and out), the head turned
-//!   while it stands.
+//! * `animate`: the clips and manual joints from what the unit does, with
+//!   no script: the standing clip always on layer 0, the walking clip on
+//!   layer 1 by the metre while it walks (blended in and out), the head
+//!   yawed while it stands (taken from the clips), turned back to the front
+//!   and given back to them when it walks.
 //! * `host(anim)`: the engine advances the channels.
 
 use ae_sdk::anim::{self, Anim, model_id};
@@ -94,12 +95,19 @@ fn animate(run: &Run) {
             } else if a.target[1] != 1.0 {
                 a.layer(1).fade_to(1.0, 200);
             }
-            a.turn(0, head, anim::axis::Y, 0.0, 2.0).additive();
+            // The head back to the front, then back to the clips.
+            if a.is_manual(head) {
+                if a.turned(head) {
+                    a.release(head);
+                } else {
+                    a.yaw(head, 0.0, 2.0).ramp(8.0);
+                }
+            }
         } else {
             if a.playing(1) != 0 && a.target[1] != 0.0 {
                 a.stop(1, 300);
             }
-            a.turn(0, head, anim::axis::Y, 0.7, 2.0).additive();
+            a.yaw(head, 0.7, 2.0).ramp(8.0);
         }
     }
 }

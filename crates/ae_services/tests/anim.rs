@@ -3,7 +3,8 @@
 //! (`ae_sdk::anim` lookups) and the `anim` service advances them.
 //! * The standing clip plays on layer 0; the walking clip blends in on
 //!   layer 1 while a unit walks (its phase by the metre), and fades out and
-//!   is cleared when it stands; the head turns while it stands.
+//!   is cleared when it stands; the head is taken from the clips and yawed
+//!   while it stands, turned back and given back when it walks.
 //! * The world is the same at 1, 2, 4 and 8 workers.
 //!
 //! One runtime at a time: the column arena is process-wide.
@@ -58,11 +59,16 @@ fn units_walk_and_stand_animated() -> Result<()> {
             walking += 1;
             ensure!(a.clip[1] == walk && a.weight[1] == 1.0 && a.flags[1] & ae_sdk::anim::layer_flags::GROUND_SPEED != 0, "unit {e} at {k}: walking at full weight: {a:?}");
             ensure!(a.phase[1] > 0.0 && a.phase[1] < rig.duration(walk), "unit {e}: walking by the metre: {a:?}");
-            ensure!(a.value[0] == 0.0 || a.value[0] < 0.7, "unit {e}: head turning back");
+            if k >= 8 + 30 {
+                ensure!(!a.is_manual(head), "unit {e} at {k}: the head turned back and given back to the clips: {a:?}");
+            }
         } else if k >= 90 + 12 {
             standing += 1;
             ensure!(a.clip[1] == 0, "unit {e} at {k}: the walking clip cleared once faded: {a:?}");
-            ensure!(a.bone[0] == head && a.value[0] == 0.7 && a.tween_done(0), "unit {e}: the head turned: {a:?}");
+            ensure!(a.is_manual(head), "unit {e} at {k}: the head taken from the clips: {a:?}");
+            if k >= 90 + 35 {
+                ensure!(a.turned(head) && a.bone[0] == head && a.value[0] == a.goal[0], "unit {e} at {k}: the head turned: {a:?}");
+            }
         } else if k >= 90 {
             fading += 1;
             ensure!(a.target[1] == 0.0 || a.clip[1] == 0, "unit {e} at {k}: fading out: {a:?}");

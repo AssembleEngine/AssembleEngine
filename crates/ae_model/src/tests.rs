@@ -412,49 +412,151 @@ mod anim_tests {
         assert!((ch.layers[0].phase - 0.3).abs() < 1e-6, "6 m/s for 0.5 s at 0.1 s/m");
     }
 
-    /// Tweens: a turn reaches its target in the ticks its speed needs, the
-    /// short way round; a spin wraps; additive and over-the-rest turns; a
-    /// turn spread over a mask.
-    #[test]
-    fn tweens() {
-        let mut rig = Rig::new(&model());
-        let dt = 1.0 / 30.0;
-        let pi = std::f32::consts::PI;
-        let mut ch = Channels::default();
-        ch.tweens[0] = Tween { bone: 1, kind: tween_kind::TURN, axis: 1, target: pi / 2.0, speed: pi, ..Default::default() };
+    /// A command as the SDK leaves it: pending, and fresh unless it replaces
+    /// an entry.
+    fn command(bone: u16, kind: u8, target: [f32; 4], speed: f32) -> Manual {
+        Manual { bone, kind, flags: manual_flags::PENDING | manual_flags::FRESH, target, speed, ..Default::default() }
+    }
+
+    fn reissue(m: &mut Manual, target: [f32; 4]) {
+        (m.flags, m.target) = (manual_flags::PENDING, target);
+    }
+
+    fn ticks_until_done(rig: &Rig, ch: &mut Channels, k: usize) -> u32 {
         let mut ticks = 0;
-        while !ch.tweens[0].done() {
-            rig.advance(&mut ch, dt, 0.0);
+        while !ch.manual[k].done() {
+            rig.advance(ch, 1.0 / 30.0, 0.0);
+            ticks += 1;
+            assert!(ticks < 1000);
+        }
+        ticks
+    }
+
+    /// Turns: in the ticks their speed needs; the long way past 180°; with
+    /// acceleration and deceleration; about a model axis through the bone's
+    /// rest rotation; a command given again goes on from where it is.
+    #[test]
+    fn manual_turns() {
+        let rig = Rig::new(&model());
+        let pi = std::f32::consts::PI;
+        let up = |angle| [0.0, 1.0, 0.0, angle];
+        let mut ch = Channels::default();
+        ch.manual[0] = command(1, manual_kind::TURN, up(pi / 2.0), pi);
+        assert_eq!(ticks_until_done(&rig, &mut ch, 0), 15, "a quarter turn at half a turn a second");
+        let p = palette_of(&rig, &ch);
+        assert!(p[3][11].abs() < 1e-5 && p[3][3].abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
+        // Back to rest, then to 270°: the long way, through +90°.
+        reissue(&mut ch.manual[0], up(0.0));
+        ticks_until_done(&rig, &mut ch, 0);
+        reissue(&mut ch.manual[0], up(1.5 * pi));
+        for _ in 0..15 {
+            rig.advance(&mut ch, 1.0 / 30.0, 0.0);
+        }
+        let p = palette_of(&rig, &ch);
+        assert!(p[3][11].abs() < 1e-4 && p[3][3].abs() < 1e-4, "through +90°: {:?}", p[3]);
+        assert_eq!(ticks_until_done(&rig, &mut ch, 0), 30);
+        let p = palette_of(&rig, &ch);
+        assert!((p[3][11] - 2.0).abs() < 1e-4 && p[3][3].abs() < 1e-4, "at 270° (-90°): {:?}", p[3]);
+        // Ramps: from rest with 2π/s² up and down, a quarter turn takes
+        // 2·sqrt(θ/a) = 1 s, peaking at π/s (give or take a tick).
+        let mut ch = Channels::default();
+        ch.manual[0] = Manual { accel: 2.0 * pi, decel: 2.0 * pi, ..command(1, manual_kind::TURN, up(pi / 2.0), 10.0) };
+        let mut peak = 0.0f32;
+        let mut ticks = 0;
+        while !ch.manual[0].done() {
+            rig.advance(&mut ch, 1.0 / 30.0, 0.0);
+            peak = peak.max(ch.manual[0].rate);
             ticks += 1;
         }
-        assert_eq!(ticks, 15, "a quarter turn at half a turn a second");
+        assert!((27..=31).contains(&ticks), "{ticks} ticks");
+        assert!(peak > 0.9 * pi && peak < 1.01 * pi, "top speed reached {peak}");
+        // Given again mid-way, a turn goes on as if it had not been.
+        let mut a = Channels::default();
+        a.manual[0] = Manual { accel: 2.0 * pi, ..command(1, manual_kind::TURN, up(pi / 2.0), pi) };
+        for _ in 0..5 {
+            rig.advance(&mut a, 1.0 / 30.0, 0.0);
+        }
+        let mut b = a;
+        reissue(&mut b.manual[0], up(pi / 2.0));
+        b.manual[0].accel = 2.0 * pi;
+        rig.advance(&mut a, 1.0 / 30.0, 0.0);
+        rig.advance(&mut b, 1.0 / 30.0, 0.0);
+        assert_eq!(a, b);
+        // `left` lying on its side at rest (a quarter about +X, so its +Z is
+        // the model's -Y): a turn about the model's up still yaws the tip,
+        // and about the bone's own Z the same turn is the other way round.
+        let mut m = model();
+        let q = Quat::from_rotation_x(pi / 2.0);
+        m.bones[1].rotation = q.to_array();
+        m.bones[1].rest = (Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)) * Mat4::from_quat(q)).to_cols_array();
+        let rig = Rig::new(&m);
+        let mut ch = Channels::default();
+        ch.manual[0] = command(1, manual_kind::TURN, up(pi / 2.0), 0.0);
+        rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         let p = palette_of(&rig, &ch);
-        assert!((p[3][11] - 0.0).abs() < 1e-5 && (p[3][3]).abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
-        // From 170° to -170° goes through 180°, not back through 0.
-        ch.tweens[0] = Tween { value: 170f32.to_radians(), target: -170f32.to_radians(), speed: 1.0, ..ch.tweens[0] };
-        rig.advance(&mut ch, dt, 0.0);
-        assert!(ch.tweens[0].value > 170f32.to_radians() || ch.tweens[0].value < -170f32.to_radians());
-        ch.tweens[0] = Tween { kind: tween_kind::SPIN, value: 0.0, speed: 4.0 * pi, ..ch.tweens[0] };
+        assert!(p[3][3].abs() < 1e-5 && p[3][7].abs() < 1e-5 && p[3][11].abs() < 1e-5, "tip yawed onto -Z of left: {:?}", p[3]);
+        ch.manual[0] = Manual { flags: manual_flags::PENDING | manual_flags::FRESH | manual_flags::BONE_AXIS, ..command(1, manual_kind::TURN, [0.0, 0.0, 1.0, pi / 2.0], 0.0) };
+        rig.advance(&mut ch, 1.0 / 30.0, 0.0);
+        let p = palette_of(&rig, &ch);
+        assert!((p[3][11] - 2.0).abs() < 1e-5, "about the bone's Z (the model's -Y): onto +Z: {:?}", p[3]);
+    }
+
+    /// A bone with a manual entry takes no clip (its children still do); a
+    /// clip played later takes it back; a turn on a clipped bone starts where
+    /// the clip had it; spins, moves and scales.
+    #[test]
+    fn manual_and_clips() {
+        let rig = Rig::new(&model());
+        let pi = std::f32::consts::PI;
+        let dt = 1.0 / 30.0;
+        let mut ch = Channels::default();
+        // Clip "turn" has `left` a quarter round; "lift" raises `tip` (held).
+        ch.layers[0] = Layer { speed: 0.0, ..layer(1, 1.0 - 1e-6) };
+        ch.layers[1] = Layer { speed: 0.0, ..layer(2, 1.0 - 1e-6) };
+        let quarter = palette_of(&rig, &ch);
+        ch.manual[0] = command(1, manual_kind::TURN, [0.0, 0.0, 1.0, 0.0], 1.0);
+        assert_eq!(palette_of(&rig, &ch), quarter, "a fresh entry shows nothing yet");
+        let shown = rig.clone();
+        let mut started = ch;
+        shown.advance(&mut started, 0.0, 0.0);
+        let p = palette_of(&rig, &started);
+        assert!(p.iter().flatten().zip(quarter.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-5), "started where the clip had it");
+        ticks_until_done(&rig, &mut started, 0);
+        let p = palette_of(&rig, &started);
+        assert!((p[3][3] - 1.0).abs() < 1e-4 && (p[3][11] - 1.0).abs() < 1e-4, "left back at rest, the clip's turn gone: {:?}", p[3]);
+        assert!((p[3][7] - 1.0).abs() < 1e-4, "the tip still lifted by its clip: {:?}", p[3]);
+        // Playing a clip on `left` takes it back.
+        started.layers[0].flags |= layer_flags::NEW;
+        rig.advance(&mut started, 0.0, 0.0);
+        assert!(started.manual[0].is_empty() && started.layers[0].flags & layer_flags::NEW == 0);
+        // ... but not from a command given in the same tick, nor an additive
+        // clip, nor a clip without the bone.
+        started.manual[0] = command(1, manual_kind::TURN, [0.0, 1.0, 0.0, 0.0], 0.0);
+        started.layers[0].flags |= layer_flags::NEW;
+        rig.advance(&mut started, 0.0, 0.0);
+        assert!(!started.manual[0].is_empty());
+        started.layers[1].flags |= layer_flags::NEW;
+        started.layers[2] = Layer { kind: kind::ADDITIVE, flags: layer_flags::NEW, ..layer(1, 0.0) };
+        rig.advance(&mut started, 0.0, 0.0);
+        assert!(!started.manual[0].is_empty());
+        // A spin speeds up and down by its ramps, staying on the rest side.
+        let mut ch = Channels::default();
+        ch.manual[3] = Manual { accel: 8.0 * pi, decel: 8.0 * pi, ..command(2, manual_kind::SPIN, [0.0, 1.0, 0.0, 0.0], 4.0 * pi) };
+        assert_eq!(ticks_until_done(&rig, &mut ch, 3), 15);
+        assert_eq!(ch.manual[3].rate, 4.0 * pi);
         for _ in 0..40 {
             rig.advance(&mut ch, dt, 0.0);
-            assert!(ch.tweens[0].value >= -pi && ch.tweens[0].value < pi && !ch.tweens[0].done());
+            assert!(ch.manual[3].value[3] >= 0.0 && ch.manual[3].done());
         }
-        // Over the rest pose a turn replaces the clip's turn; additive adds.
-        ch.tweens[0] = Tween { bone: 1, kind: tween_kind::TURN, axis: 1, value: pi / 2.0, target: pi / 2.0, ..Default::default() };
-        ch.layers[0] = layer(1, 1.0 - 1e-6);
-        let over = palette_of(&rig, &ch);
-        assert!((over[3][11] - 0.0).abs() < 1e-4 && (over[3][3]).abs() < 1e-4, "a quarter only: {:?}", over[3]);
-        ch.tweens[0].flags = tween_flags::ADDITIVE;
-        let added = palette_of(&rig, &ch);
-        assert!((added[3][3] + 1.0).abs() < 1e-4, "half a turn: the tip behind: {:?}", added[3]);
-        // A move over a mask by its weights.
-        let mut w = vec![0.0; 4];
-        (w[1], w[2]) = (1.0, 0.5);
-        let both = rig.add_mask("both", w);
-        ch.layers[0] = Layer::default();
-        ch.tweens[0] = Tween { bone: NONE, mask: both, kind: tween_kind::MOVE, axis: 1, value: 2.0, target: 2.0, ..Default::default() };
+        ch.manual[3].speed = 0.0;
+        assert_eq!(ticks_until_done(&rig, &mut ch, 3), 15);
+        // Moves (an offset in the model's frame) and scales, at once.
+        ch.manual[0] = command(1, manual_kind::MOVE, [0.0, 2.0, 0.0, 0.0], 0.0);
+        ch.manual[1] = command(1, manual_kind::SCALE, [2.0, 2.0, 2.0, 0.0], 0.0);
+        rig.advance(&mut ch, dt, 0.0);
         let p = palette_of(&rig, &ch);
-        assert_eq!((p[1][7], p[2][7]), (2.0, 1.0));
+        assert_eq!((p[1][7], p[1][0], p[1][11]), (2.0, 2.0, 1.0));
+        assert!((p[3][3] - 2.0).abs() < 1e-5, "the tip rides on the scaled bone: {:?}", p[3]);
     }
 
     /// The same channels give the same bits.
@@ -464,7 +566,8 @@ mod anim_tests {
         let mut ch = Channels::default();
         ch.layers[0] = layer(0, 0.3);
         ch.layers[1] = Layer { kind: kind::ADDITIVE, weight: 0.3, ..layer(1, 0.6) };
-        ch.tweens[0] = Tween { bone: 3, kind: tween_kind::TURN, axis: 2, value: 0.4, target: 1.0, speed: 2.0, ..Default::default() };
+        ch.manual[0] = Manual { accel: 3.0, decel: 2.0, ..command(3, manual_kind::TURN, [0.3, 0.0, 1.0, 1.0], 2.0) };
+        ch.manual[1] = Manual { accel: 3.0, ..command(2, manual_kind::SPIN, [1.0, 1.0, 0.0, 0.0], 5.0) };
         let mut a = ch;
         let mut b = ch;
         for _ in 0..100 {
