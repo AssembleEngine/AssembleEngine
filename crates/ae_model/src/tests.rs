@@ -483,7 +483,7 @@ mod anim_tests {
         rig.advance(&mut b, 1.0 / 30.0, 0.0);
         assert_eq!(a, b);
         // `left` lying on its side at rest (a quarter about +X, so its +Z is
-        // the model's -Y): a turn about the model's up still yaws the tip,
+        // the model's -Y): a turn about the model's up still swings the tip round it,
         // and about the bone's own Z the same turn is the other way round.
         let mut m = model();
         let q = Quat::from_rotation_x(pi / 2.0);
@@ -494,7 +494,7 @@ mod anim_tests {
         ch.manual[0] = command(1, manual_kind::TURN, up(pi / 2.0), 0.0);
         rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         let p = palette_of(&rig, &ch);
-        assert!(p[3][3].abs() < 1e-5 && p[3][7].abs() < 1e-5 && p[3][11].abs() < 1e-5, "tip yawed onto -Z of left: {:?}", p[3]);
+        assert!(p[3][3].abs() < 1e-5 && p[3][7].abs() < 1e-5 && p[3][11].abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
         ch.manual[0] = Manual { flags: manual_flags::PENDING | manual_flags::FRESH | manual_flags::BONE_AXIS, ..command(1, manual_kind::TURN, [0.0, 0.0, 1.0, pi / 2.0], 0.0) };
         rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         let p = palette_of(&rig, &ch);

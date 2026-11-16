@@ -2464,7 +2464,7 @@ Design:
   - **manual joint channels: a bone is either manual or clipped** (decided with the user,
     2026-11-16; replaces "tweens on top, overriding or additive"). Turn, spin, move and scale
     on a bone knock the clips out of that bone, and the other way round. Exclusion is per
-    bone: its children still take their clips (a turret yaw under a clipped hull; a spine turn
+    bone: its children still take their clips (a turret turn under a clipped hull; a spine turn
     with clipped arms). No additive turns and no turns spread over a mask; aim-while-running is
     a locomotion layer on a lower-body mask plus manual turns above it.
     - Entries are found by bone, not by slot: the next turn or spin on a bone replaces its
@@ -2480,9 +2480,10 @@ Design:
     - Axes are given in the unit's frame (`Axis::UP`, `FORWARD`, `RIGHT`) and converted to the
       bone's frame through its rest rotation at load (glTF bone frames are arbitrary, unlike
       Recoil's S3O pieces): the bone turns about that axis as seen in the rest pose. Escape
-      hatches `Axis::model(v)`, `Axis::bone(v)`. Helpers: `deg`, `yaw`, `pitch`, `turn_by`
-      (relative), `spin`, `stop_spin`, `turned` / `spun_up` (WaitForTurn). A client debug view
-      draws each bone's unit-frame axes.
+      hatches `Axis::model(v)`, `Axis::bone(v)`. Helpers: `deg`, `turn_by` (relative), `spin`,
+      `stop_spin`, `turned` / `spun_up` (WaitForTurn). No heading/pitch helpers (decided with
+      the user: on a per-bone basis, and for a tilted unit, they are hard to define sanely; it
+      was a big mess in Recoil). A client debug view draws each bone's unit-frame axes.
     - My defaults, not yet confirmed: a turn on a bone a clip was driving starts from that
       bone's current clip value (no pop, as Recoil's Turn starts from the current angle);
       a layer's clip takes back the bones it animates within its mask when it is played, its
@@ -2495,8 +2496,8 @@ Design:
     let anim = unit.anim();
     anim.play(RUN, Layer::BASE).looping().speed_from_ground().mask(LOWER_BODY);
     anim.play(AIM_RIFLE, Layer(1)).mask(UPPER_BODY).blend_in(ms(200));
-    anim.yaw(SPINE, yaw, deg_per_s(180)).accel(deg_per_s2(720));  // SPINE leaves the clips
-    anim.pitch(GUN_ARM, pitch, deg_per_s(120));
+    anim.turn(SPINE, Axis::UP, a, deg_per_s(180)).accel(deg_per_s2(720));  // SPINE leaves the clips
+    anim.turn(GUN_ARM, Axis::RIGHT, b, deg_per_s(120));
     anim.turned(SPINE).await;                 // WaitForTurn
     anim.play(RECOIL, Layer(2)).additive().once();
     ```
@@ -2615,9 +2616,9 @@ Design:
     side), then steps it (great arc as signed, the trapezoid by accel/decel; a spin stays on
     the rest side). `play` sets `layer_flags::NEW`; the ticker then clears entries (given
     before that tick) on the bones the clip animates within its mask, additive clips
-    excepted. SDK: `turn`, `turn_by`, `yaw`, `pitch`, `spin`, `stop_spin`, `move_to`,
+    excepted. SDK: `turn`, `turn_by`, `spin`, `stop_spin`, `move_to`,
     `scale_to`, `release`, `turned` / `moved` / `scaled`, `is_manual`; `.accel`, `.decel`,
-    `.ramp`; `Axis::{UP, FORWARD, RIGHT, model, bone}`, `deg`. Test game: the head yawed
+    `.ramp`; `Axis::{UP, FORWARD, RIGHT, model, bone}`, `deg`. Test game: the head turned
     while standing, turned back and released when walking. Not yet: the client debug view
     of bone axes; keeping clips' original keys (with step 3).
 

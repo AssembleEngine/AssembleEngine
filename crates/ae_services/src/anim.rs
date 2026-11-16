@@ -175,13 +175,13 @@ mod tests {
         a.play(1, 3).once().per_metre(0.25).mask(2).blend_in(100).at(0.5);
         a.turn(4, Axis::RIGHT, 1.0, 2.0).ramp(3.0);
         a.spin(9, Axis::bone([0.0, 1.0, 0.0]), 3.0);
-        a.yaw(4, deg(90.0), 1.0);
+        a.turn(4, Axis::UP, deg(90.0), 1.0);
         let ch = channels(&a);
         assert_eq!(ch.layers[1], Layer { clip: 3, mask: 2, mode: 2, kind: 0, flags: 5, reserved: 0, weight: 0.0, target: 1.0, fade: 10.0, speed: 0.25, phase: 0.5 });
         assert!(ch.layers[0].is_empty());
         let fresh = manual_flags::PENDING | manual_flags::FRESH;
         let pi = std::f32::consts::PI;
-        assert_eq!(ch.manual[0], Manual { bone: 4, kind: 1, flags: fresh, target: [0.0, 1.0, 0.0, deg(90.0)], speed: 1.0, ..Default::default() }, "the yaw replaced the turn");
+        assert_eq!(ch.manual[0], Manual { bone: 4, kind: 1, flags: fresh, target: [0.0, 1.0, 0.0, deg(90.0)], speed: 1.0, ..Default::default() }, "the second turn replaced the first");
         assert!((deg(90.0) - pi / 2.0).abs() < 1e-6);
         assert_eq!(ch.manual[1], Manual { bone: 9, kind: 2, flags: fresh | manual_flags::BONE_AXIS, target: [0.0, 1.0, 0.0, 0.0], speed: 3.0, ..Default::default() });
         assert!(ch.manual[2].is_empty());

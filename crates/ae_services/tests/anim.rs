@@ -3,7 +3,7 @@
 //! (`ae_sdk::anim` lookups) and the `anim` service advances them.
 //! * The standing clip plays on layer 0; the walking clip blends in on
 //!   layer 1 while a unit walks (its phase by the metre), and fades out and
-//!   is cleared when it stands; the head is taken from the clips and yawed
+//!   is cleared when it stands; the head is taken from the clips and turned
 //!   while it stands, turned back and given back when it walks.
 //! * The world is the same at 1, 2, 4 and 8 workers.
 //!

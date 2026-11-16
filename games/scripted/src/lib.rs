@@ -12,11 +12,11 @@
 //! * `animate`: the clips and manual joints from what the unit does, with
 //!   no script: the standing clip always on layer 0, the walking clip on
 //!   layer 1 by the metre while it walks (blended in and out), the head
-//!   yawed while it stands (taken from the clips), turned back to the front
+//!   turned about the unit's up axis while it stands (taken from the clips), turned back to the front
 //!   and given back to them when it walks.
 //! * `host(anim)`: the engine advances the channels.
 
-use ae_sdk::anim::{self, Anim, model_id};
+use ae_sdk::anim::{self, Anim, Axis, model_id};
 use ae_sdk::nav::Body;
 use ae_sdk::{Component, Run, Spawn, schedule, system};
 
@@ -100,14 +100,14 @@ fn animate(run: &Run) {
                 if a.turned(head) {
                     a.release(head);
                 } else {
-                    a.yaw(head, 0.0, 2.0).ramp(8.0);
+                    a.turn(head, Axis::UP, 0.0, 2.0).ramp(8.0);
                 }
             }
         } else {
             if a.playing(1) != 0 && a.target[1] != 0.0 {
                 a.stop(1, 300);
             }
-            a.yaw(head, 0.7, 2.0).ramp(8.0);
+            a.turn(head, Axis::UP, 0.7, 2.0).ramp(8.0);
         }
     }
 }

@@ -89,7 +89,7 @@ impl Axis {
     pub const UP: Axis = Axis::model([0.0, 1.0, 0.0]);
     /// Turning about it by a positive angle rolls up to the right.
     pub const FORWARD: Axis = Axis::model([1.0, 0.0, 0.0]);
-    /// Turning about it by a positive angle pitches forward up.
+    /// Turning about it by a positive angle tips forward up.
     pub const RIGHT: Axis = Axis::model([0.0, 0.0, 1.0]);
 
     /// In the unit's (the model's) frame.
@@ -275,16 +275,6 @@ impl Anim {
         let set = self.turn(bone, axis, angle, speed);
         set.anim.manual_flags[set.slot] |= manual_flags::RELATIVE;
         set
-    }
-
-    /// Turn `bone` about the unit's up axis (positive: to the left).
-    pub fn yaw(&mut self, bone: u16, angle: f32, speed: f32) -> ManualSet<'_> {
-        self.turn(bone, Axis::UP, angle, speed)
-    }
-
-    /// Turn `bone` about the unit's right axis (positive: forward up).
-    pub fn pitch(&mut self, bone: u16, angle: f32, speed: f32) -> ManualSet<'_> {
-        self.turn(bone, Axis::RIGHT, angle, speed)
     }
 
     /// Spin `bone` about `axis` at `rate` radians a second (signed), for
