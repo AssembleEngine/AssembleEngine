@@ -2439,11 +2439,46 @@ Decided with the user (2026-11-16):
 
 Design:
 - **Animation channels are synced columns; the engine animates.** `Turn(joint, axis, angle,
-  speed)` and friends only set targets. Per unit: clip layers (clip, start tick, speed, play mode,
-  weight, joint mask, blend-in) and joint tweens (turn, move, spin to a target at a speed). A
-  native ticker advances them every tick without calling the script (the **fast path**: a unit
-  that only plays clips or tweens never runs script code) and wakes coroutines waiting on them.
-  A clip's speed can follow the unit's ground speed (no foot sliding).
+  speed)` and friends only set targets. Per unit: clip layers and joint tweens (turn, move, spin
+  to a target at a speed), in fixed-size columns (a small, per-game maximum of layers and
+  tweens). A native ticker advances them every tick without calling the script (the **fast
+  path**: a unit that only plays clips or tweens never runs script code) and wakes coroutines
+  waiting on them. A clip's speed can follow the unit's ground speed (no foot sliding).
+- **Blending and partial override** (decided with the user, 2026-11-16): a unit runs and aims
+  at the same time, the legs from a clip, the upper body from another clip plus procedural
+  turns. The pose is built per joint, in local space (translation and scale lerp, rotation
+  nlerp on one hemisphere), from an ordered stack:
+  - **layers**, each a clip with a play mode, speed, start tick and a **weight**. A layer is
+    one of:
+    - *blend*: mixed with the layers below by its weight (cross-fades: walk to run, idle to
+      walk; or two clips mixed by a parameter such as ground speed);
+    - *override*: replaces the layers below on its **joint mask** (by its weight);
+    - *additive*: adds its clip's change from the clip's reference pose (recoil kick,
+      breathing, a flinch on a hit).
+  - **joint masks**, named per model: a joint and its descendants (e.g. "upper body" from the
+    spine up), optionally with a weight per joint (a spine twist spread over three spine joints).
+    Built from the model's joint names at load; a layer or tween without a mask covers the whole
+    model.
+  - **weights fade**: `blend_in` / `blend_out` times move a layer's weight to its target in the
+    ticker (no script call), and a layer at weight 0 after `blend_out` is removed.
+  - **procedural joint channels on top**: tweens (turn, move, spin), applied after the clip
+    layers, each either overriding the joint's rotation or translation, or adding to it
+    (aiming: the clip's upper-body aim pose, plus a yaw on the spine and a pitch on the arms
+    towards the target).
+  - Sketch of the script side (names to settle):
+
+    ```rust
+    let anim = unit.anim();
+    anim.play(RUN, Layer::BASE).looping().speed_from_ground();
+    anim.play(AIM_RIFLE, Layer(1)).overriding(UPPER_BODY).blend_in(ms(200));
+    anim.turn(SPINE, Axis::Y, yaw, deg_per_s(180)).additive().mask(SPINE_CHAIN);
+    anim.turn(ARMS, Axis::X, pitch, deg_per_s(120)).additive();
+    anim.turned(SPINE).await;                 // WaitForTurn
+    anim.play(RECOIL, Layer(2)).additive().once();
+    ```
+
+  - The order is fixed (clip layers by index, then tweens), so the result is the same on every
+    machine and in the sim's on-demand queries.
 - **The pose is a pure function of the channels and the tick**, in strict f32 (the determinism
   rules: nlerp, no FMA, `libm` for the trig of angle targets), evaluated on the CPU:
   - by the sim, **on demand**: a script asking where a joint is (a muzzle, a foot on the ground),
@@ -2453,17 +2488,17 @@ Design:
     result); the GPU gets the previous and current tick's 3x4 joint palettes and only
     interpolates them per frame. The cull sphere comes from the pose (or the model's reach over
     its clips and tween limits).
-- **Coroutines without bytecode.** A suspended coroutine must survive save→load and be the same
-  at any worker count. Two ways:
-  - A (proposed): ordinary Rust `async` scripts. Each unit's future lives in a fixed slot of a
-    host-owned deterministic arena in the shared memory (stable address, so `Pin` holds; the
-    slot size is the script's `size_of` future). No heap across an `await`: per-worker arenas are
-    reset each tick and poisoned in dev builds, so a violation shows up at once. A save stores the
-    slot arena as a blob next to the columns; it loads only into the same module build (the save
-    header already names the module hash). Late join stays a fast-forward from the command log.
-  - B: a proc macro that compiles a restricted script function into a plain-data state enum (its
-    locals across awaits as fields), stored in a column and saved by the schema, so saves
-    survive a rebuild. More work, and only a subset of Rust.
+- **Coroutines without bytecode: plain Rust `async` scripts** (decided with the user,
+  2026-11-16). A suspended coroutine must survive save→load and be the same at any worker count:
+  - each unit's future lives in a fixed slot of a host-owned deterministic arena in the shared
+    memory (stable address, so `Pin` holds; the slot size is the script's `size_of` future);
+  - no heap across an `await`: per-worker arenas are reset each tick and poisoned in dev builds,
+    so a violation shows up at once;
+  - a save stores the slot arena as a blob next to the columns; it loads only into the same
+    module build (the save header already names the module hash). Late join stays a
+    fast-forward from the command log.
+  - Not chosen: a proc macro compiling scripts into plain-data state enums saved by the schema
+    (saves would survive a rebuild, but only a subset of Rust and much more work).
 - **Scheduler and parallelism.** A global wake queue keyed by (due tick, entity): timers,
   awaited tweens and clips, callins (events from the sim systems: started or stopped moving,
   aim request, fired, hit, killed). Each tick, woken coroutines run in fixed row ranges on the
@@ -2482,10 +2517,10 @@ Design:
   pass (0.31 ms). If missed: no posing off screen and out of the shadows, distant units every n
   ticks, units at rest keep their palette. Matrices interpolated between ticks shrink fast turns
   (over about 90° a tick, e.g. a rotor): spins get an angular rate the shader applies.
-- Open questions: coroutine storage A or B (proposed A); aim by joint turns only, or also
-  look-at / IK on a joint chain later; whether the sim keeps per-joint collision volumes.
-- Verification: a scripted test unit (walk, stop, a multi-step aim, fire with a flash at the
-  muzzle, die holding the last frame) in a GPU test; save→load→continue with coroutines
+- Open questions: aim by joint turns only, or also look-at / IK on a joint chain later; whether
+  the sim keeps per-joint collision volumes.
+- Verification: a scripted test unit (walk, stop, a multi-step aim while running: an upper-body
+  override plus additive turns; fire with a flash at the muzzle; die holding the last frame) in a GPU test; save→load→continue with coroutines
   suspended; digests equal at 1/2/4/8 workers; `army-fox` with scripts against the M11 numbers.
 
 ## Later improvements
