@@ -2461,33 +2461,57 @@ Design:
     model.
   - **weights fade**: `blend_in` / `blend_out` times move a layer's weight to its target in the
     ticker (no script call), and a layer at weight 0 after `blend_out` is removed.
-  - **procedural joint channels on top**: tweens (turn, move, spin), applied after the clip
-    layers, each either overriding the joint's rotation or translation, or adding to it
-    (aiming: the clip's upper-body aim pose, plus a yaw on the spine and a pitch on the arms
-    towards the target).
+  - **manual joint channels: a bone is either manual or clipped** (decided with the user,
+    2026-11-16; replaces "tweens on top, overriding or additive"). Turn, spin, move and scale
+    on a bone knock the clips out of that bone, and the other way round. Exclusion is per
+    bone: its children still take their clips (a turret yaw under a clipped hull; a spine turn
+    with clipped arms). No additive turns and no turns spread over a mask; aim-while-running is
+    a locomotion layer on a lower-body mask plus manual turns above it.
+    - Entries are found by bone, not by slot: the next turn or spin on a bone replaces its
+      rotation entry (Recoil did it per axis), a move its translation entry, a scale its
+      scale entry. Channels a manual bone has no entry for hold the rest pose.
+    - A turn is axis/angle with a speed, acceleration and deceleration (a trapezoid speed
+      profile). Inside, the entry holds the current and target rotations as quaternions,
+      never sign-normalised: the target is `(cos θ/2, sin θ/2 · axis)` and the sign of
+      `dot(current, target)` picks the arc (positive the short way, negative the long way),
+      so a turn by 270° goes the long way. One turn covers less than a full revolution; more
+      is a spin (axis, rate, acceleration; `stop_spin` decelerates to rest). Move and scale go
+      along a straight line at a speed with the same profile.
+    - Axes are given in the unit's frame (`Axis::UP`, `FORWARD`, `RIGHT`) and converted to the
+      bone's frame through its rest rotation at load (glTF bone frames are arbitrary, unlike
+      Recoil's S3O pieces): the bone turns about that axis as seen in the rest pose. Escape
+      hatches `Axis::model(v)`, `Axis::bone(v)`. Helpers: `deg`, `yaw`, `pitch`, `turn_by`
+      (relative), `spin`, `stop_spin`, `turned` / `spun_up` (WaitForTurn). A client debug view
+      draws each bone's unit-frame axes.
+    - My defaults, not yet confirmed: a turn on a bone a clip was driving starts from that
+      bone's current clip value (no pop, as Recoil's Turn starts from the current angle);
+      a layer's clip takes back the bones it animates within its mask when it is played, its
+      fade-in starting from the manual pose being dropped is not attempted (a pop, for now);
+      an additive layer (a recoil kick, breathing) does not evict manual bones and is not
+      applied to them.
   - Sketch of the script side (names to settle):
 
     ```rust
     let anim = unit.anim();
-    anim.play(RUN, Layer::BASE).looping().speed_from_ground();
-    anim.play(AIM_RIFLE, Layer(1)).overriding(UPPER_BODY).blend_in(ms(200));
-    anim.turn(SPINE, Axis::Y, yaw, deg_per_s(180)).additive().mask(SPINE_CHAIN);
-    anim.turn(ARMS, Axis::X, pitch, deg_per_s(120)).additive();
+    anim.play(RUN, Layer::BASE).looping().speed_from_ground().mask(LOWER_BODY);
+    anim.play(AIM_RIFLE, Layer(1)).mask(UPPER_BODY).blend_in(ms(200));
+    anim.yaw(SPINE, yaw, deg_per_s(180)).accel(deg_per_s2(720));  // SPINE leaves the clips
+    anim.pitch(GUN_ARM, pitch, deg_per_s(120));
     anim.turned(SPINE).await;                 // WaitForTurn
     anim.play(RECOIL, Layer(2)).additive().once();
     ```
 
-  - The order is fixed (clip layers by index, then tweens), so the result is the same on every
-    machine and in the sim's on-demand queries.
+  - The order is fixed (clip layers by index, then manual bones), so the result is the same on
+    every machine and in the sim's on-demand queries.
 - **The pose is a pure function of the channels and the tick**, in strict f32 (the determinism
   rules: nlerp, no FMA, `libm` for the trig of angle targets), evaluated on the CPU:
   - by the sim, **on demand**: a script asking where a joint is (a muzzle, a foot on the ground).
     Clips are kept on the CPU (no GPU baking),
     and the headless sim loads models without textures;
   - by the client, for every unit in view, from the channel columns in the view (same code, same
-    result); the GPU gets the previous and current tick's 3x4 joint palettes and only
-    interpolates them per frame. The cull sphere comes from the pose (or the model's reach over
-    its clips and tween limits).
+    result); the GPU gets each joint's local keys and builds the palette (see "Joint keys"
+    below). The cull sphere comes from the pose (or the model's reach over its clips and tween
+    limits).
 - **Coroutines without bytecode: plain Rust `async` scripts** (decided with the user,
   2026-11-16). A suspended coroutine must survive save→load and be the same at any worker count:
   - each unit's future lives in a fixed slot of a host-owned deterministic arena in the shared
@@ -2512,11 +2536,11 @@ Design:
   over many units.
 - **Effects** (particles, lights, sound) are events emitted at a joint, carried to the view and
   started at the drawn joint.
-- Numbers to hold to (`army-fox`: 10 000 Foxes, 24 joints): 240 000 joint matrices per tick on
-  the client, 11.5 MB of palette per tick (about 350 MB/s at 30 Hz), against the M11 GPU pose
-  pass (0.31 ms). If missed: no posing off screen and out of the shadows, distant units every n
-  ticks, units at rest keep their palette. Matrices interpolated between ticks shrink fast turns
-  (over about 90° a tick, e.g. a rotor): spins get an angular rate the shader applies.
+- Numbers to hold to (`army-fox`: 10 000 Foxes, 24 joints): 240 000 joint poses per tick on
+  the client to evaluate, at worst 240 000 keys of 48 bytes to upload (11.5 MB a tick, about
+  350 MB/s at 30 Hz; Fox clips are keyed at 24/s, so a running Fox breaks its lines often and
+  saves little), against the M11 GPU pose pass (0.31 ms). To re-measure with step 3. If
+  missed: no posing off screen and out of the shadows, distant units every n ticks.
 - Aiming is by joint turns and clips only (decided with the user, 2026-11-16); look-at / IK on
   a joint chain is a pie-in-the-sky TODO under Later improvements.
 - No per-joint collision volumes in the sim (decided with the user, 2026-11-16): a skinned mesh
@@ -2524,33 +2548,38 @@ Design:
   stays within it (the cull sphere already covers every clip frame), and joint positions are
   for scripts' aiming and effects only.
 - Verification: a scripted test unit (walk, stop, a multi-step aim while running: an upper-body
-  override plus additive turns; fire with a flash at the muzzle; die holding the last frame) in a GPU test; save→load→continue with coroutines
+  override plus manual turns on bones the clips leave alone; fire with a flash at the muzzle; die holding the last frame) in a GPU test; save→load→continue with coroutines
   suspended; digests equal at 1/2/4/8 workers; `army-fox` with scripts against the M11 numbers.
   Save/load does not exist yet (M9): the save→load check waits for it.
 - Steps: (1) the pose evaluator; (2) channel components and the native ticker, driven by a
   plain game system; (3) the client poses on the CPU from the view, `--clip` goes; (4) a
   coroutine spike (a future per unit, resumed on another worker, digests at 1/2/4/8 workers);
   (5) the script API and callins; (6) the death sequence and the test unit.
-- Palette traffic (step 3, decided with the user, 2026-11-16):
-  - **Two stamped slots per unit, the older one overwritten.** Each unit in view owns a stable
-    pair of palette ranges; each slot carries the tick it was posed at (one stamp per unit and
-    slot, in the instance row, not per matrix). A tick writes only the slot with the older
-    stamp. The draw interpolates older → newer when the newer stamp is the stream's tick, and
-    otherwise draws the newer slot alone. That halves the upload (one palette per unit per tick,
-    not two). It stays right across skipped ticks: a unit that did not change at N-1 still has
-    its N-1 pose in its last slot.
-  - **Unchanged units are neither posed nor uploaded.** The pose is a pure function of the
-    channels, so the test is exact. A unit whose `Anim` (its model and channels) is the same
-    bytes as at its last pose keeps its slots. This is not about standing still: an idle loop
-    changes every tick, and the palette is in model space, so a unit can walk on a held pose.
-    A unit coming into view gets the same pose in both slots.
-  - **No extrapolation.** It would only save uploads on ticks the client guesses right, and a
-    wrong guess pops. Matrices extrapolated linearly shear and shrink. The two points above
-    cover the held cases exactly. This can be reopened.
+- **Joint keys** (step 3, decided with the user, 2026-11-16; replaces the per-unit palette
+  slots of cf2acf2):
+  - The GPU gets **local** joint poses, not matrices: per joint two keys of 48 bytes,
+    `(pos.xyz, tick) (rotation quaternion) (scale.xyz, spare)`, each tagged with its tick. Local
+    translation, rotation and scale move along lines between keys (nlerp on the rotation);
+    globals do not, so the GPU builds the hierarchy and the palette (a compute pass in place of
+    the M11 pose pass).
+  - **Extrapolation along the line.** The GPU draws a joint at the drawn time on the line
+    through its two keys, going past the newer key when needed. Each tick the CPU poses the
+    joint and checks it against that line (a render tolerance); only a joint that leaves its
+    line is uploaded. Units are drawn one tick behind (between N-1 and N), so the CPU knows N
+    before it is drawn: no misprediction pop. On a break at N the keys become (N-1, N), two
+    writes, unless the newer key is already N-1 (one write, over the older key): the drawn
+    span must lie on the new line.
+  - **Spins carry their rate** (axis and angular speed in the key's spare lanes, or a flag):
+    two keys a tick apart cannot show more than half a turn a tick, and a constant spin then
+    costs no uploads at all.
+  - **Clips keep their original keys**: no resampling at 60 fps, so a linear clip between
+    keys is on the line (hand-keyed and sparse clips gain most; Fox clips, at 24 keys/s,
+    little).
+  - **Unchanged units are not posed at all**: the pose is a pure function of the channels, so
+    a unit whose `Anim` bytes are the same as at its last pose keeps its keys. Extrapolation
+    saves uploads; this saves the CPU posing.
   - Measure first: the CPU cost of 240 000 joints a tick and the writes into host-visible
-    memory are likelier limits than PCIe. If they miss, the alternative is to upload inputs,
-    not outputs: channels are 280 bytes a unit against a 24-joint palette's 1152. That means
-    a GPU evaluator, which the plan decided against.
+    memory are likelier limits than PCIe.
   - Step 3 poses every unit the view shows (line of sight). A coarse CPU frustum test comes only
     if the numbers ask for it.
 - Progress:
