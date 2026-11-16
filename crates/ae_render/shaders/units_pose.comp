@@ -1,11 +1,11 @@
 #version 460
-// The units' poses (units.pose): one invocation per unit playing a clip (a
-// pose job, units.rs write_rows). Its bones' local matrices go into its
-// scratch range (the rest matrix, or for a bone the clip animates its
-// baked frames around the time blended: lerp, nlerp), are walked into
-// model space there (parents come first), and its palette range gets each
-// joint's bone times the joint's inverse bind. Mirrors
-// ae_model::pose::BakedClip::locals, globals and palette.
+// The units' poses (units.pose): one invocation per unit with joint keys
+// (a pose job, units.rs write_rows). Each bone's local transform is taken
+// on the line through its two keys at the drawn tick (ae_model::anim::
+// on_line: lerp, nlerp, past the newer key too) into the unit's scratch
+// range, walked into model space there (parents come first), and its
+// palette range gets each joint's bone times the joint's inverse bind.
+// Mirrors ae_model::anim::{on_line, Rig::globals, Rig::palette}.
 #define POSE
 #include "units_common.glsl"
 #include "units_models.glsl"
@@ -44,47 +44,25 @@ void main() {
     uint row = rows[cap + job];
     uint scratch = rows[2u * cap + job];
     ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
-    // The clip (the CPU made a job only for a valid one) and its two frames
-    // around the time, drawn behind the tick as positions are, played as
-    // the word's mode (ae_model::pose::PlayMode::clip_time).
-    uint word = attru(ATTR_CLIP, row);
-    uint mode = word >> CLIP_MODE_SHIFT;
-    uint c = mc.pose.w + 2u * ((word & CLIP_MASK) - 1u);
-    uvec4 clip = floatBitsToUint(anim[c]);  // first frame record, tracks, frames
-    vec4 timing = anim[c + 1u];             // rate, duration
-    float t = max(attrf(ATTR_CLIP_TIME, row) - u.anim.x, 0.0);
-    float d = timing.y;
-    if (d <= 0.0) {
-        t = 0.0;
-    } else if (mode == CLIP_PING_PONG) {
-        t -= 2.0 * d * floor(t / (2.0 * d));
-        t = t > d ? 2.0 * d - t : t;
-    } else if (mode == CLIP_ONCE) {
-        t = min(t, d);
-    } else {
-        t -= d * floor(t / d);
-    }
-    float f = t * timing.x;
-    uint last = clip.z - 1u;
-    uint fa = min(uint(max(f, 0.0)), last);
-    uint fb = min(fa + 1u, last);
-    float s = clamp(f - float(fa), 0.0, 1.0);
-
+    // Key k is keys[3k .. 3k + 2]; bone b's are 2b (older) and 2b + 1.
+    uint first = 3u * attru(ATTR_POSE, row);
+    float frac = uintBitsToFloat(u.anim.y);
     uint bones = mc.pose.y;
     for (uint k = 0u; k < bones; k++) {
-        palette[scratch + k] = rowsAt(mc.pose.x + 4u * k);
+        uint a = first + 6u * k;
+        uint b = a + 3u;
+        uint ta = floatBitsToUint(keys[a].w);
+        int span = int(floatBitsToUint(keys[b].w) - ta);
+        float s = span == 0 ? 1.0 : (float(int(u.anim.x - ta)) + frac) / float(span);
+        vec4 q = normalize(mix(keys[a + 1u], keys[b + 1u], s));
+        palette[scratch + k] = trs(mix(keys[a].xyz, keys[b].xyz, s), q, mix(keys[a + 2u].xyz, keys[b + 2u].xyz, s));
     }
-    uint tracks = clip.y;
-    for (uint k = 0u; k < tracks; k++) {
-        uint a = clip.x + 3u * (fa * tracks + k);
-        uint b = clip.x + 3u * (fb * tracks + k);
-        vec4 q = normalize(mix(anim[a + 1u], anim[b + 1u], s));
-        palette[scratch + floatBitsToUint(anim[a].w)] = trs(mix(anim[a].xyz, anim[b].xyz, s), q, mix(anim[a + 2u].xyz, anim[b + 2u].xyz, s));
-    }
-    // Bone 0 is the root; every other bone's parent comes before it.
-    for (uint k = 1u; k < bones; k++) {
+    // Parents come before their children (roots have none).
+    for (uint k = 0u; k < bones; k++) {
         uint parent = floatBitsToUint(anim[mc.pose.x + 4u * k + 3u].x);
-        palette[scratch + k] = mul(palette[scratch + parent], palette[scratch + k]);
+        if (parent != 0xffffffffu) {
+            palette[scratch + k] = mul(palette[scratch + parent], palette[scratch + k]);
+        }
     }
     uint dst = poseOffset(row);
     for (uint k = 0u; k < mc.cmd.w; k++) {

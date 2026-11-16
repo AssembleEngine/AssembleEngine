@@ -55,7 +55,7 @@ fn units_walk_and_stand_animated() -> Result<()> {
         ensure!(a.phase[0] > 0.0 && a.phase[0] < rig.duration(survey), "unit {e}: layer 0 plays and loops");
         // Where the unit is in its cycle at the last tick the game ran.
         let k = (119 + (*e as u32 as u64) * 7) % 150;
-        if k < 90 && k >= 8 {
+        if (8..90).contains(&k) {
             walking += 1;
             ensure!(a.clip[1] == walk && a.weight[1] == 1.0 && a.flags[1] & ae_sdk::anim::layer_flags::GROUND_SPEED != 0, "unit {e} at {k}: walking at full weight: {a:?}");
             ensure!(a.phase[1] > 0.0 && a.phase[1] < rig.duration(walk), "unit {e}: walking by the metre: {a:?}");

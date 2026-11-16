@@ -2683,6 +2683,28 @@ Design:
     (with step 5 and the weapons): the aim callin with the world direction, `to_unit` (the
     unit's orientation), the aim-from / fire-from fields and their world positions, the
     pointing axis from the per-model content file.
+  - Step 3, first cut — done (2026-11-16): correct first, fast next. The client runs the
+    animation service with the `--model` models (named by the file's lower-case stem) and the
+    content's; after every tick it reads the `Anim` column (`Runtime::each_row`) and poses each
+    unit drawn with the model its `Anim` names (`bins/ae-client/src/poser.rs`, `Rig::pose`). The
+    stream carries joint keys (`ae_model::anim::Key`: tick as a `u32`; `on_line`,
+    `same_side`), two per bone, the unit's pose at the last tick and this one; attribute `pose`
+    replaces `clip`/`clip_time`. `units.pose` evaluates the line at the drawn tick (integer
+    tick difference), walks the hierarchy, applies the inverse binds; the GPU-baked clips are
+    gone, `--clip` is gone. Pass and resource names unchanged (graphs untouched). Bench scenes
+    `army-fox`/`near-fox` now run the `scripted` game (decided by me, not yet confirmed: the
+    crossing game has no `Anim`, and giving it one would touch every crossing test and
+    digest): 10 000 Foxes on a 12 m grid under the army camera (game parameter: grid step and
+    corner). Tests: `units_pose_models` against `on_line` + `Rig::palette` (on the newer key
+    and past it), `streams_carry_poses`; 27 GPU tests pass, validation clean, no golden
+    changed. Measured: `units pose` 0.39 ms (27 bones; 0.31 ms baked), CPU posing 18.8 ms a
+    tick on one thread, 540 000 keys (26 MB) a stream; the upload cost is not measured (the
+    bench publishes one stream; live, every tick's keys are copied into each frame slot that
+    draws it, about 1.5 GB/s of host-visible writes at 30 Hz: commit B's bench needs a fresh
+    tick every frame or two). Next: posing in parallel, uploading
+    only bones that leave their line (stable key slots per unit, writes carried over skipped
+    streams), skipping unchanged units, spins by rate; then clips' original keys. Not yet:
+    observer views (no `Anim` in view tables), cull spheres for manual joints.
 
 ## Later improvements
 

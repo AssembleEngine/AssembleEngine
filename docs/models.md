@@ -88,25 +88,29 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   classes. Opaque and masked commands in a multi-draw each per cascade; the masked caster tests
   alpha as the camera does, so what is masked away casts no shadow. The graphs declare the reset
   and the cull before the shadows.
-- **Poses**: the stream's `clip` and `clip_time` attributes pick a unit's pose: `clip` 0 (or past
-  its model's clips) the rest pose, `k` the model's clip `k - 1` at `clip_time` seconds (at the
-  stream's tick; drawn `(1 - alpha)` of a tick of sim time behind, as positions are, clamped at 0).
-  The top two bits of `clip` are its play mode (`ae_model::pose::PlayMode`, `units::clip_word`):
-  loop, ping-pong (backwards to the start, then forwards again) or once (holding the last frame).
-  The stream carries the sim time of a tick (`sim_seconds`) apart from its wall time, so at any
-  sim speed a clip moves on smoothly between ticks. The palette
-  holds 3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units
-  at rest point there), then a range per unit playing a clip, then the pose pass's scratch. When a
-  new tick arrives the CPU gives each row its offset and lists the units playing a clip (pose
-  jobs). The `units pose` pass (`units.pose`, compute, before the shadows and the draws) runs one
-  invocation per job: rest local matrices, the clip's animated bones blended from two baked
-  frames, the hierarchy walked in place, each joint's bone times its inverse bind. So bones are
+- **Poses** (M14 step 3; replaced the GPU-baked clips): the CPU poses units from their sim
+  animation channels (`ae_model::anim::Rig::pose`, the sim's own function, in the client's
+  `poser.rs`) and the stream carries **joint keys** (`InstanceStream::keys`,
+  `ae_model::anim::Key`, 48 bytes: translation and the tick as a `u32`, rotation, scale): per
+  posed unit two keys per bone of its model, its local transform at the previous tick and at the
+  stream's. The stream's `pose` attribute is the unit's first key (`units::NO_POSE`: the rest
+  pose). The palette holds 3x4 matrices (rows, 48 bytes): each model's rest palette at its head
+  (written once; units at rest point there), then a range per posed unit, then the pose pass's
+  scratch. When a new tick arrives the CPU copies the keys into the slot's key buffer (host
+  visible, binding 9), gives each row its offset and lists the posed units (pose jobs). The
+  `units pose` pass (`units.pose`, compute, before the shadows and the draws) runs one
+  invocation per job: each bone on the line through its two keys at the drawn tick
+  (`ae_model::anim::on_line`: the stream's tick − 1 plus the interpolation weight; the tick
+  difference in integers, so exact at any tick; lerp and nlerp, past the newer key too), the
+  hierarchy walked in place, each joint's bone times its inverse bind. So bones are
   interpolated once per unit and frame; the vertex shader only blends up to four matrices
   (`palette[offset + joint]`), normals by the cofactor matrix (right under non-uniform scale).
-  Memory: the palette is sized for every unit playing a clip of the largest animated model
-  (capacity × (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB).
+  Memory: the palette is sized for every unit posed with the largest posable model (capacity ×
+  (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB), the key buffer per frame slot for two
+  keys per bone of every unit (Fox: 26 MB).
 - **Cull sphere**: a model with clips is culled with a sphere covering every vertex in every baked
-  frame of every clip, 5% larger (motion between frames), for all units of its class.
+  frame of every clip, 5% larger (motion between frames), for all units of its class. Manual
+  joints (M14) can reach further: not covered yet.
 - **Fit and frame**: model space is the dart's local frame (+X along the heading, +Y up, +Z to the
   right). The model's footprint radius (its rest bounds' largest extent from the origin along x or
   z) is drawn at the unit's drawn size, so the minimum pixel size applies as for darts.
@@ -125,11 +129,11 @@ the test (opaque front, masked right side, a block masked away), the Fox and a d
 without and with the units' shadow map; front and right land where the heading puts them (not
 turned, not mirrored), the mask discards, the Fox shows its texture, the blocks cast shadows and
 the masked-away block none. `units_pose_models`: a base-and-arm model built in the test (two
-clips, one moving the base and so the arm), the Fox and BoxAnimated playing clips, units at rest
-and with a clip their model lacks, drawn on time and a tick behind; every row's palette read back
-equals the CPU's (`ae_model::pose`) to 1e-3 relative; the arm is drawn where its pose puts it; a
-unit whose rest sphere is off screen but whose arm reaches in is drawn. Checked to fail without
-the lag and without the padded sphere. `units_model_shadows_culled`: a pillar far outside every
+clips, one moving the base and so the arm), the Fox and BoxAnimated with joint keys from their
+clips (`Rig::pose`), units at rest and with keys not in the stream, drawn a tick behind (on the
+newer key) and at the stream's tick (past it, by the line); every row's palette read back equals
+the CPU's (`on_line`, `Rig::globals`, `Rig::palette`) to 1e-3 relative; the arm is drawn where
+its pose puts it; a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
 cascade is counted in none; a pillar off screen toward the sun is in a cascade and shadows the
 ground in view (checked to fail when the cascades take only the units the camera sees). `ae_model` tests: baked clips against the sampler (linear
 translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
@@ -138,25 +142,34 @@ the animated reach.
 ## The client
 
 ```text
-ae-client --model [CLASS=]FILE.aemodel|.glb|.gltf [--clip N[:loop|pingpong|once][,N[:MODE]]]
+ae-client --model [CLASS=]FILE.aemodel|.glb|.gltf
+ae-client --game scripted --model assets/models/khronos/Fox/Fox.glb
 ```
 
 `--model` draws class CLASS with the model; without CLASS every class (but the observer's blips).
 A glTF is converted once by `ae-tool model convert` into `target/models/<name>.aemodel` (again when
-the glTF is newer); the client does not link the converter. Units with a model play the model's
-clip MOVING while they move and STILL while they stand (clip numbers from 1, 0 the rest pose;
-default `1,0`), each with a play mode (`loop` by default, `pingpong`, `once`). A unit's clip
-starts when it switches to it (a looping clip at a phase of the unit's own, so a crowd does not
-move in step; a clip played once at its beginning); a unit plays the standing clip only after
-standing 6 ticks, so units pausing for a tick in a crowd keep walking. For the Fox:
-`--clip 2,1:pingpong` (walk; survey back and forth). The bench scenes use that too.
+the glTF is newer); the client does not link the converter. The model is also an animation model
+of the sim's (`ae_services::anim`), named by the file's lower-case stem (`Fox.glb`: `fox`), next
+to the content's `models/*.aemodel`. Units whose `Anim` names their class's model are posed by
+their channels after every tick (the raw capture; not yet an observer's view); the rest stand at
+the rest pose. What units play is the game's: `--game scripted` (M14's test game) walks and
+stands Foxes, blending the clips by the animation service and turning their heads. `--clip`
+(M11's client-side clip choice) is gone.
 
 ## Benches
 
-`ae-client --bench army-fox,near-fox` (`bins/ae-client/src/bench.rs`): the `army` scene with every
-unit the Fox playing a clip (walk or survey), so the pose pass poses all 10 000 each frame, and a
-closer camera. They also report `model_setup` (`ModelSet::new` for the Fox: geometry, texture
-upload, baked clips, cull spheres).
+`ae-client --bench army-fox,near-fox` (`bins/ae-client/src/bench.rs`): since M14 step 3 they run
+the `scripted` game (10 000 Foxes on a 12 m grid under the `army` camera, walking and standing,
+animated by the sim) instead of the crossing army playing `--clip`, so the pose pass poses all
+10 000 each frame from joint keys, and a closer camera. They also report `model_setup`
+(`ModelSet::new` for the Fox: geometry, texture upload, cull spheres), `cpu_pose` (the client's
+time to read the channels and pose every unit for a stream) and `joint_keys`.
+
+M14 step 3, first cut (both keys of every bone uploaded every tick, posing on one thread;
+2026-11-16): `units pose` 0.39 ms (27 bones a Fox, against 0.31 ms for the baked clips), CPU
+posing 18.8 ms a tick for 10 000 Foxes, 540 000 keys (26 MB) a stream. Validation clean.
+
+The M11 numbers (the crossing army playing `--clip`):
 
 RTX 3060 Ti, 1280x720, 300 frames, median GPU times (2026-11-16), before and after the shadow
 cascades' cull (casters: model units drawn into the three cascades, summed):

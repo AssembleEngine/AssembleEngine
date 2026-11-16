@@ -2,7 +2,10 @@
 //! test game. Every unit wears model [`MODEL`] (the content's, or the one a
 //! test gives the `anim` service).
 //!
-//! Game parameter: the low 32 bits are the unit count.
+//! Game parameter: bits 0..32 the unit count; 32..40 the grid step in
+//! metres (0: 4), units of radius a quarter of it, walking at
+//! [`WALK_SPEED`] per metre of radius; 40..52 and 52..64 the grid's corner
+//! (x, y) in 16 m (the client's `-fox` benches put it under a camera).
 //!
 //! Systems, in schedule order:
 //! * `start` (tick 0): the units in a grid, each with a `Walker`, a `Body`
@@ -26,9 +29,9 @@ pub const MODEL: &str = "fox";
 /// Ticks a unit walks, then stands.
 pub const WALK_TICKS: u64 = 90;
 pub const STAND_TICKS: u64 = 60;
-/// Metres a second.
+/// Metres a second, per metre of radius.
 pub const WALK_SPEED: f32 = 1.5;
-/// Walking clip seconds per metre.
+/// Walking clip seconds per metre, times the radius.
 pub const WALK_PER_METRE: f32 = 0.6;
 
 const DT: f32 = 1.0 / 30.0;
@@ -50,11 +53,17 @@ fn start(run: &Run) {
     if run.tick() != 0 {
         return;
     }
-    let n = run.param() as u32;
+    let p = run.param();
+    let n = p as u32;
+    let step = match (p >> 32) & 0xff {
+        0 => 4.0,
+        s => s as f32,
+    };
+    let (x0, y0) = (((p >> 40) & 0xfff) as f32 * 16.0, ((p >> 52) & 0xfff) as f32 * 16.0);
     for i in 0..n {
-        let (x, y) = ((i % 100) as f32 * 4.0, (i / 100) as f32 * 4.0);
+        let (x, y) = (x0 + (i % 100) as f32 * step, y0 + (i / 100) as f32 * step);
         Spawn::new()
-            .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: 1.0 })
+            .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: step / 4.0 })
             .with(&Walker { dir: if i % 2 == 0 { 1.0 } else { -1.0 }, reserved: 0 })
             .with(&Anim::new(model_id(MODEL)))
             .submit();
@@ -67,7 +76,7 @@ fn steer(run: &Run) {
     for i in run.rows() {
         let (b, w) = (&mut bodies[i], &mut walkers[i]);
         if walking(run.tick(), ids[i]) {
-            b.vx = w.dir * WALK_SPEED;
+            b.vx = w.dir * WALK_SPEED * b.radius;
         } else {
             if b.vx != 0.0 {
                 w.dir = -w.dir;
@@ -95,7 +104,7 @@ fn animate(run: &Run) {
         }
         if bodies[i].vx != 0.0 {
             if a.playing(1) != walk {
-                a.play(1, walk).per_metre(WALK_PER_METRE).blend_in(200);
+                a.play(1, walk).per_metre(WALK_PER_METRE / bodies[i].radius).blend_in(200);
             } else if a.target[1] != 1.0 {
                 a.layer(1).fade_to(1.0, 200);
             }

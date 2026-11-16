@@ -46,12 +46,11 @@
 //!
 //! `--model [CLASS=]FILE` draws class CLASS (every class without it, but
 //! the observer's blips) with a model: an `.aemodel`, or a glTF converted
-//! once by `ae-tool` into `target/models` (`models.rs`). Units with a model
-//! play `--clip MOVING[,STILL]` (the model's clip numbers from 1, 0 the rest
-//! pose, each optionally `:loop`, `:pingpong` or `:once`; default 1,0: the
-//! first clip looping while moving, at rest standing still); looping clips
-//! at a phase of each unit's own. A model replaces the class colour (no
-//! enemy tint).
+//! once by `ae-tool` into `target/models` (`models.rs`). The model is also
+//! the sim's animation model named by the file's lower-case stem: units
+//! whose `Anim` names it are posed by their channels (`--game scripted`:
+//! Foxes walking and standing, `--model Fox.glb`); others stand at the
+//! rest pose. A model replaces the class colour (no enemy tint).
 //!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
@@ -102,6 +101,7 @@
 mod bench;
 mod ground;
 mod models;
+mod poser;
 mod sim;
 mod watch;
 
@@ -197,17 +197,15 @@ struct Options {
     loaded_map: Option<(Arc<Terrain>, Vec<[f32; 2]>)>,
     /// `--model [CLASS=]FILE`, in order.
     models: Vec<models::ClassModel>,
-    /// `--clip MOVING[,STILL]`.
-    clip: models::ClipChoice,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), clip: models::ClipChoice { moving: models::ClipPlay::looping(1), still: models::ClipPlay::looping(0) } }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--clip N[:loop|pingpong|once][,N[:MODE]]] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -282,7 +280,6 @@ fn parse() -> Result<Options> {
             "--content" => o.content = Some(value("--content", &mut args)?),
             "--param" => o.param = Some(value("--param", &mut args)?.parse().context("--param")?),
             "--model" => o.models.push(models::parse_arg(&value("--model", &mut args)?)?),
-            "--clip" => o.clip = models::ClipChoice::parse(&value("--clip", &mut args)?)?,
             "--observer" => {
                 observer_given = true;
                 o.observer = match value("--observer", &mut args)?.as_str() {
@@ -356,7 +353,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Generated | MapKind::Demo => return None,
     };
     let mounts = o.mounts.iter().cloned().chain(o.content.iter().map(Into::into)).collect();
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone(), models: o.models.clone(), clip: o.clip })
+    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone(), models: o.models.clone() })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> Result<UnitsSetup> {

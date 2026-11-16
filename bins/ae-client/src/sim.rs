@@ -6,6 +6,11 @@
 //! [`InstanceStream`]: rows matched by entity against the previous capture
 //! for the interpolation start and the heading. Stand-in for M4's copy
 //! layer, which will publish filtered view tables instead.
+//!
+//! The animation service (`ae_services::anim`) runs with the `--model`
+//! models (and the content's); units with an `Anim` drawn with its model
+//! are posed from it (`poser.rs`; the raw capture only, not yet an
+//! observer's view).
 
 use ae_nav::math::TICK_SECONDS;
 use ae_services::nav::{GroundFeed, Map, NavPlugin};
@@ -14,7 +19,11 @@ use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::decals::{Blend, Decal, DecalFeed, layer};
 use ae_render::particles::{ParticleFeed, explosion};
-use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, UnitClass, UnitFeed};
+use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, NO_POSE, UnitClass, UnitFeed};
+use crate::poser::Poser;
+use ae_model::anim::Rig;
+use ae_sdk::anim::{Anim, model_id};
+use ae_services::anim::AnimPlugin;
 use ae_sensors::{Bits, SensorGrid};
 use ae_services::view::{SENSOR_CELL, ViewPipeline};
 use ae_view::{Observer, RowState, ViewTable};
@@ -29,7 +38,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// What the renderer needs of a unit, by field.
+/// What the renderer needs of a unit, by field (`NavAgent.profile` but in
+/// the scripted game, whose units are all class 0).
 const FIELDS: [(&str, &str); 6] = [("Body", "x"), ("Body", "y"), ("Body", "vx"), ("Body", "vy"), ("Body", "radius"), ("NavAgent", "profile")];
 const F_X: usize = 0;
 const F_Y: usize = 1;
@@ -52,7 +62,7 @@ pub struct SimOptions {
     /// Draw the world as this allyteam sees it (needs teams): its view
     /// table and its vision on the terrain. `None`: everything.
     pub observer: Option<u32>,
-    /// `games/<game>`: `crossing` or `skirmish`.
+    /// `games/<game>`: `crossing`, `skirmish` or `scripted`.
     pub game: String,
     /// The game's content: package sources and content directories, in
     /// mount order (its catalogue spawns its units).
@@ -63,10 +73,9 @@ pub struct SimOptions {
     pub wasm: Option<Arc<Vec<u8>>>,
     /// A map package's terrain and start points ([`Map::Loaded`]).
     pub loaded_map: Option<(Arc<ae_nav::terrain::Terrain>, Vec<[f32; 2]>)>,
-    /// `--model`: classes drawn with a model.
+    /// `--model`: classes drawn with a model (and the animation service's
+    /// models, by name).
     pub models: Vec<crate::models::ClassModel>,
-    /// `--clip`: what units with a model play.
-    pub clip: crate::models::ClipChoice,
 }
 
 /// A player's action from the window, in world coordinates.
@@ -214,6 +223,11 @@ pub struct Sim {
     last_units: Vec<(u64, f32, f32, f32)>,
     /// The observer's line of sight at the last tick.
     last_los: Option<Bits>,
+    /// The units' channels after the last tick, by entity (with a poser).
+    anims: Vec<(u64, Anim)>,
+    /// Milliseconds of the last stream's posing (reading the channels
+    /// included).
+    pose_ms: f64,
 }
 
 /// One observer's copy layer: the pipeline, the observer, what it has ever
@@ -253,10 +267,39 @@ impl Sim {
             let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).context("the content's catalogue")?;
             plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(Arc::new(catalog))));
         }
+        // Animation: the content's models, and the `--model` ones by name.
+        let mut rigs: Vec<(String, Rig)> = o.models.iter().map(|m| (m.name.clone(), Rig::new(&m.model))).collect();
+        if !o.mounts.is_empty() {
+            let mut vfs = ae_vfs::Vfs::new();
+            for m in &o.mounts {
+                vfs.mount(m)?;
+            }
+            for f in vfs.list("models", "aemodel")? {
+                let model = ae_model::Model::from_bytes(&vfs.read(&f)?).with_context(|| format!("model {f}"))?;
+                let name = f.trim_start_matches("models/").trim_end_matches(".aemodel").to_string();
+                if !rigs.iter().any(|(n, _)| *n == name) {
+                    rigs.push((name, Rig::new(&model)));
+                }
+            }
+        }
+        let anim = AnimPlugin::new(rigs, TICK_SECONDS);
+        plugins.push(Arc::new(anim.clone()));
         let rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
         let world = rt.world_for(o.param(), o.workers)?;
-        // The raw capture (no observer) draws units with a nav agent.
-        let spec = CaptureSpec::new(&rt.schema, &FIELDS)?;
+        // The raw capture (no observer) draws units with a body; their
+        // class is their nav agent's profile, but in the scripted game
+        // (whose units have no nav agent, though the SDK declares it).
+        let spec = CaptureSpec::new(&rt.schema, &FIELDS[..if o.game == "scripted" { F_PROFILE } else { FIELDS.len() }])?;
+        // Units drawn with a model whose `Anim` names it are posed.
+        // (the layout checked: the service's own check runs only when the
+        // game schedules it).
+        let has_anim = ae_sim::host::expect_component(&rt.schema, <Anim as ae_sdk::Component>::SCHEMA).is_ok();
+        let poser = (has_anim && !o.models.is_empty()).then(|| {
+            let names = crate::models::names_per_class(&o.models, o.classes().len(), o.observer.map(|_| o.classes().len() - 2));
+            let classes: Vec<Option<u64>> = names.iter().map(|n| n.as_deref().map(model_id)).collect();
+            let rigs = classes.iter().flatten().filter_map(|&id| anim.rig(id).map(|r| (id, r.clone()))).collect();
+            Poser::new(rigs, classes)
+        });
         // Skirmish units draw by their `Look`, crossing units by class.
         let (extra, class_field) = if o.skirmish() { ("Look", ("Look", "class")) } else { ("NavAgent", ("NavAgent", "profile")) };
         let view = match o.observer {
@@ -277,7 +320,7 @@ impl Sim {
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { clip: if o.models.is_empty() { Default::default() } else { o.clip }, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None })
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { poser, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None, anims: Vec::new(), pose_ms: 0.0 })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -389,7 +432,7 @@ impl Sim {
     /// capture.
     pub fn moving(&self, class: u32) -> usize {
         let c = &self.capture;
-        (0..c.len()).filter(|&r| c.columns[F_PROFILE][r] == class && (c.f32(F_VX, r) != 0.0 || c.f32(F_VY, r) != 0.0)).count()
+        (0..c.len()).filter(|&r| profile(c, r) == class && (c.f32(F_VX, r) != 0.0 || c.f32(F_VY, r) != 0.0)).count()
     }
 
     /// Capture the world and build the stream (`tick_seconds` 0: no
@@ -400,7 +443,16 @@ impl Sim {
             self.emit_deaths();
         }
         let Some(v) = self.view.as_mut() else {
-            return Ok(self.streamer.stream(&self.capture, Instant::now(), tick_seconds));
+            let t0 = Instant::now();
+            self.anims.clear();
+            if self.streamer.poser.is_some() {
+                let anims = &mut self.anims;
+                self.rt.each_row(&self.world, "Anim", |e, bytes| anims.push((e, unsafe { bytes.as_ptr().cast::<Anim>().read_unaligned() })))?;
+                anims.sort_unstable_by_key(|a| a.0);
+            }
+            let stream = self.streamer.stream(&self.capture, &self.anims, Instant::now(), tick_seconds);
+            self.pose_ms = t0.elapsed().as_secs_f64() * 1e3;
+            return Ok(stream);
         };
         let t0 = Instant::now();
         v.pipeline.capture(&self.rt, &self.world)?;
@@ -437,7 +489,7 @@ impl Sim {
                 }
             })
             .collect();
-        let stream = self.streamer.stream_rows(self.capture.tick, &rows, Instant::now(), tick_seconds);
+        let stream = self.streamer.stream_rows(self.capture.tick, &rows, &[], Instant::now(), tick_seconds);
         // After the rows: the last tick's line of sight decides, then
         // this one's is kept.
         self.emit_deaths();
@@ -446,10 +498,21 @@ impl Sim {
         Ok(stream)
     }
 
+    /// Milliseconds of the last stream's rows, posing included (without an
+    /// observer).
+    pub fn pose_ms(&self) -> f64 {
+        self.pose_ms
+    }
+
     /// The last view's milliseconds: capture + coverage, build, rows + stream.
     pub fn view_ms(&self) -> Option<[f64; 3]> {
         self.view.as_ref().map(|v| v.ms)
     }
+}
+
+/// Row `r`'s nav profile (0 without the field).
+fn profile(c: &Capture, r: usize) -> u32 {
+    c.columns.get(F_PROFILE).map_or(0, |col| col[r])
 }
 
 /// Explosions (`(x, y, scale, seed)`) for the units of `last` missing from
@@ -553,17 +616,7 @@ struct Shown {
     hx: f32,
     hy: f32,
     state: u8,
-    /// The clip word it played, and the tick that clip started.
-    clip: u32,
-    start: u64,
-    /// Ticks it has stood still in a row.
-    still: u32,
 }
-
-/// Ticks a unit must stand before it plays the standing clip: units that
-/// stop for a tick or two in a crowd keep walking instead of flickering
-/// between the clips.
-pub const STILL_TICKS: u32 = 6;
 
 /// Turns captures into streams, remembering the last one by key.
 #[derive(Default)]
@@ -571,16 +624,17 @@ pub struct Streamer {
     /// Previous stream, sorted by key.
     previous: Vec<Shown>,
     order: Vec<u32>,
-    /// The clip units play (models only; nothing by default).
-    pub clip: crate::models::ClipChoice,
+    /// Poses units with a model and an `Anim` (none: every unit at rest).
+    pub poser: Option<Poser>,
 }
 
 impl Streamer {
-    /// The stream of `capture` (rows in entity order). A unit's previous
-    /// position is its position in the previous capture (its current one
-    /// if it is new); its heading is its velocity, or its last heading
-    /// while it stands still.
-    pub fn stream(&mut self, capture: &Capture, published: Instant, tick_seconds: f32) -> InstanceStream {
+    /// The stream of `capture` (rows in entity order), units posed by their
+    /// channels in `anims` (by entity). A unit's previous position is its
+    /// position in the previous capture (its current one if it is new);
+    /// its heading is its velocity, or its last heading while it stands
+    /// still.
+    pub fn stream(&mut self, capture: &Capture, anims: &[(u64, Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
         let n = capture.len();
         self.order.clear();
         self.order.extend(0..n as u32);
@@ -597,20 +651,25 @@ impl Streamer {
                     vx: capture.f32(F_VX, r),
                     vy: capture.f32(F_VY, r),
                     radius: capture.columns[F_RADIUS][r],
-                    class: capture.columns[F_PROFILE][r],
+                    class: profile(capture, r),
                     state: 0,
                 }
             })
             .collect();
-        self.stream_rows(capture.tick, &rows, published, tick_seconds)
+        self.stream_rows(capture.tick, &rows, anims, published, tick_seconds)
     }
 
     /// The stream of `rows` (ascending by key), matched to the previous
-    /// stream by key; a row whose state changed starts where it is.
-    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], published: Instant, tick_seconds: f32) -> InstanceStream {
+    /// stream by key; a row whose state changed starts where it is. Rows
+    /// whose key has channels in `anims` (ascending by key) are posed.
+    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], anims: &[(u64, Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
+        let mut keys = Vec::new();
         let mut next = Vec::with_capacity(rows.len());
-        let mut p = 0;
+        let (mut p, mut a) = (0, 0);
+        if let Some(poser) = &mut self.poser {
+            poser.begin();
+        }
         for row in rows {
             while p < self.previous.len() && self.previous[p].key < row.key {
                 p += 1;
@@ -620,19 +679,24 @@ impl Streamer {
             let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
             let (px, py) = moved.map_or((x, y), |b| (b.x, b.y));
             let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.hx, b.hy)) };
-            let still = if vx != 0.0 || vy != 0.0 { 0 } else { before.map_or(STILL_TICKS, |b| b.still.saturating_add(1)) };
-            let play = self.clip.of(still < STILL_TICKS);
-            let clip = play.word();
-            let start = before.filter(|b| b.clip == clip).map_or(tick, |b| b.start);
-            let clip_time = if play.clip > 0 { crate::models::clip_time(row.key, play, tick.saturating_sub(start), TICK_SECONDS) } else { 0.0 };
-            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, clip, clip_time.to_bits()];
+            while a < anims.len() && anims[a].0 < row.key {
+                a += 1;
+            }
+            let pose = match (&mut self.poser, anims.get(a).filter(|x| x.0 == row.key)) {
+                (Some(poser), Some((_, anim))) => poser.row(tick, row.key, row.class, anim, &mut keys),
+                _ => NO_POSE,
+            };
+            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, pose];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
-            next.push(Shown { key: row.key, x, y, hx, hy, state: row.state, clip, start, still });
+            next.push(Shown { key: row.key, x, y, hx, hy, state: row.state });
+        }
+        if let Some(poser) = &mut self.poser {
+            poser.end();
         }
         self.previous = next;
-        InstanceStream { tick, published, tick_seconds, sim_seconds: TICK_SECONDS, columns }
+        InstanceStream { tick, published, tick_seconds, sim_seconds: TICK_SECONDS, columns, keys }
     }
 }
 
@@ -786,11 +850,11 @@ mod tests {
     fn streams_match_rows_by_entity() {
         let mut s = Streamer::default();
         let now = Instant::now();
-        let first = s.stream(&capture(1, &[(9, 90.0, 0.0, 0.0, 1.0), (4, 40.0, 0.0, 1.0, 0.0)]), now, 0.1);
+        let first = s.stream(&capture(1, &[(9, 90.0, 0.0, 0.0, 1.0), (4, 40.0, 0.0, 1.0, 0.0)]), &[], now, 0.1);
         assert_eq!(column(&first, "x"), [40.0, 90.0]);
         assert_eq!(column(&first, "prev_x"), [40.0, 90.0], "first sight: no motion");
         // Table order changed, 4 stopped, 7 joined, 9 moved.
-        let second = s.stream(&capture(2, &[(7, 70.0, 5.0, 0.0, 0.0), (9, 91.0, 0.5, 0.0, 1.0), (4, 40.0, 0.0, 0.0, 0.0)]), now, 0.1);
+        let second = s.stream(&capture(2, &[(7, 70.0, 5.0, 0.0, 0.0), (9, 91.0, 0.5, 0.0, 1.0), (4, 40.0, 0.0, 0.0, 0.0)]), &[], now, 0.1);
         assert_eq!(column(&second, "x"), [40.0, 70.0, 91.0]);
         assert_eq!(column(&second, "prev_x"), [40.0, 70.0, 90.0]);
         assert_eq!(column(&second, "prev_y"), [0.0, 5.0, 0.0]);
@@ -798,45 +862,56 @@ mod tests {
         assert_eq!(column(&second, "heading_y"), [0.0, 0.0, 1.0]);
         assert_eq!(second.columns[7], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
-        assert_eq!(second.columns[8], [0, 0, 0], "no clip without models");
+        assert_eq!(second.columns[8], [NO_POSE; 3], "no poses without models");
         // 9 left.
-        let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), now, 0.1);
+        let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), &[], now, 0.1);
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
     }
 
-    /// With a clip choice, moving units play one clip and standing ones
-    /// the other, each at its own phase that advances with the tick; a unit
-    /// that stops plays the standing clip only after [`STILL_TICKS`], and a
-    /// clip played once starts at its beginning when the unit switches to it.
+    /// With a poser, a unit drawn with a model whose `Anim` names it gets
+    /// two keys per bone: its pose at the last stream's tick and at this
+    /// one (the same twice when it was not posed at the tick before), the
+    /// newer rotation on the older one's side; other units stay at rest.
     #[test]
-    fn streams_carry_clips() {
-        use crate::models::{ClipChoice, ClipPlay, PlayMode};
-        let once = ClipPlay { clip: 1, mode: PlayMode::Once };
-        let mut s = Streamer { clip: ClipChoice { moving: ClipPlay::looping(2), still: once }, ..Streamer::default() };
+    fn streams_carry_poses() {
+        use ae_model::anim::{Rig, key_trs};
+        use ae_sdk::anim::manual_kind;
+        let identity = glam::Mat4::IDENTITY.to_cols_array();
+        let bone = |name: &str, parent: Option<u32>| ae_model::Bone { name: name.into(), parent, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] };
+        let model = ae_model::Model { bones: vec![bone("root", None), bone("arm", Some(0))], ..Default::default() };
+        let arm = model_id("arm");
+        let rigs = [(arm, Arc::new(Rig::new(&model)))].into_iter().collect();
+        // Class = entity % 3: class 0 is drawn with the arm, class 1 not.
+        let mut s = Streamer { poser: Some(Poser::new(rigs, vec![Some(arm), None])), ..Streamer::default() };
+        let turned = |angle: f32, model: u64| {
+            let mut a = Anim::new(model);
+            (a.bone[0], a.manual_kind[0]) = (1, manual_kind::TURN);
+            let (sn, c) = (angle * 0.5).sin_cos();
+            a.value[0] = [0.0, sn, 0.0, c];
+            a
+        };
+        let rows = [(3, 30.0, 0.0, 0.0, 0.0), (4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let now = Instant::now();
-        let rows = [(4, 40.0, 0.0, 1.0, 0.0), (9, 90.0, 0.0, 0.0, 0.0)];
-        let first = s.stream(&capture(10, &rows), now, 0.1);
-        assert_eq!(first.columns[8], [2, once.word()], "4 moves, 9 stands");
-        assert_eq!(first.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
-        let second = s.stream(&capture(11, &rows), now, 0.1);
-        let t = |st: &InstanceStream, r: usize| f32::from_bits(st.columns[9][r]);
-        assert!((t(&second, 0) - t(&first, 0) - TICK_SECONDS).abs() < 1e-4, "a tick of sim time");
-        assert!((t(&second, 1) - TICK_SECONDS).abs() < 1e-6, "once: from its start, no phase");
-        assert_ne!(t(&first, 0), clip_time_of(9, 0), "own phases");
-        // 4 stops: it walks on for STILL_TICKS - 1 ticks, then plays the
-        // standing clip from its start.
-        let stopped = [(4, 40.0, 0.0, 0.0, 0.0)];
-        for k in 0..STILL_TICKS as u64 - 1 {
-            let st = s.stream(&capture(12 + k, &stopped), now, 0.1);
-            assert_eq!(st.columns[8], [2], "tick {k} after stopping: still walking");
-        }
-        let st = s.stream(&capture(12 + STILL_TICKS as u64 - 1, &stopped), now, 0.1);
-        assert_eq!(st.columns[8], [once.word()]);
-        assert_eq!(t(&st, 0), 0.0, "the standing clip starts");
-    }
-
-    fn clip_time_of(key: u64, ticks: u64) -> f32 {
-        crate::models::clip_time(key, crate::models::ClipPlay::looping(2), ticks, TICK_SECONDS)
+        let anims = |angle: f32| vec![(3, turned(angle, arm)), (4, turned(angle, arm)), (6, turned(angle, model_id("other")))];
+        let rot = |st: &InstanceStream, k: usize| key_trs(&st.keys[k]);
+        let first = s.stream(&capture(10, &rows), &anims(0.1), now, 0.1);
+        assert_eq!(first.columns[8], [0, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model");
+        assert_eq!(first.keys.len(), 4, "two bones, two keys each");
+        let ((older, ta), (newer, tb)) = (rot(&first, 2), rot(&first, 3));
+        assert_eq!((ta, tb), (9, 10));
+        assert_eq!(older, newer, "first posed: no motion");
+        assert!((newer.r[1] - (0.05f32).sin()).abs() < 1e-6, "the arm turned: {newer:?}");
+        // The next tick's turn, given on the other hemisphere.
+        let mut flipped = anims(0.2);
+        flipped[0].1.value[0] = flipped[0].1.value[0].map(|v| -v);
+        let second = s.stream(&capture(11, &rows), &flipped, now, 0.1);
+        let ((older, ta), (newer, tb)) = (rot(&second, 2), rot(&second, 3));
+        assert_eq!((ta, tb), (10, 11));
+        assert!((older.r[1] - (0.05f32).sin()).abs() < 1e-6 && (newer.r[1] - (0.1f32).sin()).abs() < 1e-6, "from the last pose to this one, on its side: {older:?} {newer:?}");
+        // A tick skipped: no line from an old pose.
+        let third = s.stream(&capture(13, &rows), &anims(0.4), now, 0.1);
+        assert_eq!(rot(&third, 2).0, rot(&third, 3).0);
+        assert_eq!(third.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

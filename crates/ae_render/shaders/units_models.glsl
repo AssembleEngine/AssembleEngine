@@ -21,7 +21,7 @@ struct Material {
 layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
 // Skinning matrices, 3x4: each column holds a row of the affine transform
 // (p' = vec4(p, 1) * m). The models' rest palettes, then a range per unit
-// playing a clip (rows' pose offsets point into either), then the pose
+// with joint keys (rows' pose offsets point into either), then the pose
 // pass's scratch.
 #ifdef POSE
 layout(std430, set = 1, binding = 2) buffer Palette { mat3x4 palette[]; };
@@ -33,7 +33,7 @@ struct ModelClass {
     vec4 sphere; // bounding sphere (at rest, or over its clips), fitted units
     uvec4 cmd;   // first entry in classCommands, commands (0: a dart), rest palette offset, joints
     vec4 fit;    // x: 1 / footprint radius
-    uvec4 pose;  // in anim[]: first bone, bones, first joint, first clip
+    uvec4 pose;  // in anim[]: first bone, bones, first joint; unused
 };
 layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
 
@@ -52,16 +52,17 @@ layout(std430, set = 1, binding = 4) readonly buffer Draws { DrawRecord draws[];
 // Per class its commands' indices (the cull counts each).
 layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classCommands[]; };
 // Per frame: [capacity] each row's palette offset, [capacity] the rows
-// playing a clip (the pose jobs), [capacity] each job's scratch offset.
+// with joint keys (the pose jobs), [capacity] each job's scratch offset.
 layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
 // Partially bound (models::MAX_TEXTURES); indexed per draw, so uniformly.
 layout(set = 1, binding = 7) uniform sampler2D textures[1024];
 #ifdef POSE
 // The animation table (models.rs, animation()): bones (rest rows 0..2,
-// parent in 3.x), joints (inverse bind rows 0..2, bone in 3.x), clips
-// (first frame record, tracks, frames; rate, duration), baked frames (per
-// frame and track: translation with the bone in w, rotation, scale).
+// parent in 3.x), joints (inverse bind rows 0..2, bone in 3.x).
 layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
+// The stream's joint keys (ae_model::anim::Key), three vec4 each:
+// translation and the tick (uint bits), rotation, scale.
+layout(std430, set = 1, binding = 9) readonly buffer Keys { vec4 keys[]; };
 #endif
 
 // cascade: the shadow caster's (units_pose.comp: the number of jobs);

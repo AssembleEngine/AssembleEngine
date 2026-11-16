@@ -25,14 +25,18 @@
 //! particle pool is in its steady state when measuring) at seeded places
 //! around the camera target; time advances 1/60 s a frame.
 //!
-//! The `-fox` scenes draw every unit with the Khronos Fox (converted on
-//! first use, `models.rs`), every unit playing a clip (walking while it
-//! moves, surveying while it stands): the `units pose` pass poses all of
-//! them each frame. They also report `model_setup`, the CPU (and upload)
-//! time of building the renderer's model set (`ModelSet::new`: geometry,
-//! textures, baked clips, cull spheres), median of 5.
+//! The `-fox` scenes run the `scripted` game instead (10 000 Foxes in a
+//! grid under the army camera, walking and standing, animated by the sim:
+//! clips blended by the animation service, heads turned), drawn with the
+//! Khronos Fox (converted on first use, `models.rs`): the client poses
+//! every unit on the CPU from its channels and the `units pose` pass
+//! builds every palette each frame. They also report `model_setup`, the
+//! CPU (and upload) time of building the renderer's model set
+//! (`ModelSet::new`: geometry, textures, cull spheres), median of 5, and
+//! `cpu_pose`, the client's time to read the channels and pose every unit
+//! for a stream (median over the last 10 ticks), with info `joint_keys`.
 
-use super::models::{self, ClassModel, ClipChoice, ClipPlay, Model};
+use super::models::{self, ClassModel};
 use super::{MapKind, Options, effects, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
 use ae_bench::Report;
 use ae_bench::diff::Thresholds;
@@ -115,9 +119,9 @@ const WARMUP_SECONDS: f32 = 1.0;
 const ARMY: [f32; 5] = [2900.0, 17900.0, 1400.0, 0.4, 0.85];
 const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 
-/// The Fox's clips (1 Survey, 2 Walk, 3 Run): walk while moving, survey
-/// standing still, so every unit plays one.
-const FOX_CLIPS: ClipChoice = ClipChoice { moving: ClipPlay::looping(2), still: ClipPlay { clip: 1, mode: models::PlayMode::PingPong } };
+/// The `scripted` game's parameter for the `-fox` scenes: 10 000 units on
+/// a 12 m grid (radius 3) from (2304, 17296), the army camera's view.
+const FOX_PARAM: u64 = 10_000 | 12 << 32 | 144 << 40 | 1081 << 52;
 
 const SCENES: [Scene; 9] = [
     Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0, fox: false },
@@ -126,16 +130,17 @@ const SCENES: [Scene; 9] = [
     Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0, fox: false },
     Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0, fox: false },
     Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, fox: false },
-    Scene { name: "army-fox", about: "as army, every unit the Fox (1,728 vertices, 24 joints) playing a clip", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true },
+    Scene { name: "army-fox", about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true },
     Scene { name: "near-fox", about: "as army-fox, closer (fewer units, larger on screen)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: true },
     Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0, fox: false },
 ];
 
-fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<Arc<Model>>) -> Options {
+fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Options {
     let mut o = Options::default();
     if let Some(model) = fox.filter(|_| scene.fox) {
-        o.models = vec![ClassModel { class: None, model }];
-        o.clip = FOX_CLIPS;
+        o.models = vec![model];
+        o.game = "scripted".into();
+        o.param = Some(FOX_PARAM);
     }
     o.particles_full = b.particles_full;
     o.particle_blend = b.particle_blend;
@@ -153,8 +158,8 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<Arc<Model>>) -> Opti
 #[derive(Default)]
 struct Cache {
     sources: BTreeMap<(u8, i32), (Arc<TerrainSource>, Option<Arc<Terrain>>)>,
-    streams: BTreeMap<(u8, i32, u32, bool), Arc<InstanceStream>>,
-    fox: Option<Arc<Model>>,
+    streams: BTreeMap<(u8, i32, u32, bool), (Arc<InstanceStream>, Option<Sample>)>,
+    fox: Option<ClassModel>,
 }
 
 impl Cache {
@@ -167,7 +172,9 @@ impl Cache {
         Ok(self.sources[&key].0.clone())
     }
 
-    fn stream(&mut self, o: &Options) -> Result<Option<Arc<InstanceStream>>> {
+    /// The units at tick `o.ticks`, and with models the time to pose them
+    /// (the last 10 ticks are streamed, so keys span real motion).
+    fn stream(&mut self, o: &Options) -> Result<Option<(Arc<InstanceStream>, Option<Sample>)>> {
         let Some(s) = sim_options(o) else { return Ok(None) };
         let key = (o.map as u8, o.map_cells, o.units, !o.models.is_empty());
         if let Some(stream) = self.streams.get(&key) {
@@ -175,13 +182,21 @@ impl Cache {
         }
         let started = Instant::now();
         let mut sim = super::sim::Sim::new(&s, None)?;
-        for _ in 0..o.ticks {
+        let posed = !o.models.is_empty();
+        let mut pose_ms = Vec::new();
+        for t in 0..o.ticks {
             sim.tick()?;
+            if posed && t + 10 >= o.ticks && t + 1 < o.ticks {
+                sim.stream(0.0)?;
+                pose_ms.push(sim.pose_ms());
+            }
         }
         let stream = Arc::new(sim.stream(0.0)?);
-        eprintln!("sim: {} units at tick {} in {:.1} s", stream.len(), stream.tick, started.elapsed().as_secs_f32());
-        self.streams.insert(key, stream.clone());
-        Ok(Some(stream))
+        pose_ms.push(sim.pose_ms());
+        let pose = posed.then(|| ns(&mut pose_ms));
+        eprintln!("sim: {} units at tick {} in {:.1} s{}", stream.len(), stream.tick, started.elapsed().as_secs_f32(), if posed { format!(", {} joint keys, posed in {:.2} ms", stream.keys.len(), sim.pose_ms()) } else { String::new() });
+        self.streams.insert(key, (stream.clone(), pose));
+        Ok(Some((stream, pose)))
     }
 }
 
@@ -241,7 +256,9 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let o = options_for(scene, b, cache.fox.clone());
     let source = cache.source(&o)?;
     let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o);
-    if let (Some(s), Some(stream)) = (sim_options(&o), cache.stream(&o)?) {
+    let mut posing = None;
+    if let (Some(s), Some((stream, pose))) = (sim_options(&o), cache.stream(&o)?) {
+        posing = pose.map(|p| (p, stream.keys.len() as u64));
         let feed = Arc::new(UnitFeed::default());
         feed.publish(stream);
         app = app.with_units(units_setup(&s, feed)?);
@@ -326,6 +343,10 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let mut report = Report::new(&format!("gpu-{}", scene.name));
     if let Some(s) = sim_options(&o).filter(|_| scene.fox) {
         report.time_with_tolerance("model_setup", model_setup(gpu, &s)?, CPU_TOLERANCE);
+    }
+    if let Some((pose, keys)) = posing {
+        report.time_with_tolerance("cpu_pose", pose, CPU_TOLERANCE);
+        report.info("joint_keys", keys, "");
     }
     let counted: Vec<bool> = names.iter().map(|n| !READBACK_PASSES.contains(&n.as_str())).collect();
     let mut total: Vec<f64> = gpu_frames.iter().map(|f| f.iter().zip(&counted).filter(|(_, c)| **c).map(|(&ms, _)| ms as f64).sum()).collect();

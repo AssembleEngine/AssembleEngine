@@ -14,7 +14,8 @@
 //!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
 //!
 //! The passes: `units pose` (`units.pose`, compute: the skinning palettes
-//! of the units with models into `units.palette`, which the draws read),
+//! of the units with joint keys into `units.palette`, which the draws
+//! read),
 //! `units reset` (transfer: the indirect instance counts to 0), `units
 //! cull` (compute: frustum test per unit, appends visible indices and
 //! counts them; with models and shadows, also each model unit per shadow
@@ -45,26 +46,18 @@ use std::time::Instant;
 /// The attributes of an instance stream, in column order. Positions are on
 /// the ground plane in world units (the nav world's x and y; render world
 /// x and z); `heading` need not be normalised (zero: facing +x); `class`
-/// is a `u32` indexing [`UnitsSetup::classes`]. `clip` (a `u32`) is the
-/// clip a unit with a model plays: 0 (or past the model's clips) the rest
-/// pose, `k` the model's clip `k - 1`, with its [`PlayMode`] in the top two
-/// bits ([`clip_word`]); `clip_time` is the sim seconds it has played at the
-/// stream's tick (drawn a tick behind, as positions are). Every other
-/// attribute is an `f32`.
-pub const ATTRIBUTES: [&str; 10] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "clip", "clip_time"];
+/// is a `u32` indexing [`UnitsSetup::classes`]. `pose` (a `u32`) is where
+/// a unit with a model finds its joint keys in [`InstanceStream::keys`]:
+/// its model's bones' keys from there, two per bone (older, newer), or
+/// [`NO_POSE`] for the rest pose. Every other attribute is an `f32`.
+pub const ATTRIBUTES: [&str; 9] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "pose"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 const ATTR_CLASS: usize = 7;
-const ATTR_CLIP: usize = 8;
-/// The clip number's bits of a `clip` word; the [`PlayMode`] is above them.
-pub const CLIP_MASK: u32 = (1 << 30) - 1;
-pub const CLIP_MODE_SHIFT: u32 = 30;
+const ATTR_POSE: usize = 8;
+/// The `pose` of a unit drawn at its model's rest pose.
+pub const NO_POSE: u32 = u32::MAX;
 
-pub use ae_model::pose::PlayMode;
-
-/// The `clip` word of clip `clip` (0: the rest pose) played as `mode`.
-pub fn clip_word(clip: u32, mode: PlayMode) -> u32 {
-    (clip & CLIP_MASK) | ((mode as u32) << CLIP_MODE_SHIFT)
-}
+pub use ae_model::anim::Key;
 /// Classes with their own colour; higher class ids use the last one.
 pub const MAX_CLASSES: usize = 16;
 /// Vertices of one unit (a four-faced dart).
@@ -87,12 +80,16 @@ pub struct InstanceStream {
     /// Length of a tick in wall time (the sim's tick over its speed); 0
     /// shows the latest positions only.
     pub tick_seconds: f32,
-    /// Sim time of a tick (what `clip_time` gains per tick, whatever the
-    /// sim's speed): clips are drawn `(1 - alpha) * sim_seconds` behind.
+    /// Sim time of a tick, whatever the sim's speed (effects follow it).
     pub sim_seconds: f32,
     /// `columns[attribute][row]`, raw 4-byte words, every column the same
     /// length.
     pub columns: [Vec<u32>; ATTRIBUTE_COUNT],
+    /// Joint keys (`ae_model::anim::Key`): per posed unit, from its `pose`,
+    /// two per bone of its model. A bone is drawn on the line through its
+    /// two keys at the drawn tick (`tick - 1 + alpha`, past the newer key
+    /// too).
+    pub keys: Vec<Key>,
 }
 
 impl InstanceStream {
@@ -193,9 +190,9 @@ struct FrameUbo {
     counts: [u32; 4],
     classes: [[f32; 4]; MAX_CLASSES],
     unit_shadow: crate::shadow::CascadeUniforms,
-    /// x: how far behind the stream's tick the frame is drawn (seconds;
-    /// clip times are drawn that much earlier).
-    anim: [f32; 4],
+    /// x: the tick drawn from (the stream's tick - 1), y: the fraction
+    /// past it (`f32` bits; joint keys are evaluated there).
+    anim: [u32; 4],
 }
 
 /// Makes a graphics pipeline from a vertex and a fragment shader, with the
@@ -208,9 +205,11 @@ struct Models {
     set_layout: vk::DescriptorSetLayout,
     /// Per slot: set 1 (`shaders/units_models.glsl`).
     sets: Vec<vk::DescriptorSet>,
-    /// Per slot: pose offsets, the pose jobs (rows playing a clip, their
+    /// Per slot: pose offsets, the pose jobs (rows with joint keys, their
     /// scratch offsets).
     rows: Vec<OwnedBuffer>,
+    /// Per slot: the stream's joint keys (as many as fit).
+    keys: Vec<OwnedBuffer>,
     /// Per slot: pose jobs in `rows`.
     jobs: Vec<u32>,
     pose: vk::Pipeline,
@@ -259,19 +258,23 @@ pub struct UnitRenderer {
 }
 
 impl Models {
-    /// `slot`'s rows: each row's palette offset (its model's rest
-    /// palette, or a range of its own when it plays a clip: a pose job),
-    /// and the pose jobs (rows playing a clip, their scratch offsets).
+    /// `slot`'s rows and keys: each row's palette offset (its model's rest
+    /// palette, or a range of its own when it has joint keys: a pose job),
+    /// the pose jobs (rows with keys, their scratch offsets), and the keys.
     fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize) {
         let class_of = |r: usize| (stream.columns[ATTR_CLASS][r] as usize).min(MAX_CLASSES - 1);
         let mut words = vec![0u32; 3 * capacity];
         let (ranges, scratch, _) = self.set.palette_layout(capacity as u32);
         let (mut range, mut scratch, mut jobs) = (ranges as u32, scratch as u32, 0);
+        let fit = stream.keys.len().min((self.keys[slot].size / size_of::<Key>() as u64) as usize);
+        if let Some(bytes) = self.keys[slot].mapped() {
+            bytes[..fit * size_of::<Key>()].copy_from_slice(pipeline::slice_bytes(&stream.keys[..fit]));
+        }
         for r in 0..rows {
             let Some(mc) = self.set.class_model[class_of(r)] else { continue };
             let mc = &self.set.classes[mc];
-            let clip = stream.columns[ATTR_CLIP][r] & CLIP_MASK;
-            words[r] = match clip >= 1 && clip <= mc.clips {
+            let pose = stream.columns[ATTR_POSE][r];
+            words[r] = match mc.bones > 0 && pose != NO_POSE && pose as usize + 2 * mc.bones as usize <= fit {
                 true => {
                     words[capacity + jobs] = r as u32;
                     words[2 * capacity + jobs] = scratch;
@@ -347,15 +350,16 @@ impl UnitRenderer {
         let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
         let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
         // Set 1 of the models: seven storage buffers, the texture array
-        // (partially bound), the animation table.
+        // (partially bound), the animation table, the joint keys.
         let model_layout = match &model_set {
             Some(_) => Some(unsafe {
                 let storage = |b: u32| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(all);
                 let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
                 bindings.push(vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(models::MAX_TEXTURES).stage_flags(vk::ShaderStageFlags::FRAGMENT));
                 bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
+                bindings.push(storage(9).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 let none = vk::DescriptorBindingFlags::empty();
-                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none]).collect::<Vec<_>>();
+                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none]).collect::<Vec<_>>();
                 let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
                 device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings).push_next(&mut flag_info), None)?
             }),
@@ -385,7 +389,7 @@ impl UnitRenderer {
             let m = model_layout.is_some() as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 8 * m) * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 9 * m) * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: (4 + models::MAX_TEXTURES * m) * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n * (1 + m)).pool_sizes(&sizes), None)?;
@@ -488,6 +492,9 @@ impl UnitRenderer {
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let rows_bytes = 3 * capacity as u64 * 4;
         let rows = (0..frames_in_flight).map(|_| host(rows_bytes, storage, "unit model rows")).collect::<Result<Vec<_>>>()?;
+        // Two keys per bone of every unit.
+        let keys_bytes = (capacity as u64 * set.max_bones as u64 * 2 * size_of::<Key>() as u64).max(size_of::<Key>() as u64);
+        let keys = (0..frames_in_flight).map(|_| host(keys_bytes, storage, "unit joint keys")).collect::<Result<Vec<_>>>()?;
         let template = upload::buffer(gpu, &set.template, vk::BufferUsageFlags::TRANSFER_SRC, "unit indirect template")?;
         let layouts = vec![set_layout; frames_in_flight];
         let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }?;
@@ -502,6 +509,8 @@ impl UnitRenderer {
             writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&images));
             let anim = info(&set.anim);
             writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(8).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&anim));
+            let keys = info(&keys[slot]);
+            writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(9).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&keys));
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
         let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout).context("unit pose pipeline")?;
@@ -514,7 +523,7 @@ impl UnitRenderer {
             )),
             false => None,
         };
-        Ok(Models { set, set_layout, sets, rows, jobs: vec![0; frames_in_flight], pose, template, opaque, masked, caster })
+        Ok(Models { set, set_layout, sets, rows, keys, jobs: vec![0; frames_in_flight], pose, template, opaque, masked, caster })
     }
 
     fn indirect_usage() -> vk::BufferUsageFlags {
@@ -662,7 +671,7 @@ impl UnitRenderer {
             counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, self.models.as_ref().map_or(0, |m| m.set.commands())],
             classes: self.classes,
             unit_shadow,
-            anim: [(1.0 - alpha) * stream.map_or(0.0, |s| s.sim_seconds.max(0.0)), 0.0, 0.0, 0.0],
+            anim: [stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32), alpha.to_bits(), 0, 0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
@@ -818,7 +827,7 @@ impl UnitRenderer {
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);
             }
-            for b in m.rows.iter_mut() {
+            for b in m.rows.iter_mut().chain(m.keys.iter_mut()) {
                 b.destroy(gpu);
             }
             m.template.destroy(gpu);
@@ -881,7 +890,7 @@ mod tests {
 
     #[test]
     fn sim_time_follows_the_sim() {
-        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default() };
+        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default(), keys: Vec::new() };
         let (a, b) = (stream(10, 0.05), stream(11, 0.05));
         assert!((a.sim_time(0.0) - 0.9).abs() < 1e-6 && (a.sim_time(1.0) - 1.0).abs() < 1e-6, "a tick behind, by sim seconds");
         assert!(b.sim_time(0.0) >= a.sim_time(1.0), "the next stream never steps back");

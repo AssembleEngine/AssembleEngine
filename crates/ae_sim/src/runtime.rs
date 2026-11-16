@@ -671,26 +671,32 @@ impl Runtime {
     /// Every live row of a component, by name: `(entity, value bytes)`,
     /// sorted by entity.
     pub fn rows(&self, w: &World, component: &str) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut out = Vec::new();
+        self.each_row(w, component, |e, bytes| out.push((e, bytes.to_vec())))?;
+        out.sort_by_key(|(e, _)| *e);
+        Ok(out)
+    }
+
+    /// `f(entity, value bytes)` for every live row of a component, by name,
+    /// in table order (no copies).
+    pub fn each_row(&self, w: &World, component: &str, mut f: impl FnMut(u64, &[u8])) -> Result<()> {
         let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
         let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
         let size = self.schema.components[i].size as usize;
         let terms = [Term { component: id, access: Access::Read }];
-        let mut out = Vec::new();
         unsafe {
             let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
                 let ids = std::slice::from_raw_parts(chunk.entities, chunk.count);
                 let data = std::slice::from_raw_parts(chunk.fields[0], chunk.count * size);
                 for (r, id) in ids.iter().enumerate() {
-                    out.push((*id, data[r * size..(r + 1) * size].to_vec()));
+                    f(*id, &data[r * size..(r + 1) * size]);
                 }
                 Ok(())
             });
             fb::fini_query(q);
-            r?;
+            r
         }
-        out.sort_by_key(|(e, _)| *e);
-        Ok(out)
     }
 
     /// Overwrite 4-byte field `component.field` of `entity` with `bits`

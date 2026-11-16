@@ -619,6 +619,50 @@ impl Rig {
     }
 }
 
+/// A joint key for the GPU (the pose pass, `units_pose.comp`): a bone's
+/// local transform at a tick, 12 words: translation and the tick (the
+/// `u32` itself, not a float: exact at any tick), rotation (x, y, z, w),
+/// scale and a spare word. The GPU draws a bone on the line through its
+/// two keys ([`on_line`]).
+pub type Key = [u32; 12];
+
+/// `p` at `tick` as a key.
+pub fn key(p: &Trs, tick: u32) -> Key {
+    let f = |x: f32| x.to_bits();
+    [f(p.t[0]), f(p.t[1]), f(p.t[2]), tick, f(p.r[0]), f(p.r[1]), f(p.r[2]), f(p.r[3]), f(p.s[0]), f(p.s[1]), f(p.s[2]), 0]
+}
+
+/// A key's transform and tick.
+pub fn key_trs(k: &Key) -> (Trs, u32) {
+    let f = |i: usize| f32::from_bits(k[i]);
+    (Trs { t: [f(0), f(1), f(2)], r: [f(4), f(5), f(6), f(7)], s: [f(8), f(9), f(10)] }, k[3])
+}
+
+/// The transform at `tick + frac` on the line through keys `a` and `b`
+/// (older first; past `b` too): translation and scale lerped, rotation
+/// nlerped as stored (the keys on one hemisphere). The tick difference is
+/// taken in integers first, as the pose pass does. Equal ticks: `b`.
+pub fn on_line(a: &Key, b: &Key, tick: u32, frac: f32) -> Trs {
+    let ((pa, ta), (pb, tb)) = (key_trs(a), key_trs(b));
+    let span = tb.wrapping_sub(ta) as i32;
+    if span == 0 {
+        return pb;
+    }
+    let s = (tick.wrapping_sub(ta) as i32 as f32 + frac) / span as f32;
+    let l = |x: [f32; 3], y: [f32; 3]| [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s, x[2] + (y[2] - x[2]) * s];
+    let r = qnorm(add4(pa.r, [(pb.r[0] - pa.r[0]) * s, (pb.r[1] - pa.r[1]) * s, (pb.r[2] - pa.r[2]) * s, (pb.r[3] - pa.r[3]) * s]));
+    Trs { t: l(pa.t, pb.t), r, s: l(pa.s, pb.s) }
+}
+
+/// `b`'s rotation on `a`'s hemisphere (a key's rotation before it goes on
+/// a line from `a`: manual rotations are never sign-normalised).
+pub fn same_side(a: &Trs, mut b: Trs) -> Trs {
+    if dot4(a.r, b.r) < 0.0 {
+        b.r = neg4(b.r);
+    }
+    b
+}
+
 /// `x` moved toward `to` by at most `step` (or all the way, `at_once`).
 fn toward(x: f32, to: f32, step: f32, at_once: bool) -> f32 {
     let d = to - x;
