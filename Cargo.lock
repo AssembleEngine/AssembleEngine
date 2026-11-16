@@ -38,6 +38,7 @@ dependencies = [
  "anyhow",
  "ash",
  "glam",
+ "rayon",
 ]
 
 [[package]]

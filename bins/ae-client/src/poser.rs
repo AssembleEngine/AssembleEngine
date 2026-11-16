@@ -8,7 +8,8 @@
 //! posed at the previous tick). The GPU draws each bone on the line
 //! through them at the drawn time, a tick behind as positions are. A unit
 //! is posed when its class is drawn with a model and its `Anim` names that
-//! model (`ClassModel::name`).
+//! model (`ClassModel::name`). Units are posed in parallel (rayon), each
+//! into its own range of the keys.
 //!
 //! Not yet (step 3's second half, docs/PLAN.md "Joint keys"): uploading
 //! only the bones that leave their line, stable key slots per unit,
@@ -17,6 +18,7 @@
 use ae_model::anim::{Key, Pose, Rig, Trs, key, same_side};
 use ae_render::units::NO_POSE;
 use ae_sdk::anim::Anim;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -30,66 +32,87 @@ struct Posed {
     bones: u32,
 }
 
+/// One unit to pose in this stream.
+struct Job<'a> {
+    rig: &'a Rig,
+    anim: &'a Anim,
+    /// Its bones at the last tick in `Poser::locals`, if posed then.
+    before: Option<u32>,
+}
+
 pub struct Poser {
     /// The rigs, by model id (`ae_sdk::anim::model_id`).
     rigs: BTreeMap<u64, Arc<Rig>>,
     /// Per stream class: the model id of the model it is drawn with.
     classes: Vec<Option<u64>>,
-    /// Scratch pose per model id.
-    poses: BTreeMap<u64, Pose>,
     /// Units posed at the last stream (by key) and their bones; the ones
     /// being posed now.
     last: Vec<Posed>,
     locals: Vec<Trs>,
     next: Vec<Posed>,
     next_locals: Vec<Trs>,
-    /// Merge position in `last`.
-    at: usize,
 }
 
 impl Poser {
     /// `rigs` by model id; `classes`: each stream class's model id.
     pub fn new(rigs: BTreeMap<u64, Arc<Rig>>, classes: Vec<Option<u64>>) -> Self {
-        Self { rigs, classes, poses: BTreeMap::new(), last: Vec::new(), locals: Vec::new(), next: Vec::new(), next_locals: Vec::new(), at: 0 }
+        Self { rigs, classes, last: Vec::new(), locals: Vec::new(), next: Vec::new(), next_locals: Vec::new() }
     }
 
-    /// Start a stream.
-    pub fn begin(&mut self) {
+    /// Pose `units` (key, class, channels; ascending by key) at `tick`:
+    /// each one's `pose` attribute into `poses` ([`NO_POSE`] when it is
+    /// not posed), its keys into `keys` (both cleared first).
+    pub fn pose(&mut self, tick: u64, units: &[(u64, u32, &Anim)], poses: &mut Vec<u32>, keys: &mut Vec<Key>) {
+        let now = tick as u32;
+        poses.clear();
         self.next.clear();
+        let mut jobs = Vec::with_capacity(units.len());
+        let (mut at, mut total) = (0, 0usize);
+        for &(key_of, class, anim) in units {
+            let rig = match self.classes.get(class as usize) {
+                Some(&Some(model)) if anim.model == model => self.rigs.get(&model),
+                _ => None,
+            };
+            let Some(rig) = rig else {
+                poses.push(NO_POSE);
+                continue;
+            };
+            let bones = rig.bones() as u32;
+            while at < self.last.len() && self.last[at].key < key_of {
+                at += 1;
+            }
+            let before = self.last.get(at).filter(|p| p.key == key_of && p.tick.wrapping_add(1) == now && p.bones == bones).map(|p| p.first);
+            poses.push(2 * total as u32);
+            self.next.push(Posed { key: key_of, tick: now, first: total as u32, bones });
+            jobs.push(Job { rig, anim, before });
+            total += bones as usize;
+        }
+        keys.clear();
+        keys.resize(2 * total, [0; 12]);
         self.next_locals.clear();
-        self.at = 0;
-    }
-
-    /// The `pose` attribute of the unit `key` of class `class` with
-    /// channels `anim` at `tick` (keys ascending within a stream), its keys
-    /// appended to `keys`; [`NO_POSE`] when it is not posed.
-    pub fn row(&mut self, tick: u64, key_of: u64, class: u32, anim: &Anim, keys: &mut Vec<Key>) -> u32 {
-        let Some(&Some(model)) = self.classes.get(class as usize) else { return NO_POSE };
-        if anim.model != model {
-            return NO_POSE;
+        self.next_locals.resize(total, Trs { t: [0.0; 3], r: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] });
+        // Each job's ranges of the keys and of the locals.
+        let (mut key_rest, mut local_rest) = (&mut keys[..], &mut self.next_locals[..]);
+        let mut work = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let bones = job.rig.bones();
+            let (k, kr) = std::mem::take(&mut key_rest).split_at_mut(2 * bones);
+            let (l, lr) = std::mem::take(&mut local_rest).split_at_mut(bones);
+            (key_rest, local_rest) = (kr, lr);
+            work.push((job, k, l));
         }
-        let Some(rig) = self.rigs.get(&model) else { return NO_POSE };
-        let pose = self.poses.entry(model).or_insert_with(|| rig.rest_pose());
-        rig.pose(&ae_services::anim::channels(anim), pose);
-        let (now, bones) = (tick as u32, rig.bones() as u32);
-        while self.at < self.last.len() && self.last[self.at].key < key_of {
-            self.at += 1;
-        }
-        let before = self.last.get(self.at).filter(|p| p.key == key_of && p.tick.wrapping_add(1) == now && p.bones == bones);
-        let first = keys.len() as u32;
-        let start = self.next_locals.len() as u32;
-        for (b, local) in pose.local.iter().enumerate() {
-            let old = before.map_or(*local, |p| self.locals[p.first as usize + b]);
-            let new = same_side(&old, *local);
-            keys.extend([key(&old, now.wrapping_sub(1)), key(&new, now)]);
-            self.next_locals.push(new);
-        }
-        self.next.push(Posed { key: key_of, tick: now, first: start, bones });
-        first
-    }
-
-    /// End a stream: its poses are the next one's previous ones.
-    pub fn end(&mut self) {
+        let last = &self.locals;
+        work.into_par_iter().with_min_len(256).for_each_init(BTreeMap::<usize, Pose>::new, |poses, (job, keys, locals)| {
+            let pose = poses.entry(job.rig as *const Rig as usize).or_insert_with(|| job.rig.rest_pose());
+            job.rig.pose(&ae_services::anim::channels(job.anim), pose);
+            for (b, local) in pose.local.iter().enumerate() {
+                let old = job.before.map_or(*local, |first| last[first as usize + b]);
+                let new = same_side(&old, *local);
+                keys[2 * b] = key(&old, now.wrapping_sub(1));
+                keys[2 * b + 1] = key(&new, now);
+                locals[b] = new;
+            }
+        });
         std::mem::swap(&mut self.last, &mut self.next);
         std::mem::swap(&mut self.locals, &mut self.next_locals);
     }

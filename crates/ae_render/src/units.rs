@@ -53,7 +53,8 @@ use std::time::Instant;
 pub const ATTRIBUTES: [&str; 9] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "pose"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 const ATTR_CLASS: usize = 7;
-const ATTR_POSE: usize = 8;
+/// The `pose` attribute's column.
+pub const ATTR_POSE: usize = 8;
 /// The `pose` of a unit drawn at its model's rest pose.
 pub const NO_POSE: u32 = u32::MAX;
 

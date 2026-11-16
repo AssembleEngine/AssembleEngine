@@ -19,7 +19,7 @@ use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::decals::{Blend, Decal, DecalFeed, layer};
 use ae_render::particles::{ParticleFeed, explosion};
-use ae_render::units::{ATTRIBUTE_COUNT, InstanceStream, NO_POSE, UnitClass, UnitFeed};
+use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, InstanceStream, NO_POSE, UnitClass, UnitFeed};
 use crate::poser::Poser;
 use ae_model::anim::Rig;
 use ae_sdk::anim::{Anim, model_id};
@@ -626,6 +626,8 @@ pub struct Streamer {
     order: Vec<u32>,
     /// Poses units with a model and an `Anim` (none: every unit at rest).
     pub poser: Option<Poser>,
+    /// The poser's `pose` attributes (scratch).
+    poses: Vec<u32>,
 }
 
 impl Streamer {
@@ -667,9 +669,9 @@ impl Streamer {
         let mut keys = Vec::new();
         let mut next = Vec::with_capacity(rows.len());
         let (mut p, mut a) = (0, 0);
-        if let Some(poser) = &mut self.poser {
-            poser.begin();
-        }
+        // Rows with channels: (row, then key, class, channels).
+        let mut posed = Vec::new();
+        let mut units = Vec::new();
         for row in rows {
             while p < self.previous.len() && self.previous[p].key < row.key {
                 p += 1;
@@ -682,18 +684,21 @@ impl Streamer {
             while a < anims.len() && anims[a].0 < row.key {
                 a += 1;
             }
-            let pose = match (&mut self.poser, anims.get(a).filter(|x| x.0 == row.key)) {
-                (Some(poser), Some((_, anim))) => poser.row(tick, row.key, row.class, anim, &mut keys),
-                _ => NO_POSE,
-            };
-            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, pose];
+            if let (Some(_), Some((_, anim))) = (&self.poser, anims.get(a).filter(|x| x.0 == row.key)) {
+                posed.push(next.len());
+                units.push((row.key, row.class, anim));
+            }
+            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, NO_POSE];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
             next.push(Shown { key: row.key, x, y, hx, hy, state: row.state });
         }
         if let Some(poser) = &mut self.poser {
-            poser.end();
+            poser.pose(tick, &units, &mut self.poses, &mut keys);
+            for (&r, &pose) in posed.iter().zip(&self.poses) {
+                columns[ATTR_POSE][r] = pose;
+            }
         }
         self.previous = next;
         InstanceStream { tick, published, tick_seconds, sim_seconds: TICK_SECONDS, columns, keys }
