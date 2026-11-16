@@ -2319,6 +2319,22 @@ that in.
   `EXT_meshopt_compression`, KTX2/Basis textures). Do not choose silently.
 - Verification: loader tests on the Khronos sample models (a basic piece model, a skinned one),
   goldens for the drawn result, validation layers clean; the model's size and load time measured.
+- Decided with the user (2026-11-16), M11 next, before M8–M10:
+  - more than four influences per vertex: keep the four strongest, renormalise, warn;
+    TEXCOORD_2 and above, COLOR_1: dropped with a warning; non-uniform node scale: supported
+    (bones are full matrices);
+  - extensions accepted: `KHR_texture_transform`, `KHR_materials_emissive_strength`,
+    `KHR_texture_basisu` (KTX2/Basis, transcoded by the converter); not accepted (the converter
+    fails, naming it): `KHR_draco_mesh_compression`, `EXT_meshopt_compression`; sparse accessors
+    are core glTF and read;
+  - animation clips: imported as data (sampled tracks in the model), no runtime player yet; a sim
+    system can play them into `PieceTransform` later.
+  - textures stay in the format the glTF brings, in the KTX2 suite: each is stored in the model as
+    a KTX2 in a GPU format. PNG/JPEG become RGBA8 with mips (zstd supercompression, lossless);
+    KTX2 already in a GPU format is kept; Basis-compressed KTX2 is transcoded by the converter to
+    BC7, so the runtime needs no transcoder.
+- Not in the sim yet: no `PieceTransform` column exists. In M11 the renderer takes a pose per
+  class (the rest pose, or a clip sampled at a time); the sim columns come later.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
