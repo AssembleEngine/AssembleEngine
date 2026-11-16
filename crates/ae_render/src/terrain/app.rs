@@ -433,6 +433,12 @@ impl TerrainApp {
         Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
     }
 
+    /// Joint keys the last frame uploaded into the units' key table, and
+    /// the render thread's milliseconds for it.
+    pub fn last_key_upload(&self) -> (u32, f64) {
+        self.unit_renderer.as_ref().map_or((0, 0.0), |u| u.key_upload())
+    }
+
     /// Per model class, the units the cull put in each shadow cascade in
     /// the last frame (after `run_headless`); for tests and tools.
     pub fn last_unit_cascade_counts(&mut self) -> Vec<[u32; crate::shadow::CASCADES]> {
@@ -696,7 +702,6 @@ impl RenderApp for TerrainApp {
             // This slot's previous frame has completed: its count is final.
             let previous = (units.rows(slot), units.read_visible(slot));
             *self.unit_counts.lock().unwrap_or_else(|p| p.into_inner()) = previous;
-            let stream = setup.feed.latest();
             let frame = UnitFrame {
                 view_proj: params.view_proj,
                 cam_pos: params.cam_pos,
@@ -705,7 +710,7 @@ impl RenderApp for TerrainApp {
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows,
             };
-            units.write_frame(slot, &frame, stream.as_deref(), Instant::now());
+            units.write_frame(slot, &frame, &setup.feed, Instant::now());
         }
         if let Some(particles) = self.particle_renderer.as_mut() {
             let mut camera = view.camera;

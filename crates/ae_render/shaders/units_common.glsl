@@ -31,7 +31,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
     vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
-    uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits)
+    uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: joint key writes
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; } inst;

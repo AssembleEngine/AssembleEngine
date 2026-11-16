@@ -9,7 +9,10 @@
 //!   layer's view tables), so the renderer never sees the sim.
 //! * [`UnitFeed`] holds the latest stream. The producer swaps in a new one
 //!   after each tick; the render thread takes whatever is latest at the
-//!   start of a frame, so neither waits for the other.
+//!   start of a frame, so neither waits for the other. It also keeps the
+//!   joint key table the streams write ([`KeyWrites`]), and hands the
+//!   renderer the keys changed since its last take, so a key is uploaded
+//!   once however many streams or frames pass.
 //! * Positions are interpolated between the previous and the latest tick
 //!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
 //!
@@ -40,6 +43,7 @@ use anyhow::{Context as _, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Vec3};
 use gpu_allocator::MemoryLocation;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -47,8 +51,9 @@ use std::time::Instant;
 /// the ground plane in world units (the nav world's x and y; render world
 /// x and z); `heading` need not be normalised (zero: facing +x); `class`
 /// is a `u32` indexing [`UnitsSetup::classes`]. `pose` (a `u32`) is where
-/// a unit with a model finds its joint keys in [`InstanceStream::keys`]:
-/// its model's bones' keys from there, two per bone (older, newer), or
+/// a unit with a model finds its joint keys in the key table (what the
+/// streams' [`InstanceStream::keys`] wrote): its model's bones' keys from
+/// there, two per bone (in either order: each carries its tick), or
 /// [`NO_POSE`] for the rest pose. Every other attribute is an `f32`.
 pub const ATTRIBUTES: [&str; 9] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "pose"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
@@ -86,11 +91,56 @@ pub struct InstanceStream {
     /// `columns[attribute][row]`, raw 4-byte words, every column the same
     /// length.
     pub columns: [Vec<u32>; ATTRIBUTE_COUNT],
-    /// Joint keys (`ae_model::anim::Key`): per posed unit, from its `pose`,
-    /// two per bone of its model. A bone is drawn on the line through its
-    /// two keys at the drawn tick (`tick - 1 + alpha`, past the newer key
-    /// too).
+    /// Writes into the joint key table (`ae_model::anim::Key`): a posed
+    /// unit's bones from its `pose`, two keys per bone of its model. A
+    /// bone is drawn on the line through its two keys at the drawn tick
+    /// (`tick - 1 + alpha`, past the newer key too). Every stream is to
+    /// be published: each one writes only what changed.
+    pub keys: KeyWrites,
+}
+
+/// Writes into the joint key table: key `at[i]` becomes `keys[i]`, in
+/// order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyWrites {
+    /// The table is emptied first (a new producer, or a whole table).
+    pub reset: bool,
+    pub at: Vec<u32>,
     pub keys: Vec<Key>,
+}
+
+impl KeyWrites {
+    pub fn push(&mut self, at: u32, key: Key) {
+        self.at.push(at);
+        self.keys.push(key);
+    }
+
+    pub fn len(&self) -> usize {
+        self.at.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+
+    /// Onto `table` (grown with zeros as needed).
+    pub fn apply(&self, table: &mut Vec<Key>) {
+        if self.reset {
+            table.clear();
+        }
+        for (&at, key) in self.at.iter().zip(&self.keys) {
+            let at = at as usize;
+            if at >= table.len() {
+                table.resize(at + 1, [0; 12]);
+            }
+            table[at] = *key;
+        }
+    }
+
+    /// The whole of `table`, from empty.
+    pub fn whole(table: &[Key]) -> Self {
+        Self { reset: true, at: (0..table.len() as u32).collect(), keys: table.to_vec() }
+    }
 }
 
 impl InstanceStream {
@@ -119,19 +169,98 @@ impl InstanceStream {
     }
 }
 
-/// The latest stream, shared by its producer and the render thread.
+/// The latest stream, shared by its producer and the render thread, and
+/// the joint key table the streams wrote.
 #[derive(Default)]
 pub struct UnitFeed {
-    latest: Mutex<Option<Arc<InstanceStream>>>,
+    state: Mutex<FeedState>,
+}
+
+#[derive(Default)]
+struct FeedState {
+    latest: Option<Arc<InstanceStream>>,
+    /// The key table as of `latest`.
+    keys: Vec<Key>,
+    /// Keys written since the last take, and a bit per key for them.
+    dirty: Vec<u32>,
+    marked: Vec<u64>,
+    /// Takes so far, and resets: a reader whose last take is not the
+    /// latest gets the whole table.
+    takes: u64,
 }
 
 impl UnitFeed {
-    pub fn publish(&self, stream: Arc<InstanceStream>) {
-        *self.latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(stream);
+    /// Publish `stream`, its key writes applied to the table and handed
+    /// back for their memory (the producer's next stream overwrites them;
+    /// the published stream has none).
+    pub fn publish_reusing(&self, mut stream: InstanceStream) -> KeyWrites {
+        let keys = std::mem::take(&mut stream.keys);
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.apply(&keys);
+        s.latest = Some(Arc::new(stream));
+        keys
     }
 
+    pub fn publish(&self, stream: Arc<InstanceStream>) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.apply(&stream.keys);
+        s.latest = Some(stream);
+    }
+
+}
+
+impl FeedState {
+    fn apply(&mut self, w: &KeyWrites) {
+        let s = self;
+        if w.reset {
+            s.keys.clear();
+            s.dirty.clear();
+            s.marked.clear();
+            s.takes += 1;
+        }
+        for (&at, key) in w.at.iter().zip(&w.keys) {
+            let i = at as usize;
+            if i >= s.keys.len() {
+                s.keys.resize(i + 1, [0; 12]);
+                s.marked.resize(s.keys.len().div_ceil(64), 0);
+            }
+            s.keys[i] = *key;
+            if s.marked[i / 64] & (1 << (i % 64)) == 0 {
+                s.marked[i / 64] |= 1 << (i % 64);
+                s.dirty.push(at);
+            }
+        }
+    }
+}
+
+impl UnitFeed {
     pub fn latest(&self) -> Option<Arc<InstanceStream>> {
-        self.latest.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).latest.clone()
+    }
+
+    /// The latest stream, and the joint keys its reader lacks: `write(at,
+    /// key)` for each key written since the reader's last take (`seen`,
+    /// 0 at first), or for the whole table when another take or a reset
+    /// came between. Under the feed's lock, so the keys are the stream's.
+    pub fn take(&self, seen: &mut u64, mut write: impl FnMut(u32, &Key)) -> Option<Arc<InstanceStream>> {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *s;
+        if *seen != 0 && *seen == s.takes {
+            for &at in &s.dirty {
+                write(at, &s.keys[at as usize]);
+            }
+        } else {
+            for (at, key) in s.keys.iter().enumerate() {
+                write(at as u32, key);
+            }
+        }
+        for &at in &s.dirty {
+            s.marked[at as usize / 64] = 0;
+        }
+        s.dirty.clear();
+        s.takes += 1;
+        *seen = s.takes;
+        s.latest.clone()
     }
 }
 
@@ -209,11 +338,26 @@ struct Models {
     /// Per slot: pose offsets, the pose jobs (rows with joint keys, their
     /// scratch offsets).
     rows: Vec<OwnedBuffer>,
-    /// Per slot: the stream's joint keys (as many as fit).
-    keys: Vec<OwnedBuffer>,
+    /// The joint key table (`units_keys.comp` writes it, the poses read
+    /// it), `table_keys` keys: one for all slots, written in queue order.
+    table: OwnedBuffer,
+    table_keys: usize,
+    /// Per slot: the frame's key writes (keys, their places in the table),
+    /// `writes` of them.
+    staged: Vec<OwnedBuffer>,
+    staged_at: Vec<OwnedBuffer>,
+    writes: Vec<u32>,
+    /// Per slot: writes staged and not yet recorded (a frame dropped
+    /// after `write_frame`: the next take is of the whole table).
+    unrecorded: Vec<AtomicBool>,
+    /// The last take from the feed ([`UnitFeed::take`]), and its keys and
+    /// milliseconds (staging them included).
+    seen: u64,
+    last_take: (u32, f64),
     /// Per slot: pose jobs in `rows`.
     jobs: Vec<u32>,
     pose: vk::Pipeline,
+    scatter: vk::Pipeline,
     /// The indirect buffer's initial contents, copied in by the reset.
     template: OwnedBuffer,
     opaque: vk::Pipeline,
@@ -259,18 +403,37 @@ pub struct UnitRenderer {
 }
 
 impl Models {
-    /// `slot`'s rows and keys: each row's palette offset (its model's rest
-    /// palette, or a range of its own when it has joint keys: a pose job),
-    /// the pose jobs (rows with keys, their scratch offsets), and the keys.
+    /// The stream from `feed`, and the key writes `slot`'s frame makes
+    /// (what the table lacks).
+    fn take(&mut self, slot: usize, feed: &UnitFeed) -> Option<Arc<InstanceStream>> {
+        if self.unrecorded.iter().any(|f| f.swap(false, Ordering::Relaxed)) {
+            self.seen = 0;
+        }
+        let started = Instant::now();
+        let cap = self.table_keys;
+        let (mut n, mut keys, mut at) = (0usize, self.staged[slot].mapped(), self.staged_at[slot].mapped());
+        let stream = feed.take(&mut self.seen, |i, key| {
+            if let (true, Some(keys), Some(at)) = ((i as usize) < cap, keys.as_deref_mut(), at.as_deref_mut()) {
+                keys[n * size_of::<Key>()..(n + 1) * size_of::<Key>()].copy_from_slice(pipeline::slice_bytes(key));
+                at[n * 4..n * 4 + 4].copy_from_slice(&i.to_ne_bytes());
+                n += 1;
+            }
+        });
+        self.writes[slot] = n as u32;
+        self.unrecorded[slot].store(n > 0, Ordering::Relaxed);
+        self.last_take = (n as u32, started.elapsed().as_secs_f64() * 1e3);
+        stream
+    }
+
+    /// `slot`'s rows: each row's palette offset (its model's rest palette,
+    /// or a range of its own when it has joint keys in the table: a pose
+    /// job), the pose jobs (rows with keys, their scratch offsets).
     fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize) {
         let class_of = |r: usize| (stream.columns[ATTR_CLASS][r] as usize).min(MAX_CLASSES - 1);
         let mut words = vec![0u32; 3 * capacity];
         let (ranges, scratch, _) = self.set.palette_layout(capacity as u32);
         let (mut range, mut scratch, mut jobs) = (ranges as u32, scratch as u32, 0);
-        let fit = stream.keys.len().min((self.keys[slot].size / size_of::<Key>() as u64) as usize);
-        if let Some(bytes) = self.keys[slot].mapped() {
-            bytes[..fit * size_of::<Key>()].copy_from_slice(pipeline::slice_bytes(&stream.keys[..fit]));
-        }
+        let fit = self.table_keys;
         for r in 0..rows {
             let Some(mc) = self.set.class_model[class_of(r)] else { continue };
             let mc = &self.set.classes[mc];
@@ -351,16 +514,19 @@ impl UnitRenderer {
         let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
         let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
         // Set 1 of the models: seven storage buffers, the texture array
-        // (partially bound), the animation table, the joint keys.
+        // (partially bound), the animation table, the joint key table, the
+        // frame's key writes and their places.
         let model_layout = match &model_set {
             Some(_) => Some(unsafe {
                 let storage = |b: u32| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(all);
                 let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
                 bindings.push(vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(models::MAX_TEXTURES).stage_flags(vk::ShaderStageFlags::FRAGMENT));
                 bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
-                bindings.push(storage(9).stage_flags(vk::ShaderStageFlags::COMPUTE));
+                for b in 9..12 {
+                    bindings.push(storage(b).stage_flags(vk::ShaderStageFlags::COMPUTE));
+                }
                 let none = vk::DescriptorBindingFlags::empty();
-                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none]).collect::<Vec<_>>();
+                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none, none, none]).collect::<Vec<_>>();
                 let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
                 device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings).push_next(&mut flag_info), None)?
             }),
@@ -390,7 +556,7 @@ impl UnitRenderer {
             let m = model_layout.is_some() as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 9 * m) * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 11 * m) * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: (4 + models::MAX_TEXTURES * m) * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n * (1 + m)).pool_sizes(&sizes), None)?;
@@ -493,9 +659,11 @@ impl UnitRenderer {
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let rows_bytes = 3 * capacity as u64 * 4;
         let rows = (0..frames_in_flight).map(|_| host(rows_bytes, storage, "unit model rows")).collect::<Result<Vec<_>>>()?;
-        // Two keys per bone of every unit.
-        let keys_bytes = (capacity as u64 * set.max_bones as u64 * 2 * size_of::<Key>() as u64).max(size_of::<Key>() as u64);
-        let keys = (0..frames_in_flight).map(|_| host(keys_bytes, storage, "unit joint keys")).collect::<Result<Vec<_>>>()?;
+        // Two keys per bone of every unit; a frame may write all of them.
+        let table_keys = (capacity as usize * set.max_bones as usize * 2).max(1);
+        let table = OwnedBuffer::new(gpu, BufferDesc { size: (table_keys * size_of::<Key>()) as u64, usage: storage }, MemoryLocation::GpuOnly, "unit joint key table")?;
+        let staged = (0..frames_in_flight).map(|_| host((table_keys * size_of::<Key>()) as u64, storage, "unit joint key writes")).collect::<Result<Vec<_>>>()?;
+        let staged_at = (0..frames_in_flight).map(|_| host(table_keys as u64 * 4, storage, "unit joint key places")).collect::<Result<Vec<_>>>()?;
         let template = upload::buffer(gpu, &set.template, vk::BufferUsageFlags::TRANSFER_SRC, "unit indirect template")?;
         let layouts = vec![set_layout; frames_in_flight];
         let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }?;
@@ -510,11 +678,14 @@ impl UnitRenderer {
             writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&images));
             let anim = info(&set.anim);
             writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(8).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&anim));
-            let keys = info(&keys[slot]);
-            writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(9).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&keys));
+            let keys = [info(&table), info(&staged[slot]), info(&staged_at[slot])];
+            for (b, k) in keys.iter().enumerate() {
+                writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(9 + b as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(k));
+            }
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
         let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout).context("unit pose pipeline")?;
+        let scatter = pipeline::compute_pipeline(device, spirv!("units_keys.comp"), pipeline_layout).context("unit key write pipeline")?;
         let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true).context("unit model pipeline")?;
         let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true).context("unit masked model pipeline")?;
         let caster = match casts {
@@ -524,7 +695,27 @@ impl UnitRenderer {
             )),
             false => None,
         };
-        Ok(Models { set, set_layout, sets, rows, keys, jobs: vec![0; frames_in_flight], pose, template, opaque, masked, caster })
+        Ok(Models {
+            set,
+            set_layout,
+            sets,
+            rows,
+            table,
+            table_keys,
+            staged,
+            staged_at,
+            writes: vec![0; frames_in_flight],
+            unrecorded: (0..frames_in_flight).map(|_| AtomicBool::new(false)).collect(),
+            seen: 0,
+            last_take: (0, 0.0),
+            jobs: vec![0; frames_in_flight],
+            pose,
+            scatter,
+            template,
+            opaque,
+            masked,
+            caster,
+        })
     }
 
     fn indirect_usage() -> vk::BufferUsageFlags {
@@ -628,14 +819,26 @@ impl UnitRenderer {
         BufferDesc { size: self.indirect.size, usage: Self::indirect_usage() }
     }
 
+    /// Joint keys the last [`Self::write_frame`] staged for the key table,
+    /// and its milliseconds doing it (under the feed's lock).
+    pub fn key_upload(&self) -> (u32, f64) {
+        self.models.as_ref().map_or((0, 0.0), |m| m.last_take)
+    }
+
     /// Rows of `slot`'s stream (after [`Self::write_frame`]).
     pub fn rows(&self, slot: usize) -> u32 {
         self.uploaded[slot].map_or(0, |(_, rows)| rows)
     }
 
-    /// Uniforms for `slot`, and the stream's columns when it is newer than
-    /// the slot's copy (the slot's previous submission has completed).
-    pub fn write_frame(&mut self, slot: usize, frame: &UnitFrame, stream: Option<&InstanceStream>, now: Instant) {
+    /// Uniforms for `slot`, the latest stream's columns from `feed` when it
+    /// is newer than the slot's copy, and the joint keys the key table
+    /// lacks (the slot's previous submission has completed).
+    pub fn write_frame(&mut self, slot: usize, frame: &UnitFrame, feed: &UnitFeed, now: Instant) {
+        let stream = match &mut self.models {
+            Some(m) => m.take(slot, feed),
+            None => feed.latest(),
+        };
+        let stream = stream.as_deref();
         let mut alpha = 1.0;
         match stream {
             Some(stream) => {
@@ -672,7 +875,7 @@ impl UnitRenderer {
             counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, self.models.as_ref().map_or(0, |m| m.set.commands())],
             classes: self.classes,
             unit_shadow,
-            anim: [stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32), alpha.to_bits(), 0, 0],
+            anim: [stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32), alpha.to_bits(), self.models.as_ref().map_or(0, |m| m.writes[slot]), 0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
@@ -697,15 +900,33 @@ impl UnitRenderer {
         unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, self.indirect.buffer, self.counts[ctx.slot].buffer, &[vk::BufferCopy::default().size(size)]) };
     }
 
-    /// The units' poses. Records inside a compute pass that reads
-    /// [`Self::instances`] and writes [`Self::palette`].
+    /// The frame's joint key writes into the key table, then the units'
+    /// poses. Records inside a compute pass that reads [`Self::instances`]
+    /// and writes [`Self::palette`] (the key table is the renderer's own:
+    /// its barriers are here).
     pub fn record_pose(&self, ctx: &PassContext<'_>) {
         let Some(m) = &self.models else { return };
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let writes = m.writes[ctx.slot];
+        if writes > 0 {
+            let barrier = |src: vk::AccessFlags, dst: vk::AccessFlags| unsafe {
+                let b = [vk::MemoryBarrier::default().src_access_mask(src).dst_access_mask(dst)];
+                device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &b, &[], &[]);
+            };
+            // After the earlier frames' poses read the table (queue order).
+            barrier(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_WRITE);
+            unsafe {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.scatter);
+                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+                device.cmd_dispatch(cmd, writes.div_ceil(64), 1, 1);
+            }
+            barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
+            m.unrecorded[ctx.slot].store(false, Ordering::Relaxed);
+        }
         let jobs = m.jobs[ctx.slot];
         if self.rows(ctx.slot) == 0 || jobs == 0 {
             return;
         }
-        let (device, cmd) = (ctx.device, ctx.cmd);
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.pose);
@@ -823,14 +1044,15 @@ impl UnitRenderer {
         let device = &gpu.device;
         if let Some(mut m) = self.models.take() {
             unsafe {
-                for p in [m.pose, m.opaque, m.masked].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
+                for p in [m.pose, m.scatter, m.opaque, m.masked].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
                     device.destroy_pipeline(p, None);
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);
             }
-            for b in m.rows.iter_mut().chain(m.keys.iter_mut()) {
+            for b in m.rows.iter_mut().chain(&mut m.staged).chain(&mut m.staged_at) {
                 b.destroy(gpu);
             }
+            m.table.destroy(gpu);
             m.template.destroy(gpu);
             m.set.destroy(gpu);
         }
@@ -891,11 +1113,51 @@ mod tests {
 
     #[test]
     fn sim_time_follows_the_sim() {
-        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default(), keys: Vec::new() };
+        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default(), keys: KeyWrites::default() };
         let (a, b) = (stream(10, 0.05), stream(11, 0.05));
         assert!((a.sim_time(0.0) - 0.9).abs() < 1e-6 && (a.sim_time(1.0) - 1.0).abs() < 1e-6, "a tick behind, by sim seconds");
         assert!(b.sim_time(0.0) >= a.sim_time(1.0), "the next stream never steps back");
         // At 2x (half the wall time per tick) a tick still gains 0.1 s.
         assert_eq!(stream(11, 0.025).sim_time(0.5), stream(11, 0.2).sim_time(0.5));
+    }
+
+    /// The feed keeps the key table the streams write; a reader gets the
+    /// whole table at first, after a reset or after another reader's
+    /// take, else the keys written since its last take, once each.
+    #[test]
+    fn feed_hands_out_key_writes() {
+        let k = |v: u32| [v; 12];
+        let stream = |keys: KeyWrites| Arc::new(InstanceStream { tick: 1, published: Instant::now(), tick_seconds: 0.0, sim_seconds: 0.1, columns: Default::default(), keys });
+        let writes = |w: &[(u32, u32)]| {
+            let mut keys = KeyWrites::default();
+            for &(at, v) in w {
+                keys.push(at, k(v));
+            }
+            keys
+        };
+        let feed = UnitFeed::default();
+        let take = |seen: &mut u64| {
+            let mut got = Vec::new();
+            feed.take(seen, |at, key| got.push((at, key[0])));
+            got
+        };
+        feed.publish(stream(writes(&[(2, 20), (0, 1)])));
+        let (mut a, mut b) = (0, 0);
+        assert_eq!(take(&mut a), [(0, 1), (1, 0), (2, 20)], "the whole table at first");
+        assert_eq!(take(&mut a), [], "nothing new");
+        feed.publish(stream(writes(&[(1, 10), (2, 21)])));
+        feed.publish(stream(writes(&[(1, 11), (4, 40)])));
+        assert_eq!(take(&mut a), [(1, 11), (2, 21), (4, 40)], "coalesced, the last write each");
+        feed.publish(stream(writes(&[(0, 2)])));
+        assert_eq!(take(&mut b).len(), 5, "another reader: the whole table");
+        assert_eq!(take(&mut a).len(), 5, "a take came between: the whole table");
+        let mut whole = KeyWrites::whole(&[k(7)]);
+        whole.at.push(1);
+        whole.keys.push(k(8));
+        feed.publish(stream(whole.clone()));
+        assert_eq!(take(&mut a), [(0, 7), (1, 8)], "a reset: the new table");
+        let mut table = vec![k(9); 6];
+        whole.apply(&mut table);
+        assert_eq!(table, [k(7), k(8)]);
     }
 }

@@ -19,7 +19,7 @@ use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::decals::{Blend, Decal, DecalFeed, layer};
 use ae_render::particles::{ParticleFeed, explosion};
-use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, InstanceStream, NO_POSE, UnitClass, UnitFeed};
+use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, InstanceStream, KeyWrites, NO_POSE, UnitClass, UnitFeed};
 use crate::poser::Poser;
 use ae_model::anim::Rig;
 use ae_sdk::anim::{Anim, model_id};
@@ -498,6 +498,13 @@ impl Sim {
         Ok(stream)
     }
 
+    /// The key writes of a published stream, back from
+    /// `UnitFeed::publish_reusing`: the next stream writes into their
+    /// memory.
+    pub fn recycle(&mut self, keys: KeyWrites) {
+        self.streamer.spare = keys;
+    }
+
     /// Milliseconds of the last stream's rows, posing included (without an
     /// observer).
     pub fn pose_ms(&self) -> f64 {
@@ -628,6 +635,8 @@ pub struct Streamer {
     pub poser: Option<Poser>,
     /// The poser's `pose` attributes (scratch).
     poses: Vec<u32>,
+    /// Key writes' memory back from the feed, for the next stream.
+    pub spare: KeyWrites,
 }
 
 impl Streamer {
@@ -666,7 +675,7 @@ impl Streamer {
     /// whose key has channels in `anims` (ascending by key) are posed.
     pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], anims: &[(u64, Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
-        let mut keys = Vec::new();
+        let mut keys = std::mem::take(&mut self.spare);
         let mut next = Vec::with_capacity(rows.len());
         let (mut p, mut a) = (0, 0);
         // Rows with channels: (row, then key, class, channels).
@@ -798,7 +807,7 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Opti
         let stream = sim.stream(TICK_SECONDS / rate)?;
         let (tick, units) = (stream.tick, stream.len());
         let view = sim.view_counts();
-        feed.publish(Arc::new(stream));
+        sim.recycle(feed.publish_reusing(stream));
         tick_sum += (t1 - t0).as_secs_f64() * 1e3;
         capture_sum += t1.elapsed().as_secs_f64() * 1e3;
         count += 1;
@@ -874,12 +883,11 @@ mod tests {
     }
 
     /// With a poser, a unit drawn with a model whose `Anim` names it gets
-    /// two keys per bone: its pose at the last stream's tick and at this
-    /// one (the same twice when it was not posed at the tick before), the
-    /// newer rotation on the older one's side; other units stay at rest.
+    /// a slot of joint keys (two per bone of the largest model); streams
+    /// write only the keys of bones that left their lines.
     #[test]
     fn streams_carry_poses() {
-        use ae_model::anim::{Rig, key_trs};
+        use ae_model::anim::{Key, Rig, key_trs, on_line};
         use ae_sdk::anim::manual_kind;
         let identity = glam::Mat4::IDENTITY.to_cols_array();
         let bone = |name: &str, parent: Option<u32>| ae_model::Bone { name: name.into(), parent, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] };
@@ -898,25 +906,49 @@ mod tests {
         let rows = [(3, 30.0, 0.0, 0.0, 0.0), (4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let now = Instant::now();
         let anims = |angle: f32| vec![(3, turned(angle, arm)), (4, turned(angle, arm)), (6, turned(angle, model_id("other")))];
-        let rot = |st: &InstanceStream, k: usize| key_trs(&st.keys[k]);
+        let mut table: Vec<Key> = Vec::new();
+        // The arm's turn drawn at `tick` (its keys at 2, 3: unit 3's slot 0).
+        let arm_at = |table: &[Key], tick: u32| on_line(&table[2], &table[3], tick, 0.0).r[1];
         let first = s.stream(&capture(10, &rows), &anims(0.1), now, 0.1);
         assert_eq!(first.columns[8], [0, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model");
-        assert_eq!(first.keys.len(), 4, "two bones, two keys each");
-        let ((older, ta), (newer, tb)) = (rot(&first, 2), rot(&first, 3));
+        assert!(first.keys.reset && first.keys.at == [0, 1, 2, 3], "a new table, both bones' keys: {:?}", first.keys.at);
+        first.keys.apply(&mut table);
+        let ((older, ta), (newer, tb)) = (key_trs(&table[2]), key_trs(&table[3]));
         assert_eq!((ta, tb), (9, 10));
         assert_eq!(older, newer, "first posed: no motion");
         assert!((newer.r[1] - (0.05f32).sin()).abs() < 1e-6, "the arm turned: {newer:?}");
-        // The next tick's turn, given on the other hemisphere.
+        // The next tick's turn, given on the other hemisphere: the arm
+        // leaves its line, the root does not; the newer key is the last
+        // tick's, so one write over the older one.
         let mut flipped = anims(0.2);
         flipped[0].1.value[0] = flipped[0].1.value[0].map(|v| -v);
         let second = s.stream(&capture(11, &rows), &flipped, now, 0.1);
-        let ((older, ta), (newer, tb)) = (rot(&second, 2), rot(&second, 3));
-        assert_eq!((ta, tb), (10, 11));
-        assert!((older.r[1] - (0.05f32).sin()).abs() < 1e-6 && (newer.r[1] - (0.1f32).sin()).abs() < 1e-6, "from the last pose to this one, on its side: {older:?} {newer:?}");
-        // A tick skipped: no line from an old pose.
-        let third = s.stream(&capture(13, &rows), &anims(0.4), now, 0.1);
-        assert_eq!(rot(&third, 2).0, rot(&third, 3).0);
-        assert_eq!(third.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
+        assert!(!second.keys.reset);
+        assert_eq!(second.keys.at, [2], "only the arm's older key");
+        second.keys.apply(&mut table);
+        assert_eq!((table[2][3], table[3][3]), (11, 10));
+        assert!((arm_at(&table, 10) - (0.05f32).sin()).abs() < 1e-6 && (arm_at(&table, 11) - (0.1f32).sin()).abs() < 1e-6, "from the last pose to this one, on its side");
+        // Turning on at that rate: on the line, nothing written.
+        let third = s.stream(&capture(12, &rows), &anims(0.3), now, 0.1);
+        assert!(third.keys.is_empty(), "on its line: {:?}", third.keys.at);
+        assert!((arm_at(&table, 12) - (0.15f32).sin()).abs() < 1e-3);
+        // A tick skipped and the arm turned back: off the line, and no
+        // pose at the last tick: both keys at the new pose.
+        let fourth = s.stream(&capture(14, &rows), &anims(0.1), now, 0.1);
+        assert_eq!(fourth.keys.at, [2, 3]);
+        fourth.keys.apply(&mut table);
+        assert_eq!(key_trs(&table[2]).0, key_trs(&table[3]).0);
+        // The same channels: not posed again, on its (flat) line.
+        let fifth = s.stream(&capture(15, &rows), &anims(0.1), now, 0.1);
+        assert!(fifth.keys.is_empty());
+        // Unit 3 gone, unit 6 now an arm: it takes the freed slot, fresh.
+        let rows2 = [(4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
+        let mut moved = anims(0.1);
+        moved[2].1.model = arm;
+        let sixth = s.stream(&capture(16, &rows2), &moved[1..], now, 0.1);
+        assert_eq!(sixth.columns[8], [NO_POSE, 0]);
+        assert_eq!(sixth.keys.at, [0, 1, 2, 3]);
+        assert_eq!(sixth.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

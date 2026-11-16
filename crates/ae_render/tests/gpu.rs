@@ -572,7 +572,7 @@ fn units_render_over_terrain() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -595,7 +595,7 @@ fn units_render_over_terrain() {
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
     let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0, models: Vec::new() };
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
     let camera = {
@@ -655,7 +655,7 @@ fn terrain_edits_reach_the_heightfield() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -674,7 +674,7 @@ fn terrain_edits_reach_the_heightfield() {
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
     let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: false }];
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new() });
     let camera = {
@@ -1014,7 +1014,7 @@ fn cull_on_gpu(
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
 
     let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
@@ -1026,7 +1026,7 @@ fn cull_on_gpu(
             columns[a].push(word);
         }
     }
-    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() };
+    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() };
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(stream.clone()));
     let classes = vec![UnitClass { color: [1.0, 0.0, 0.0], floats: false }];
@@ -1090,7 +1090,7 @@ fn units_cull_matches_the_cpu_reference() {
         tick_seconds: 0.0,
         sim_seconds: 0.0,
         columns: std::array::from_fn(|a| candidates.iter().map(|&(x, y, r, c)| [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0, r.to_bits(), c, ae_render::units::NO_POSE][a]).collect()),
-        keys: Vec::new(),
+        keys: ae_render::units::KeyWrites::default(),
     };
     let margins = cull_margins(&probe, &frame, MIN_PIXELS, 1.0, ground);
     let rows: Vec<(f32, f32, f32, u32)> = candidates.iter().zip(&margins).filter(|(_, m)| m.0.abs() > 0.5).map(|(c, _)| *c).take(3000).collect();
@@ -1146,7 +1146,7 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
     use ae_render::terrain::heightmap::{build_pyramid, generate};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
 
     let heightmap = generate(257, 257, 3);
     let pyramid = build_pyramid(&heightmap, 300.0, 0.0);
@@ -1160,7 +1160,7 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
     let classes = vec![UnitClass { color: [1.0, 0.8, 0.1], floats: false }, UnitClass { color: [0.9, 0.9, 0.95], floats: true }, UnitClass { color: [0.8, 0.1, 0.1], floats: false }];
     let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new() });
     if let Some(wasm) = module {
@@ -1615,7 +1615,7 @@ fn water_covers_the_low_ground_only() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, VisionGrid};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -1646,7 +1646,7 @@ fn water_covers_the_low_ground_only() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
         let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: true }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if r.water {
@@ -1768,7 +1768,7 @@ fn hills_shade_away_from_the_sun() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -1802,7 +1802,7 @@ fn hills_shade_away_from_the_sun() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if r.shadows {
@@ -1948,7 +1948,7 @@ fn units_cast_shadows() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2027,7 +2027,7 @@ fn units_cast_shadows() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if shadows {
@@ -2137,7 +2137,7 @@ fn particles_cast_coloured_shadows() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2182,7 +2182,7 @@ fn particles_cast_coloured_shadows() {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if shadows {
@@ -2854,7 +2854,7 @@ fn decals_wrap_over_cliffs() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2909,7 +2909,7 @@ fn decals_wrap_over_cliffs() {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if decals != Decals::None {
@@ -3273,7 +3273,7 @@ fn units_draw_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3319,7 +3319,7 @@ fn units_draw_models() {
     // shadow map (the models' caster).
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: KeyWrites::default() }));
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: models.clone() });
         if shadows {
             app = app.with_shadows();
@@ -3424,7 +3424,7 @@ fn units_model_shadows_culled() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3497,7 +3497,7 @@ fn units_model_shadows_culled() {
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: Vec::new() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: KeyWrites::default() }));
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 1.0, models: models.clone() });
         if shadows {
             app = app.with_shadows();
@@ -3557,7 +3557,7 @@ fn units_pose_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, frustum_planes};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, NO_POSE, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{InstanceStream, KeyWrites, NO_POSE, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3696,7 +3696,17 @@ fn units_pose_models() {
             true => (std::time::Instant::now() + std::time::Duration::from_secs(3600), 0.25),
             false => (std::time::Instant::now(), 0.0),
         };
-        feed.publish(Arc::new(InstanceStream { tick: newer as u64 + 1, published, tick_seconds, sim_seconds: tick_seconds, columns: columns.clone(), keys: keys.clone() }));
+        // A whole table of stale keys (every bone at the origin, a tick
+        // earlier), then the keys as writes over it: the renderer gets the
+        // feed's table, both streams' writes coalesced.
+        let stale: Vec<Key> = keys.iter().map(|k| key(&ae_model::anim::Trs { t: [0.0; 3], r: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] }, k[3].wrapping_sub(1))).collect();
+        let stream = |keys: KeyWrites| Arc::new(InstanceStream { tick: newer as u64 + 1, published, tick_seconds, sim_seconds: tick_seconds, columns: columns.clone(), keys });
+        feed.publish(stream(KeyWrites::whole(&stale)));
+        let mut writes = KeyWrites::default();
+        for (i, k) in keys.iter().enumerate() {
+            writes.push(i as u32, *k);
+        }
+        feed.publish(stream(writes));
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: setup_models.clone() });
         set_view(&app);
         app.create_offscreen(&gpu, extent).unwrap();

@@ -90,24 +90,35 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   and the cull before the shadows.
 - **Poses** (M14 step 3; replaced the GPU-baked clips): the CPU poses units from their sim
   animation channels (`ae_model::anim::Rig::pose`, the sim's own function, in the client's
-  `poser.rs`) and the stream carries **joint keys** (`InstanceStream::keys`,
-  `ae_model::anim::Key`, 48 bytes: translation and the tick as a `u32`, rotation, scale): per
-  posed unit two keys per bone of its model, its local transform at the previous tick and at the
-  stream's. The stream's `pose` attribute is the unit's first key (`units::NO_POSE`: the rest
-  pose). The palette holds 3x4 matrices (rows, 48 bytes): each model's rest palette at its head
-  (written once; units at rest point there), then a range per posed unit, then the pose pass's
-  scratch. When a new tick arrives the CPU copies the keys into the slot's key buffer (host
-  visible, binding 9), gives each row its offset and lists the posed units (pose jobs). The
-  `units pose` pass (`units.pose`, compute, before the shadows and the draws) runs one
-  invocation per job: each bone on the line through its two keys at the drawn tick
+  `poser.rs`) into a **joint key table** (`ae_model::anim::Key`, 48 bytes: translation and the
+  tick as a `u32`, rotation, scale): a posed unit has a slot of two keys per bone (for the
+  largest model), the same while it stays posed. Each tick a bone's pose is checked against the
+  line through its keys (`ae_model::anim::within`, 1e-3: radians, scale, and the model's reach
+  for translation); only a bone that left it gets new keys: its pose at the last tick and this
+  one, or this one only over the older key when the newer is the last tick's. A unit whose
+  `Anim` is unchanged is not posed again (still checked); units are posed in parallel (rayon).
+  Streams carry the writes (`InstanceStream::keys`, `units::KeyWrites`); the `UnitFeed` applies
+  them to its copy of the table and hands the renderer the keys changed since its last take,
+  coalesced (`UnitFeed::take`; the whole table at first or after a reset), so every stream must
+  be published (`publish_reusing` gives the writes' memory back to the poser). The stream's
+  `pose` attribute is the unit's first key (`units::NO_POSE`: the rest pose). The palette holds
+  3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units at
+  rest point there), then a range per posed unit, then the pose pass's scratch. Each frame the
+  render thread stages the keys it took (host visible, per slot, bindings 10 and 11); when a new
+  tick arrives it gives each row its offset and lists the posed units (pose jobs). The `units
+  pose` pass (`units.pose`, compute, before the shadows and the draws) first scatters the staged
+  keys into the table (`units_keys.comp`; device local, one for all frame slots, with barriers
+  against the earlier frames' reads, binding 9), then runs one invocation per job: each bone on
+  the line through its two keys (in either order) at the drawn tick
   (`ae_model::anim::on_line`: the stream's tick − 1 plus the interpolation weight; the tick
   difference in integers, so exact at any tick; lerp and nlerp, past the newer key too), the
   hierarchy walked in place, each joint's bone times its inverse bind. So bones are
   interpolated once per unit and frame; the vertex shader only blends up to four matrices
   (`palette[offset + joint]`), normals by the cofactor matrix (right under non-uniform scale).
   Memory: the palette is sized for every unit posed with the largest posable model (capacity ×
-  (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB), the key buffer per frame slot for two
-  keys per bone of every unit (Fox: 26 MB).
+  (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB), the key table for two keys per bone
+  of every unit (Fox: 26 MB, device local), and per frame slot staging for as many writes (28
+  MB, host visible).
 - **Cull sphere**: a model with clips is culled with a sphere covering every vertex in every baked
   frame of every clip, 5% larger (motion between frames), for all units of its class. Manual
   joints (M14) can reach further: not covered yet.
@@ -130,7 +141,8 @@ without and with the units' shadow map; front and right land where the heading p
 turned, not mirrored), the mask discards, the Fox shows its texture, the blocks cast shadows and
 the masked-away block none. `units_pose_models`: a base-and-arm model built in the test (two
 clips, one moving the base and so the arm), the Fox and BoxAnimated with joint keys from their
-clips (`Rig::pose`), units at rest and with keys not in the stream, drawn a tick behind (on the
+clips (`Rig::pose`), published as a stale whole table and then the keys as writes over it,
+units at rest and with keys not in the table, drawn a tick behind (on the
 newer key) and at the stream's tick (past it, by the line); every row's palette read back equals
 the CPU's (`on_line`, `Rig::globals`, `Rig::palette`) to 1e-3 relative; the arm is drawn where
 its pose puts it; a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
@@ -158,16 +170,30 @@ stands Foxes, blending the clips by the animation service and turning their head
 
 ## Benches
 
-`ae-client --bench army-fox,near-fox` (`bins/ae-client/src/bench.rs`): since M14 step 3 they run
-the `scripted` game (10 000 Foxes on a 12 m grid under the `army` camera, walking and standing,
-animated by the sim) instead of the crossing army playing `--clip`, so the pose pass poses all
-10 000 each frame from joint keys, and a closer camera. They also report `model_setup`
+`ae-client --bench army-fox,live-fox,near-fox` (`bins/ae-client/src/bench.rs`): since M14 step 3
+they run the `scripted` game (10 000 Foxes on a 12 m grid under the `army` camera, walking and
+standing, animated by the sim) instead of the crossing army playing `--clip`, so the pose pass
+poses all 10 000 each frame from joint keys; `near-fox` with a closer camera. `army-fox` and
+`near-fox` draw one tick (the whole key table uploaded once); `live-fox` keeps the sim running,
+a tick every second frame, posed and uploaded as when playing. They also report `model_setup`
 (`ModelSet::new` for the Fox: geometry, texture upload, cull spheres), `cpu_pose` (the client's
-time to read the channels and pose every unit for a stream) and `joint_keys`.
+time to read the channels, pose the units and find the bones off their lines, per stream),
+`joint_keys` (the table) and `key_writes` (keys written a tick); `live-fox` also
+`cpu_key_upload` (the render thread's time to take and stage a tick's keys) and
+`keys_uploaded`.
 
-M14 step 3, first cut (both keys of every bone uploaded every tick, posing on one thread;
-2026-11-16): `units pose` 0.39 ms (27 bones a Fox, against 0.31 ms for the baked clips), CPU
-posing 18.8 ms a tick for 10 000 Foxes, 540 000 keys (26 MB) a stream. Validation clean.
+M14 step 3 (RTX 3060 Ti, 24 threads, 2026-11-17):
+
+| | CPU posing | Keys a tick | Upload (render thread) | `units pose` |
+|---|---|---|---|---|
+| First cut (every key, one thread) | 18.8 ms | 540 000 (26 MB) | not measured | 0.39 ms |
+| In parallel (every key) | ~10 ms | 540 000 | not measured | 0.39 ms |
+| Lines, slots, unchanged skipped (`live-fox`) | 5.9 ms | 152 000 (7.3 MB) | 1.8 ms | 0.44 ms (scatter included) |
+
+Posing is memory bound from about four threads on (it reads the 26 MB key mirror and the
+bones' last poses each tick). Fox clips are resampled at 60 fps and keyed at 24/s, so most
+animated bones leave their lines every tick: keeping the clips' own keys comes next.
+Validation clean.
 
 The M11 numbers (the crossing army playing `--clip`):
 

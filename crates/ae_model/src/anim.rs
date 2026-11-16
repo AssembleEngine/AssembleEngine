@@ -654,6 +654,41 @@ pub fn on_line(a: &Key, b: &Key, tick: u32, frac: f32) -> Trs {
     Trs { t: l(pa.t, pb.t), r, s: l(pa.s, pb.s) }
 }
 
+/// How far a drawn transform may be from the posed one (a joint key line's
+/// value against the pose: within it, no new key).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tolerance {
+    translation_sq: f32,
+    /// sin(angle / 2), squared.
+    half_sin_sq: f32,
+    scale: f32,
+}
+
+impl Tolerance {
+    /// A `translation` distance in the model's units, an `angle` in
+    /// radians, a `scale` difference per axis.
+    pub fn new(translation: f32, angle: f32, scale: f32) -> Self {
+        let half = libm::sinf(0.5 * angle.clamp(0.0, core::f32::consts::PI));
+        Self { translation_sq: translation * translation, half_sin_sq: half * half, scale }
+    }
+}
+
+/// `a` and `b` are within `tol` of each other (the rotations' angle by the
+/// vector part of their difference, either sign: exact for small angles).
+pub fn within(a: &Trs, b: &Trs, tol: &Tolerance) -> bool {
+    let d = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let t = d(a.t, b.t);
+    if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > tol.translation_sq {
+        return false;
+    }
+    if d(a.s, b.s).iter().any(|x| x.abs() > tol.scale) {
+        return false;
+    }
+    // sin(angle / 2) = |vector part of conj(a) b| for unit quaternions.
+    let q = qmul(qconj(a.r), b.r);
+    q[0] * q[0] + q[1] * q[1] + q[2] * q[2] <= tol.half_sin_sq
+}
+
 /// `b`'s rotation on `a`'s hemisphere (a key's rotation before it goes on
 /// a line from `a`: manual rotations are never sign-normalised).
 pub fn same_side(a: &Trs, mut b: Trs) -> Trs {

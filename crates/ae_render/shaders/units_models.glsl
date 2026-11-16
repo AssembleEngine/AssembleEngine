@@ -60,9 +60,18 @@ layout(set = 1, binding = 7) uniform sampler2D textures[1024];
 // The animation table (models.rs, animation()): bones (rest rows 0..2,
 // parent in 3.x), joints (inverse bind rows 0..2, bone in 3.x).
 layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
-// The stream's joint keys (ae_model::anim::Key), three vec4 each:
-// translation and the tick (uint bits), rotation, scale.
+// The joint key table (ae_model::anim::Key), three vec4 each: translation
+// and the tick (uint bits), rotation, scale; a posed unit's bones from its
+// pose attribute (UnitFeed's table, units.rs). units_keys.comp writes it.
+#ifdef KEY_WRITES
+layout(std430, set = 1, binding = 9) writeonly buffer Keys { vec4 keys[]; };
+#else
 layout(std430, set = 1, binding = 9) readonly buffer Keys { vec4 keys[]; };
+#endif
+// The frame's key writes (u.anim.z of them): key i, three vec4, goes to
+// table key stagedAt[i].
+layout(std430, set = 1, binding = 10) readonly buffer Staged { vec4 staged[]; };
+layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
 #endif
 
 // cascade: the shadow caster's (units_pose.comp: the number of jobs);
