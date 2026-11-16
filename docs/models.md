@@ -15,7 +15,7 @@ ae-tool model info FILE.aemodel                    # parts, textures, clips, loa
 
 ## The format
 
-Little-endian: magic `AEMODEL\0`, version (u32, now 1), header length (u32), a JSON header padded
+Little-endian: magic `AEMODEL\0`, version (u32, now 2: primitives have a layout), header length (u32), a JSON header padded
 to 16 bytes, then a blob. The header's byte ranges point into the blob, 16-byte aligned. A model
 of another version is refused ("convert it again").
 
@@ -30,7 +30,13 @@ of another version is refused ("convert it again").
   matrix agree.
 - **Vertices** (80 bytes): position, normal, tangent (xyz + bitangent sign), UV0, UV1, colour
   (RGBA unorm16, linear), four joints (u16), four weights (unorm16, summing to 65535).
-- **Primitives**: triangle lists, one material each, in one shared vertex and index buffer.
+- **Primitives**: triangle lists, one material each, in one shared vertex and index buffer. Each
+  has a GPU layout (decision 2026-11-16, after RecoilEngine's GL4 model path): **rigid** (every
+  vertex on one joint at weight 1; 17 words on the GPU, the joint in the last) or **skinned** (four
+  joints and weights; 20 words). The converter gives each primitive the cheapest layout its
+  vertices allow and merges the primitives of one material and layout (`Model::merge_primitives`):
+  a piece model draws once per material, its per-vertex joint picking the piece. In memory and in
+  the file every vertex is the 80-byte one; `Model::gpu_words` packs a primitive for the GPU.
 - **Materials**: glTF's metallic-roughness: base colour, metallic-roughness, normal (with scale),
   occlusion (with strength), emissive (`KHR_materials_emissive_strength` multiplied in); alpha
   opaque, mask (cutoff) or blend; double-sided. Each texture reference carries its UV set, its
@@ -49,6 +55,47 @@ of another version is refused ("convert it again").
   interpolation (step, linear, cubic spline) and the keys as they are. `pose::Pose::sample` plays
   them (slerp for linear rotations; held at the first and last key outside them). No runtime
   player yet: the sim will drive bones (`PieceTransform`, not yet in the sim).
+
+## The renderer (`ae_render::models`, the units)
+
+`UnitsSetup::models[class]` gives a unit class a model; the others stay darts, and with no model
+at all the units renderer is exactly the darts' one (the same pipelines, buffers and goldens).
+
+GPU-driven and bindless, after RecoilEngine's GL4 model path (one global geometry buffer,
+per-unit transform ranges, multi-draw) without its per-vertex quaternion interpolation:
+
+- **Resources**: one geometry buffer (every model's vertices packed per primitive in its layout,
+  read by vertex pulling, then every index); one material table; one partially bound array of
+  1024 textures the materials index; per frame slot a palette buffer and a rows buffer.
+- **Commands**: one `VkDrawIndexedIndirectCommand` per (class, primitive), with a draw record
+  (material, class, vertex base and layout, the class's region of the visible list) the shaders
+  read by `gl_DrawID`. Opaque commands first, then alpha-masked ones: two pipelines, because a
+  shader that discards loses early depth. The camera draws every model in two multi-draws; the
+  shadow map in one per cascade.
+- **Cull** (`units_models_cull.comp`, in the units' cull pass): a model unit is tested with its
+  model's bounding sphere, appended to its class's region of the visible list and counted in each
+  of its class's commands. The reset copies the commands' template (instance counts 0).
+- **Shadows**: the shadow caster draws every row; the rows grouped by class (written on the CPU
+  when a new tick arrives) give each class's instances. The darts' caster skips model classes.
+  Masked materials cast whole shadows.
+- **Poses**: each row has a palette offset (rows buffer); the vertex shader skins by
+  `palette[offset + joint]`, normals by the cofactor matrix (right under non-uniform scale). Step
+  2 points every unit of a class at the class's rest palette; step 3 adds per-unit ranges and a
+  compute pass resolving bone transforms (interpolating ticks once per bone, not per vertex).
+- **Fit and frame**: model space is the dart's local frame (+X along the heading, +Y up, +Z to the
+  right). The model's footprint radius (its rest bounds' largest extent from the origin along x or
+  z) is drawn at the unit's drawn size, so the minimum pixel size applies as for darts.
+- **Materials**: base colour (factor × vertex colour × texture), alpha mask, normal map, occlusion,
+  emissive, double-sided; lit like the darts (sun past the hills, units and particles, sky, fog).
+  Not yet: metallic-roughness, blending (blended materials are drawn as masks at 0.5).
+- **Device**: needs `multiDrawIndirect`, `shaderDrawParameters` and
+  `descriptorBindingPartiallyBound` (enabled when present; a units renderer with models refuses to
+  start without them), and `textureCompressionBC` for BC textures.
+
+Test: `units_draw_models` (`crates/ae_render/tests/gpu.rs`, validation on): a piece model built in
+the test (opaque front, masked right side, a block masked away), the Fox and a dart in one frame;
+front and right land where the heading puts them (not turned, not mirrored), the mask discards,
+the Fox shows its texture.
 
 ## The converter: what it reads, drops and refuses
 
@@ -83,7 +130,7 @@ textures not decoded):
 | Model | glTF | Model file | Convert | Load | Contents |
 |---|---|---|---|---|---|
 | SimpleSkin | 3.5 KB | 3.0 KB | 0.2 ms | 0.006 ms | 2 joints, 10 vertices, 1 clip |
-| BoxAnimated | 12 KB | 31 KB | 0.3 ms | 0.022 ms | 2 pieces, 320 vertices, 1 clip |
+| BoxAnimated | 12 KB | 31 KB | 0.3 ms | 0.022 ms | 2 pieces, 320 vertices (rigid: 68 B each on the GPU), 1 clip |
 | Fox | 163 KB | 295 KB | 332 ms | 0.075 ms | 24 joints, 1,728 vertices, 1024² texture, 3 clips |
 | CesiumMan | 438 KB | 906 KB | 596 ms | 0.094 ms | 20 joints, 3,273 vertices, 1024² texture |
 | AnimatedCube | 568 KB | 739 KB | 236 ms | 0.028 ms | 512² texture, 1 clip |

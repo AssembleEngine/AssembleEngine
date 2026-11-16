@@ -24,7 +24,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 sun;         // xyz direction; w = minimum unit size in pixels
     vec4 fog;         // rgb, density (0 = off)
     uvec4 counts;     // instances, capacity, flags (1: hills' shadows)
-    vec4 classes[MAX_CLASSES]; // rgb; w = 1: floats on the water surface
+    vec4 classes[MAX_CLASSES]; // rgb; w: 1 = floats on the water surface, + 2 = has a model
     // The units' shadow cascades (src/shadow.rs, unit_shadows.glsl).
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
     vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
@@ -35,7 +35,13 @@ layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; }
 
 #ifdef CULL
 layout(std430, set = 0, binding = 2) writeonly buffer Visible { uint visible[]; };
+#ifdef MODELS
+// The darts' VkDrawIndirectCommand (words 0..3), then one
+// VkDrawIndexedIndirectCommand (5 words) per model primitive and class.
+layout(std430, set = 0, binding = 3) buffer Indirect { uint cmdWords[]; };
+#else
 layout(std430, set = 0, binding = 3) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } cmd;
+#endif
 #else
 layout(std430, set = 0, binding = 2) readonly buffer Visible { uint visible[]; };
 #endif
@@ -82,7 +88,7 @@ Unit loadUnit(uint i) {
     vec2 uv = (p / u.map.x + 0.5) * u.map.yz;
     float h = textureLod(heightTex, uv, 0.0).r * u.height.x + u.height.y;
     unit.cls = min(attru(ATTR_CLASS, i), MAX_CLASSES - 1u);
-    if (u.height.w > 0.5 && u.classes[unit.cls].w > 0.5) {
+    if (u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
         h = max(h, u.height.z);
     }
     unit.pos = vec3(p.x, h, p.y);
@@ -92,4 +98,9 @@ Unit loadUnit(uint i) {
     float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, u.camPos.xyz), 1e-3);
     unit.size = radius * max(1.0, u.sun.w / max(pixels, 1e-6));
     return unit;
+}
+
+// The class is drawn with a model (src/models.rs), not a dart.
+bool hasModel(uint cls) {
+    return (uint(u.classes[cls].w) & 2u) != 0u;
 }

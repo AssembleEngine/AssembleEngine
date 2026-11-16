@@ -585,7 +585,7 @@ fn units_render_over_terrain() {
     }
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
-    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0 };
+    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0, models: Vec::new() };
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
     let camera = {
         let view = app.view();
@@ -665,7 +665,7 @@ fn terrain_edits_reach_the_heightfield() {
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
     let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0 });
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new() });
     let camera = {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -1019,7 +1019,7 @@ fn cull_on_gpu(
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(stream.clone()));
     let classes = vec![UnitClass { color: [1.0, 0.0, 0.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels });
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels, models: Vec::new() });
     let cam = {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -1149,7 +1149,7 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
     let classes = vec![UnitClass { color: [1.0, 0.8, 0.1], floats: false }, UnitClass { color: [0.9, 0.9, 0.95], floats: true }, UnitClass { color: [0.8, 0.1, 0.1], floats: false }];
-    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0 });
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new() });
     if let Some(wasm) = module {
         app = app.with_module(wasm);
     }
@@ -1635,7 +1635,7 @@ fn water_covers_the_low_ground_only() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
         let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: true }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if r.water {
             app = app.with_water();
         }
@@ -1791,7 +1791,7 @@ fn hills_shade_away_from_the_sun() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if r.shadows {
             app = app.with_shadows();
         }
@@ -2016,7 +2016,7 @@ fn units_cast_shadows() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -2171,7 +2171,7 @@ fn particles_cast_coloured_shadows() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -2898,7 +2898,7 @@ fn decals_wrap_over_cliffs() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0 });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
             let life = match decals {
@@ -3212,5 +3212,147 @@ fn decals_relit_modulated_and_glowing() {
     let f = luma(&fading_in, centre);
     println!("glow while fading in: centre {f:.0}");
     assert!(f > l - 12.0, "the fade-in dims the glow: {f} against {l}");
+    assert_clean(&gpu);
+}
+
+/// A box of `color` (alpha in w) from `min` to `max` on joint 0: 24
+/// vertices with face normals, 36 indices (appended to `m`, one primitive
+/// of material `material`).
+fn model_box(m: &mut ae_model::Model, min: [f32; 3], max: [f32; 3], material: u32) {
+    use ae_model::{Layout, Primitive, Vertex};
+    let first_vertex = m.vertices.len() as u32;
+    let first_index = m.indices.len() as u32;
+    // Per axis and side: the face's normal and its four corners.
+    for axis in 0..3 {
+        for side in [0usize, 1] {
+            let mut normal = [0.0f32; 3];
+            normal[axis] = if side == 1 { 1.0 } else { -1.0 };
+            let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+            let base = (m.vertices.len() as u32) - first_vertex;
+            for (ua, ub) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
+                let mut p = [0.0f32; 3];
+                p[axis] = if side == 1 { max[axis] } else { min[axis] };
+                p[a] = if ua == 1 { max[a] } else { min[a] };
+                p[b] = if ub == 1 { max[b] } else { min[b] };
+                m.vertices.push(Vertex { position: p, normal, tangent: [1.0, 0.0, 0.0, 1.0], color: [65535; 4], joints: [0; 4], weights: [65535, 0, 0, 0], ..Default::default() });
+            }
+            m.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    let vertex_count = m.vertices.len() as u32 - first_vertex;
+    m.primitives.push(Primitive { material, layout: Layout::Skinned, first_vertex, vertex_count, first_index, index_count: 36 });
+}
+
+/// Units drawn with models (M11 step 2), validation clean: a piece model
+/// built here (a red opaque block at its front, +X; a blue alpha-masked
+/// block at its right, +Z; a green block in the middle masked away by its
+/// alpha), the Khronos Fox (textured, skinned, at rest) and a dart in one
+/// frame. The front and the right land where the heading puts them (the
+/// model is neither turned nor mirrored), the masked-away block shows the
+/// ground, the Fox shows its texture, and every unit passes the cull.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn units_draw_models() {
+    use ae_model::{AlphaMode, Bone, Joint, Material, Model};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let mut blocks = Model {
+        bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
+        joints: vec![Joint { bone: 0, inverse_bind: identity }],
+        ..Default::default()
+    };
+    let material = |name: &str, base_color: [f32; 4], alpha: AlphaMode| Material { name: name.into(), base_color, alpha, ..Default::default() };
+    blocks.materials = vec![
+        material("red", [1.0, 0.02, 0.02, 1.0], AlphaMode::Opaque),
+        material("blue", [0.02, 0.02, 1.0, 1.0], AlphaMode::Mask { cutoff: 0.5 }),
+        material("green", [0.02, 1.0, 0.02, 0.2], AlphaMode::Mask { cutoff: 0.5 }),
+    ];
+    model_box(&mut blocks, [0.55, 0.0, -0.3], [1.0, 0.6, 0.3], 0);
+    model_box(&mut blocks, [-0.3, 0.0, 0.55], [0.3, 0.6, 1.0], 1);
+    model_box(&mut blocks, [-0.4, 0.0, -0.4], [0.4, 1.2, 0.4], 2);
+    blocks.bounds = ae_model::Bounds { min: [-0.4, 0.0, -0.4], max: [1.0, 1.2, 1.0] };
+    blocks.merge_primitives();
+    blocks.validate().unwrap();
+    let fox = ae_gltf::convert_file(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb")).unwrap().model;
+
+    // (x, y, heading, radius, class): blocks facing world +z, the Fox
+    // facing +x, a dart.
+    let units = [(440.0f32, 512.0f32, (0.0f32, 1.0f32), 40.0f32, 0u32), (590.0, 470.0, (1.0, 0.0), 40.0, 1), (560.0, 580.0, (1.0, 0.0), 6.0, 2), (560.0, 600.0, (0.0, -1.0), 40.0, 0)];
+    let mut columns: [Vec<u32>; 8] = Default::default();
+    for &(x, y, (hx, hy), radius, class) in &units {
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), hx.to_bits(), hy.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns }));
+    let classes = vec![UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [1.0, 0.02, 1.0], floats: false }];
+    let models = vec![Some(Arc::new(blocks)), Some(Arc::new(fox))];
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models });
+    let camera = {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(512.0, 512.0);
+        view.camera.pitch = 1.4;
+        view.camera.distance = 700.0;
+        view.fog = false;
+        view.camera
+    };
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    run_headless(&gpu, &mut app, target, 8, config).unwrap();
+    let pixels = app.readback().unwrap();
+    if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
+        let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+        ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(&path, ppm).unwrap();
+    }
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let pixel = |p: Vec3| -> [i32; 3] {
+        let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "{p} projects into the view");
+        let i = (v as usize * extent.width as usize + u as usize) * 4;
+        [pixels[i] as i32, pixels[i + 1] as i32, pixels[i + 2] as i32]
+    };
+    // Model point (forward, up, right) of a unit at (x, y) with heading h,
+    // radius r (the blocks' footprint is 1).
+    let at = |x: f32, y: f32, (hx, hy): (f32, f32), r: f32, local: Vec3| -> Vec3 {
+        let (forward, side) = (Vec3::new(hx, 0.0, hy), Vec3::new(-hy, 0.0, hx));
+        Vec3::new(x, 50.0, y) + (forward * local.x + Vec3::Y * local.y + side * local.z) * r
+    };
+    for &(x, y, h, r, class) in units.iter().filter(|u| u.4 == 0) {
+        let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.8, 0.6, 0.0)));
+        assert!(cr > 2 * cg && cr > 2 * cb, "class {class} at ({x}, {y}): red at its front: {cr} {cg} {cb}");
+        let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.6, 0.8)));
+        assert!(cb > 2 * cr && cb > 2 * cg, "class {class} at ({x}, {y}): blue (masked, kept) at its right: {cr} {cg} {cb}");
+        let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.0, 0.0)));
+        assert!(!(cg > 2 * cr && cg > 2 * cb), "class {class} at ({x}, {y}): the green block is masked away: {cr} {cg} {cb}");
+        // Mirrored, blue would be at the left.
+        let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.3, -0.8)));
+        assert!(!(cb > 2 * cr && cb > 2 * cg), "class {class} at ({x}, {y}): nothing blue at its left: {cr} {cg} {cb}");
+    }
+    // The Fox's fur (orange-brown) over its middle.
+    let (fx, fy, fh, fr, _) = units[1];
+    let [cr, cg, cb] = pixel(at(fx, fy, fh, fr, Vec3::new(0.0, 0.3, 0.0)));
+    assert!(cr > cb + 30 && cr > 60, "the Fox's texture: {cr} {cg} {cb}");
+    let [cr, cg, cb] = pixel(Vec3::new(560.0, 50.0, 580.0));
+    assert!(cr > 2 * cg && cb > 2 * cg, "the dart: {cr} {cg} {cb}");
+    assert_eq!(app.last_unit_counts(), Some((4, 4)), "four rows, all pass the cull");
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
 }

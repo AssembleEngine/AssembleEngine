@@ -9,6 +9,12 @@ layout(push_constant) uniform Push { uint cascade; } pc;
 
 void main() {
     Unit unit = loadUnit(uint(gl_InstanceIndex));
+    if (hasModel(unit.cls)) {
+        // Cast by its model (units_models_shadow.vert): outside the clip
+        // volume.
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
     vec3 world = place(unit, CORNERS[FACES[gl_VertexIndex]]);
     uint k = pc.cascade;
     vec3 l = vec3(dot(u.unitShadowAxes[0].xyz, world), dot(u.unitShadowAxes[1].xyz, world), dot(u.unitShadowAxes[2].xyz, world));

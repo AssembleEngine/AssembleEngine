@@ -79,7 +79,8 @@ pub fn convert(bytes: &[u8], base: Option<&Path>) -> Result<Converted> {
         material_of: HashMap::new(),
     };
     c.run()?;
-    let model = c.model;
+    let mut model = c.model;
+    model.merge_primitives();
     model.validate().context("converted model")?;
     Ok(Converted { model, warnings: c.warnings })
 }
@@ -266,6 +267,7 @@ impl<'a> Converter<'a> {
             }
             self.model.primitives.push(Primitive {
                 material,
+                layout: ae_model::Layout::Skinned,
                 first_vertex: self.model.vertices.len() as u32,
                 vertex_count: vertices.len() as u32,
                 first_index: self.model.indices.len() as u32,

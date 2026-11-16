@@ -2335,6 +2335,17 @@ that in.
     BC7, so the runtime needs no transcoder.
 - Not in the sim yet: no `PieceTransform` column exists. In M11 the renderer takes a pose per
   class (the rest pose, or a clip sampled at a time); the sim columns come later.
+- Decided with the user (2026-11-16, after reading RecoilEngine's GL4 model path: one global
+  vertex and index buffer, per-unit transform ranges in one buffer, multi-draw per bin; its
+  per-vertex quaternion interpolation and transform chains are the part not to copy):
+  - two vertex layouts, chosen per primitive and read by vertex pulling: rigid (one joint per
+    vertex, 68 bytes; pieces sharing a material merged into one primitive, so a model draws once
+    per material) and skinned (four joints and weights, 80 bytes). Replaces "one uniform format";
+  - per-unit poses: each unit's palette range in one big buffer, its offset per instance; a
+    compute pass resolves bone transforms to 3x4 matrices once per bone per frame (interpolating
+    sim ticks there, not per vertex); vertices only blend matrices. Step 2 points every unit of a
+    class at the class's rest palette; step 3 adds the resolve pass and per-unit ranges;
+  - all models' vertices and indices in one GPU buffer.
 - Progress (details: `docs/models.md`):
   - Step 1, format and converter — done (2026-11-16). `ae_model` is the format (JSON header +
     aligned blob, versioned), KTX2 textures, poses and clips. `ae_gltf` is the converter (the C++
@@ -2342,9 +2353,15 @@ that in.
     in the tests and on three vendored Khronos samples (SimpleSkin CC0, BoxAnimated CC-BY, Fox
     CC0/CC-BY; `assets/models/khronos`). Sizes and load times measured (Fox: 295 KB, 0.08 ms to
     load).
-  - Next: step 2, the runtime upload and drawing at the rest pose (opt-in, the dart path and its
-    goldens unchanged); step 3, skinning with clips sampled at a time, and the units' shadows; step
-    4, `ae-client --model`, benches, a validation run.
+  - Step 2, drawing at the rest pose — done (2026-11-16). Format version 2 (rigid and skinned
+    layouts per primitive, primitives merged by material and layout). `ae_render::models`: one
+    geometry buffer, a material table, a partially bound texture array, per-(class, primitive)
+    commands with draw records by `gl_DrawID`; the cull fills them, two multi-draws (opaque,
+    masked) draw them, the units' shadow caster draws them too. Opt-in per class
+    (`UnitsSetup::models`): with none, the darts' renderer unchanged (24 GPU tests pass as
+    before). New GPU test `units_draw_models`, validation clean.
+  - Next: step 3, per-unit palette ranges, the pose-resolve compute pass, clips sampled at a time;
+    step 4, `ae-client --model`, benches, a validation run.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 

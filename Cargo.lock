@@ -243,6 +243,8 @@ name = "ae_render"
 version = "0.0.1"
 dependencies = [
  "ae_framegraph",
+ "ae_gltf",
+ "ae_model",
  "ae_render_abi",
  "anyhow",
  "ash",

@@ -11,7 +11,7 @@ fn sample_model() -> Model {
     Model {
         bones: vec![bone("root", None, [0.0; 3]), bone("arm", Some(0), [1.0, 0.0, 0.0])],
         joints: vec![Joint { bone: 0, inverse_bind: Mat4::IDENTITY.to_cols_array() }, Joint { bone: 1, inverse_bind: Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0)).to_cols_array() }],
-        primitives: vec![Primitive { material: 0, first_vertex: 0, vertex_count: 3, first_index: 0, index_count: 3 }],
+        primitives: vec![Primitive { material: 0, layout: Layout::Rigid, first_vertex: 0, vertex_count: 3, first_index: 0, index_count: 3 }],
         materials: vec![Material {
             name: "m".into(),
             base_color_texture: Some(TextureRef { texture: 0, uv: 0, sampler: Sampler::default(), transform: Some(UvTransform { offset: [0.5, 0.0], rotation: 0.3, scale: [2.0, 2.0] }) }),
@@ -143,4 +143,38 @@ fn uv_transform_matrix() {
     // The extension's rotation matrix: [c s; -s c].
     let want = [c * x + s * y + 0.5, -s * x + c * y + 0.25];
     assert!((got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6, "{got:?} {want:?}");
+}
+
+#[test]
+fn merge_by_material_and_layout() {
+    let mut m = sample_model();
+    let mut skinned = m.vertices[0];
+    skinned.joints = [0, 1, 0, 0];
+    skinned.weights = [30000, 35535, 0, 0];
+    let piece = |x: f32, joint: u16| Vertex { position: [x, 1.0, 0.0], joints: [joint, 0, 0, 0], weights: [65535, 0, 0, 0], ..m.vertices[0] };
+    // Primitive 0 (rigid, joint 0..1), a second rigid piece on joint 1 with
+    // the same material, and a skinned triangle with it too.
+    m.vertices.extend([piece(0.0, 1), piece(1.0, 1), piece(2.0, 1), skinned, skinned, skinned]);
+    m.indices.extend([2, 1, 0, 0, 1, 2]);
+    m.primitives.push(Primitive { material: 0, layout: Layout::Skinned, first_vertex: 3, vertex_count: 3, first_index: 3, index_count: 3 });
+    m.primitives.push(Primitive { material: 0, layout: Layout::Skinned, first_vertex: 6, vertex_count: 3, first_index: 6, index_count: 3 });
+    m.validate().unwrap();
+    let before: Vec<[f32; 3]> = m.primitives.iter().flat_map(|p| m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|&i| m.vertices[(p.first_vertex + i) as usize].position)).collect();
+    m.merge_primitives();
+    m.validate().unwrap();
+    assert_eq!(m.primitives.iter().map(|p| (p.layout, p.vertex_count, p.index_count)).collect::<Vec<_>>(), [(Layout::Rigid, 6, 6), (Layout::Skinned, 3, 3)]);
+    // The same triangles, in the same order.
+    let after: Vec<[f32; 3]> = m.primitives.iter().flat_map(|p| m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|&i| m.vertices[(p.first_vertex + i) as usize].position)).collect();
+    assert_eq!(before, after);
+    let rigid = m.gpu_words(&m.primitives[0]);
+    assert_eq!(rigid.len(), 6 * RIGID_WORDS);
+    assert_eq!(rigid[RIGID_WORDS * 3 + 16], 1, "the piece's joint");
+    assert_eq!(f32::from_bits(rigid[RIGID_WORDS * 4]), 1.0, "position x of the second piece's second vertex");
+    let skin = m.gpu_words(&m.primitives[1]);
+    assert_eq!(skin.len(), 3 * SKINNED_WORDS);
+    assert_eq!(&skin[16..20], &[1 << 16, 0, 30000 | 35535 << 16, 0]);
+    // A rigid primitive with a blended vertex is refused.
+    m.primitives[0].layout = Layout::Rigid;
+    m.primitives[1].layout = Layout::Rigid;
+    assert!(m.validate().is_err());
 }

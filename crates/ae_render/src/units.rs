@@ -28,6 +28,7 @@
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::OwnedBuffer;
+use crate::models::{self, ModelSet};
 use crate::pipeline::{self, Blend, DepthState, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
 use crate::upload;
@@ -49,7 +50,7 @@ pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 /// Classes with their own colour; higher class ids use the last one.
 pub const MAX_CLASSES: usize = 16;
 /// Vertices of one unit (a four-faced dart).
-const UNIT_VERTICES: u32 = 12;
+pub(crate) const UNIT_VERTICES: u32 = 12;
 
 const IDENTITY_INSTANCES: u64 = (0xAE7 << 40) | (2 << 32);
 const IDENTITY_VISIBLE: u64 = (0xAE7 << 40) | (2 << 32) | 0x100;
@@ -125,6 +126,11 @@ pub struct UnitsSetup {
     /// Units smaller than this on screen are drawn this large (pixels,
     /// across), so they stay visible from far away.
     pub min_pixels: f32,
+    /// A model per class (`models[class]`, [`crate::models`]); a class
+    /// without one (or beyond the list) is drawn as a dart. A model's
+    /// class colour is not used. Empty: darts only, and the renderer is
+    /// exactly the darts' one.
+    pub models: Vec<Option<Arc<ae_model::Model>>>,
 }
 
 /// Per-frame inputs besides the stream.
@@ -158,8 +164,34 @@ struct FrameUbo {
     unit_shadow: crate::shadow::CascadeUniforms,
 }
 
+/// Makes a graphics pipeline from a vertex and a fragment shader, with the
+/// colour target (`true`) or for the shadow map.
+type PipelineMaker<'a> = dyn Fn(&[u8], &[u8], bool) -> Result<vk::Pipeline> + 'a;
+
+/// The model side of a [`UnitRenderer`] whose classes have models.
+struct Models {
+    set: ModelSet,
+    set_layout: vk::DescriptorSetLayout,
+    /// Per slot: set 1 (`shaders/units_models.glsl`).
+    sets: Vec<vk::DescriptorSet>,
+    /// Per slot: the palettes (host-written each frame).
+    palettes: Vec<OwnedBuffer>,
+    /// Per slot: class bases, rows grouped by class, pose offsets.
+    rows: Vec<OwnedBuffer>,
+    /// Per slot: the shadow caster's commands (every row of each class).
+    shadow_commands: Vec<OwnedBuffer>,
+    /// The indirect buffer's initial contents, copied in by the reset.
+    template: OwnedBuffer,
+    opaque: vk::Pipeline,
+    masked: vk::Pipeline,
+    caster: Option<vk::Pipeline>,
+}
+
 pub struct UnitRenderer {
     capacity: u32,
+    /// With models: their GPU side (the darts' pipelines then use the
+    /// models' pipeline layout, and the cull is `units_models_cull.comp`).
+    models: Option<Models>,
     info: TerrainInfo,
     classes: [[f32; 4]; MAX_CLASSES],
     min_pixels: f32,
@@ -188,6 +220,45 @@ pub struct UnitRenderer {
     counts: Vec<OwnedBuffer>,
 }
 
+impl Models {
+    /// `slot`'s rows grouped by model class, each class's base, each row's
+    /// palette offset (its class's rest palette for now), and the shadow
+    /// caster's commands (every row of each class).
+    fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize) {
+        let class_of = |r: usize| (stream.columns[7][r] as usize).min(MAX_CLASSES - 1);
+        let mut counts = [0u32; MAX_CLASSES];
+        for r in 0..rows {
+            counts[class_of(r)] += 1;
+        }
+        let mut bases = [0u32; MAX_CLASSES];
+        let mut next = 0;
+        for c in 0..MAX_CLASSES {
+            bases[c] = next;
+            if self.set.class_model[c].is_some() {
+                next += counts[c];
+            }
+        }
+        let mut words = vec![0u32; MAX_CLASSES + 2 * capacity];
+        words[..MAX_CLASSES].copy_from_slice(&bases);
+        let mut fill = bases;
+        for r in 0..rows {
+            let c = class_of(r);
+            if let Some(mc) = self.set.class_model[c] {
+                words[MAX_CLASSES + fill[c] as usize] = r as u32;
+                fill[c] += 1;
+                words[MAX_CLASSES + capacity + r] = self.set.classes[mc].palette_offset;
+            }
+        }
+        if let Some(bytes) = self.rows[slot].mapped() {
+            bytes[..words.len() * 4].copy_from_slice(pipeline::slice_bytes(&words));
+        }
+        let commands: Vec<u32> = self.set.draws.iter().flat_map(|d| [d.index_count, counts[d.class as usize], d.first_index, 0, 0]).collect();
+        if let Some(bytes) = self.shadow_commands[slot].mapped() {
+            bytes[..commands.len() * 4].copy_from_slice(pipeline::slice_bytes(&commands));
+        }
+    }
+}
+
 impl UnitRenderer {
     /// Units over `terrain` (its height texture places them), drawn into a
     /// pass with a `color_format` target and a `depth_format` reverse-Z
@@ -196,9 +267,18 @@ impl UnitRenderer {
         ensure!(setup.capacity > 0, "unit capacity 0");
         let device = &gpu.device;
         let capacity = setup.capacity;
+        let model_set = match setup.models.iter().any(Option::is_some) {
+            true => Some(ModelSet::new(gpu, &setup.models, capacity, MAX_CLASSES).context("unit models")?),
+            false => None,
+        };
         let mut classes = [[0.8, 0.8, 0.8, 0.0]; MAX_CLASSES];
         for (slot, class) in classes.iter_mut().zip(&setup.classes) {
             *slot = [class.color[0], class.color[1], class.color[2], class.floats as u32 as f32];
+        }
+        if let Some(set) = &model_set {
+            for c in &set.classes {
+                classes[c.class as usize][3] += 2.0;
+            }
         }
         let stream_bytes = capacity as u64 * ATTRIBUTE_COUNT as u64 * 4;
         let instances = (0..frames_in_flight)
@@ -207,11 +287,18 @@ impl UnitRenderer {
         let ubos = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: size_of::<FrameUbo>() as u64, usage: vk::BufferUsageFlags::UNIFORM_BUFFER }, MemoryLocation::CpuToGpu, "unit frame"))
             .collect::<Result<Vec<_>>>()?;
-        let visible = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::GpuOnly, "unit visible")?;
+        // With models: a region of the visible list per model class after
+        // the darts', and their commands after the darts'.
+        let regions = 1 + model_set.as_ref().map_or(0, |s| s.classes.len() as u64);
+        let visible = OwnedBuffer::new(gpu, BufferDesc { size: regions * capacity as u64 * 4, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::GpuOnly, "unit visible")?;
         let words = [UNIT_VERTICES, 0, 0, 0];
-        let indirect = upload::buffer(gpu, pipeline::push_bytes(&words), Self::indirect_usage(), "unit indirect")?;
+        let initial: &[u8] = match &model_set {
+            Some(set) => &set.template,
+            None => pipeline::push_bytes(&words),
+        };
+        let indirect = upload::buffer(gpu, initial, Self::indirect_usage(), "unit indirect")?;
         let counts = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: 16, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "unit counts"))
+            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: initial.len() as u64, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "unit counts"))
             .collect::<Result<Vec<_>>>()?;
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
@@ -219,6 +306,20 @@ impl UnitRenderer {
         let (shadow_view, shadow_sampler) = terrain.shadow_texture();
         let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
         let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
+        // Set 1 of the models: seven storage buffers and the texture array
+        // (partially bound).
+        let model_layout = match &model_set {
+            Some(_) => Some(unsafe {
+                let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7)
+                    .map(|b| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(all))
+                    .collect();
+                bindings.push(vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(models::MAX_TEXTURES).stage_flags(vk::ShaderStageFlags::FRAGMENT));
+                let flags = [vk::DescriptorBindingFlags::empty(); 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND]).collect::<Vec<_>>();
+                let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
+                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings).push_next(&mut flag_info), None)?
+            }),
+            None => None,
+        };
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
@@ -233,15 +334,20 @@ impl UnitRenderer {
                     (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                 ],
             )?;
-            // The caster's push constant: the cascade it draws.
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
+            // The caster's push constant: the cascade it draws; with models
+            // also the multi-draw's first command (every stage).
+            let pipeline_layout = match model_layout {
+                Some(models) => pipeline::pipeline_layout(device, &[set_layout, models], 8, all)?,
+                None => pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?,
+            };
             let n = frames_in_flight as u32;
+            let m = model_layout.is_some() as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 4 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 7 * m) * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: (4 + models::MAX_TEXTURES * m) * n },
             ];
-            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
+            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n * (1 + m)).pool_sizes(&sizes), None)?;
             let layouts = vec![set_layout; frames_in_flight];
             let sets = device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))?;
             for (slot, &set) in sets.iter().enumerate() {
@@ -267,40 +373,39 @@ impl UnitRenderer {
             }
             (set_layout, pipeline_layout, desc_pool, sets)
         };
-        let cull = pipeline::compute_pipeline(device, spirv!("units_cull.comp"), pipeline_layout).context("unit cull pipeline")?;
-        let draw = pipeline::graphics_pipeline(
-            device,
-            &GraphicsDesc {
-                vertex: spirv!("units.vert"),
-                fragment: spirv!("units.frag"),
-                layout: pipeline_layout,
-                color_formats: &[color_format],
-                depth: Some(DepthState { format: depth_format, write: true, compare: vk::CompareOp::GREATER_OR_EQUAL }),
-                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                blend: Blend::Off,
-            },
-        )
-        .context("unit pipeline")?;
-        let caster = match terrain.unit_shadow_map().is_real() {
-            true => Some(
-                pipeline::graphics_pipeline(
-                    device,
-                    &GraphicsDesc {
-                        vertex: spirv!("units_shadow.vert"),
-                        fragment: spirv!("units_shadow.frag"),
-                        layout: pipeline_layout,
-                        color_formats: &[],
-                        depth: Some(DepthState { format: crate::shadow::format(), write: true, compare: vk::CompareOp::GREATER_OR_EQUAL }),
-                        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                        blend: Blend::Off,
-                    },
-                )
-                .context("unit shadow pipeline")?,
-            ),
+        let cull_code: &[u8] = if model_set.is_some() { spirv!("units_models_cull.comp") } else { spirv!("units_cull.comp") };
+        let cull = pipeline::compute_pipeline(device, cull_code, pipeline_layout).context("unit cull pipeline")?;
+        let color_formats = [color_format];
+        let graphics = |vertex: &[u8], fragment: &[u8], color: bool| {
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: pipeline_layout,
+                    color_formats: if color { &color_formats } else { &[] },
+                    depth: Some(match color {
+                        true => DepthState { format: depth_format, write: true, compare: vk::CompareOp::GREATER_OR_EQUAL },
+                        false => DepthState { format: crate::shadow::format(), write: true, compare: vk::CompareOp::GREATER_OR_EQUAL },
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                },
+            )
+        };
+        let draw = graphics(spirv!("units.vert"), spirv!("units.frag"), true).context("unit pipeline")?;
+        let casts = terrain.unit_shadow_map().is_real();
+        let caster = match casts {
+            true => Some(graphics(spirv!("units_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit shadow pipeline")?),
             false => None,
+        };
+        let models = match (model_set, model_layout) {
+            (Some(set), Some(layout)) => Some(Self::models(gpu, set, layout, desc_pool, frames_in_flight, capacity, &graphics, casts)?),
+            _ => None,
         };
         Ok(Self {
             capacity,
+            models,
             info: *terrain.info(),
             classes,
             min_pixels: setup.min_pixels,
@@ -322,6 +427,49 @@ impl UnitRenderer {
         })
     }
 
+    /// The model side: per-slot buffers, set 1 and the pipelines.
+    #[allow(clippy::too_many_arguments)]
+    fn models(
+        gpu: &GpuDevice,
+        set: ModelSet,
+        set_layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+        frames_in_flight: usize,
+        capacity: u32,
+        graphics: &PipelineMaker<'_>,
+        casts: bool,
+    ) -> Result<Models> {
+        let device = &gpu.device;
+        let host = |size: u64, usage: vk::BufferUsageFlags, name: &str| OwnedBuffer::new(gpu, BufferDesc { size, usage }, MemoryLocation::CpuToGpu, name);
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let palettes = (0..frames_in_flight).map(|_| set.palette_buffer(gpu)).collect::<Result<Vec<_>>>()?;
+        let rows_bytes = (MAX_CLASSES as u64 + 2 * capacity as u64) * 4;
+        let rows = (0..frames_in_flight).map(|_| host(rows_bytes, storage, "unit model rows")).collect::<Result<Vec<_>>>()?;
+        let shadow_bytes = (set.commands().max(1) as u64) * models::COMMAND_BYTES;
+        let shadow_commands = (0..frames_in_flight).map(|_| host(shadow_bytes, vk::BufferUsageFlags::INDIRECT_BUFFER, "unit model shadow commands")).collect::<Result<Vec<_>>>()?;
+        let template = upload::buffer(gpu, &set.template, vk::BufferUsageFlags::TRANSFER_SRC, "unit indirect template")?;
+        let layouts = vec![set_layout; frames_in_flight];
+        let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }?;
+        for (slot, &ds) in sets.iter().enumerate() {
+            let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
+            let geometry = [vk::DescriptorBufferInfo { buffer: set.geometry.buffer, offset: 0, range: set.index_offset.max(4) }];
+            let buffers = [geometry, info(&set.materials), info(&palettes[slot]), info(&set.class_table), info(&set.draw_table), info(&set.class_commands), info(&rows[slot])];
+            let mut writes: Vec<vk::WriteDescriptorSet> =
+                buffers.iter().enumerate().map(|(i, b)| vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(b)).collect();
+            let images: Vec<vk::DescriptorImageInfo> =
+                set.slots.iter().map(|&(view, sampler)| vk::DescriptorImageInfo { sampler, image_view: view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }).collect();
+            writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&images));
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
+        let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true).context("unit model pipeline")?;
+        let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true).context("unit masked model pipeline")?;
+        let caster = match casts {
+            true => Some(graphics(spirv!("units_models_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit model shadow pipeline")?),
+            false => None,
+        };
+        Ok(Models { set, set_layout, sets, palettes, rows, shadow_commands, template, opaque, masked, caster })
+    }
+
     fn indirect_usage() -> vk::BufferUsageFlags {
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC
     }
@@ -340,8 +488,11 @@ impl UnitRenderer {
     /// Units the cull passed in the frame that last used `slot` (call once
     /// that frame has completed: in `prepare`, or after the device idles).
     pub fn read_visible(&mut self, slot: usize) -> u32 {
+        let first: Vec<u32> = self.models.as_ref().map_or(Vec::new(), |m| m.set.classes.iter().map(|c| c.commands[0]).collect());
         let Some(bytes) = self.counts[slot].mapped() else { return 0 };
-        u32::from_le_bytes(bytes[4..8].try_into().unwrap())
+        let word = |w: usize| u32::from_le_bytes(bytes[w * 4..w * 4 + 4].try_into().unwrap());
+        // The darts', then each model class's (its first command's).
+        word(1) + first.iter().map(|&k| word(4 + 5 * k as usize + 1)).sum::<u32>()
     }
 
     pub fn capacity(&self) -> u32 {
@@ -397,6 +548,9 @@ impl UnitRenderer {
                             bytes[a * capacity * 4..a * capacity * 4 + words.len() * 4].copy_from_slice(pipeline::slice_bytes(words));
                         }
                     }
+                    if let Some(m) = &mut self.models {
+                        m.write_rows(slot, stream, rows as usize, self.capacity as usize);
+                    }
                     self.uploaded[slot] = Some((stream.tick, rows));
                 }
             }
@@ -421,18 +575,30 @@ impl UnitRenderer {
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
         }
+        if let Some(m) = &mut self.models {
+            let Models { set, palettes, .. } = m;
+            if let Some(bytes) = palettes[slot].mapped() {
+                set.write_palettes(bytes);
+            }
+        }
     }
 
     /// Zero the instance count. Records inside a transfer pass that
     /// declares [`Self::indirect`] as a transfer destination.
     pub fn record_reset(&self, ctx: &PassContext<'_>) {
-        unsafe { ctx.device.cmd_fill_buffer(ctx.cmd, self.indirect.buffer, 4, 4, 0) };
+        match &self.models {
+            // Every command's instance count (and the darts'), from the
+            // template.
+            Some(m) => unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, m.template.buffer, self.indirect.buffer, &[vk::BufferCopy::default().size(self.indirect.size)]) },
+            None => unsafe { ctx.device.cmd_fill_buffer(ctx.cmd, self.indirect.buffer, 4, 4, 0) },
+        }
     }
 
     /// Copy the indirect arguments to `slot`'s host buffer. Records inside a
     /// transfer pass that reads [`Self::indirect`] and writes [`Self::counts`].
     pub fn record_count(&self, ctx: &PassContext<'_>) {
-        unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, self.indirect.buffer, self.counts[ctx.slot].buffer, &[vk::BufferCopy::default().size(16)]) };
+        let size = if self.models.is_some() { self.indirect.size } else { 16 };
+        unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, self.indirect.buffer, self.counts[ctx.slot].buffer, &[vk::BufferCopy::default().size(size)]) };
     }
 
     /// Frustum culling. Records inside a compute pass that reads
@@ -446,7 +612,7 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
     }
@@ -459,9 +625,32 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
+            if let Some(m) = &self.models {
+                // Every model command in two multi-draws: opaque, masked.
+                device.cmd_bind_index_buffer(cmd, m.set.geometry.buffer, m.set.index_offset, vk::IndexType::UINT32);
+                let (opaque, total) = (m.set.opaque, m.set.commands());
+                for (pipeline, first, count) in [(m.opaque, 0, opaque), (m.masked, opaque, total - opaque)] {
+                    if count == 0 {
+                        continue;
+                    }
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pipeline::slice_bytes(&[0u32, first]));
+                    let offset = models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
+                    device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, offset, count, models::COMMAND_BYTES as u32);
+                }
+            }
         }
+    }
+
+    /// The descriptor sets the pipelines bind: set 0, and with models set 1.
+    fn bound_sets(&self, slot: usize) -> Vec<vk::DescriptorSet> {
+        let mut sets = vec![self.sets[slot]];
+        if let Some(m) = &self.models {
+            sets.push(m.sets[slot]);
+        }
+        sets
     }
 
     /// Every unit into each cascade of the units' shadow map (nothing when
@@ -474,20 +663,51 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+            let push_stages = match self.models {
+                Some(_) => vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                None => vk::ShaderStageFlags::VERTEX,
+            };
+            let model_caster = self.models.as_ref().and_then(|m| m.caster.map(|c| (m, c))).filter(|(m, _)| m.set.commands() > 0);
+            if let Some((m, _)) = model_caster {
+                device.cmd_bind_index_buffer(cmd, m.set.geometry.buffer, m.set.index_offset, vk::IndexType::UINT32);
+            }
             for k in 0..crate::shadow::CASCADES as u32 {
                 let viewport = vk::Viewport { x: (k * side) as f32, y: 0.0, width: side as f32, height: side as f32, min_depth: 0.0, max_depth: 1.0 };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: (k * side) as i32, y: 0 }, extent: vk::Extent2D { width: side, height: side } }]);
-                device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX, 0, &k.to_le_bytes());
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
+                if self.models.is_some() {
+                    device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, pipeline::slice_bytes(&[k, 0u32]));
+                } else {
+                    device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, &k.to_le_bytes());
+                }
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
+                // Every row of each model class, every command in one
+                // multi-draw (the darts' caster skipped those rows).
+                if let Some((m, model_caster)) = model_caster {
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, model_caster);
+                    device.cmd_draw_indexed_indirect(cmd, m.shadow_commands[ctx.slot].buffer, 0, m.set.commands(), models::COMMAND_BYTES as u32);
+                }
             }
         }
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
+        if let Some(mut m) = self.models.take() {
+            unsafe {
+                for p in [m.opaque, m.masked].into_iter().chain(m.caster) {
+                    device.destroy_pipeline(p, None);
+                }
+                device.destroy_descriptor_set_layout(m.set_layout, None);
+            }
+            for b in m.palettes.iter_mut().chain(m.rows.iter_mut()).chain(m.shadow_commands.iter_mut()) {
+                b.destroy(gpu);
+            }
+            m.template.destroy(gpu);
+            m.set.destroy(gpu);
+        }
         unsafe {
             if let Some(caster) = self.caster.take() {
                 device.destroy_pipeline(caster, None);

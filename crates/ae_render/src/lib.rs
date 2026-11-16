@@ -21,6 +21,7 @@ pub mod fullscreen;
 pub mod graph_file;
 pub mod library;
 pub mod memory;
+pub mod models;
 pub mod particles;
 pub mod module;
 pub mod pipeline;

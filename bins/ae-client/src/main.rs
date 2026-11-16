@@ -342,7 +342,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> UnitsSetup {
-    UnitsSetup { feed, capacity: s.units, classes: s.classes(), min_pixels: 7.0 }
+    UnitsSetup { feed, capacity: s.units, classes: s.classes(), min_pixels: 7.0, models: Vec::new() }
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with

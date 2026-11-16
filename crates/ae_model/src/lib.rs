@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 compile_error!("ae_model assumes a little-endian host");
 
 pub const MAGIC: [u8; 8] = *b"AEMODEL\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Influences per vertex.
 pub const MAX_INFLUENCES: usize = 4;
 
@@ -96,9 +96,36 @@ pub struct Joint {
     pub inverse_bind: [f32; 16],
 }
 
+/// How a primitive's vertices are packed for the GPU (vertex pulling).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Layout {
+    /// One joint per vertex at weight 1 (pieces): [`RIGID_WORDS`] words.
+    Rigid,
+    /// Four joints and weights: [`SKINNED_WORDS`] words.
+    Skinned,
+}
+
+/// 4-byte words of a rigid vertex: position 0..2, normal 3..5, tangent
+/// 6..9, uv0 10..11, uv1 12..13, colour 14..15 (RGBA unorm16), joint 16.
+pub const RIGID_WORDS: usize = 17;
+/// 4-byte words of a skinned vertex: as rigid up to the colour, joints
+/// 16..17 (u16), weights 18..19 (unorm16).
+pub const SKINNED_WORDS: usize = 20;
+
+impl Layout {
+    pub fn words(self) -> usize {
+        match self {
+            Layout::Rigid => RIGID_WORDS,
+            Layout::Skinned => SKINNED_WORDS,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Primitive {
     pub material: u32,
+    /// Rigid: every vertex has weights `[65535, 0, 0, 0]`.
+    pub layout: Layout,
     /// Vertices of this primitive (indices are relative to `first_vertex`).
     pub first_vertex: u32,
     pub vertex_count: u32,
@@ -316,6 +343,65 @@ impl Model {
         unsafe { std::slice::from_raw_parts(self.vertices.as_ptr().cast(), self.vertices.len() * VERTEX_BYTES) }
     }
 
+    /// The vertices of `p` packed for the GPU in its layout
+    /// ([`Layout::words`] words each).
+    pub fn gpu_words(&self, p: &Primitive) -> Vec<u32> {
+        let vertices = &self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize];
+        let mut out = Vec::with_capacity(vertices.len() * p.layout.words());
+        for v in vertices {
+            out.extend(v.position.iter().chain(&v.normal).chain(&v.tangent).chain(&v.uv0).chain(&v.uv1).map(|f| f.to_bits()));
+            out.push(v.color[0] as u32 | (v.color[1] as u32) << 16);
+            out.push(v.color[2] as u32 | (v.color[3] as u32) << 16);
+            match p.layout {
+                Layout::Rigid => out.push(v.joints[0] as u32),
+                Layout::Skinned => {
+                    out.push(v.joints[0] as u32 | (v.joints[1] as u32) << 16);
+                    out.push(v.joints[2] as u32 | (v.joints[3] as u32) << 16);
+                    out.push(v.weights[0] as u32 | (v.weights[1] as u32) << 16);
+                    out.push(v.weights[2] as u32 | (v.weights[3] as u32) << 16);
+                }
+            }
+        }
+        out
+    }
+
+    /// Gives each primitive the cheapest layout its vertices allow (rigid
+    /// when every vertex has one joint at weight 1), then merges the
+    /// primitives of one material and layout into one (a piece model
+    /// draws once per material: the per-vertex joint picks the piece).
+    /// Order: by first appearance.
+    pub fn merge_primitives(&mut self) {
+        for p in &mut self.primitives {
+            let vs = &self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize];
+            p.layout = if vs.iter().all(|v| v.weights == [65535, 0, 0, 0]) { Layout::Rigid } else { Layout::Skinned };
+        }
+        let mut groups: Vec<((u32, Layout), Vec<usize>)> = Vec::new();
+        for (i, p) in self.primitives.iter().enumerate() {
+            match groups.iter_mut().find(|(k, _)| *k == (p.material, p.layout)) {
+                Some((_, members)) => members.push(i),
+                None => groups.push(((p.material, p.layout), vec![i])),
+            }
+        }
+        let (mut vertices, mut indices, mut primitives) = (Vec::new(), Vec::new(), Vec::new());
+        for ((material, layout), members) in groups {
+            let (first_vertex, first_index) = (vertices.len() as u32, indices.len() as u32);
+            for i in members {
+                let p = &self.primitives[i];
+                let base = vertices.len() as u32 - first_vertex;
+                let mut vs = self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize].to_vec();
+                if layout == Layout::Rigid {
+                    for v in &mut vs {
+                        v.joints = [v.joints[0], 0, 0, 0];
+                    }
+                }
+                vertices.extend(vs);
+                indices.extend(self.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|x| x + base));
+            }
+            primitives.push(Primitive { material, layout, first_vertex, vertex_count: vertices.len() as u32 - first_vertex, first_index, index_count: indices.len() as u32 - first_index });
+        }
+        (self.vertices, self.indices, self.primitives) = (vertices, indices, primitives);
+    }
+
     /// Checks the references between the parts.
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.bones.is_empty() && self.bones[0].parent.is_none(), "bone 0 must be the root");
@@ -344,6 +430,7 @@ impl Model {
             ensure!(self.indices[p.first_index as usize..i_end as usize].iter().all(|&x| x < p.vertex_count), "primitive {i}: index out of range");
             for v in &self.vertices[p.first_vertex as usize..v_end as usize] {
                 ensure!(v.joints.iter().all(|&j| (j as usize) < self.joints.len()), "primitive {i}: joint out of range");
+                ensure!(p.layout == Layout::Skinned || v.weights == [65535, 0, 0, 0], "primitive {i}: rigid with a vertex of several influences");
             }
         }
         for c in &self.clips {

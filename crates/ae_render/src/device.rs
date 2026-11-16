@@ -230,6 +230,13 @@ pub struct GpuDevice {
     /// `fragmentStoresAndAtomics` is enabled (the particles' exact
     /// per-pixel reference, tests only).
     pub fragment_stores: bool,
+    /// `textureCompressionBC` is enabled (BC1–BC7 model textures).
+    pub texture_compression_bc: bool,
+    /// `multiDrawIndirect`, `shaderDrawParameters` and
+    /// `descriptorBindingPartiallyBound` are enabled: the units' models
+    /// (one multi-draw per pipeline, per-draw records by `gl_DrawID`, a
+    /// partially bound texture array).
+    pub gpu_driven: bool,
     /// A frame fence timed out: the GPU may still be executing, so waiting
     /// for idle could block forever and destroying objects is unsafe.
     hung: AtomicBool,
@@ -289,11 +296,16 @@ impl GpuDevice {
                 vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
                 _ => 2,
             };
-            let optional = (base.fill_mode_non_solid == vk::TRUE, base.fragment_stores_and_atomics == vk::TRUE);
+            let mut features11 = vk::PhysicalDeviceVulkan11Features::default();
+            let mut features12b = vk::PhysicalDeviceVulkan12Features::default();
+            let mut more = vk::PhysicalDeviceFeatures2::default().push_next(&mut features11).push_next(&mut features12b);
+            unsafe { vk_instance.get_physical_device_features2(physical, &mut more) };
+            let gpu_driven = base.multi_draw_indirect == vk::TRUE && features11.shader_draw_parameters == vk::TRUE && features12b.descriptor_binding_partially_bound == vk::TRUE;
+            let optional = (base.fill_mode_non_solid == vk::TRUE, base.fragment_stores_and_atomics == vk::TRUE, base.texture_compression_bc == vk::TRUE, gpu_driven);
             candidates.push((rank, physical, family, properties, optional));
         }
         candidates.sort_by_key(|(rank, ..)| *rank);
-        let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores)) = candidates
+        let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores, texture_compression_bc, gpu_driven)) = candidates
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances and a graphics+compute queue"))?;
@@ -317,16 +329,20 @@ impl GpuDevice {
             .dynamic_rendering(true)
             .synchronization2(true)
             .shader_demote_to_helper_invocation(true);
-        let mut features12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true).descriptor_binding_partially_bound(gpu_driven);
+        let mut features11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(gpu_driven);
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
         let base_features = vk::PhysicalDeviceFeatures::default()
             .shader_clip_distance(true)
             .fill_mode_non_solid(fill_mode_non_solid)
-            .fragment_stores_and_atomics(fragment_stores);
+            .fragment_stores_and_atomics(fragment_stores)
+            .texture_compression_bc(texture_compression_bc)
+            .multi_draw_indirect(gpu_driven);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&extensions)
             .enabled_features(&base_features)
+            .push_next(&mut features11)
             .push_next(&mut features12)
             .push_next(&mut features13);
         let device = unsafe { vk_instance.create_device(physical, &create_info, None) }.context("vkCreateDevice")?;
@@ -367,6 +383,8 @@ impl GpuDevice {
             device_name,
             fill_mode_non_solid,
             fragment_stores,
+            texture_compression_bc,
+            gpu_driven,
             hung: AtomicBool::new(false),
         })
     }

@@ -113,6 +113,11 @@ fn model_info(file: &str) -> Result<()> {
         m.clips.len()
     );
     println!("  bounds {:?} .. {:?}", m.bounds.min, m.bounds.max);
+    let gpu_bytes: usize = m.primitives.iter().map(|p| p.vertex_count as usize * p.layout.words() * 4).sum();
+    println!("  GPU vertices: {gpu_bytes} bytes");
+    for (i, p) in m.primitives.iter().enumerate() {
+        println!("  primitive {i}: {:?}, material {} ({}), {} vertices, {} triangles", p.layout, p.material, m.materials[p.material as usize].name, p.vertex_count, p.index_count / 3);
+    }
     for (i, t) in m.textures.iter().enumerate() {
         let img = ae_model::ktx::read(t)?;
         println!("  texture {i} {}: VkFormat {} {}x{}, {} levels, {} bytes", m.texture_names[i], img.format.0, img.width, img.height, img.levels.len(), t.len());
