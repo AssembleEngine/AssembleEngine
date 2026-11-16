@@ -124,6 +124,38 @@ the lag and without the padded sphere. `ae_model` tests: baked clips against the
 translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
 the animated reach.
 
+## The client
+
+```text
+ae-client --model [CLASS=]FILE.aemodel|.glb|.gltf [--clip MOVING[,STILL]]
+```
+
+`--model` draws class CLASS with the model; without CLASS every class (but the observer's blips).
+A glTF is converted once by `ae-tool model convert` into `target/models/<name>.aemodel` (again when
+the glTF is newer); the client does not link the converter. Units with a model play the model's
+clip MOVING while they move and STILL while they stand (clip numbers from 1, 0 the rest pose;
+default `1,0`), each unit at its own phase of the sim's time. For the Fox: `--clip 2,1` (walk,
+survey).
+
+## Benches
+
+`ae-client --bench army-fox,near-fox` (`bins/ae-client/src/bench.rs`): the `army` scene with every
+unit the Fox playing a clip (walk or survey), so the pose pass poses all 10 000 each frame, and a
+closer camera. They also report `model_setup` (`ModelSet::new` for the Fox: geometry, texture
+upload, baked clips, cull spheres).
+
+RTX 3060 Ti, 1280x720, 300 frames, median GPU times (2026-11-16, before the shadow cull):
+
+| Scene | Visible | Pose | Shadows | Units | GPU total | Model setup |
+|---|---|---|---|---|---|---|
+| army (darts) | 8 606 | — | 0.043 ms | 0.039 ms | 0.53 ms | — |
+| army-fox | 8 594 | 0.31 ms | 5.3 ms | 2.07 ms | 8.9 ms | 16 ms |
+| near-fox | 4 398 | 0.31 ms | 4.8 ms | 1.08 ms | 7.4 ms | 18 ms |
+
+The model shadows cost as much at any view: the caster drew every unit into every cascade (a
+`--capture` with 424 units visible: 4.9 ms). The pose pass, 31 ns a unit, stays as it is.
+Validation run (`AE_VK_VALIDATION=1`, the three scenes): 0 errors, 0 warnings.
+
 ## The converter: what it reads, drops and refuses
 
 Read: the default scene (or the first one; with no scene, every root node). It reads:

@@ -2369,7 +2369,11 @@ that in.
     of animated models cover every baked frame (+5%). New GPU test `units_pose_models` (palettes
     read back against the CPU, drawn poses, the lag, the padded cull); 26 GPU tests pass,
     validation clean.
-  - Next: step 4, `ae-client --model`, benches against the darts, a validation run.
+  - Step 4, client and benches — in progress (2026-11-16). `ae-client --model [CLASS=]FILE`
+    (glTF converted by `ae-tool` on first use) and `--clip MOVING[,STILL]`; bench scenes
+    `army-fox`, `near-fox`. Validation clean. Measured: pose pass 0.31 ms for 10 000 Foxes; model
+    shadows 5 ms whatever the view (every unit drawn into every cascade): next, a per-cascade
+    cull for model units.
 
 ### M12 — Lights and the HDR scene target (priority: medium)
 
