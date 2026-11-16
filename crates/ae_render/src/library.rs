@@ -238,6 +238,8 @@ impl LibraryPass {
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
             Self::ShadowsDraw => &[
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::UnitVisible, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::UnitIndirect, Role::IndirectBuffer),
                 (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear)),
             ],

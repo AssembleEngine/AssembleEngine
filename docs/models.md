@@ -70,7 +70,8 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 - **Resources**: one geometry buffer (every model's vertices packed per primitive in its layout,
   read by vertex pulling, then every index); one material table; one partially bound array of
   1024 textures the materials index; an animation table (bones, joints, clips, baked frames); one
-  palette buffer (`units.palette`); per frame slot a rows buffer.
+  palette buffer (`units.palette`); per frame slot a rows buffer (pose offsets and jobs). The
+  visible list holds per model class a region for the camera and one per shadow cascade.
 - **Commands**: one `VkDrawIndexedIndirectCommand` per (class, primitive), with a draw record
   (material, class, vertex base and layout, the class's region of the visible list) the shaders
   read by `gl_DrawID`. Opaque commands first, then alpha-masked ones: two pipelines, because a
@@ -79,10 +80,14 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 - **Cull** (`units_models_cull.comp`, in the units' cull pass): a model unit is tested with its
   model's bounding sphere, appended to its class's region of the visible list and counted in each
   of its class's commands. The reset copies the commands' template (instance counts 0).
-- **Shadows**: the shadow caster draws every row; the rows grouped by class (written on the CPU
-  when a new tick arrives) give each class's instances. The darts' caster skips model classes.
-  Opaque and masked commands in a multi-draw each per cascade; the masked caster tests alpha as
-  the camera does, so what is masked away casts no shadow.
+- **Shadows**: with the units' shadow map on, the cull also tests each model unit's sphere against
+  each cascade's sides in light space (not its depth: a caster nearer the sun than the cascade's
+  box still shadows what is in it) and appends it to its class's region for that cascade, counted
+  in that cascade's copy of the commands (after the camera's in the indirect buffer). The shadow
+  caster draws each cascade's commands; the darts' caster draws every dart and skips model
+  classes. Opaque and masked commands in a multi-draw each per cascade; the masked caster tests
+  alpha as the camera does, so what is masked away casts no shadow. The graphs declare the reset
+  and the cull before the shadows.
 - **Poses**: the stream's `clip` and `clip_time` attributes pick a unit's pose: `clip` 0 (or past
   its model's clips) the rest pose, `k` the model's clip `k - 1` at `clip_time` seconds (at the
   stream's tick; drawn a tick behind as positions are, clamped at 0; clips loop). The palette
@@ -120,7 +125,9 @@ clips, one moving the base and so the arm), the Fox and BoxAnimated playing clip
 and with a clip their model lacks, drawn on time and a tick behind; every row's palette read back
 equals the CPU's (`ae_model::pose`) to 1e-3 relative; the arm is drawn where its pose puts it; a
 unit whose rest sphere is off screen but whose arm reaches in is drawn. Checked to fail without
-the lag and without the padded sphere. `ae_model` tests: baked clips against the sampler (linear
+the lag and without the padded sphere. `units_model_shadows_culled`: a pillar far outside every
+cascade is counted in none; a pillar off screen toward the sun is in a cascade and shadows the
+ground in view (checked to fail when the cascades take only the units the camera sees). `ae_model` tests: baked clips against the sampler (linear
 translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
 the animated reach.
 
@@ -144,17 +151,22 @@ unit the Fox playing a clip (walk or survey), so the pose pass poses all 10 000 
 closer camera. They also report `model_setup` (`ModelSet::new` for the Fox: geometry, texture
 upload, baked clips, cull spheres).
 
-RTX 3060 Ti, 1280x720, 300 frames, median GPU times (2026-11-16, before the shadow cull):
+RTX 3060 Ti, 1280x720, 300 frames, median GPU times (2026-11-16), before and after the shadow
+cascades' cull (casters: model units drawn into the three cascades, summed):
 
-| Scene | Visible | Pose | Shadows | Units | GPU total | Model setup |
-|---|---|---|---|---|---|---|
-| army (darts) | 8 606 | — | 0.043 ms | 0.039 ms | 0.53 ms | — |
-| army-fox | 8 594 | 0.31 ms | 5.3 ms | 2.07 ms | 8.9 ms | 16 ms |
-| near-fox | 4 398 | 0.31 ms | 4.8 ms | 1.08 ms | 7.4 ms | 18 ms |
+| Scene | Visible | Pose | Cull | Shadows | Casters | Units | GPU total | Model setup |
+|---|---|---|---|---|---|---|---|---|
+| army (darts) | 8 606 | — | 0.005 ms | 0.044 ms | — | 0.036 ms | 0.53 ms | — |
+| army-fox, before | 8 594 | 0.31 ms | 0.010 ms | 5.3 ms | 30 000 | 2.07 ms | 8.9 ms | 16 ms |
+| army-fox, after | 8 594 | 0.31 ms | 0.024 ms | 4.4 ms | 28 313 | 2.08 ms | 8.1 ms | 17 ms |
+| near-fox, before | 4 398 | 0.31 ms | 0.007 ms | 4.8 ms | 30 000 | 1.08 ms | 7.4 ms | 18 ms |
+| near-fox, after | 4 398 | 0.31 ms | 0.020 ms | 3.9 ms | 25 077 | 1.07 ms | 6.5 ms | 16 ms |
 
-The model shadows cost as much at any view: the caster drew every unit into every cascade (a
-`--capture` with 424 units visible: 4.9 ms). The pose pass, 31 ns a unit, stays as it is.
-Validation run (`AE_VK_VALIDATION=1`, the three scenes): 0 errors, 0 warnings.
+Before the cull every unit went into every cascade, at any view (a `--capture` with 424 units
+visible: 4.9 ms of shadows). The cull leaves out what no cascade holds, but the cascades are large
+and nested, so in these views nearly every Fox is drawn into all three: the shadows stay
+vertex-bound (about 48 million vertices). The pose pass, 31 ns a unit, stays as it is.
+Validation runs (`AE_VK_VALIDATION=1`: army, army-fox, near-fox, battle): 0 errors, 0 warnings.
 
 ## The converter: what it reads, drops and refuses
 

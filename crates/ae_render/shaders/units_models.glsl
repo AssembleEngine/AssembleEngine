@@ -41,7 +41,7 @@ layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelC
 struct DrawRecord {
     uint material;
     uint cls;
-    uint visibleBase; // the class's region of the visible list
+    uint visibleBase; // the class's region of the visible list (then one per cascade)
     uint vertexBase;  // first word of the primitive's vertices
     uint words;       // per vertex: 17 rigid, 20 skinned
     uint pad0;
@@ -51,10 +51,8 @@ struct DrawRecord {
 layout(std430, set = 1, binding = 4) readonly buffer Draws { DrawRecord draws[]; };
 // Per class its commands' indices (the cull counts each).
 layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classCommands[]; };
-// Per frame: [MAX_CLASSES] each class's first entry in the order, then
-// [capacity] the rows grouped by class (the shadow caster draws every
-// row), [capacity] each row's palette offset, [capacity] the rows playing
-// a clip (the pose jobs), [capacity] each job's scratch offset.
+// Per frame: [capacity] each row's palette offset, [capacity] the rows
+// playing a clip (the pose jobs), [capacity] each job's scratch offset.
 layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
 // Partially bound (models::MAX_TEXTURES); indexed per draw, so uniformly.
 layout(set = 1, binding = 7) uniform sampler2D textures[1024];
@@ -70,7 +68,7 @@ layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
 // drawBase: the multi-draw's first command.
 layout(push_constant) uniform Push { uint cascade; uint drawBase; } pc;
 
-uint poseOffset(uint row) { return rows[MAX_CLASSES + u.counts.y + row]; }
+uint poseOffset(uint row) { return rows[row]; }
 
 struct Skinned {
     vec3 pos;

@@ -25,7 +25,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 height;      // scale, offset, water level, has water
     vec4 sun;         // xyz direction; w = minimum unit size in pixels
     vec4 fog;         // rgb, density (0 = off)
-    uvec4 counts;     // instances, capacity, flags (1: hills' shadows)
+    uvec4 counts;     // instances, capacity, flags (1: hills' shadows), model commands
     vec4 classes[MAX_CLASSES]; // rgb; w: 1 = floats on the water surface, + 2 = has a model
     // The units' shadow cascades (src/shadow.rs, unit_shadows.glsl).
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
@@ -40,7 +40,9 @@ layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; }
 layout(std430, set = 0, binding = 2) writeonly buffer Visible { uint visible[]; };
 #ifdef MODELS
 // The darts' VkDrawIndirectCommand (words 0..3), then one
-// VkDrawIndexedIndirectCommand (5 words) per model primitive and class.
+// VkDrawIndexedIndirectCommand (5 words) per model primitive and class
+// (counts.w of them), then the same commands again for each shadow
+// cascade.
 layout(std430, set = 0, binding = 3) buffer Indirect { uint cmdWords[]; };
 #else
 layout(std430, set = 0, binding = 3) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } cmd;

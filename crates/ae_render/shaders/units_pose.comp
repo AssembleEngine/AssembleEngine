@@ -41,8 +41,8 @@ void main() {
         return;
     }
     uint cap = u.counts.y;
-    uint row = rows[MAX_CLASSES + 2u * cap + job];
-    uint scratch = rows[MAX_CLASSES + 3u * cap + job];
+    uint row = rows[cap + job];
+    uint scratch = rows[2u * cap + job];
     ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
     // The clip (the CPU made a job only for a valid one) and its two frames
     // around the time, drawn behind the tick as positions are; clips loop.

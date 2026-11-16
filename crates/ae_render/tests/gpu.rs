@@ -3409,6 +3409,132 @@ fn units_draw_models() {
     assert_clean(&gpu);
 }
 
+/// The units' shadow map draws a model unit into the cascades the cull
+/// finds it in, not every unit into every cascade: a pillar far outside
+/// every cascade is counted in none, and a pillar off screen toward the
+/// sun (outside the camera's frustum) still shadows the ground in view.
+/// Checked to fail when the cascades only take units the camera sees.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn units_model_shadows_culled() {
+    use ae_model::{Bone, Joint, Material, Model};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    // A pillar eight times as tall as its footprint (0.2), which is drawn
+    // at the unit's radius: radius 50 makes it 400 m tall.
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let mut pillar = Model {
+        bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
+        joints: vec![Joint { bone: 0, inverse_bind: identity }],
+        materials: vec![Material { name: "grey".into(), base_color: [0.5, 0.5, 0.5, 1.0], ..Default::default() }],
+        ..Default::default()
+    };
+    model_box(&mut pillar, [-0.2, 0.0, -0.2], [0.2, 1.6, 0.2], 0);
+    pillar.bounds = ae_model::Bounds { min: [-0.2, 0.0, -0.2], max: [0.2, 1.6, 0.2] };
+    pillar.validate().unwrap();
+    let pillar = Arc::new(pillar);
+    let (radius, height) = (50.0f32, 400.0f32);
+
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let (target, pitch, distance) = (Vec2::new(512.0, 512.0), 1.4f32, 700.0f32);
+    let camera = {
+        let app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = target;
+        view.camera.pitch = pitch;
+        view.camera.distance = distance;
+        view.camera
+    };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    // Whether a sphere is inside the camera's side planes.
+    let rows = view_proj.transpose();
+    let sides = [rows.w_axis + rows.x_axis, rows.w_axis - rows.x_axis, rows.w_axis + rows.y_axis, rows.w_axis - rows.y_axis];
+    let touches = |c: Vec3, r: f32| sides.iter().all(|p| p.truncate().dot(c) + p.w >= -r * p.truncate().length());
+    let in_view = |p: Vec3| -> Option<usize> {
+        let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
+        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        (u >= 8.0 && v >= 8.0 && u < extent.width as f32 - 8.0 && v < extent.height as f32 - 8.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+    };
+    // The pillar's upper part's shadow on the ground (height 50), and the
+    // pillar's foot toward the sun from it: the nearest foot whose whole
+    // pillar (a generous sphere) is off screen while that shadow is in view.
+    let sun = ae_render::terrain::sun::direction();
+    let toward_sun = Vec2::new(sun.x, sun.z).normalize();
+    let ground_y = 50.0;
+    let shadow_of = |foot: Vec2| {
+        let top = Vec3::new(foot.x, ground_y + 0.9 * height, foot.y);
+        top - sun * ((top.y - ground_y) / sun.y)
+    };
+    let foot = (0..400)
+        .map(|k| target + toward_sun * (5.0 * k as f32))
+        .find(|&f| !touches(Vec3::new(f.x, ground_y + 0.5 * height, f.y), 0.6 * height) && in_view(shadow_of(f)).is_some())
+        .expect("a foot off screen whose shadow is in view");
+    let far = Vec2::new(20_000.0, 512.0);
+
+    // Class 0 the pillar toward the sun, class 1 the far one.
+    let units = [(foot, 0u32), (far, 1)];
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for &(p, class) in &units {
+        for (a, word) in [p.x.to_bits(), p.y.to_bits(), p.x.to_bits(), p.y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let classes = vec![UnitClass { color: [0.5; 3], floats: false }; 2];
+    let models = vec![Some(pillar.clone()), Some(pillar.clone())];
+    let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, columns: at_rest(columns.clone()) }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 1.0, models: models.clone() });
+        if shadows {
+            app = app.with_shadows();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+            view.shadows = shadows;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, info, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("model-shadows-{}.ppm", shadows as u8)), ppm).unwrap();
+        }
+        let counts = app.last_unit_counts();
+        let cascades = app.last_unit_cascade_counts();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        (pixels, counts, cascades)
+    };
+    let (lit, lit_counts, lit_cascades) = render(false);
+    let (shaded, counts, cascades) = render(true);
+    assert_eq!(lit_counts, Some((2, 0)), "both pillars off screen");
+    assert_eq!(counts, Some((2, 0)));
+    assert_eq!(lit_cascades, vec![[0; 3]; 2], "no shadow map: no cascade lists");
+    assert_eq!(cascades[1], [0, 0, 0], "the far pillar is in no cascade");
+    assert!(cascades[0].iter().any(|&n| n == 1) && cascades[0].iter().all(|&n| n <= 1), "the pillar toward the sun is in a cascade: {:?}", cascades[0]);
+    let i = in_view(shadow_of(foot)).unwrap();
+    let luma = |px: &[u8]| px[i] as i32 + px[i + 1] as i32 + px[i + 2] as i32;
+    assert!(luma(&shaded) * 10 < luma(&lit) * 8, "the off-screen pillar's shadow at {}: {} without the map, {} with it", shadow_of(foot), luma(&lit), luma(&shaded));
+    assert_clean(&gpu);
+}
+
 /// Units playing clips: the pose pass's palettes match the CPU's
 /// (`ae_model::pose`: the baked clip at the unit's time, drawn a tick
 /// behind, looping; units at rest or with no such clip on the rest

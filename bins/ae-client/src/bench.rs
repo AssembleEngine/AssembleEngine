@@ -14,8 +14,10 @@
 //!   with a 50% `bench-diff` tolerance: they are noisy);
 //! * counters `leaves` and `drawn`: CBT leaves and leaves drawn, summed
 //!   over the measured frames (deterministic: more is a regression);
-//! * info `units_visible` (in the last frame), `frames`, `width`, `height`: the
-//!   workload; a change means times are not comparable.
+//! * info `units_visible` (in the last frame; with models also
+//!   `units_cascade0..2`, the model units in each shadow cascade),
+//!   `frames`, `width`, `height`: the workload; a change means times are
+//!   not comparable.
 //!
 //! Units come from the crossing game run headless to tick 300 (once per
 //! map, shared by its scenes), as `--capture` does. A scene with
@@ -313,6 +315,8 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     // The GPU cull's count of the last frame: read once everything has
     // finished, since during the run it can come from an earlier frame.
     let visible = app.last_unit_counts().map_or(0, |(_, v)| v as u64);
+    // Model units drawn into each shadow cascade (summed over classes).
+    let cascades = app.last_unit_cascade_counts().iter().fold([0u64; 3], |acc, c| std::array::from_fn(|k| acc[k] + c[k] as u64));
     let names = headless.stats().pass_names;
     gpu_frames.retain(|f| f.len() == names.len());
     anyhow::ensure!(gpu_frames.len() >= b.frames / 2, "only {} of {} frames have GPU timestamps", gpu_frames.len(), b.frames);
@@ -342,6 +346,11 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     report.counter("leaves", leaves, "");
     report.counter("drawn", drawn, "");
     report.info("units_visible", visible, "");
+    if scene.fox {
+        for (k, n) in cascades.iter().enumerate() {
+            report.info(&format!("units_cascade{k}"), *n, "");
+        }
+    }
     report.info("frames", b.frames as u64, "");
     report.info("width", extent.width as u64, "px");
     report.info("height", extent.height as u64, "px");

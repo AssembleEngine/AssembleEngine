@@ -433,6 +433,13 @@ impl TerrainApp {
         Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
     }
 
+    /// Per model class, the units the cull put in each shadow cascade in
+    /// the last frame (after `run_headless`); for tests and tools.
+    pub fn last_unit_cascade_counts(&mut self) -> Vec<[u32; crate::shadow::CASCADES]> {
+        let slot = self.last_slot;
+        self.unit_renderer.as_mut().map_or(Vec::new(), |units| units.read_cascade_counts(slot))
+    }
+
     /// Each row's skinning palette in the last frame (empty for a dart),
     /// once the device is idle (after `run_headless`); for tests and tools.
     pub fn last_unit_poses(&mut self, gpu: &GpuDevice) -> Result<Vec<Vec<[f32; 12]>>> {
@@ -976,20 +983,30 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
         .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
         .id();
-    // The units' poses, before anything draws them.
-    if let Some([instances, .., palette]) = units {
+    // The units' poses and cull, before anything draws them (the shadows
+    // read the cull's lists per cascade).
+    if let Some([instances, visible, draws, _, palette]) = units {
         graph
             .pass("units pose", PassKind::Compute, LibraryPass::UnitsPose)
             .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
             .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
             .id();
+        graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
+        graph
+            .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+            .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
+            .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
     }
-    // The units' shadows: every unit drawn from the sun, before anything
+    // The units' shadows: the units drawn from the sun, before anything
     // that samples the map.
-    if let (Some([instances, .., palette]), Some(map)) = (units, map) {
+    if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
         graph
             .pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw)
             .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(draws, Role::IndirectBuffer)
             .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
             .depth(map, LoadOp::Clear)
             .id();
@@ -1017,13 +1034,6 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     )
     .id();
     if let Some([instances, visible, draws, counts, palette]) = units {
-        graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
-        graph
-            .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
-            .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
-            .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
-            .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
-            .id();
         // Declared after the terrain draw: a second writer of the target
         // and the depth buffer, ordered after it.
         receive(

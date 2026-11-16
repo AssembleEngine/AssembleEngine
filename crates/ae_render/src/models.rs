@@ -157,7 +157,8 @@ pub struct ModelSet {
     /// The rest palettes, 12 floats per entry.
     rest: Vec<f32>,
     /// The indirect buffer's initial contents: the darts' command, then
-    /// the models' (instance counts 0).
+    /// the models' (instance counts 0), then the models' again for each
+    /// shadow cascade.
     pub template: Vec<u8>,
     /// Model class (index into `classes`) of each unit class.
     pub class_model: Vec<Option<usize>>,
@@ -328,6 +329,16 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
 }
 
 impl ModelSet {
+    /// Regions of the visible list per model class: the camera's, then
+    /// one per shadow cascade, each `capacity` rows.
+    pub const REGIONS: u32 = 1 + crate::shadow::CASCADES as u32;
+
+    /// Entries of the visible list: the darts' region, then the model
+    /// classes' regions.
+    pub fn visible_len(&self, capacity: u32) -> u64 {
+        capacity as u64 * (1 + Self::REGIONS as u64 * self.classes.len() as u64)
+    }
+
     /// `models[class]` for each unit class (`None`: a dart); `capacity`
     /// units per visible-list region.
     pub fn new(gpu: &GpuDevice, models: &[Option<Arc<Model>>], capacity: u32, max_classes: usize) -> Result<Self> {
@@ -408,7 +419,9 @@ impl ModelSet {
             let Some(model) = model else { continue };
             let m = unique.iter().position(|u| Arc::ptr_eq(u, model)).unwrap();
             let (prims, base_material) = &placed[m];
-            let visible_base = capacity * (1 + classes.len() as u32);
+            // The darts' region, then per model class the camera's region
+            // and one per shadow cascade.
+            let visible_base = capacity * (1 + Self::REGIONS * classes.len() as u32);
             for (p, &(vertex_base, first_index)) in model.primitives.iter().zip(prims) {
                 let masked = !matches!(model.materials[p.material as usize].alpha, AlphaMode::Opaque);
                 let record = GpuDraw { material: base_material + p.material, class: c as u32, visible_base, vertex_base, words: p.layout.words() as u32, pad: [0; 3] };
@@ -444,6 +457,12 @@ impl ModelSet {
             }
             records.push(record);
             draws.push(draw);
+        }
+        // Each cascade's copy of the commands (counted by the cull, drawn by
+        // the shadow caster).
+        let camera = template[DART_COMMAND_BYTES as usize..].to_vec();
+        for _ in 0..crate::shadow::CASCADES {
+            template.extend_from_slice(&camera);
         }
         let mut class_commands = Vec::new();
         for mc in &classes {
