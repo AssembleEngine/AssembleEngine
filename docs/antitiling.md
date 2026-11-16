@@ -1,10 +1,11 @@
-# Anti-tiling (future work)
+# Anti-tiling
 
-A planned improvement to the terrain's material tilesets (`crates/ae_render/shaders/terrain.frag`,
-`docs/tilesets.md`). The example below was supplied as the reference to start from. It is kept
-verbatim, in an older GLSL dialect (`texture2D`); it is not compiled anywhere yet.
+Implemented for the terrain's material tilesets: `layerTexel` in
+`crates/ae_render/shaders/terrain.frag`, the per-layer `AntiTiling` setting in
+`crates/ae_render/src/terrain/tileset.rs`, defaults and costs in `docs/tilesets.md`. The example
+it started from is kept verbatim at the end, in an older GLSL dialect (`texture2D`).
 
-What it does:
+What the example does:
 - Hides a texture's repetition by sampling it twice per position: rotated and offset by two
   hashed seeds. A value noise picks the seeds and blends between them.
 - Blending two samples flattens the contrast. To restore it, the blend is re-centred on the
@@ -13,19 +14,44 @@ What it does:
 - Triplanar weights have a constant overlap zone (`BlendZone`).
 - Triplanar normals are combined with reoriented normal mapping (RNM) against the surface normal.
 
-Notes for when it is implemented:
-- Rotating the UV and jumping between hash seeds breaks the UV derivatives where the seed changes,
-  so the mip level jumps and seams show. Sample with `textureGrad`, rotating `dFdx(uv)`/`dFdy(uv)`
-  by the same angle (the derivative of the offset is zero).
-- Sample cost: two samples per projection, three projections, colour and normals: about 12 per
-  layer where the example is used in full. The terrain pass is very sensitive to shader size
-  (M7: a never-taken branch cost it 18 %). Enable it per layer, behind a specialization constant
-  or a pipeline variant, and run `bench-diff` on the terrain pass.
-- Compute `meanColor` on the CPU when the tileset is loaded (the mean of the top mip), not with
-  `texture2D(tex, vec2(0.5), 15.0)` per pixel.
-- It replaces or extends the broad brightness variation the terrain shader already applies
-  ("Anti-tiling" in `terrain.frag`). Compare the triplanar weights and the normal blend with the
-  tileset's current orientation and pixel-normal blending; keep whichever reads better.
+How the implementation differs:
+- Sampled with `textureGrad`, the gradients rotated with the uv (the offset has none), so the mip
+  does not jump where the seed changes.
+- The tangent normals rotate back into the uv frame (the example used them as sampled, which
+  tilts rotated copies the wrong way).
+- Per layer: `Off`, `Shifted` (offsets only, for textures with a direction: strata, ripples) or
+  `Rotated`. The path is a specialization constant, compiled in only when a layer uses it; an
+  untaken path measured free.
+- Seeds come from a 16-entry table (golden-ratio angles, R2-sequence offsets), not a hash and
+  `sin`/`cos` per pixel: the terrain pass is bound by its arithmetic, and this saved about a
+  fifth of the overhead.
+- The triangle weights are sharpened about 1/2 (×2, still summing to 1), and a copy of weight 0
+  is not sampled.
+- The means are the layer's last mip (albedo averaged in linear light, height linearly), computed
+  on the CPU and kept in the tileset table. The normals' mean is taken as flat.
+- The noise is 8 features per repeat in the layer's uv, as in the example.
+- Not adopted: the constant-overlap triplanar weights and RNM. The tileset keeps its pow-4
+  weights and whiteout blend; the anti-tiled path does not change them.
+
+Measurements (terrain pass, `ae-client --bench close,cliffs,overview`), of variants that were
+not kept:
+- Every layer anti-tiled, rotated: +47 % close, +38 % overview, +65 % cliffs. Per-layer selection
+  is the lever: the defaults cost +24 % close (half the view is an anti-tiled layer), +15 %
+  overview, +8 % cliffs.
+- The value noise is about a third of the overhead (replaced by a constant).
+- Sharpening the crossfade so one copy is sampled over most of the ground saves little (×2: a
+  few %, ×8: about as much): the cost is mostly arithmetic per call, not samples.
+- A noise in world space, computed once per pixel and shared by the layers: much slower
+  (+81 % close), presumably from holding it across the taps (register pressure).
+- Straight two-sample code without the skip: slightly slower than the loop with it.
+
+Next steps, if the cost matters:
+- Read the noise from a small tiling texture (one fetch) in place of four hashes, as Íñigo
+  Quílez's "texture repetition" article does in its cheapest technique. That article (from
+  memory: its URL returned 404 when checked) is the origin of this kind of method. Its
+  blend factor also subtracts a fraction of the two copies' colour difference before the
+  smoothstep, so the transition follows the texture's features. Worth trying against the
+  variance-preserving blend.
 
 ```glsl
 // ============================================================================

@@ -162,6 +162,9 @@ struct Options {
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
+    /// `--no-anti-tiling`: the tileset's layers sampled once, as they were
+    /// before anti-tiling (to compare the look and the cost).
+    anti_tiling: bool,
     /// `--bench`: scenes to measure instead of opening a window.
     bench: Option<bench::BenchOptions>,
     /// Threads recording render passes (1: the render thread alone).
@@ -185,11 +188,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Mailbox, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--fifo] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -232,6 +235,7 @@ fn parse() -> Result<Options> {
                 };
             }
             "--tileset-size" => o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?,
+            "--no-anti-tiling" => o.anti_tiling = false,
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
@@ -396,7 +400,10 @@ fn tileset(o: &Options) -> Result<Option<Arc<Tileset>>> {
     let Some(name) = &o.tileset else { return Ok(None) };
     anyhow::ensure!(o.tileset_size.is_power_of_two() && o.tileset_size >= 4, "--tileset-size must be a power of two of at least 4");
     let started = Instant::now();
-    let t = tileset::by_name(name, o.tileset_size).context("unknown tileset")?;
+    let mut t = tileset::by_name(name, o.tileset_size).context("unknown tileset")?;
+    if !o.anti_tiling {
+        t = t.without_anti_tiling();
+    }
     eprintln!(
         "tileset {}: {} layers of {}², {:.1} MB with mips, generated in {:.2} s",
         t.name,

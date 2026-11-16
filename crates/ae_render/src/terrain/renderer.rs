@@ -519,13 +519,14 @@ impl TerrainRenderer {
         let prepare = pipeline::compute_pipeline(device, spirv!("cbt_prepare.comp"), pipeline_layout)?;
         let update = pipeline::compute_pipeline(device, spirv!("cbt_update.comp"), pipeline_layout)?;
         let reduce = pipeline::compute_pipeline(device, spirv!("cbt_reduce.comp"), pipeline_layout)?;
-        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, false)?;
+        let anti_tiling = tileset.is_some_and(Tileset::anti_tiled);
+        let terrain = graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, false, anti_tiling)?;
         let terrain_decals = match decals {
-            Some(_) => Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, true)?),
+            Some(_) => Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain.frag"), false, unit_shadows, true, anti_tiling)?),
             None => None,
         };
         let wire = if gpu.fill_mode_non_solid {
-            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true, false, false)?)
+            Some(graphics_pipeline(device, pipeline_layout, color_format, depth_format, spirv!("terrain_wire.frag"), true, false, false, false)?)
         } else {
             None
         };
@@ -911,14 +912,16 @@ fn graphics_pipeline(
     wire: bool,
     unit_shadows: bool,
     decals: bool,
+    anti_tiling: bool,
 ) -> Result<vk::Pipeline> {
     let vert = pipeline::shader_module(device, spirv!("terrain.vert"))?;
     let frag = pipeline::shader_module(device, fragment)?;
     // UNIT_SHADOWS (unit_shadows.glsl): without a shadow map the lookup is
-    // compiled out, not just skipped; DECALS (terrain_decals.glsl) likewise.
-    let spec_words = [u32::from(unit_shadows), u32::from(decals)];
+    // compiled out, not just skipped; DECALS (terrain_decals.glsl) and
+    // ANTI_TILING (terrain.frag, when a tileset layer uses it) likewise.
+    let spec_words = [u32::from(unit_shadows), u32::from(decals), u32::from(anti_tiling)];
     let spec_value: Vec<u8> = spec_words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-    let spec_entries = [vk::SpecializationMapEntry { constant_id: 0, offset: 0, size: 4 }, vk::SpecializationMapEntry { constant_id: 1, offset: 4, size: 4 }];
+    let spec_entries: [vk::SpecializationMapEntry; 3] = std::array::from_fn(|i| vk::SpecializationMapEntry { constant_id: i as u32, offset: 4 * i as u32, size: 4 });
     let spec = vk::SpecializationInfo::default().map_entries(&spec_entries).data(&spec_value);
     let stages = [
         vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(c"main"),

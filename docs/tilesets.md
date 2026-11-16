@@ -49,7 +49,7 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 | Normal array | `R8G8_UNORM` 2D array with the same shape. Tangent-space normal x and y (z is reconstructed); x runs along the texture's u axis, y along v. |
 | Size | Square, a power of two (`--tileset-size`, default 512). |
 | Material table | Per gameplay material id (8 slots): a **ground** layer for flat ground and a **cliff** layer for steep slopes. |
-| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. |
+| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. `anti_tiling`: `Off`, `Shifted(amount)` or `Rotated(amount)` (see "Anti-tiling" below). |
 | Per-tileset settings | `cliff_slope`: the slope range over which ground turns to cliff, as 1 − n.y; default 0.18..0.42, about 35°..55°. `blend_depth`: the sharpness of the height blend, default 0.22. `detail_tilt`: how much detail normals move the cliff mask, default 0.35. `warp`: boundary meander, default 2 cells with 40 m features. `macro_variation`: anti-tiling brightness, default ±22 % with 150 m features. |
 
 **Memory.** One 512² layer is 512² × (4 + 2) bytes × 4/3 for mips = 2.0 MB. A 7-layer set is
@@ -57,7 +57,7 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 multithreaded (layers in parallel, rows within each) and takes about 0.06 s on a 24-thread CPU.
 
 **GPU side.** The renderer uploads both arrays once with `upload::image_layers` (2D-array views).
-It uploads the table (`TilesetUbo`, 288 bytes, std140 with only 16-byte members, size asserted)
+It uploads the table (`TilesetUbo`, 416 bytes, std140 with only 16-byte members, size asserted)
 as a device-local uniform buffer. They are bound at set 0, bindings 10, 11 and 12 of the terrain
 pipeline, sampled with a trilinear REPEAT sampler. Without a tileset the bindings hold 1×1
 placeholders and the shader takes the palette path.
@@ -121,6 +121,25 @@ existing terrain uniforms:
 against visible tiling), and the blended normal replaces the geometric one for lighting. Water
 tint, fog and the LOD/wireframe overlays then apply as before.
 
+**Anti-tiling** (`docs/antitiling.md`). A layer whose `anti_tiling` is not `Off` is sampled as
+two copies of its texture, each offset (and rotated, for `Rotated`) by a seed, crossfaded by a
+value noise in the layer's uv (8 features per repeat) that walks through the seeds; `amount` is
+about how many seeds the noise's range walks through. The blend is re-centred on the layer's mean
+albedo and height (from its last mip, in the table) and scaled to keep the contrast. Normals rotate
+back into the uv frame. `Shifted` keeps a texture's direction (strata, ripples). The path is a
+specialization constant, compiled in only when some layer uses it.
+
+Defaults: on for the layers whose repeat shows (temperate: sand shifted; river bed, gravel, mud
+rotated. Desert: dune sand shifted; cracked clay, gravel, salt pan rotated). Off for grass, scrub
+and forest floor (their repeat does not show, and they cover most maps) and for the rocks (rotating
+breaks the strata; shifting barely changes the cliffs and cost about 105 µs more in the cliffs bench).
+
+Measured on mud from above (GPU test `anti_tiling_breaks_the_repeat_and_keeps_the_contrast`): the
+image's correlation with itself one repeat away falls from 0.98 to 0.08; mean and standard deviation
+of luminance stay within 1 %. Cost of the terrain pass (bench, 1280×720, against no anti-tiling):
+close +38 µs (155.7 → 193.8, half the view mud), overview +30 µs (200.7 → 230.4), cliffs +29 µs
+(376.5 → 405.8).
+
 **Cost control.** Where several corners share a layer, which is the case inside any material,
 the shader samples it once. The cliff layer is sampled only where the cliff mask is above 0.
 Taps are reused by constant index: a runtime index into the tap array cost 2–3× in GPU time.
@@ -135,6 +154,7 @@ Taps are reused by constant index: a runtime index into the tap array cost 2–3
 
 **`ae-client`:**
 - `--tileset temperate|desert|none` (default temperate) and `--tileset-size N` (default 512).
+- `--no-anti-tiling` turns anti-tiling off on every layer (to compare the look and the cost).
 - `--weights` starts in the weights view.
 - **M** toggles between the tileset and the palette; **B** toggles the weights view.
 

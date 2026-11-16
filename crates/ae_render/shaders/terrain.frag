@@ -25,7 +25,9 @@ layout(set = 0, binding = 10) uniform sampler2DArray tileAlbedo; // rgb albedo, 
 layout(set = 0, binding = 11) uniform sampler2DArray tileNormal; // rg tangent-space normal
 layout(set = 0, binding = 12) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
-    vec4 layers[8];     // x repeats per world unit, y normal strength, z 1 = triplanar
+    vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
+                        // triplanar, bit 1 anti-tiling rotates), w anti-tiling (0 off)
+    vec4 means[8];      // per layer: mean albedo (linear) and height
     vec4 params;        // x, y cliff slope start/end, z blend depth, w detail tilt
     vec4 warp;          // x boundary warp (cells), y 1 / its feature size (world units),
                         // z macro variation, w 1 / its feature size
@@ -34,6 +36,85 @@ layout(set = 0, binding = 12) uniform TilesetUBO {
 // One projected layer: albedo (a = height) and the world normal with the
 // layer's detail applied.
 struct Tap { vec4 albedo; vec3 normal; };
+
+// Anti-tiling (docs/antitiling.md) is compiled in only when a layer of the
+// tileset uses it, so tilesets without it pay nothing.
+layout(constant_id = 2) const bool ANTI_TILING = false;
+const float ANTI_TILING_SHARPNESS = 2.0;
+
+// One texel of a layer: albedo (a = height) and the tangent-space normal's
+// x, y (-1..1, before the layer's strength).
+struct Texel { vec4 albedo; vec2 normal; };
+
+Texel texel(float l, vec2 uv, vec2 gx, vec2 gy) {
+    return Texel(textureGrad(tileAlbedo, vec3(uv, l), gx, gy), textureGrad(tileNormal, vec3(uv, l), gx, gy).xy * 2.0 - 1.0);
+}
+
+// Per seed (anti-tiling): the rotation's cos and sin and the offset, a
+// table rather than docs/antitiling.md's hash per pixel (the terrain pass
+// is bound by its arithmetic): angles spaced by the golden ratio, offsets
+// by the R2 sequence.
+const vec4 ANTI_TILING_SEEDS[16] = vec4[](
+    vec4(-0.362375, 0.932032, 0.254878, 0.069840),
+    vec4(0.896783, -0.442471, 0.009755, 0.639681),
+    vec4(-0.960145, -0.279504, 0.764633, 0.209521),
+    vec4(0.519179, 0.854666, 0.519511, 0.779361),
+    vec4(0.194492, -0.980904, 0.274388, 0.349201),
+    vec4(-0.806004, 0.591911, 0.029266, 0.919042),
+    vec4(0.994152, 0.107991, 0.784144, 0.488882),
+    vec4(-0.660110, -0.751169, 0.539021, 0.058722),
+    vec4(-0.020663, 0.999786, 0.293899, 0.628563),
+    vec4(0.690583, -0.723254, 0.048777, 0.198403),
+    vec4(-0.997765, 0.066823, 0.803654, 0.768243),
+    vec4(0.780859, 0.624707, 0.558532, 0.338083),
+    vec4(-0.153797, -0.988102, 0.313410, 0.907924),
+    vec4(-0.554048, 0.832485, 0.068287, 0.477764),
+    vec4(0.970873, -0.239594, 0.823165, 0.047604),
+    vec4(-0.877735, -0.479146, 0.578043, 0.617445));
+
+// The layer at `uv` (in repeats), anti-tiled when the layer asks for it:
+// two copies of the texture, each offset (and rotated, if the layer's
+// texture has no direction to keep) by a seed from the table, crossfaded
+// by a value noise that walks through the seeds (triangle weights summing
+// to 1). Averaging two samples flattens the contrast, so
+// the blend is re-centred on the layer's mean and scaled by
+// 1 / |weights|, which keeps the variance (the normals' mean is taken as
+// flat: a tileable height field has no mean slope). The gradients rotate
+// with the uv (the offset has none), so mips do not jump where the seed
+// changes; the normals rotate back into the uv's frame. (A noise in world
+// space shared by the layers, computed once per pixel, measured slower:
+// held across the taps, it costs more than it saves.)
+Texel layerTexel(uint layer, vec2 uv, vec2 gx, vec2 gy) {
+    float l = float(layer);
+    float amount = tiles.layers[layer].w;
+    if (!ANTI_TILING || amount <= 0.0) {
+        return texel(l, uv, gx, gy);
+    }
+    float t = valueNoise(uv * 8.0) * amount * 0.5;
+    vec2 ph = fract(vec2(t + 0.5, t));
+    vec2 seed = floor(vec2(t + 0.5, t)) * 2.0 + vec2(0.0, 1.0);
+    // Triangle weights, sharpened about 1/2 (they still sum to 1): over
+    // most of the ground one copy has weight 0 and is not sampled.
+    bool rotates = (uint(tiles.layers[layer].z) & 2u) != 0u;
+    vec2 wt = clamp((min(ph, 1.0 - ph) * 2.0 - 0.5) * ANTI_TILING_SHARPNESS + 0.5, 0.0, 1.0);
+    Texel s[2];
+    for (int i = 0; i < 2; i++) {
+        if (wt[i] <= 0.0) {
+            s[i] = Texel(vec4(0.0), vec2(0.0));
+            continue;
+        }
+        vec4 h = ANTI_TILING_SEEDS[int(seed[i]) & 15];
+        h.xy = rotates ? h.xy : vec2(1.0, 0.0);
+        mat2 r = mat2(h.x, h.y, -h.y, h.x);
+        s[i] = texel(l, r * uv + h.zw, r * gx, r * gy);
+        s[i].normal = s[i].normal * r; // transpose(r) * normal
+    }
+    vec4 mean = tiles.means[layer];
+    float k = inversesqrt(max(dot(wt, wt), 1e-6));
+    vec4 albedo = (s[0].albedo * wt.x + s[1].albedo * wt.y - mean) * k + mean;
+    vec2 normal = (s[0].normal * wt.x + s[1].normal * wt.y) * k;
+    return Texel(clamp(albedo, 0.0, 1.0), normal);
+}
 
 // Sample `layer` projected along the axes weighted by `axes` (x, y, z
 // projections; y is the planar one from above), with gradients from the
@@ -48,35 +129,37 @@ Tap project(uint layer, vec3 P, vec3 dx, vec3 dy, vec3 n, vec3 axes) {
     vec3 sg = vec3(n.x < 0.0 ? -1.0 : 1.0, n.y < 0.0 ? -1.0 : 1.0, n.z < 0.0 ? -1.0 : 1.0);
     vec4 a = vec4(0.0);
     vec3 w = vec3(0.0);
-    float l = float(layer);
     if (axes.x > 0.0) {
         vec2 uv = vec2(P.z * sg.x, P.y) * k;
         vec2 gx = vec2(dx.z * sg.x, dx.y) * k, gy = vec2(dy.z * sg.x, dy.y) * k;
-        vec2 t = (textureGrad(tileNormal, vec3(uv, l), gx, gy).xy * 2.0 - 1.0) * strength;
+        Texel x = layerTexel(layer, uv, gx, gy);
+        vec2 t = x.normal * strength;
         float tz = sqrt(max(1.0 - dot(t, t), 0.0));
         t.x *= sg.x;
         vec3 tn = vec3(t + n.zy, tz * n.x);
-        a += axes.x * textureGrad(tileAlbedo, vec3(uv, l), gx, gy);
+        a += axes.x * x.albedo;
         w += axes.x * tn.zyx;
     }
     if (axes.y > 0.0) {
         vec2 uv = vec2(P.x * sg.y, P.z) * k;
         vec2 gx = vec2(dx.x * sg.y, dx.z) * k, gy = vec2(dy.x * sg.y, dy.z) * k;
-        vec2 t = (textureGrad(tileNormal, vec3(uv, l), gx, gy).xy * 2.0 - 1.0) * strength;
+        Texel x = layerTexel(layer, uv, gx, gy);
+        vec2 t = x.normal * strength;
         float tz = sqrt(max(1.0 - dot(t, t), 0.0));
         t.x *= sg.y;
         vec3 tn = vec3(t + n.xz, tz * n.y);
-        a += axes.y * textureGrad(tileAlbedo, vec3(uv, l), gx, gy);
+        a += axes.y * x.albedo;
         w += axes.y * tn.xzy;
     }
     if (axes.z > 0.0) {
         vec2 uv = vec2(-P.x * sg.z, P.y) * k;
         vec2 gx = vec2(-dx.x * sg.z, dx.y) * k, gy = vec2(-dy.x * sg.z, dy.y) * k;
-        vec2 t = (textureGrad(tileNormal, vec3(uv, l), gx, gy).xy * 2.0 - 1.0) * strength;
+        Texel x = layerTexel(layer, uv, gx, gy);
+        vec2 t = x.normal * strength;
         float tz = sqrt(max(1.0 - dot(t, t), 0.0));
         t.x *= -sg.z;
         vec3 tn = vec3(t + n.xy, tz * n.z);
-        a += axes.z * textureGrad(tileAlbedo, vec3(uv, l), gx, gy);
+        a += axes.z * x.albedo;
         w += axes.z * tn.xyz;
     }
     return Tap(a, normalize(w));
@@ -87,16 +170,20 @@ vec3 triplanarAxes(vec3 n) {
     return b / max(b.x + b.y + b.z, 1e-6);
 }
 
+bool triplanar(uint layer) {
+    return (uint(tiles.layers[layer].z) & 1u) != 0u;
+}
+
 // Ground: planar unless the layer is triplanar.
 Tap groundTap(uint layer, vec3 P, vec3 dx, vec3 dy, vec3 n) {
-    vec3 axes = tiles.layers[layer].z > 0.5 ? triplanarAxes(n) : vec3(0.0, 1.0, 0.0);
+    vec3 axes = triplanar(layer) ? triplanarAxes(n) : vec3(0.0, 1.0, 0.0);
     return project(layer, P, dx, dy, n, axes);
 }
 
 // Cliffs: duoplanar (the two horizontal axes) unless the layer is triplanar.
 Tap cliffTap(uint layer, vec3 P, vec3 dx, vec3 dy, vec3 n) {
     vec3 axes;
-    if (tiles.layers[layer].z > 0.5) {
+    if (triplanar(layer)) {
         axes = triplanarAxes(n);
     } else {
         vec2 b = pow(abs(n.xz) + 1e-3, vec2(4.0));

@@ -2352,12 +2352,17 @@ that in.
     and cached while nothing in them moves.
   - It replaces the units' cascades (M7) behind the same `shadows.map` / `shadows.draw` contract.
   - The particles' coloured shadows need a colour page for each depth page.
-- **Anti-tiling of the terrain's material tilesets**
-  - What: sample each texture twice, rotated and offset by hashed seeds, with a variance-preserving
-    blend around its mean colour.
-  - It also brings triplanar weights with a constant overlap, and normals combined by RNM.
-  - The supplied example, kept verbatim, and implementation notes (mip seams from the UV jumps,
-    sample cost, gating per layer) are in `docs/antitiling.md`.
+- **Anti-tiling of the terrain's material tilesets** — done (2026-11-16).
+  - Each anti-tiled layer is two offset copies of its texture (rotated too, unless the texture has a
+    direction), crossfaded by a value noise, with a variance-preserving blend around the layer's
+    mean. Per layer `Off` / `Shifted` / `Rotated`; a specialization constant, so tilesets without
+    it pay nothing; `ae-client --no-anti-tiling` compares.
+  - On mud from above, the correlation at one repeat falls 0.98 → 0.08 with mean and contrast
+    within 1 %. The defaults (patterned layers on; grass, scrub, forest floor and rock off) cost
+    the terrain pass +38 µs close, +30 µs overview, +29 µs cliffs (720p).
+  - Not adopted: the example's constant-overlap triplanar weights and RNM normals.
+  - Details, the variants measured and not kept, and next steps (a noise texture in place of the
+    hashes; a colour-aware blend factor, after Quílez) are in `docs/antitiling.md`.
 - **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).
   - Seen in play, they look poor: too coarse and too discrete, as if the smoke updated at a lower
     frame rate than the rest of the scene.

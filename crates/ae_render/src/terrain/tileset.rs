@@ -39,6 +39,31 @@ pub struct LayerSettings {
     /// Scale of the detail normal (0: flat, 1: as generated).
     pub normal_strength: f32,
     pub projection: Projection,
+    pub anti_tiling: AntiTiling,
+}
+
+/// Anti-tiling (`docs/antitiling.md`): each sample of the layer becomes
+/// two copies of the texture, each moved by a seed, crossfaded by a value
+/// noise that walks through the seeds; the blend keeps the texture's
+/// contrast. The amount (above 0, up to 16) is about how many seeds the
+/// noise's range walks through. It adds to the terrain pass's cost where
+/// the layer shows (about +27 % in the close-up bench with every layer on).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AntiTiling {
+    Off,
+    /// Copies offset only: for textures with a direction (strata, ripples).
+    Shifted(f32),
+    /// Copies rotated and offset: for textures without one.
+    Rotated(f32),
+}
+
+impl AntiTiling {
+    pub fn amount(self) -> f32 {
+        match self {
+            AntiTiling::Off => 0.0,
+            AntiTiling::Shifted(a) | AntiTiling::Rotated(a) => a,
+        }
+    }
 }
 
 /// One layer's textures: per mip, tightly packed, mip 0 `size` square.
@@ -49,6 +74,17 @@ pub struct Layer {
     pub albedo: Vec<Vec<u8>>,
     /// `R8G8_UNORM` texels (tangent-space normal x, y).
     pub normal: Vec<Vec<u8>>,
+}
+
+impl Layer {
+    /// The mean albedo (linear light) and height: the last mip's one texel
+    /// (the mips average albedo in linear light, height linearly).
+    pub fn mean(&self) -> [f32; 4] {
+        match self.albedo.last() {
+            Some(t) if t.len() == 4 => [srgb_decode(t[0]), srgb_decode(t[1]), srgb_decode(t[2]), t[3] as f32 / 255.0],
+            _ => [0.0; 4],
+        }
+    }
 }
 
 /// The layers a gameplay material uses.
@@ -94,8 +130,12 @@ pub struct TilesetUbo {
     /// Per material id: x = ground layer, y = cliff layer.
     pub materials: [[u32; 4]; MATERIAL_SLOTS],
     /// Per layer: x = repeats per world unit, y = normal strength,
-    /// z = projection (0 by orientation, 1 triplanar).
+    /// z = projection (bit 0: 0 by orientation, 1 triplanar) and bit 1
+    /// anti-tiling rotates, w = anti-tiling amount (0 off).
     pub layers: [[f32; 4]; MAX_LAYERS],
+    /// Per layer: the mean albedo (linear) and height, which the
+    /// anti-tiling blend keeps its contrast around.
+    pub means: [[f32; 4]; MAX_LAYERS],
     /// x, y: cliff slope start and end; z: blend depth; w: detail tilt.
     pub params: [f32; 4],
     /// x: boundary warp (cells); y: 1 / its feature size (world units);
@@ -103,7 +143,7 @@ pub struct TilesetUbo {
     pub warp: [f32; 4],
 }
 
-pub const TILESET_UBO_BYTES: usize = 288;
+pub const TILESET_UBO_BYTES: usize = 416;
 const _: () = assert!(size_of::<TilesetUbo>() == TILESET_UBO_BYTES);
 
 /// Finite and above zero (NaN is not).
@@ -132,8 +172,8 @@ impl Tileset {
                     return Err(format!("layer `{}`: mip {m} has the wrong size", s.name));
                 }
             }
-            if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) {
-                return Err(format!("layer `{}`: tile size {} or normal strength {} out of range", s.name, s.tile_size, s.normal_strength));
+            if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) || !matches!(s.anti_tiling, AntiTiling::Off) && !(s.anti_tiling.amount() > 0.0 && s.anti_tiling.amount() <= 16.0) {
+                return Err(format!("layer `{}`: tile size {}, normal strength {} or anti-tiling {:?} out of range", s.name, s.tile_size, s.normal_strength, s.anti_tiling));
             }
         }
         for (id, m) in self.materials.iter().enumerate() {
@@ -151,6 +191,20 @@ impl Tileset {
         Ok(())
     }
 
+    /// Whether any layer is anti-tiled (the terrain pipeline compiles the
+    /// path in only then).
+    pub fn anti_tiled(&self) -> bool {
+        self.layers.iter().any(|l| l.settings.anti_tiling != AntiTiling::Off)
+    }
+
+    /// Turn anti-tiling off on every layer.
+    pub fn without_anti_tiling(mut self) -> Self {
+        for l in &mut self.layers {
+            l.settings.anti_tiling = AntiTiling::Off;
+        }
+        self
+    }
+
     pub fn mip_count(&self) -> usize {
         self.size.trailing_zeros() as usize + 1
     }
@@ -162,7 +216,11 @@ impl Tileset {
         }
         for (slot, l) in u.layers.iter_mut().zip(&self.layers) {
             let s = &l.settings;
-            *slot = [1.0 / s.tile_size, s.normal_strength, s.projection as u32 as f32, 0.0];
+            let flags = s.projection as u32 | u32::from(matches!(s.anti_tiling, AntiTiling::Rotated(_))) << 1;
+            *slot = [1.0 / s.tile_size, s.normal_strength, flags as f32, s.anti_tiling.amount()];
+        }
+        for (slot, l) in u.means.iter_mut().zip(&self.layers) {
+            *slot = l.mean();
         }
         u.params = [self.cliff_slope.0, self.cliff_slope.1, self.blend_depth, self.detail_tilt];
         u.warp = [self.warp.0, 1.0 / self.warp.1, self.macro_variation.0, 1.0 / self.macro_variation.1];
@@ -436,7 +494,7 @@ fn downsample(albedo: &[u8], normal: &[u8], size: usize) -> (Vec<u8>, Vec<u8>) {
     (a, nm)
 }
 
-fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump: f32, projection: Projection) -> Layer {
+fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump: f32, projection: Projection, anti_tiling: AntiTiling) -> Layer {
     let (mut a, mut n) = generate(recipe, size, seed, bump);
     let (mut albedo, mut normal) = (Vec::new(), Vec::new());
     let mut side = size as usize;
@@ -449,13 +507,13 @@ fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump:
         (a, n) = downsample(&a, &n, side);
         side /= 2;
     }
-    Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, projection }, albedo, normal }
+    Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, projection, anti_tiling }, albedo, normal }
 }
 
-fn build(name: &str, size: u32, specs: Vec<(&str, Recipe, f32, f32, Projection)>, materials: [MaterialLayers; MATERIAL_SLOTS]) -> Tileset {
+fn build(name: &str, size: u32, specs: Vec<(&str, Recipe, f32, f32, Projection, AntiTiling)>, materials: [MaterialLayers; MATERIAL_SLOTS]) -> Tileset {
     assert!(size.is_power_of_two() && size >= 4, "tileset size {size}");
     let layers = std::thread::scope(|s| {
-        let handles: Vec<_> = specs.iter().enumerate().map(|(i, &(n, r, tile, bump, p))| s.spawn(move || layer(n, r, size, 0x5eed + i as u32 * 131, tile, bump, p))).collect();
+        let handles: Vec<_> = specs.iter().enumerate().map(|(i, &(n, r, tile, bump, p, a))| s.spawn(move || layer(n, r, size, 0x5eed + i as u32 * 131, tile, bump, p, a))).collect();
         handles.into_iter().map(|h| h.join().expect("layer generation")).collect()
     });
     let t = Tileset { name: name.into(), size, layers, materials, cliff_slope: (0.18, 0.42), blend_depth: 0.22, detail_tilt: 0.35, warp: (2.0, 40.0), macro_variation: (0.22, 150.0) };
@@ -471,15 +529,15 @@ const fn m(ground: u8, cliff: u8) -> MaterialLayers {
 /// mud. Materials (`ae_nav::terrain::Material`): grass, forest, sand, rock,
 /// water (the bed), road, mud; every cliff is rock.
 pub fn temperate(size: u32) -> Tileset {
-    use Projection::*;
+    use {AntiTiling::*, Projection::*};
     let specs = vec![
-        ("grass", Recipe::Grass { base: [0.08, 0.14, 0.03], tip: [0.20, 0.26, 0.06] }, 24.0, 1.0, ByOrientation),
-        ("forest floor", Recipe::Forest, 20.0, 1.2, ByOrientation),
-        ("sand", Recipe::Sand { light: [0.62, 0.52, 0.33], dark: [0.42, 0.34, 0.20], ripples: 9.0 }, 32.0, 0.8, ByOrientation),
-        ("rock", Recipe::Rock { light: [0.33, 0.31, 0.29], dark: [0.12, 0.11, 0.10], strata: 5.0 }, 48.0, 2.0, ByOrientation),
-        ("river bed", Recipe::Pebbles { stone: [0.30, 0.28, 0.24], fill: [0.16, 0.14, 0.10], cells: 12 }, 16.0, 1.5, ByOrientation),
-        ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation),
-        ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation),
+        ("grass", Recipe::Grass { base: [0.08, 0.14, 0.03], tip: [0.20, 0.26, 0.06] }, 24.0, 1.0, ByOrientation, Off),
+        ("forest floor", Recipe::Forest, 20.0, 1.2, ByOrientation, Off),
+        ("sand", Recipe::Sand { light: [0.62, 0.52, 0.33], dark: [0.42, 0.34, 0.20], ripples: 9.0 }, 32.0, 0.8, ByOrientation, Shifted(2.0)),
+        ("rock", Recipe::Rock { light: [0.33, 0.31, 0.29], dark: [0.12, 0.11, 0.10], strata: 5.0 }, 48.0, 2.0, ByOrientation, Off),
+        ("river bed", Recipe::Pebbles { stone: [0.30, 0.28, 0.24], fill: [0.16, 0.14, 0.10], cells: 12 }, 16.0, 1.5, ByOrientation, Rotated(2.0)),
+        ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(2.0)),
+        ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation, Rotated(2.0)),
     ];
     build("temperate", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
 }
@@ -487,15 +545,15 @@ pub fn temperate(size: u32) -> Tileset {
 /// Dry scrub, dark scrub, dune sand, red rock (triplanar), cracked clay
 /// (river beds), gravel, salt pan; cliffs are red rock.
 pub fn desert(size: u32) -> Tileset {
-    use Projection::*;
+    use {AntiTiling::*, Projection::*};
     let specs = vec![
-        ("dry scrub", Recipe::Grass { base: [0.30, 0.24, 0.12], tip: [0.42, 0.36, 0.18] }, 24.0, 0.9, ByOrientation),
-        ("dark scrub", Recipe::Grass { base: [0.14, 0.13, 0.06], tip: [0.28, 0.24, 0.10] }, 20.0, 1.1, ByOrientation),
-        ("dune sand", Recipe::Sand { light: [0.78, 0.55, 0.30], dark: [0.55, 0.36, 0.18], ripples: 14.0 }, 40.0, 0.9, ByOrientation),
-        ("red rock", Recipe::Rock { light: [0.55, 0.28, 0.15], dark: [0.22, 0.10, 0.06], strata: 9.0 }, 56.0, 2.2, Triplanar),
-        ("cracked clay", Recipe::Cracked { clay: [0.50, 0.38, 0.26], crack: [0.18, 0.12, 0.08] }, 18.0, 1.4, ByOrientation),
-        ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation),
-        ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation),
+        ("dry scrub", Recipe::Grass { base: [0.30, 0.24, 0.12], tip: [0.42, 0.36, 0.18] }, 24.0, 0.9, ByOrientation, Off),
+        ("dark scrub", Recipe::Grass { base: [0.14, 0.13, 0.06], tip: [0.28, 0.24, 0.10] }, 20.0, 1.1, ByOrientation, Off),
+        ("dune sand", Recipe::Sand { light: [0.78, 0.55, 0.30], dark: [0.55, 0.36, 0.18], ripples: 14.0 }, 40.0, 0.9, ByOrientation, Shifted(2.0)),
+        ("red rock", Recipe::Rock { light: [0.55, 0.28, 0.15], dark: [0.22, 0.10, 0.06], strata: 9.0 }, 56.0, 2.2, Triplanar, Off),
+        ("cracked clay", Recipe::Cracked { clay: [0.50, 0.38, 0.26], crack: [0.18, 0.12, 0.08] }, 18.0, 1.4, ByOrientation, Rotated(2.0)),
+        ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(2.0)),
+        ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation, Rotated(2.0)),
     ];
     build("desert", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
 }
@@ -588,5 +646,32 @@ mod tests {
         assert_eq!(u.materials[4], [4, 3, 0, 0]);
         assert_eq!(u.layers[0][0], 1.0 / 24.0);
         assert_eq!(desert(16).ubo().layers[3][2], 1.0, "red rock is triplanar");
+    }
+
+    /// The table's anti-tiling: flags (bit 0 triplanar, bit 1 rotates),
+    /// amount, and means from the last mip; out-of-range amounts rejected.
+    #[test]
+    fn anti_tiling_in_the_table() {
+        let mut t = temperate(16);
+        t.layers[0].settings.projection = Projection::Triplanar;
+        t.layers[0].settings.anti_tiling = AntiTiling::Rotated(3.0);
+        t.layers[1].settings.anti_tiling = AntiTiling::Shifted(1.5);
+        t.layers[2].settings.anti_tiling = AntiTiling::Off;
+        assert!(t.anti_tiled());
+        let u = t.ubo();
+        assert_eq!((u.layers[0][2], u.layers[0][3]), (3.0, 3.0), "triplanar | rotates, amount");
+        assert_eq!((u.layers[1][2], u.layers[1][3]), (0.0, 1.5), "shifted");
+        assert_eq!(u.layers[2][3], 0.0, "off");
+        // The last mip is the mean: its decoded texel.
+        let top = t.layers[4].albedo.last().unwrap();
+        assert_eq!(top.len(), 4);
+        assert_eq!(u.means[4], [srgb_decode(top[0]), srgb_decode(top[1]), srgb_decode(top[2]), top[3] as f32 / 255.0]);
+        assert!(u.means[4][..3].iter().all(|&c| c > 0.0 && c < 1.0));
+        assert!(!t.clone().without_anti_tiling().anti_tiled());
+        for bad in [AntiTiling::Rotated(0.0), AntiTiling::Shifted(-1.0), AntiTiling::Rotated(17.0), AntiTiling::Shifted(f32::NAN)] {
+            let mut t = temperate(16);
+            t.layers[5].settings.anti_tiling = bad;
+            assert!(t.validate().unwrap_err().contains("anti-tiling"), "{bad:?}");
+        }
     }
 }
