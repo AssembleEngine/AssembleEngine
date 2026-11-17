@@ -216,8 +216,11 @@ M14 (RTX 3060 Ti, 24 threads, 2026-11-17; `live-fox` for the last two rows):
 The CPU time is reading the units' `Anim` rows (536 bytes each), matching them to the stream and
 packing; no bone is evaluated. A walking Fox writes its record's tick and its layers' phases a
 tick (about three cells). The `units pose` pass samples the clips for both records only while
-the drawn tick is between them. `gpu_total` is unchanged within its spread (8.8 ms `army-fox`,
-7.4 ms `near-fox`, mostly the shadows). Validation clean (`live-fox` and the GPU tests).
+the drawn tick is between them. `gpu_total` (baselines, `bench/results/baseline/gpu-*-fox.json`):
+8.3 ms `army-fox`, 8.2 ms `live-fox`, 6.9 ms `near-fox`, mostly the shadows (no earlier baseline
+of the `scripted` scenes to compare: the old ones were of the crossing army). Validation clean
+(`live-fox` and the GPU tests). A `--capture` of the scripted game shows the Foxes mid-stride
+and standing, as the sim plays them.
 
 The M11 numbers (the crossing army playing `--clip`):
 
