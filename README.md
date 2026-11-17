@@ -1,4 +1,4 @@
-# AssemblyEngine
+# AssembleEngine
 
 An RTS-first game engine: a deterministic lockstep simulation on an ECS, with game logic in WASM modules
 that run on many cores at once, native services (navigation, spatial queries, sensors) behind batch

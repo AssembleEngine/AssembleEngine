@@ -1,6 +1,6 @@
 [package]
 name = "ae-render-sdk"
-description = "Rust SDK for AssemblyEngine render modules: the export glue around a declare/frame trait, plus the frame graph and program table builders."
+description = "Rust SDK for AssembleEngine render modules: the export glue around a declare/frame trait, plus the frame graph and program table builders."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

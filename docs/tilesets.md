@@ -1,6 +1,6 @@
 # Terrain material tilesets
 
-How AssemblyEngine colours terrain: reusable, per-environment surface libraries instead of
+How AssembleEngine colours terrain: reusable, per-environment surface libraries instead of
 per-map colour and normal textures (MrBob's proposal, `docs/PLAN.md` "Terrain appearance").
 This document is the M3 validation write-up the proposal asks for:
 - the blending logic and where its shader code is;

@@ -1,4 +1,4 @@
-//! Rust SDK for AssemblyEngine sim modules.
+//! Rust SDK for AssembleEngine sim modules.
 //!
 //! ```ignore
 //! use ae_sdk::{Component, Run, system, schedule};

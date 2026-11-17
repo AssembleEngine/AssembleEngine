@@ -1,4 +1,4 @@
-# AssemblyEngine — architecture, drawn
+# AssembleEngine — architecture, drawn
 
 Five readings, each a level deeper. Start at the top, stop where the question is answered.
 

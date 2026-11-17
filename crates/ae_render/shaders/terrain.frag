@@ -318,7 +318,7 @@ void main() {
     albedo = mix(albedo, snow, smoothstep(snowLine, snowLine + 0.05, t) * (1.0 - smoothstep(0.35, 0.6, slope)));
 
     if ((u.cfg.z & FLAG_MATERIALS) != 0u) {
-        // Per-cell gameplay materials (AssemblyEngine addition), blended
+        // Per-cell gameplay materials (AssembleEngine addition), blended
         // bilinearly between cell centres; slopes still turn to rock.
         // Placeholder until material tilesets.
         const vec3 palette[8] = vec3[](
@@ -380,7 +380,7 @@ void main() {
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * shadeN.y));
 
-    // Ground under water (AssemblyEngine addition): tint by the depth of the
+    // Ground under water (AssembleEngine addition): tint by the depth of the
     // water column. This is the part of RA3's underwater pass the water
     // surface (water.frag) builds on: the surface blends its reflection
     // over this.

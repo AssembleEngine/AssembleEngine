@@ -1,6 +1,6 @@
 [package]
 name = "ae-sdk"
-description = "Rust SDK for AssemblyEngine sim modules: typed columns, commands, events, schema."
+description = "Rust SDK for AssembleEngine sim modules: typed columns, commands, events, schema."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

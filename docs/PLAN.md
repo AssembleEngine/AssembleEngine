@@ -1,8 +1,8 @@
-# AssemblyEngine — architecture and roadmap
+# AssembleEngine — architecture and roadmap
 
 ## Context
 
-AssemblyEngine is a new RTS-focused (but flexible) engine, a spiritual successor to Recoil: same extensibility
+AssembleEngine is a new RTS-focused (but flexible) engine, a spiritual successor to Recoil: same extensibility
 (a whole game defined by scripts + content), none of the old constraints (serial sim, per-call Lua marshalling,
 GL-era renderer, 16-bit ids, hard-coded economy). `/home/ak/AssembleEngine` is empty; this plan sets the
 architecture and the milestone order. Four prototypes supply most of the hard parts:
@@ -227,7 +227,7 @@ Goal: catch regressions and find bottlenecks per subsystem, without launching th
 What Godot and Unreal do, and what fits this architecture. Sourced from my knowledge of both engines, not from
 a fresh review of their code.
 
-| Idea | Where it comes from | Fit for AssemblyEngine |
+| Idea | Where it comes from | Fit for AssembleEngine |
 |---|---|---|
 | Inspector generated from reflected properties + hints (range, enum, asset type) | Godot `@export`, Unreal `UPROPERTY` meta → Details panel | **Take, nearly free.** The component schema already exists; add editor hints per field (label, range, unit, enum, reference kind, tooltip). |
 | Editor attaches to a running game in another process; live tree, live property edits | Godot remote scene tree / debugger | **Take.** `ae_inspect` protocol over a local socket to `ae-client`/`ae-headless`. Edits travel as synced dev commands, so they stay deterministic and land in replays. |

@@ -144,8 +144,8 @@ impl GpuInstance {
             Vec::new()
         };
         let app_info = vk::ApplicationInfo::default()
-            .application_name(c"AssemblyEngine")
-            .engine_name(c"AssemblyEngine")
+            .application_name(c"AssembleEngine")
+            .engine_name(c"AssembleEngine")
             .api_version(vk::API_VERSION_1_3);
         let counters = Arc::new(ValidationCounters::default());
         let mut messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()

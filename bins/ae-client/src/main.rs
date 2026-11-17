@@ -764,7 +764,7 @@ fn run(o: Options) -> Result<ExitCode> {
     if let Some(path) = &o.capture {
         return capture(source.context("--capture needs a terrain map")?, nav, &o, path);
     }
-    let mut window = SdlWindow::new("AssemblyEngine", 1280, 720)?;
+    let mut window = SdlWindow::new("AssembleEngine", 1280, 720)?;
     let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false, record_threads: o.record_threads };
     type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
     let mut terrain: Option<Shared> = None;
@@ -898,7 +898,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 None => detail,
             };
             let detail = detail + if render.present_mode == "FIFO" { " | vsync on" } else { " | vsync off" };
-            window.set_title(&format!("AssemblyEngine | {label} | {fps:.0} fps{detail}"));
+            window.set_title(&format!("AssembleEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
         }
         std::thread::sleep(Duration::from_millis(2));
