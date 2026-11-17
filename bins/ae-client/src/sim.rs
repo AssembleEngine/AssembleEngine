@@ -147,6 +147,28 @@ const BLIP_RADIUS: f32 = 5.0;
 const ENEMY_TINT: [f32; 3] = [0.95, 0.15, 0.1];
 
 impl SimOptions {
+    /// The sim's animation models by name: the `--model` ones, then the
+    /// content's (`models/*.aemodel`) not named so. The renderer poses
+    /// with the same rigs (`UnitsSetup::rigs`), so it samples the sim's
+    /// clips and masks; both sides make them here.
+    pub fn rigs(&self) -> Result<Vec<(String, Rig)>> {
+        let mut rigs: Vec<(String, Rig)> = self.models.iter().map(|m| (m.name.clone(), Rig::new(&m.model))).collect();
+        if !self.mounts.is_empty() {
+            let mut vfs = ae_vfs::Vfs::new();
+            for m in &self.mounts {
+                vfs.mount(m)?;
+            }
+            for f in vfs.list("models", "aemodel")? {
+                let model = ae_model::Model::from_bytes(&vfs.read(&f)?).with_context(|| format!("model {f}"))?;
+                let name = f.trim_start_matches("models/").trim_end_matches(".aemodel").to_string();
+                if !rigs.iter().any(|(n, _)| *n == name) {
+                    rigs.push((name, Rig::new(&model)));
+                }
+            }
+        }
+        Ok(rigs)
+    }
+
     fn plugin(&self) -> NavPlugin {
         let base = match &self.loaded_map {
             Some((terrain, starts)) => NavPlugin::loaded(terrain.clone(), starts.clone()),
@@ -267,22 +289,7 @@ impl Sim {
             let catalog = ae_catalog::Catalog::load(&vfs, "defs", &schema).context("the content's catalogue")?;
             plugins.push(Arc::new(ae_services::catalog::CatalogPlugin::new(Arc::new(catalog))));
         }
-        // Animation: the content's models, and the `--model` ones by name.
-        let mut rigs: Vec<(String, Rig)> = o.models.iter().map(|m| (m.name.clone(), Rig::new(&m.model))).collect();
-        if !o.mounts.is_empty() {
-            let mut vfs = ae_vfs::Vfs::new();
-            for m in &o.mounts {
-                vfs.mount(m)?;
-            }
-            for f in vfs.list("models", "aemodel")? {
-                let model = ae_model::Model::from_bytes(&vfs.read(&f)?).with_context(|| format!("model {f}"))?;
-                let name = f.trim_start_matches("models/").trim_end_matches(".aemodel").to_string();
-                if !rigs.iter().any(|(n, _)| *n == name) {
-                    rigs.push((name, Rig::new(&model)));
-                }
-            }
-        }
-        let anim = AnimPlugin::new(rigs, TICK_SECONDS);
+        let anim = AnimPlugin::new(o.rigs()?, TICK_SECONDS);
         plugins.push(Arc::new(anim.clone()));
         let rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
         let world = rt.world_for(o.param(), o.workers)?;

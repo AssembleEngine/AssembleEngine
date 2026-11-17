@@ -95,8 +95,9 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   `models::animation`) holds each model's clips as the **sim's own bake**
   (`ae_model::anim::Rig::clip_table`: per clip its frames at 60/s, a track word per bone, keys
   as translation, rotation, scale), its masks (a weight word per bone) and its rest transforms,
-  from the rig the renderer is given per class (`UnitsSetup::rigs`; none: `Rig::new` of the
-  model, which is what the sim's rigs are until masks come from content). The client
+  from the rig the renderer is given per class (`UnitsSetup::rigs`: the client's are the sim's,
+  made by `SimOptions::rigs` as the sim makes them, masks included; none: `Rig::new` of the
+  model). The client
   (`poser.rs`) packs each posed unit's `Anim` into an **animation record** of 15 16-byte cells
   (`units::RECORD_CELLS`: the tick and the shown manual entries' count; per layer clip, mask,
   mode, kind, weight, phase; per shown manual entry its bone, kind and value). A posed unit
