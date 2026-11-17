@@ -57,6 +57,11 @@ impl AnimPlugin {
         Ok(Some(Self::new(models, tick_seconds)))
     }
 
+    /// The ticker's work on rows, for benches and tools.
+    pub fn advance(&self) -> Advance {
+        Advance { rigs: self.rigs.clone(), none: Arc::new(Rig::new(&Default::default())), dt: self.tick_seconds }
+    }
+
     pub fn rig(&self, model: u64) -> Option<&Arc<Rig>> {
         self.rigs.get(&model).map(|(_, r)| r)
     }
@@ -80,7 +85,7 @@ impl HostPlugin for AnimPlugin {
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 match name {
-                    "anim" => Ok(Box::new(Ticker { rigs: self.rigs.clone(), none: Rig::new(&Default::default()), dt: self.tick_seconds })),
+                    "anim" => Ok(Box::new(Ticker { advance: self.advance() })),
                     other => bail!("no host system `{other}` in the animation plugin"),
                 }
             })
@@ -129,9 +134,7 @@ impl HostPlugin for AnimPlugin {
 }
 
 struct Ticker {
-    rigs: Arc<BTreeMap<u64, (String, Arc<Rig>)>>,
-    none: Rig,
-    dt: f32,
+    advance: Advance,
 }
 
 impl HostSystem for Ticker {
@@ -139,14 +142,36 @@ impl HostSystem for Ticker {
         for chunk in ctx.chunks() {
             let anims = unsafe { chunk.column::<Anim>(0) };
             let bodies = unsafe { chunk.column::<Body>(1) };
-            for (a, b) in anims.iter_mut().zip(bodies.iter()) {
-                let rig = self.rigs.get(&a.model).map_or(&self.none, |(_, r)| r);
-                let mut ch = channels(a);
-                rig.advance(&mut ch, self.dt, (b.vx * b.vx + b.vy * b.vy).sqrt());
-                store(&ch, a);
-            }
+            self.advance.rows(anims, bodies);
         }
         Ok(())
+    }
+}
+
+/// What the ticker does to rows: the content's rigs and the tick length.
+#[derive(Clone)]
+pub struct Advance {
+    rigs: Arc<BTreeMap<u64, (String, Arc<Rig>)>>,
+    none: Arc<Rig>,
+    dt: f32,
+}
+
+impl Advance {
+    /// One tick of every row: `anims[i]` with the ground speed of
+    /// `bodies[i]`.
+    pub fn rows(&self, anims: &mut [Anim], bodies: &[Body]) {
+        for (a, b) in anims.iter_mut().zip(bodies.iter()) {
+            let rig = self.rigs.get(&a.model).map_or(&self.none, |(_, r)| r);
+            let mut ch = channels(a);
+            rig.advance(&mut ch, self.dt, (b.vx * b.vx + b.vy * b.vy).sqrt());
+            store(&ch, a);
+        }
+    }
+
+    /// [`Advance::rows`] split across `par`'s threads (rows are
+    /// independent: the same results for any split).
+    pub fn rows_par(&self, par: &ae_nav::par::Par, anims: &mut [Anim], bodies: &[Body]) {
+        par.chunks_mut_at(anims, |start, part| self.rows(part, &bodies[start..start + part.len()]));
     }
 }
 

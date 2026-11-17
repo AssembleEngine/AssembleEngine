@@ -127,11 +127,14 @@ version = "0.0.1"
 name = "ae_bench"
 version = "0.0.1"
 dependencies = [
+ "ae-sdk",
  "ae_ecs",
  "ae_framegraph",
+ "ae_model",
  "ae_nav",
  "ae_profile",
  "ae_sensors",
+ "ae_services",
  "ae_sim",
  "ae_spatial",
  "ae_view",

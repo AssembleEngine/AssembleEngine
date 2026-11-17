@@ -4,6 +4,7 @@ use crate::measure::Budget;
 use crate::record::Report;
 use anyhow::Result;
 
+pub mod anim;
 pub mod ecs_structural;
 pub mod framegraph_bake;
 pub mod nav;
@@ -37,6 +38,7 @@ pub const SUITES: &[Suite] = &[
     Suite { name: "sensors", about: "line-of-sight and radar coverage per allyteam (ae_sensors), serial and parallel; equal bits required", run: sensors::run },
     Suite { name: "sim-dispatch", about: "sandbox game tick: layered schedule on the worker crew, merge, apply; equal digests at 1..N workers", run: sim_dispatch::run },
     Suite { name: "view", about: "copy layer view tables per observer (ae_view): frame preparation, one build, a two-observer tick", run: view::run },
+    Suite { name: "anim", about: "animation ticker rows (ae_services::anim) on seeded channels at 1 and N threads; equal digests required", run: anim::run },
     Suite { name: "spatial", about: "grid rebuild and batch radius / nearest-k / sweep queries; equal hits at 1 and N threads", run: spatial::run },
 ];
 

@@ -9,6 +9,9 @@ license.workspace = true
 ae_ecs.workspace = true
 ae_framegraph.workspace = true
 ae_nav.workspace = true
+ae_model.workspace = true
+ae_services.workspace = true
+ae-sdk = { workspace = true, features = ["nav", "anim"] }
 ae_sim.workspace = true
 ae_sensors.workspace = true
 ae_spatial.workspace = true
