@@ -2729,6 +2729,29 @@ Design:
     clips' original keys (Fox clips resampled at 60 fps break most lines every tick); then
     regenerate the `gpu-*-fox` baselines (and a first `gpu-live-fox`). Not run yet: the
     windowed client with the delta keys (the offscreen `live-fox` only).
+  - Hybrid animation, phase 3 (clips on the GPU) — done (2026-11-17;
+    `docs/hybrid-animation.md`). It supersedes the joint keys: spins by rate and clips' original
+    keys are dropped (the GPU samples the sim's uniform 60/s bake). The client packs each posed
+    unit's `Anim` into an animation record (`units::RECORD_CELLS`, 15 16-byte cells: layers'
+    clip, mask, mode, kind, weight, phase; shown manual entries' bone, kind, value), two per slot,
+    each stamped with its tick; a tick writes one record over the older (its changed cells), or
+    none when it matches the newer (stamping the newer the last tick first when it is older).
+    `KeyWrites` became `AnimWrites` (16-byte cells), the feed and the scatter
+    (`units_anim_writes.comp`) unchanged in kind. The models' animation table carries each rig's
+    bake (`Rig::clip_table`), masks and rest transforms (`UnitsSetup::rigs`: the sim's rig per
+    class; none: `Rig::new` of the model, which the sim's are while masks are not from content);
+    `units_pose.comp` evaluates both records as `Rig::pose` does and lerps them at the drawn tick
+    (held at either end). Tests: `units_pose_models` against `Rig::pose` (play modes, a wrap,
+    blended, weighted, masked and additive layers, manual turns/moves/scales, a fresh entry,
+    newer-first records, opposite hemispheres; checked to fail on two shader mutations),
+    `streams_carry_poses`, `feed_hands_out_table_writes`. Measured (`live-fox`): CPU 6.5 →
+    1.3–1.8 ms a tick (reading the `Anim` rows and packing; no bone evaluated), 154 000 keys
+    (7.4 MB) → 28 500 cells (0.57 MB) a tick, upload 1.1 → 0.12 ms, `units pose` 0.43 → 0.37 ms;
+    validation clean. Not done from the proposal (each needs a decision): phase 0's separate
+    ticker bench, phase 1 (instance columns once a tick), phase 2 (the ticker's copies, wrap,
+    parallel rows; integer phases re-pin digests), phase 4 (a synced facing for aim and fire,
+    a schema change), phase 5 (`Bounds` and the callout, a schema change; pose after the cull),
+    phase 6 (analytic phases). Not run yet: the windowed client.
 
 ## Later improvements
 

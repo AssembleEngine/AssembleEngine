@@ -572,7 +572,7 @@ fn units_render_over_terrain() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -595,8 +595,8 @@ fn units_render_over_terrain() {
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
-    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0, models: Vec::new() };
+    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
+    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0, models: Vec::new(), rigs: Vec::new() };
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
     let camera = {
         let view = app.view();
@@ -655,7 +655,7 @@ fn terrain_edits_reach_the_heightfield() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -674,9 +674,9 @@ fn terrain_edits_reach_the_heightfield() {
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
     let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new() });
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
     let camera = {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -1014,7 +1014,7 @@ fn cull_on_gpu(
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
 
     let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
@@ -1026,11 +1026,11 @@ fn cull_on_gpu(
             columns[a].push(word);
         }
     }
-    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() };
+    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() };
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(stream.clone()));
     let classes = vec![UnitClass { color: [1.0, 0.0, 0.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels, models: Vec::new() });
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels, models: Vec::new(), rigs: Vec::new() });
     let cam = {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -1090,7 +1090,7 @@ fn units_cull_matches_the_cpu_reference() {
         tick_seconds: 0.0,
         sim_seconds: 0.0,
         columns: std::array::from_fn(|a| candidates.iter().map(|&(x, y, r, c)| [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0, r.to_bits(), c, ae_render::units::NO_POSE][a]).collect()),
-        keys: ae_render::units::KeyWrites::default(),
+        anim: ae_render::units::AnimWrites::default(),
     };
     let margins = cull_margins(&probe, &frame, MIN_PIXELS, 1.0, ground);
     let rows: Vec<(f32, f32, f32, u32)> = candidates.iter().zip(&margins).filter(|(_, m)| m.0.abs() > 0.5).map(|(c, _)| *c).take(3000).collect();
@@ -1146,7 +1146,7 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
     use ae_render::terrain::heightmap::{build_pyramid, generate};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
 
     let heightmap = generate(257, 257, 3);
     let pyramid = build_pyramid(&heightmap, 300.0, 0.0);
@@ -1160,9 +1160,9 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
     let classes = vec![UnitClass { color: [1.0, 0.8, 0.1], floats: false }, UnitClass { color: [0.9, 0.9, 0.95], floats: true }, UnitClass { color: [0.8, 0.1, 0.1], floats: false }];
-    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new() });
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new(), rigs: Vec::new() });
     if let Some(wasm) = module {
         app = app.with_module(wasm);
     }
@@ -1615,7 +1615,7 @@ fn water_covers_the_low_ground_only() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, VisionGrid};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -1646,9 +1646,9 @@ fn water_covers_the_low_ground_only() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: true }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.water {
             app = app.with_water();
         }
@@ -1768,7 +1768,7 @@ fn hills_shade_away_from_the_sun() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec4};
 
     let gpu = gpu();
@@ -1802,9 +1802,9 @@ fn hills_shade_away_from_the_sun() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.shadows {
             app = app.with_shadows();
         }
@@ -1948,7 +1948,7 @@ fn units_cast_shadows() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2027,9 +2027,9 @@ fn units_cast_shadows() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -2137,7 +2137,7 @@ fn particles_cast_coloured_shadows() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2182,9 +2182,9 @@ fn particles_cast_coloured_shadows() {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -2854,7 +2854,7 @@ fn decals_wrap_over_cliffs() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -2909,9 +2909,9 @@ fn decals_wrap_over_cliffs() {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), keys: KeyWrites::default() }));
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
             let life = match decals {
@@ -3273,7 +3273,7 @@ fn units_draw_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3319,8 +3319,8 @@ fn units_draw_models() {
     // shadow map (the models' caster).
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: KeyWrites::default() }));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: models.clone() });
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: models.clone(), rigs: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -3424,7 +3424,7 @@ fn units_model_shadows_culled() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3497,8 +3497,8 @@ fn units_model_shadows_culled() {
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), keys: KeyWrites::default() }));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 1.0, models: models.clone() });
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 1.0, models: models.clone(), rigs: Vec::new() });
         if shadows {
             app = app.with_shadows();
         }
@@ -3537,19 +3537,23 @@ fn units_model_shadows_culled() {
     assert_clean(&gpu);
 }
 
-/// Units with joint keys: the pose pass's palettes match the CPU's
-/// (`ae_model::anim`: each bone on the line through its two keys at the
-/// drawn tick, `on_line`, then `Rig::globals` and `Rig::palette`), drawn a
-/// tick behind (on the newer key) and at the stream's tick (past it, by
-/// the line); units without keys, or whose keys are not in the stream, on
-/// the rest palette. For a model built here (a base and an arm, two clips
-/// through the hierarchy), the Fox (skinned) and BoxAnimated (animated
-/// pieces); the arm is drawn where its pose puts it; a unit whose rest
-/// sphere is off screen but whose clip reaches into it is not culled.
+/// Units with animation records: the pose pass's palettes match the sim's
+/// (`ae_model::anim`: `Rig::pose` of each record's channels, lerped
+/// between the two at the drawn tick, then `Rig::globals` and
+/// `Rig::palette`), drawn half way between the records (ticks 5 and 7,
+/// drawn at 6) and on the newer; units without records, or whose records
+/// are not in the table, on the rest palette. Layers blended, weighted,
+/// masked (the sim's rig's mask) and additive, every play mode, a loop
+/// across its wrap, manual turns, moves and scales (one not shown yet),
+/// records newer first, rotations on opposite hemispheres. For a model
+/// built here (a base and an arm, two clips through the hierarchy), the
+/// Fox (skinned) and BoxAnimated (animated pieces); the arm is drawn where
+/// its pose puts it; a unit whose rest sphere is off screen but whose clip
+/// reaches into it is not culled.
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn units_pose_models() {
-    use ae_model::anim::{Channels, Key, Layer, Pose, Rig, key, on_line};
+    use ae_model::anim::{Channels, Layer, Manual, Pose, Rig, Trs, kind, manual_flags, manual_kind};
     use ae_model::pose::{PlayMode, rest_palette};
     use ae_model::{Bone, Channel, Clip, Interpolation, Joint, Material, Model, Path, Range};
     use ae_render::models::rows;
@@ -3557,7 +3561,7 @@ fn units_pose_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, frustum_planes};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{InstanceStream, KeyWrites, NO_POSE, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, Cell, InstanceStream, NO_POSE, RECORD_CELLS, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3623,23 +3627,90 @@ fn units_pose_models() {
         Vec3::new(x, 50.0, y) + (forward * local.x + Vec3::Y * local.y + side * local.z) * r
     };
 
-    // (x, y, heading, radius, class, keys): keys are the clip (from 1;
-    // 0: none), its mode, and its times at the older and the newer key
-    // (ticks 5 and 7); class 3 is a dart.
-    type Keys = Option<(u16, PlayMode, f32, f32)>;
+    // What a unit's records hold: none (at rest), records not in the
+    // table, or channels at ticks 5 and 7 (stored newer first when
+    // `swapped`).
+    #[derive(Clone)]
+    enum Spec {
+        Rest,
+        Missing,
+        Records(Channels, Channels, bool),
+    }
     let (looped, once, pingpong) = (PlayMode::Loop, PlayMode::Once, PlayMode::PingPong);
-    let mut units: Vec<((f32, f32), (f32, f32), f32, u32, Keys)> = vec![
-        ((420.0, 440.0), (1.0, 0.0), 20.0, 0, None),
-        ((510.0, 440.0), (1.0, 0.0), 20.0, 0, Some((1, looped, 0.5, 0.5))),
-        ((600.0, 440.0), (1.0, 0.0), 20.0, 0, Some((2, looped, 0.6, 1.0))),
-        ((420.0, 540.0), (1.0, 0.0), 20.0, 0, Some((1, looped, 0.25, 0.75))),
-        ((510.0, 540.0), (1.0, 0.0), 20.0, 0, Some((0, looped, 0.0, 0.0))),
-        ((610.0, 560.0), (1.0, 0.0), 40.0, 1, Some((2, looped, 0.3, 0.4))),
-        ((530.0, 640.0), (1.0, 0.0), 30.0, 2, Some((1, looped, 0.1, 0.2))),
-        ((620.0, 650.0), (1.0, 0.0), 6.0, 3, Some((1, looped, 0.0, 0.0))),
-        ((470.0, 390.0), (1.0, 0.0), 20.0, 0, Some((2, pingpong, 3.3, 3.3))),
-        ((560.0, 390.0), (1.0, 0.0), 20.0, 0, Some((1, once, 7.5, 7.5))),
-        ((650.0, 390.0), (1.0, 0.0), 30.0, 2, Some((1, pingpong, 0.2, 0.3))),
+    let layer = |clip: u16, mode: PlayMode, phase: f32| Layer { clip, mode: mode as u8, weight: 1.0, target: 1.0, phase, ..Default::default() };
+    let with = |layers: &[Layer], manual: &[Manual]| {
+        let mut ch = Channels::default();
+        ch.layers[..layers.len()].copy_from_slice(layers);
+        ch.manual[..manual.len()].copy_from_slice(manual);
+        ch
+    };
+    let one = |clip: u16, mode: PlayMode, ta: f32, tb: f32| Spec::Records(with(&[layer(clip, mode, ta)], &[]), with(&[layer(clip, mode, tb)], &[]), false);
+    let entry = |bone: u16, kind: u8, value: [f32; 4]| Manual { bone, kind, value, ..Default::default() };
+    let about_y = |deg: f32| Quat::from_rotation_y(deg.to_radians()).to_array();
+    let additive = |l: Layer, mask: u16, weight: f32| Layer { kind: kind::ADDITIVE, mask, weight, ..l };
+    let weighted = |l: Layer, weight: f32| Layer { weight, ..l };
+    let mut units: Vec<((f32, f32), (f32, f32), f32, u32, Spec)> = vec![
+        ((420.0, 440.0), (1.0, 0.0), 20.0, 0, Spec::Rest),
+        ((510.0, 440.0), (1.0, 0.0), 20.0, 0, one(1, looped, 0.5, 0.5)),
+        ((600.0, 440.0), (1.0, 0.0), 20.0, 0, one(2, looped, 0.6, 1.0)),
+        ((420.0, 540.0), (1.0, 0.0), 20.0, 0, one(1, looped, 0.25, 0.75)),
+        ((510.0, 540.0), (1.0, 0.0), 20.0, 0, Spec::Missing),
+        (
+            (610.0, 560.0),
+            (1.0, 0.0),
+            40.0,
+            1,
+            Spec::Records(with(&[layer(2, looped, 0.3), weighted(layer(1, looped, 0.1), 0.5)], &[]), with(&[layer(2, looped, 0.4), weighted(layer(1, looped, 0.2), 0.5)], &[]), true),
+        ),
+        ((530.0, 640.0), (1.0, 0.0), 30.0, 2, one(1, looped, 0.1, 0.2)),
+        ((620.0, 650.0), (1.0, 0.0), 6.0, 3, one(1, looped, 0.0, 0.0)),
+        ((470.0, 390.0), (1.0, 0.0), 20.0, 0, one(2, pingpong, 3.3, 3.3)),
+        ((560.0, 390.0), (1.0, 0.0), 20.0, 0, one(1, once, 7.5, 7.5)),
+        ((650.0, 390.0), (1.0, 0.0), 30.0, 2, one(1, pingpong, 0.2, 0.3)),
+        // A loop across its wrap: the poses lerped.
+        ((440.0, 600.0), (1.0, 0.0), 20.0, 0, one(1, looped, 0.9, 0.1)),
+        // The base hopping, the arm's reach added on its mask only.
+        (
+            (560.0, 600.0),
+            (1.0, 0.0),
+            20.0,
+            0,
+            Spec::Records(with(&[layer(2, looped, 0.5), additive(layer(1, looped, 0.4), 1, 0.7)], &[]), with(&[layer(2, looped, 1.0), additive(layer(1, looped, 0.6), 1, 0.7)], &[]), true),
+        ),
+        // Manual: the arm turned (out of its clip), the base moved then
+        // scaled; a move not shown yet.
+        (
+            (480.0, 480.0),
+            (1.0, 0.0),
+            20.0,
+            0,
+            Spec::Records(
+                with(&[layer(1, looped, 0.5)], &[entry(2, manual_kind::TURN, about_y(30.0)), entry(1, manual_kind::MOVE, [0.0, 0.5, 0.0, 0.0])]),
+                with(&[layer(1, looped, 0.5)], &[entry(2, manual_kind::TURN, about_y(60.0)), entry(1, manual_kind::SCALE, [1.5, 1.0, 1.0, 0.0]), Manual { flags: manual_flags::FRESH, ..entry(1, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0]) }]),
+                false,
+            ),
+        ),
+        // A turn whose records are on opposite hemispheres (a spin).
+        (
+            (580.0, 480.0),
+            (1.0, 0.0),
+            20.0,
+            0,
+            Spec::Records(with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))]), with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))]), true),
+        ),
+        // Half a blend over the rest, a layer at weight 0, a clip and a
+        // mask the model lacks (skipped; the whole model).
+        (
+            (650.0, 480.0),
+            (1.0, 0.0),
+            20.0,
+            0,
+            Spec::Records(
+                with(&[weighted(layer(1, looped, 0.5), 0.5), weighted(layer(2, looped, 0.5), 0.0), layer(9, looped, 0.1), Layer { mask: 5, ..layer(2, looped, 0.25) }], &[]),
+                with(&[weighted(layer(1, looped, 0.7), 0.5), weighted(layer(2, looped, 0.5), 0.0), layer(9, looped, 0.1), Layer { mask: 5, ..layer(2, looped, 0.75) }], &[]),
+                false,
+            ),
+        ),
     ];
     // Off the right edge, facing +y (its right is world -x): its rest
     // sphere is culled, its arm at 0.99 s of "reach" (5.94 to its right)
@@ -3650,64 +3721,76 @@ fn units_pose_models() {
     while !outside(at(x, 512.0, heading, 20.0, Vec3::new(rest_sphere[0], rest_sphere[1], rest_sphere[2])), rest_sphere[3] * 20.0) {
         x += 2.0;
     }
-    units.push(((x + 4.0, 512.0), heading, 20.0, 0, Some((1, looped, 0.99, 0.99))));
+    units.push(((x + 4.0, 512.0), heading, 20.0, 0, one(1, looped, 0.99, 0.99)));
     let reach_tip = at(x + 4.0, 512.0, heading, 20.0, Vec3::new(0.0, 1.39, 5.94));
     assert!(!outside(reach_tip, 0.0), "the off-screen unit's arm reaches into the view");
 
-    // Keys: a unit's pose at its two times (one clip layer), two keys per
-    // bone; a model without the clip gets no keys of its own but a `pose`
-    // past the stream's keys (drawn at rest).
-    let rigs: Vec<Rig> = models.iter().map(Rig::new).collect();
-    let (older, newer) = (5u32, 7u32);
-    let posed = |rig: &Rig, clip: u16, mode: PlayMode, time: f32| -> Pose {
-        let mut ch = Channels::default();
-        ch.layers[0] = Layer { clip, mode: mode as u8, weight: 1.0, target: 1.0, phase: time, ..Default::default() };
-        let mut p = rig.rest_pose();
-        rig.pose(&ch, &mut p);
-        p
+    // The sim's rigs; the arm's has a mask (its arm only), which the
+    // renderer gets with the rig.
+    let mut rigs: Vec<Rig> = models.iter().map(Rig::new).collect();
+    let arm_mask = rigs[0].add_mask("arm", vec![0.0, 0.0, 1.0]);
+    assert_eq!(arm_mask, 1);
+    // A record as the client packs it (ae-client poser.rs, units.rs
+    // RECORD_CELLS).
+    let record = |ch: &Channels, tick: u32| -> [Cell; RECORD_CELLS] {
+        let mut r = [[0; 4]; RECORD_CELLS];
+        for (i, l) in ch.layers.iter().enumerate().filter(|(_, l)| l.clip != 0) {
+            r[1 + i] = [l.clip as u32 | (l.mask as u32) << 16, l.mode as u32 | (l.kind as u32) << 8, l.weight.to_bits(), l.phase.to_bits()];
+        }
+        let mut n = 0;
+        for m in ch.manual.iter().filter(|m| m.kind != manual_kind::NONE && m.flags & manual_flags::FRESH == 0) {
+            r[5 + n / 4][n % 4] = m.bone as u32 | (m.kind as u32) << 16;
+            r[7 + n] = m.value.map(f32::to_bits);
+            n += 1;
+        }
+        r[0] = [tick, n as u32, 0, 0];
+        r
     };
-    let mut keys: Vec<Key> = Vec::new();
+    let (older, newer) = (5u32, 7u32);
+    let mut table: Vec<Cell> = Vec::new();
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
-    for &((x, y), (hx, hy), radius, class, k) in &units {
-        let pose = match (k, rigs.get(class as usize)) {
-            (Some((clip, mode, ta, tb)), Some(rig)) if clip > 0 => {
-                let first = keys.len() as u32;
-                let (a, b) = (posed(rig, clip, mode, ta), posed(rig, clip, mode, tb));
-                for (pa, pb) in a.local.iter().zip(&b.local) {
-                    keys.extend([key(pa, older), key(&ae_model::anim::same_side(pa, *pb), newer)]);
+    for ((x, y), (hx, hy), radius, class, spec) in &units {
+        let pose = match spec {
+            Spec::Records(a, b, swapped) if (*class as usize) < rigs.len() => {
+                let first = table.len() as u32;
+                let (a, b) = (record(a, older), record(b, newer));
+                match swapped {
+                    true => table.extend(b.iter().chain(&a)),
+                    false => table.extend(a.iter().chain(&b)),
                 }
                 first
             }
-            (Some(_), _) => 1 << 20,
-            (None, _) => NO_POSE,
+            Spec::Records(..) | Spec::Missing => 1 << 20,
+            Spec::Rest => NO_POSE,
         };
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), hx.to_bits(), hy.to_bits(), radius.to_bits(), class, pose].into_iter().enumerate() {
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), hx.to_bits(), hy.to_bits(), radius.to_bits(), *class, pose].into_iter().enumerate() {
             columns[a].push(word);
         }
     }
     let classes = vec![UnitClass { color: [0.5; 3], floats: false }; 4];
     let setup_models: Vec<_> = models.iter().map(|m| Some(Arc::new(m.clone()))).collect();
+    let setup_rigs: Vec<_> = rigs.iter().map(|r| Some(Arc::new(r.clone()))).collect();
     // Frame, counts and poses; `behind`: drawn a tick behind the stream
-    // (published in the future: interpolation weight 0), on the newer key;
-    // else at the stream's tick, half a key span past the newer key.
+    // (published in the future: interpolation weight 0), half way between
+    // the records; else at the stream's tick, on the newer.
     let render = |behind: bool| {
         let feed = Arc::new(UnitFeed::default());
         let (published, tick_seconds) = match behind {
             true => (std::time::Instant::now() + std::time::Duration::from_secs(3600), 0.25),
             false => (std::time::Instant::now(), 0.0),
         };
-        // A whole table of stale keys (every bone at the origin, a tick
-        // earlier), then the keys as writes over it: the renderer gets the
-        // feed's table, both streams' writes coalesced.
-        let stale: Vec<Key> = keys.iter().map(|k| key(&ae_model::anim::Trs { t: [0.0; 3], r: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] }, k[3].wrapping_sub(1))).collect();
-        let stream = |keys: KeyWrites| Arc::new(InstanceStream { tick: newer as u64 + 1, published, tick_seconds, sim_seconds: tick_seconds, columns: columns.clone(), keys });
-        feed.publish(stream(KeyWrites::whole(&stale)));
-        let mut writes = KeyWrites::default();
-        for (i, k) in keys.iter().enumerate() {
-            writes.push(i as u32, *k);
+        // A whole table of stale records (empty, ticks 1 and 2), then the
+        // records as writes over it: the renderer gets the feed's table,
+        // both streams' writes coalesced.
+        let stale: Vec<Cell> = (0..table.len()).map(|c| if c % RECORD_CELLS == 0 { [1 + (c / RECORD_CELLS % 2) as u32, 0, 0, 0] } else { [0; 4] }).collect();
+        let stream = |anim: AnimWrites| Arc::new(InstanceStream { tick: newer as u64, published, tick_seconds, sim_seconds: tick_seconds, columns: columns.clone(), anim });
+        feed.publish(stream(AnimWrites::whole(&stale)));
+        let mut writes = AnimWrites::default();
+        for (i, c) in table.iter().enumerate().filter(|(i, c)| stale[*i] != **c) {
+            writes.push(i as u32, *c);
         }
         feed.publish(stream(writes));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: setup_models.clone() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 32, classes: classes.clone(), min_pixels: 6.0, models: setup_models.clone(), rigs: setup_rigs.clone() });
         set_view(&app);
         app.create_offscreen(&gpu, extent).unwrap();
         let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
@@ -3724,22 +3807,35 @@ fn units_pose_models() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         (pixels, counts, poses)
     };
+    // The sim's pose of `ch`.
+    let pose_of = |rig: &Rig, ch: &Channels| -> Pose {
+        let mut p = rig.rest_pose();
+        rig.pose(ch, &mut p);
+        p
+    };
+    let nlerp = |a: [f32; 4], b: [f32; 4], s: f32| {
+        let b = if Vec4::from(a).dot(Vec4::from(b)) < 0.0 { b.map(|v| -v) } else { b };
+        Vec4::from(a).lerp(Vec4::from(b), s).normalize().to_array()
+    };
+    let lerp3 = |a: [f32; 3], b: [f32; 3], s: f32| Vec3::from(a).lerp(Vec3::from(b), s).to_array();
 
     for behind in [false, true] {
         let (pixels, counts, poses) = render(behind);
         assert_eq!(counts, Some((units.len() as u32, units.len() as u32)), "every unit drawn (behind: {behind})");
         assert_eq!(poses.len(), units.len());
-        for (r, &(.., class, k)) in units.iter().enumerate() {
-            let Some(model) = models.get(class as usize) else {
+        // Drawn at tick 6 (half way) or 7 (the newer).
+        let s = if behind { 0.5 } else { 1.0 };
+        for (r, (.., class, spec)) in units.iter().enumerate() {
+            let Some(model) = models.get(*class as usize) else {
                 assert!(poses[r].is_empty(), "row {r}: a dart has no palette");
                 continue;
             };
-            let rig = &rigs[class as usize];
-            let want: Vec<[f32; 12]> = match (columns[8][r], k) {
-                (p, Some(_)) if p != NO_POSE && (p as usize) < keys.len() => {
-                    let p = p as usize;
-                    let local = (0..rig.bones()).map(|b| on_line(&keys[p + 2 * b], &keys[p + 2 * b + 1], newer, if behind { 0.0 } else { 1.0 })).collect();
-                    let pose = Pose { local, posed: vec![true; rig.bones()] };
+            let rig = &rigs[*class as usize];
+            let want: Vec<[f32; 12]> = match spec {
+                Spec::Records(a, b, _) => {
+                    let (pa, pb) = (pose_of(rig, a), pose_of(rig, b));
+                    let local = pa.local.iter().zip(&pb.local).map(|(a, b)| Trs { t: lerp3(a.t, b.t, s), r: nlerp(a.r, b.r, s), s: lerp3(a.s, b.s, s) }).collect();
+                    let pose = Pose { local, posed: pa.posed.iter().zip(&pb.posed).map(|(a, b)| *a || *b).collect() };
                     let mut globals = vec![[0.0; 12]; rig.bones()];
                     rig.globals(&pose, &mut globals);
                     let mut palette = vec![[0.0; 12]; rig.joints()];
@@ -3751,7 +3847,7 @@ fn units_pose_models() {
             assert_eq!(poses[r].len(), want.len(), "row {r}: one entry per joint");
             for (j, (got, want)) in poses[r].iter().zip(&want).enumerate() {
                 for i in 0..12 {
-                    assert!((got[i] - want[i]).abs() <= 1e-3 * want[i].abs().max(1.0), "row {r} (class {class}, keys {k:?}, behind {behind}) joint {j}: {got:?} vs {want:?}");
+                    assert!((got[i] - want[i]).abs() <= 1e-3 * want[i].abs().max(1.0), "row {r} (class {class}, behind {behind}) joint {j}: {got:?} vs {want:?}");
                 }
             }
         }
@@ -3776,7 +3872,7 @@ fn units_pose_models() {
         assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "half way through the reach, the arm 3 to the right");
         assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "and not on the base");
         let (x, y, h, r) = unit(4);
-        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "keys not in the stream: at rest");
+        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "records not in the table: at rest");
         assert!(blue(reach_tip), "the off-screen unit's arm is drawn");
         let (x, y, h, r) = unit(9);
         assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))), "played once, held at full reach (looping it would be half way)");

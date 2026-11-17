@@ -1,0 +1,19 @@
+#version 460
+// The frame's writes into the units' animation table (units.pose, before
+// the poses): one invocation per cell (units.rs write_frame stages them
+// from UnitFeed::take). The table lives across frames; only what changed
+// comes.
+#define POSE
+#define ANIM_WRITES
+#include "units_common.glsl"
+#include "units_models.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= u.anim.z) {
+        return;
+    }
+    records[stagedAt[i]] = staged[i];
+}

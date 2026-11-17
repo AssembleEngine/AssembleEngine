@@ -21,7 +21,7 @@ struct Material {
 layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
 // Skinning matrices, 3x4: each column holds a row of the affine transform
 // (p' = vec4(p, 1) * m). The models' rest palettes, then a range per unit
-// with joint keys (rows' pose offsets point into either), then the pose
+// with animation records (rows' pose offsets point into either), then the pose
 // pass's scratch.
 #ifdef POSE
 layout(std430, set = 1, binding = 2) buffer Palette { mat3x4 palette[]; };
@@ -33,7 +33,7 @@ struct ModelClass {
     vec4 sphere; // bounding sphere (at rest, or over its clips), fitted units
     uvec4 cmd;   // first entry in classCommands, commands (0: a dart), rest palette offset, joints
     vec4 fit;    // x: 1 / footprint radius
-    uvec4 pose;  // in anim[]: first bone, bones, first joint; unused
+    uvec4 pose;  // in anim[]: first bone, bones, first joint, the clips' head
 };
 layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
 
@@ -52,25 +52,29 @@ layout(std430, set = 1, binding = 4) readonly buffer Draws { DrawRecord draws[];
 // Per class its commands' indices (the cull counts each).
 layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classCommands[]; };
 // Per frame: [capacity] each row's palette offset, [capacity] the rows
-// with joint keys (the pose jobs), [capacity] each job's scratch offset.
+// with animation records (the pose jobs), [capacity] each job's scratch offset.
 layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
 // Partially bound (models::MAX_TEXTURES); indexed per draw, so uniformly.
 layout(set = 1, binding = 7) uniform sampler2D textures[1024];
 #ifdef POSE
-// The animation table (models.rs, animation()): bones (rest rows 0..2,
-// parent in 3.x), joints (inverse bind rows 0..2, bone in 3.x).
+// The models' animation table (models.rs, animation()): per model its bones
+// (rest rows 0..2, parent in 3.x), joints (inverse bind rows 0..2, bone in
+// 3.x), and from ModelClass.pose.w its clips (the sim's bake), masks and
+// rest transforms. Words (uint) are indexed over the whole table, four a
+// vec4.
 layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
-// The joint key table (ae_model::anim::Key), three vec4 each: translation
-// and the tick (uint bits), rotation, scale; a posed unit's bones from its
-// pose attribute (UnitFeed's table, units.rs). units_keys.comp writes it.
-#ifdef KEY_WRITES
-layout(std430, set = 1, binding = 9) writeonly buffer Keys { vec4 keys[]; };
+uint animWord(uint w) { return floatBitsToUint(anim[w >> 2u][w & 3u]); }
+// The units' animation table (units.rs RECORD_CELLS): two records per
+// posed unit from its pose attribute. units_anim_writes.comp writes it.
+#define RECORD_CELLS 15u
+#ifdef ANIM_WRITES
+layout(std430, set = 1, binding = 9) writeonly buffer Records { uvec4 records[]; };
 #else
-layout(std430, set = 1, binding = 9) readonly buffer Keys { vec4 keys[]; };
+layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; };
 #endif
-// The frame's key writes (u.anim.z of them): key i, three vec4, goes to
-// table key stagedAt[i].
-layout(std430, set = 1, binding = 10) readonly buffer Staged { vec4 staged[]; };
+// The frame's table writes (u.anim.z of them): cell i goes to table cell
+// stagedAt[i].
+layout(std430, set = 1, binding = 10) readonly buffer Staged { uvec4 staged[]; };
 layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
 #endif
 

@@ -433,10 +433,10 @@ impl TerrainApp {
         Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
     }
 
-    /// Joint keys the last frame uploaded into the units' key table, and
+    /// Cells the last frame uploaded into the units' animation table, and
     /// the render thread's milliseconds for it.
-    pub fn last_key_upload(&self) -> (u32, f64) {
-        self.unit_renderer.as_ref().map_or((0, 0.0), |u| u.key_upload())
+    pub fn last_anim_upload(&self) -> (u32, f64) {
+        self.unit_renderer.as_ref().map_or((0, 0.0), |u| u.anim_upload())
     }
 
     /// Per model class, the units the cull put in each shadow cascade in

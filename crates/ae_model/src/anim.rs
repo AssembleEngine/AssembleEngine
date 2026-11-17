@@ -246,6 +246,21 @@ impl Baked {
     }
 }
 
+/// A baked clip, read only ([`Rig::clip_table`]): the bones it animates
+/// (its tracks, ascending), and per frame (`frames` of them, `rate` a
+/// second, the last at `duration`) each track's local transform,
+/// `keys[frame * tracks.len() + track]`. A frame between two is their lerp
+/// (rotations nlerp the short way); a layer samples it at
+/// `PlayMode::clip_time(phase, duration) * rate`.
+#[derive(Clone, Copy, Debug)]
+pub struct ClipTable<'a> {
+    pub tracks: &'a [u32],
+    pub frames: u32,
+    pub rate: f32,
+    pub duration: f32,
+    pub keys: &'a [Trs],
+}
+
 /// The bones' local transforms, and which of them anything posed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pose {
@@ -332,6 +347,22 @@ impl Rig {
 
     pub fn masks(&self) -> &[Mask] {
         &self.masks
+    }
+
+    /// The bones' parents (`u32::MAX`: a root); parents come first.
+    pub fn parents(&self) -> &[u32] {
+        &self.parents
+    }
+
+    /// The bones' rest transforms (what an unposed part starts from).
+    pub fn rest(&self) -> &[Trs] {
+        &self.rest
+    }
+
+    /// Clip `clip` (numbered from 1) as baked: what [`Rig::pose`] samples,
+    /// for the GPU to sample the same keys.
+    pub fn clip_table(&self, clip: u16) -> Option<ClipTable<'_>> {
+        self.baked(clip).map(|c| ClipTable { tracks: &c.tracks, frames: c.frames, rate: c.rate, duration: c.duration, keys: &c.keys })
     }
 
     fn baked(&self, clip: u16) -> Option<&Baked> {

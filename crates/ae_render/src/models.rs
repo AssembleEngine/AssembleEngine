@@ -14,14 +14,16 @@
 //!   discards loses early depth), so the camera draws with two multi-draws.
 //! * Poses: the palette (`units.palette`) holds 3x4 matrices (rows). Its
 //!   head is each model's rest palette, written once; a unit at rest
-//!   points at it. A unit with joint keys in the stream (its bones' local
-//!   transforms, `ae_model::anim::Key`, posed on the CPU) gets a range of
-//!   its own, which the pose pass (`shaders/units_pose.comp`) fills each
-//!   frame: each bone on the line through its two keys at the drawn time,
-//!   the hierarchy walked, the inverse binds applied, once per unit and
-//!   bone (vertices only blend matrices). The animation table
-//!   ([`ModelSet::anim`]) holds the bones and joints. A model with clips is
-//!   culled with a sphere that covers every clip frame.
+//!   points at it. A unit with animation records (its channels at two
+//!   ticks, `crate::units::RECORD_CELLS`) gets a range of its own, which
+//!   the pose pass (`shaders/units_pose.comp`) fills each frame: each bone
+//!   evaluated from its model's clips as the sim's `Rig::pose` does, lerped
+//!   between the records at the drawn time, the hierarchy walked, the
+//!   inverse binds applied, once per unit and bone (vertices only blend
+//!   matrices). The animation table ([`ModelSet::anim`], [`animation`])
+//!   holds the bones, joints, and the rig's clips (the sim's bake), masks
+//!   and rest transforms. A model with clips is culled with a sphere that
+//!   covers every clip frame.
 //! * A model is fitted to the unit: its footprint radius (the largest
 //!   distance of its rest bounds from the origin along x or z) is drawn at
 //!   the unit's drawn size, as the dart's body radius is. Model space is
@@ -36,6 +38,7 @@ use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline;
 use crate::upload;
+use ae_model::anim::Rig;
 use ae_model::{AlphaMode, Filter, Model, Sampler, TextureRef, Wrap, ktx};
 use anyhow::{Context as _, Result, ensure};
 use ash::vk;
@@ -84,7 +87,7 @@ struct GpuClass {
     /// x: 1 / footprint radius.
     fit: [f32; 4],
     /// In the animation table (vec4s): the first bone, bones, the first
-    /// joint; unused.
+    /// joint, the clips' head.
     pose: [u32; 4],
 }
 
@@ -131,8 +134,8 @@ pub struct ModelSet {
     pub class_table: OwnedBuffer,
     pub draw_table: OwnedBuffer,
     pub class_commands: OwnedBuffer,
-    /// The animation table, vec4s: per model its bones (rest matrix rows,
-    /// then the parent) and joints (inverse bind rows, then the bone).
+    /// The animation table, vec4s: per model its bones, joints, clips,
+    /// masks and rest transforms ([`animation`]).
     pub anim: OwnedBuffer,
     images: Vec<OwnedImage>,
     samplers: Vec<vk::Sampler>,
@@ -204,9 +207,24 @@ pub fn rows(m: Mat4) -> [f32; 12] {
     out
 }
 
-/// Append `model`'s bones and joints to the animation table; its
-/// `GpuClass::pose`.
-fn animation(model: &Model, anim: &mut Vec<[f32; 4]>) -> [u32; 4] {
+/// Append `model`'s bones and joints, and `rig`'s clips, masks and rest
+/// transforms, to the animation table; its `GpuClass::pose`. The layout
+/// (vec4s; "words" are 32-bit, four a vec4, indexed from the table's
+/// start; `shaders/units_models.glsl`):
+/// * bones: rest matrix rows 0..2, then (parent, 0, 0, 0);
+/// * joints: inverse bind rows 0..2, then (bone, 0, 0, 0);
+/// * at `pose.w`, the clips' head: (clips, masks, first rest vec4, mask
+///   word), then per clip two vec4s: (frames, rate, duration, tracks),
+///   (first key vec4, track-of word, 0, 0);
+/// * per clip a word per bone: its track, or `u32::MAX` (not animated);
+/// * per mask a word per bone: its weight (`f32` bits);
+/// * per bone its rest transform: (translation, 0), rotation, (scale, 0);
+/// * per clip its keys, frame by frame, track by track: three vec4s as
+///   the rest transforms.
+///
+/// The clips are `rig`'s bake ([`ae_model::anim::Rig::clip_table`]): the
+/// sim's own keys, not baked again here.
+pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4] {
     let word = |u: u32| f32::from_bits(u);
     let bone_base = anim.len() as u32;
     for b in &model.bones {
@@ -218,7 +236,39 @@ fn animation(model: &Model, anim: &mut Vec<[f32; 4]>) -> [u32; 4] {
         let r = rows(Mat4::from_cols_array(&j.inverse_bind));
         anim.extend([[r[0], r[1], r[2], r[3]], [r[4], r[5], r[6], r[7]], [r[8], r[9], r[10], r[11]], [word(j.bone), 0.0, 0.0, 0.0]]);
     }
-    [bone_base, model.bones.len() as u32, joint_base, 0]
+    let bones = rig.bones();
+    let clips: Vec<_> = (1..=rig.clip_names().len() as u16).filter_map(|c| rig.clip_table(c)).collect();
+    let masks = rig.masks();
+    // Words after the head, in vec4s: track-of words, mask words.
+    let head = anim.len();
+    let words_at = head + 1 + 2 * clips.len();
+    let word_count = (clips.len() + masks.len()) * bones;
+    let rest_at = words_at + word_count.div_ceil(4);
+    let mut keys_at = rest_at + 3 * bones;
+    anim.push([word(clips.len() as u32), word(masks.len() as u32), word(rest_at as u32), word((4 * words_at + clips.len() * bones) as u32)]);
+    for (c, clip) in clips.iter().enumerate() {
+        anim.push([word(clip.frames), clip.rate, clip.duration, word(clip.tracks.len() as u32)]);
+        anim.push([word(keys_at as u32), word((4 * words_at + c * bones) as u32), 0.0, 0.0]);
+        keys_at += 3 * clip.keys.len();
+    }
+    let mut words = vec![u32::MAX; word_count.next_multiple_of(4)];
+    for (c, clip) in clips.iter().enumerate() {
+        for (i, &b) in clip.tracks.iter().enumerate() {
+            words[c * bones + b as usize] = i as u32;
+        }
+    }
+    for (k, m) in masks.iter().enumerate() {
+        for (b, w) in m.weights.iter().enumerate() {
+            words[(clips.len() + k) * bones + b] = w.to_bits();
+        }
+    }
+    anim.extend(words.chunks(4).map(|w| [word(w[0]), word(w[1]), word(w[2]), word(w[3])]));
+    let trs = |p: &ae_model::anim::Trs| [[p.t[0], p.t[1], p.t[2], 0.0], p.r, [p.s[0], p.s[1], p.s[2], 0.0]];
+    anim.extend(rig.rest().iter().flat_map(trs));
+    for clip in &clips {
+        anim.extend(clip.keys.iter().flat_map(trs));
+    }
+    [bone_base, model.bones.len() as u32, joint_base, head as u32]
 }
 
 /// Images and samplers made so far, destroyed if building fails.
@@ -320,9 +370,11 @@ impl ModelSet {
         capacity as u64 * (1 + Self::REGIONS as u64 * self.classes.len() as u64)
     }
 
-    /// `models[class]` for each unit class (`None`: a dart); `capacity`
-    /// units per visible-list region.
-    pub fn new(gpu: &GpuDevice, models: &[Option<Arc<Model>>], capacity: u32, max_classes: usize) -> Result<Self> {
+    /// `models[class]` for each unit class (`None`: a dart), posed by
+    /// `rigs[class]` (the sim's rig of that model: its clips and masks;
+    /// none or beyond the list: one made from the model, without masks);
+    /// `capacity` units per visible-list region.
+    pub fn new(gpu: &GpuDevice, models: &[Option<Arc<Model>>], rigs: &[Option<Arc<Rig>>], capacity: u32, max_classes: usize) -> Result<Self> {
         ensure!(gpu.gpu_driven, "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound");
         // The fragment stage sees the models' texture array and the units'
         // four samplers.
@@ -335,7 +387,7 @@ impl ModelSet {
             limits.max_per_stage_descriptor_sampled_images
         );
         let mut tex = Textures { gpu, images: Vec::new(), samplers: Vec::new(), image_of: Vec::new(), slots: Vec::new() };
-        match Self::build(gpu, models, capacity, max_classes, &mut tex) {
+        match Self::build(gpu, models, rigs, capacity, max_classes, &mut tex) {
             Ok(set) => Ok(set),
             Err(err) => {
                 tex.destroy();
@@ -344,7 +396,7 @@ impl ModelSet {
         }
     }
 
-    fn build(gpu: &GpuDevice, models: &[Option<Arc<Model>>], capacity: u32, max_classes: usize, tex: &mut Textures<'_>) -> Result<Self> {
+    fn build(gpu: &GpuDevice, models: &[Option<Arc<Model>>], rigs: &[Option<Arc<Rig>>], capacity: u32, max_classes: usize, tex: &mut Textures<'_>) -> Result<Self> {
         // Unique models: their vertex words, indices and materials.
         let mut unique: Vec<Arc<Model>> = Vec::new();
         let mut words: Vec<u32> = Vec::new();
@@ -359,7 +411,8 @@ impl ModelSet {
         let mut anim: Vec<[f32; 4]> = Vec::new();
         let mut rest: Vec<f32> = Vec::new();
         let (mut max_joints, mut max_bones) = (0u32, 0u32);
-        for model in models.iter().take(max_classes).flatten() {
+        for (c, model) in models.iter().enumerate().take(max_classes) {
+            let Some(model) = model else { continue };
             if unique.iter().any(|u| Arc::ptr_eq(u, model)) {
                 continue;
             }
@@ -378,7 +431,12 @@ impl ModelSet {
             }
             let rest_offset = (rest.len() / 12) as u32;
             rest.extend(ae_model::pose::rest_palette(model).iter().flat_map(|p| rows(*p)));
-            let pose = animation(model, &mut anim);
+            let rig = match rigs.get(c) {
+                Some(Some(rig)) => rig.clone(),
+                _ => Arc::new(Rig::new(model)),
+            };
+            ensure!(rig.bones() == model.bones.len(), "a rig of {} bones for a model of {}", rig.bones(), model.bones.len());
+            let pose = animation(model, &rig, &mut anim);
             let (footprint, mut sphere) = fit(model);
             if !model.clips.is_empty() {
                 let reach = ae_model::pose::animated_radius(model, glam::Vec3::new(sphere[0], sphere[1], sphere[2]));

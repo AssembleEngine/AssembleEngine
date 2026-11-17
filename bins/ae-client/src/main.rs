@@ -364,7 +364,9 @@ fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> Result<UnitsSetup> {
     // With an observer the classes end with the blips' and the selection's.
     let blip = s.observer.map(|_| classes.len() - 2);
     let models = models::per_class(&s.models, classes.len(), blip);
-    Ok(UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models })
+    // The sim's rigs are made from these models (`Rig::new`, no masks
+    // yet), and so are the renderer's: the same clips.
+    Ok(UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models, rigs: Vec::new() })
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with

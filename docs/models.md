@@ -88,39 +88,53 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   classes. Opaque and masked commands in a multi-draw each per cascade; the masked caster tests
   alpha as the camera does, so what is masked away casts no shadow. The graphs declare the reset
   and the cull before the shadows.
-- **Poses** (M14 step 3; replaced the GPU-baked clips): the CPU poses units from their sim
-  animation channels (`ae_model::anim::Rig::pose`, the sim's own function, in the client's
-  `poser.rs`) into a **joint key table** (`ae_model::anim::Key`, 48 bytes: translation and the
-  tick as a `u32`, rotation, scale): a posed unit has a slot of two keys per bone (for the
-  largest model), the same while it stays posed. Each tick a bone's pose is checked against the
-  line through its keys (`ae_model::anim::within`, 1e-3: radians, scale, and the model's reach
-  for translation); only a bone that left it gets new keys: its pose at the last tick and this
-  one, or this one only over the older key when the newer is the last tick's. A unit whose
-  `Anim` is unchanged is not posed again (still checked); units are posed in parallel (rayon).
-  Streams carry the writes (`InstanceStream::keys`, `units::KeyWrites`); the `UnitFeed` keeps
-  them until the renderer takes them, each key once at its newest value (`UnitFeed::take`), so
-  every stream must be published (`publish_reusing` hands taken batches' memory back to the
-  poser). A renderer that missed writes (its first take with no whole table pending, a frame
-  dropped after staging, too many batches untaken) makes the feed ask the producer for the
-  whole table (`wants_whole`; the poser writes its mirror, `reset`). The stream's
-  `pose` attribute is the unit's first key (`units::NO_POSE`: the rest pose). The palette holds
-  3x4 matrices (rows, 48 bytes): each model's rest palette at its head (written once; units at
-  rest point there), then a range per posed unit, then the pose pass's scratch. Each frame the
-  render thread stages the keys it took (host visible, per slot, bindings 10 and 11); when a new
-  tick arrives it gives each row its offset and lists the posed units (pose jobs). The `units
-  pose` pass (`units.pose`, compute, before the shadows and the draws) first scatters the staged
-  keys into the table (`units_keys.comp`; device local, one for all frame slots, with barriers
-  against the earlier frames' reads, binding 9), then runs one invocation per job: each bone on
-  the line through its two keys (in either order) at the drawn tick
-  (`ae_model::anim::on_line`: the stream's tick − 1 plus the interpolation weight; the tick
-  difference in integers, so exact at any tick; lerp and nlerp, past the newer key too), the
-  hierarchy walked in place, each joint's bone times its inverse bind. So bones are
-  interpolated once per unit and frame; the vertex shader only blends up to four matrices
-  (`palette[offset + joint]`), normals by the cofactor matrix (right under non-uniform scale).
-  Memory: the palette is sized for every unit posed with the largest posable model (capacity ×
-  (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB), the key table for two keys per bone
-  of every unit (Fox: 26 MB, device local), and per frame slot staging for as many writes (28
-  MB, host visible).
+- **Poses** (M14, hybrid animation, `docs/hybrid-animation.md`; replaced the CPU-posed joint
+  keys of step 3, which replaced the GPU-baked clips): the GPU evaluates each unit's pose from
+  its sim animation channels; nothing is posed on the CPU (the pose is presentation; the sim
+  answers its own joint questions, `Rig::dir_in`). The models' animation table (binding 8,
+  `models::animation`) holds each model's clips as the **sim's own bake**
+  (`ae_model::anim::Rig::clip_table`: per clip its frames at 60/s, a track word per bone, keys
+  as translation, rotation, scale), its masks (a weight word per bone) and its rest transforms,
+  from the rig the renderer is given per class (`UnitsSetup::rigs`; none: `Rig::new` of the
+  model, which is what the sim's rigs are until masks come from content). The client
+  (`poser.rs`) packs each posed unit's `Anim` into an **animation record** of 15 16-byte cells
+  (`units::RECORD_CELLS`: the tick and the shown manual entries' count; per layer clip, mask,
+  mode, kind, weight, phase; per shown manual entry its bone, kind and value). A posed unit
+  has a slot of two records, each stamped with its tick, the same while it stays posed; each
+  tick its record is compared with the newer one: the same (standing, a clip held) and nothing
+  is written; otherwise it goes over the older one when the newer is the last tick's (only the
+  cells that differ), or the newer is stamped the last tick first when it is older (it held so
+  since). Units are packed in parallel (rayon). Streams carry the writes
+  (`InstanceStream::anim`, `units::AnimWrites`); the `UnitFeed` keeps them until the renderer
+  takes them, each cell once at its newest value (`UnitFeed::take`), so every stream must be
+  published (`publish_reusing` hands taken batches' memory back). A renderer that missed
+  writes (its first take with no whole table pending, a frame dropped after staging, too many
+  batches untaken) makes the feed ask the producer for the whole table (`wants_whole`; the
+  packer writes its mirror, `reset`). The stream's `pose` attribute is the unit's first cell
+  (`units::NO_POSE`: the rest pose). The palette holds 3x4 matrices (rows, 48 bytes): each
+  model's rest palette at its head (written once; units at rest point there), then a range per
+  posed unit, then the pose pass's scratch. Each frame the render thread stages the cells it
+  took (host visible, per slot, bindings 10 and 11); when a new tick arrives it gives each row
+  its offset and lists the posed units (pose jobs). The `units pose` pass (`units.pose`,
+  compute, before the shadows and the draws) first scatters the staged cells into the units'
+  animation table (`units_anim_writes.comp`; device local, one for all frame slots, with
+  barriers against the earlier frames' reads, binding 9), then runs one invocation per job
+  (`units_pose.comp`): each bone evaluated from each record as `Rig::pose` does (rest, then
+  the layers in order: the clip at its phase by its play mode, two frames lerped; blended by
+  weight × mask weight, at most 1, or its change from the clip's first frame added; then a
+  bone with a shown manual entry takes its rest transform with the entries' values), drawn
+  between the two records' transforms at the drawn tick (the stream's tick − 1 plus the
+  interpolation weight; tick differences in integers; lerp and nlerp the short way, held at
+  the older before it and the newer past it; only one record evaluated then), a bone neither
+  record poses at its rest matrix; the hierarchy walked in place, each joint's bone times its
+  inverse bind. So a pose is the lerp of the two ticks' poses, as the joint keys drew it (a
+  spin faster than half a turn a tick shows wrong, as it did). The vertex shader only blends
+  up to four matrices (`palette[offset + joint]`), normals by the cofactor matrix (right under
+  non-uniform scale). Memory: the palette is sized for every unit posed with the largest
+  posable model (capacity × (joints + bones) × 48 bytes; Fox, 10 000 units: 23 MB), the units'
+  animation table for two records per unit (480 bytes; 10 000 units: 4.8 MB, device local),
+  and per frame slot staging for as many writes (4.8 MB + 4 bytes a cell, host visible); the
+  CPU mirror is as large as the table. The Fox's clips take 0.6 MB of the models' table.
 - **Cull sphere**: a model with clips is culled with a sphere covering every vertex in every baked
   frame of every clip, 5% larger (motion between frames), for all units of its class. Manual
   joints (M14) can reach further: not covered yet.
@@ -142,12 +156,16 @@ the test (opaque front, masked right side, a block masked away), the Fox and a d
 without and with the units' shadow map; front and right land where the heading puts them (not
 turned, not mirrored), the mask discards, the Fox shows its texture, the blocks cast shadows and
 the masked-away block none. `units_pose_models`: a base-and-arm model built in the test (two
-clips, one moving the base and so the arm), the Fox and BoxAnimated with joint keys from their
-clips (`Rig::pose`), published as a stale whole table and then the keys as writes over it,
-units at rest and with keys not in the table, drawn a tick behind (on the
-newer key) and at the stream's tick (past it, by the line); every row's palette read back equals
-the CPU's (`on_line`, `Rig::globals`, `Rig::palette`) to 1e-3 relative; the arm is drawn where
-its pose puts it; a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
+clips, one moving the base and so the arm; its rig given a mask), the Fox and BoxAnimated with
+animation records (ticks 5 and 7, some stored newer first): one layer in every play mode, a loop
+across its wrap, two layers blended and weighted, an additive layer on the mask, a weight-0
+layer, a clip and a mask the model lacks, manual turns, moves and scales (one not shown yet),
+a turn's records on opposite hemispheres; published as a stale whole table and then the records
+as writes over it, units at rest and with records not in the table, drawn half way between the
+records and on the newer; every row's palette read back equals the sim's (`Rig::pose` of each
+record's channels, lerped, `Rig::globals`, `Rig::palette`) to 1e-3 relative (checked to fail
+with the additive rotation or the manual rotations dropped from the shader); the arm is drawn
+where its pose puts it; a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
 cascade is counted in none; a pillar off screen toward the sun is in a cascade and shadows the
 ground in view (checked to fail when the cascades take only the units the camera sees). `ae_model` tests: baked clips against the sampler (linear
 translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
@@ -175,29 +193,31 @@ stands Foxes, blending the clips by the animation service and turning their head
 `ae-client --bench army-fox,live-fox,near-fox` (`bins/ae-client/src/bench.rs`): since M14 step 3
 they run the `scripted` game (10 000 Foxes on a 12 m grid under the `army` camera, walking and
 standing, animated by the sim) instead of the crossing army playing `--clip`, so the pose pass
-poses all 10 000 each frame from joint keys; `near-fox` with a closer camera. `army-fox` and
-`near-fox` draw one tick (the whole key table uploaded once); `live-fox` keeps the sim running,
-a tick every second frame, posed and uploaded as when playing. They also report `model_setup`
-(`ModelSet::new` for the Fox: geometry, texture upload, cull spheres), `cpu_pose` (the client's
-time to read the channels, pose the units and find the bones off their lines, per stream),
-`joint_keys` (the table) and `key_writes` (keys written a tick); `live-fox` also
-`cpu_key_publish` (the feed keeping a tick's writes, on the sim thread), `cpu_key_upload` (the
-render thread's time to take and stage them) and `keys_uploaded`. The sim ticks in the
-`--warmup` frames and the measured ones only, so the workload does not follow the frame rate.
+poses all 10 000 each frame; `near-fox` with a closer camera. `army-fox` and `near-fox` draw one
+tick (the whole animation table uploaded once); `live-fox` keeps the sim running, a tick every
+second frame, packed and uploaded as when playing. They also report `model_setup`
+(`ModelSet::new` for the Fox: geometry, texture upload, clip tables, cull spheres),
+`cpu_anim_pack` (the client's time to read the channels and pack the units' records, per
+stream), `anim_cells` (the table, 16-byte cells) and `anim_writes` (cells written a tick);
+`live-fox` also `cpu_anim_publish` (the feed keeping a tick's writes, on the sim thread),
+`cpu_anim_upload` (the render thread's time to take and stage them) and
+`anim_cells_uploaded`. The sim ticks in the `--warmup` frames and the measured ones only, so the
+workload does not follow the frame rate.
 
-M14 step 3 (RTX 3060 Ti, 24 threads, 2026-11-17):
+M14 (RTX 3060 Ti, 24 threads, 2026-11-17; `live-fox` for the last two rows):
 
-| | CPU posing | Keys a tick | Upload (render thread) | `units pose` |
+| | CPU a tick | Written a tick | Upload (render thread) | `units pose` |
 |---|---|---|---|---|
-| First cut (every key, one thread) | 18.8 ms | 540 000 (26 MB) | not measured | 0.39 ms |
-| In parallel (every key) | ~10 ms | 540 000 | not measured | 0.39 ms |
-| Lines, slots, unchanged skipped (`live-fox`) | 6.5 ms | 154 000 (7.4 MB) | 1.1 ms | 0.43 ms (scatter included) |
+| Joint keys, first cut (every key, one thread) | 18.8 ms posing | 540 000 keys (26 MB) | not measured | 0.39 ms |
+| Joint keys in parallel (every key) | ~10 ms posing | 540 000 keys | not measured | 0.39 ms |
+| Joint keys: lines, slots, unchanged skipped | 6.5 ms posing | 154 000 keys (7.4 MB) | 1.1 ms | 0.43 ms (scatter included) |
+| Hybrid: records, clips sampled on the GPU | 1.3–1.8 ms packing | 28 500 cells (0.57 MB) | 0.12 ms | 0.37 ms (scatter included) |
 
-Posing is memory bound from about four threads on (it reads the 26 MB key mirror and the
-bones' last poses each tick); the feed keeping the writes costs microseconds (an earlier cut
-that applied them to a table of its own took 3.4 ms of the sim thread). Fox clips are resampled at 60 fps and keyed at 24/s, so most
-animated bones leave their lines every tick: keeping the clips' own keys comes next.
-Validation clean.
+The CPU time is reading the units' `Anim` rows (536 bytes each), matching them to the stream and
+packing; no bone is evaluated. A walking Fox writes its record's tick and its layers' phases a
+tick (about three cells). The `units pose` pass samples the clips for both records only while
+the drawn tick is between them. `gpu_total` is unchanged within its spread (8.8 ms `army-fox`,
+7.4 ms `near-fox`, mostly the shadows). Validation clean (`live-fox` and the GPU tests).
 
 The M11 numbers (the crossing army playing `--clip`):
 

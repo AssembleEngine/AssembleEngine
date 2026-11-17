@@ -13,7 +13,7 @@
 #define ATTR_HEADING_Y 5u
 #define ATTR_RADIUS 6u
 #define ATTR_CLASS 7u
-// The unit's first joint key (ae_render::units::NO_POSE: at rest).
+// The unit's first animation record cell (ae_render::units::NO_POSE: at rest).
 #define ATTR_POSE 8u
 #define MAX_CLASSES 16u
 
@@ -31,7 +31,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 unitShadowAxes[3];   // light axes: right, up, toward the sun
     vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
-    uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: joint key writes
+    uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: animation table writes
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; } inst;

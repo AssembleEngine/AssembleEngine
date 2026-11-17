@@ -28,19 +28,20 @@
 //! The `-fox` scenes run the `scripted` game instead (10 000 Foxes in a
 //! grid under the army camera, walking and standing, animated by the sim:
 //! clips blended by the animation service, heads turned), drawn with the
-//! Khronos Fox (converted on first use, `models.rs`): the client poses
-//! every unit on the CPU from its channels and the `units pose` pass
-//! builds every palette each frame. They also report `model_setup`, the
-//! CPU (and upload) time of building the renderer's model set
-//! (`ModelSet::new`: geometry, textures, cull spheres), median of 5, and
-//! `cpu_pose`, the client's time to read the channels and pose every unit
-//! for a stream (median over the last 10 ticks), with info `joint_keys` (the
-//! key table) and `key_writes` (keys written a tick). `live-fox` keeps the
+//! Khronos Fox (converted on first use, `models.rs`): the client packs
+//! every unit's channels into animation records and the `units pose` pass
+//! evaluates their clips and builds every palette each frame. They also
+//! report `model_setup`, the CPU (and upload) time of building the
+//! renderer's model set (`ModelSet::new`: geometry, textures, clip tables,
+//! cull spheres), median of 5, and `cpu_anim_pack`, the client's time to
+//! read the channels and pack every unit for a stream (median over the
+//! last 10 ticks), with info `anim_cells` (the animation table, 16-byte
+//! cells) and `anim_writes` (cells written a tick). `live-fox` keeps the
 //! sim ticking (every second frame, in the `--warmup` frames and the
-//! measured ones) and reports `cpu_pose` and `key_writes` over the measured
-//! ticks, `cpu_key_publish` (the feed taking a tick's writes into its
-//! table, on the sim thread), `cpu_key_upload` (the render thread taking
-//! and staging them) and `keys_uploaded`.
+//! measured ones) and reports `cpu_anim_pack` and `anim_writes` over the
+//! measured ticks, `cpu_anim_publish` (the feed taking a tick's writes, on
+//! the sim thread), `cpu_anim_upload` (the render thread taking and
+//! staging them) and `anim_cells_uploaded`.
 
 use super::models::{self, ClassModel};
 use super::{MapKind, Options, effects, place_camera, sim_options, terrain_source, tileset, units_setup, with_look};
@@ -52,7 +53,7 @@ use ae_render::device::{GpuDevice, GpuInstance};
 use ae_render::executor::ExecutorConfig;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
 use ae_render::thread::{Headless, RenderApp, TargetInfo};
-use ae_render::units::{InstanceStream, KeyWrites, UnitFeed};
+use ae_render::units::{AnimWrites, InstanceStream, UnitFeed};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -143,7 +144,7 @@ const SCENES: [Scene; 10] = [
     Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0, fox: false, live: false },
     Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, fox: false, live: false },
     Scene { name: "army-fox", about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: false },
-    Scene { name: "live-fox", about: "as army-fox, the sim running: a tick every second frame, its joint keys posed and uploaded", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: true },
+    Scene { name: "live-fox", about: "as army-fox, the sim running: a tick every second frame, its animation records packed and uploaded", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: true },
     Scene { name: "near-fox", about: "as army-fox, closer (fewer units, larger on screen)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: true, live: false },
     Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0, fox: false, live: false },
 ];
@@ -186,8 +187,8 @@ impl Cache {
     }
 
     /// The units at tick `o.ticks`, and with models how posing them went
-    /// (the last 10 ticks are streamed, so keys span real motion); the
-    /// stream carries the whole key table.
+    /// (the last 10 ticks are streamed, so records span real motion); the
+    /// stream carries the whole animation table.
     fn stream(&mut self, o: &Options) -> Result<Option<(Arc<InstanceStream>, Option<Posing>)>> {
         let Some(s) = sim_options(o) else { return Ok(None) };
         let key = (o.map as u8, o.map_cells, o.units, !o.models.is_empty());
@@ -203,23 +204,23 @@ impl Cache {
             sim.tick()?;
             if (posed && t + 10 >= o.ticks) || t + 1 == o.ticks {
                 let mut s = sim.stream(0.0)?;
-                s.keys.apply(&mut table);
+                s.anim.apply(&mut table);
                 pose_ms.push(sim.pose_ms());
-                writes.push(s.keys.len() as f64);
+                writes.push(s.anim.len() as f64);
                 // Their memory for the next stream, as publishing does.
-                sim.recycle(std::mem::take(&mut s.keys));
+                sim.recycle(std::mem::take(&mut s.anim));
                 stream = Some(s);
             }
         }
         let mut stream = stream.context("no ticks")?;
-        let posing = posed.then(|| Posing { pose: ns(&mut pose_ms[1..].to_vec()), writes: median(&mut writes[1..].to_vec()), keys: table.len() as u64 });
-        stream.keys = KeyWrites::whole(&table);
+        let posing = posed.then(|| Posing { pack: ns(&mut pose_ms[1..].to_vec()), writes: median(&mut writes[1..].to_vec()), cells: table.len() as u64 });
+        stream.anim = AnimWrites::whole(&table);
         eprintln!(
             "sim: {} units at tick {} in {:.1} s{}",
             stream.len(),
             stream.tick,
             started.elapsed().as_secs_f32(),
-            if posed { format!(", {} joint keys, {} written in the last tick, posed in {:.2} ms", table.len(), writes.last().copied().unwrap_or(0.0), sim.pose_ms()) } else { String::new() }
+            if posed { format!(", {} animation cells, {} written in the last tick, packed in {:.2} ms", table.len(), writes.last().copied().unwrap_or(0.0), sim.pose_ms()) } else { String::new() }
         );
         let stream = Arc::new(stream);
         self.streams.insert(key, (stream.clone(), posing));
@@ -227,15 +228,15 @@ impl Cache {
     }
 }
 
-/// How posing went: the client's time per stream (reading the channels,
-/// posing, finding the bones off their lines), joint keys written per
-/// tick (medians; the first stream, which writes every key, left out),
-/// and keys in the table.
+/// How packing went: the client's time per stream (reading the channels,
+/// packing them, finding the cells that changed), cells written per tick
+/// (medians; the first stream, which writes every cell, left out), and
+/// cells in the table.
 #[derive(Clone, Copy)]
 struct Posing {
-    pose: Sample,
+    pack: Sample,
     writes: u64,
-    keys: u64,
+    cells: u64,
 }
 
 fn median(v: &mut [f64]) -> u64 {
@@ -301,7 +302,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o);
     let mut posing = None;
     // The live scenes' sim and feed: every stream is published (each
-    // writes only the keys that changed).
+    // writes only the cells that changed).
     let mut live = None;
     match sim_options(&o) {
         Some(s) if scene.live => {
@@ -327,17 +328,17 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         }
         None => {}
     }
-    // Live: a tick every `LIVE_FRAMES` frames, its posing time and key
-    // writes.
+    // Live: a tick every `LIVE_FRAMES` frames, its packing time and
+    // table writes.
     let (mut live_pose, mut live_writes, mut live_publish) = (Vec::new(), Vec::new(), Vec::new());
     let mut tick_live = |frame: usize, measured: bool| -> Result<()> {
         let Some((sim, feed)) = live.as_mut().filter(|_| frame % LIVE_FRAMES == 0) else { return Ok(()) };
         sim.tick()?;
         if feed.wants_whole() {
-            sim.write_whole_keys();
+            sim.write_whole_anim();
         }
         let stream = sim.stream(0.0)?;
-        let writes = stream.keys.len();
+        let writes = stream.anim.len();
         let started = Instant::now();
         let spare = feed.publish_reusing(stream);
         if measured {
@@ -409,10 +410,10 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         tick_live(i, true)?;
         let started = Instant::now();
         headless.frames(&mut app, 1)?;
-        let (keys, ms) = app.last_key_upload();
-        if keys > 0 && scene.live {
+        let (cells, ms) = app.last_anim_upload();
+        if cells > 0 && scene.live {
             upload_ms.push(ms);
-            uploaded.push(keys as f64);
+            uploaded.push(cells as f64);
         }
         let elapsed = started.elapsed().as_secs_f64() * 1e3;
         let e = headless.stats();
@@ -440,17 +441,17 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         report.time_with_tolerance("model_setup", model_setup(gpu, &s)?, CPU_TOLERANCE);
     }
     if let Some(p) = posing {
-        report.time_with_tolerance("cpu_pose", p.pose, CPU_TOLERANCE);
-        report.info("joint_keys", p.keys, "");
-        report.info("key_writes", p.writes, "");
+        report.time_with_tolerance("cpu_anim_pack", p.pack, CPU_TOLERANCE);
+        report.info("anim_cells", p.cells, "");
+        report.info("anim_writes", p.writes, "");
     }
     if scene.live {
         anyhow::ensure!(!live_pose.is_empty() && !upload_ms.is_empty(), "no live ticks measured");
-        report.time_with_tolerance("cpu_pose", ns(&mut live_pose), CPU_TOLERANCE);
-        report.time_with_tolerance("cpu_key_publish", ns(&mut live_publish), CPU_TOLERANCE);
-        report.time_with_tolerance("cpu_key_upload", ns(&mut upload_ms), CPU_TOLERANCE);
-        report.info("key_writes", median(&mut live_writes), "");
-        report.info("keys_uploaded", median(&mut uploaded), "");
+        report.time_with_tolerance("cpu_anim_pack", ns(&mut live_pose), CPU_TOLERANCE);
+        report.time_with_tolerance("cpu_anim_publish", ns(&mut live_publish), CPU_TOLERANCE);
+        report.time_with_tolerance("cpu_anim_upload", ns(&mut upload_ms), CPU_TOLERANCE);
+        report.info("anim_writes", median(&mut live_writes), "");
+        report.info("anim_cells_uploaded", median(&mut uploaded), "");
     }
     let counted: Vec<bool> = names.iter().map(|n| !READBACK_PASSES.contains(&n.as_str())).collect();
     let mut total: Vec<f64> = gpu_frames.iter().map(|f| f.iter().zip(&counted).filter(|(_, c)| **c).map(|(&ms, _)| ms as f64).sum()).collect();
@@ -489,7 +490,7 @@ fn model_setup(gpu: &GpuDevice, s: &super::sim::SimOptions) -> Result<Sample> {
     let mut times = Vec::new();
     for _ in 0..5 {
         let started = Instant::now();
-        let mut set = ae_render::models::ModelSet::new(gpu, &per_class, s.units, ae_render::units::MAX_CLASSES)?;
+        let mut set = ae_render::models::ModelSet::new(gpu, &per_class, &[], s.units, ae_render::units::MAX_CLASSES)?;
         times.push(started.elapsed().as_secs_f64() * 1e3);
         set.destroy(gpu);
     }

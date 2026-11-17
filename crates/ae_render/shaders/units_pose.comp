@@ -1,16 +1,30 @@
 #version 460
-// The units' poses (units.pose): one invocation per unit with joint keys
-// (a pose job, units.rs write_rows). Each bone's local transform is taken
-// on the line through its two keys at the drawn tick (ae_model::anim::
-// on_line: lerp, nlerp, past the newer key too) into the unit's scratch
-// range, walked into model space there (parents come first), and its
-// palette range gets each joint's bone times the joint's inverse bind.
-// Mirrors ae_model::anim::{on_line, Rig::globals, Rig::palette}.
+// The units' poses (units.pose): one invocation per unit with animation
+// records (a pose job, units.rs write_rows). Each of the unit's two records
+// (units.rs RECORD_CELLS) is evaluated bone by bone as the sim's Rig::pose
+// does it: from the rest transform up by the layers in order, each its clip
+// (the sim's bake, models.rs animation()) at its phase by its play mode,
+// weighted by its weight times its mask's weight for the bone (at most 1):
+// a blend lerped over what is below, an additive layer's change from the
+// clip's first frame added; then a bone with a manual entry shown takes its
+// rest transform with the entries' values. The bone is drawn between the
+// two records' transforms at the drawn tick (lerp, rotations nlerp the
+// short way; held at the older before it and the newer past it) into the
+// unit's scratch range; a bone neither posed keeps its rest matrix. Then
+// walked into model space (parents come first), and the palette range gets
+// each joint's bone times the joint's inverse bind. Mirrors
+// ae_model::anim::{Rig::pose, Rig::globals, Rig::palette}.
 #define POSE
 #include "units_common.glsl"
 #include "units_models.glsl"
 
 layout(local_size_x = 64) in;
+
+struct Trs {
+    vec3 t;
+    vec4 r;
+    vec3 s;
+};
 
 mat3x4 rowsAt(uint i) { return mat3x4(anim[i], anim[i + 1u], anim[i + 2u]); }
 
@@ -24,15 +38,131 @@ mat3x4 mul(mat3x4 a, mat3x4 b) {
 }
 
 // Translation, rotation (unit quaternion xyzw), scale: T R S as rows.
-mat3x4 trs(vec3 t, vec4 q, vec3 s) {
+mat3x4 trsRows(Trs p) {
+    vec4 q = p.r;
+    vec3 s = p.s;
     vec3 q2 = q.xyz + q.xyz;
     float xx = q.x * q2.x, yy = q.y * q2.y, zz = q.z * q2.z;
     float xy = q.x * q2.y, xz = q.x * q2.z, yz = q.y * q2.z;
     float wx = q.w * q2.x, wy = q.w * q2.y, wz = q.w * q2.z;
     return mat3x4(
-        vec4((1.0 - (yy + zz)) * s.x, (xy - wz) * s.y, (xz + wy) * s.z, t.x),
-        vec4((xy + wz) * s.x, (1.0 - (xx + zz)) * s.y, (yz - wx) * s.z, t.y),
-        vec4((xz - wy) * s.x, (yz + wx) * s.y, (1.0 - (xx + yy)) * s.z, t.z));
+        vec4((1.0 - (yy + zz)) * s.x, (xy - wz) * s.y, (xz + wy) * s.z, p.t.x),
+        vec4((xy + wz) * s.x, (1.0 - (xx + zz)) * s.y, (yz - wx) * s.z, p.t.y),
+        vec4((xz - wy) * s.x, (yz + wx) * s.y, (1.0 - (xx + yy)) * s.z, p.t.z));
+}
+
+// A transform in the models' table: (translation, 0), rotation, (scale, 0).
+Trs trsAt(uint i) { return Trs(anim[i].xyz, anim[i + 1u], anim[i + 2u].xyz); }
+
+vec4 qnorm(vec4 q) {
+    float len = length(q);
+    return len > 0.0 ? q / len : vec4(0.0, 0.0, 0.0, 1.0);
+}
+
+// From a to b by s, the short way, normalised.
+vec4 nlerp(vec4 a, vec4 b, float s) {
+    if (dot(a, b) < 0.0) {
+        b = -b;
+    }
+    return qnorm(a + (b - a) * s);
+}
+
+Trs lerpTrs(Trs a, Trs b, float s) { return Trs(a.t + (b.t - a.t) * s, nlerp(a.r, b.r, s), a.s + (b.s - a.s) * s); }
+
+vec4 qmul(vec4 a, vec4 b) {
+    return vec4(
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+
+vec4 qconj(vec4 q) { return vec4(-q.xyz, q.w); }
+
+// `time` seconds into a clip `duration` long, by play mode (0 loop, 1
+// ping-pong, 2 once): ae_model::pose::PlayMode::clip_time.
+float clipTime(float time, float duration, uint mode) {
+    if (duration <= 0.0) {
+        return 0.0;
+    }
+    time = max(time, 0.0);
+    if (mode == 1u) {
+        float t = time - 2.0 * duration * floor(time / (2.0 * duration));
+        return t > duration ? 2.0 * duration - t : t;
+    }
+    if (mode == 2u) {
+        return min(time, duration);
+    }
+    return time - duration * floor(time / duration);
+}
+
+// Bone `b` of a model (`bones` of them; its clips' head at anim[clipsAt])
+// by the record at records[rec], into `p`; whether anything posed it.
+bool evalBone(uint rec, uint b, uint bones, uint clipsAt, out Trs p) {
+    uvec4 head = floatBitsToUint(anim[clipsAt]);
+    p = trsAt(head.z + 3u * b);
+    bool posed = false;
+    for (uint l = 0u; l < 4u; l++) {
+        uvec4 c = records[rec + 1u + l];
+        uint clip = c.x & 0xffffu;
+        float weight = uintBitsToFloat(c.z);
+        if (clip == 0u || clip > head.x || weight <= 0.0) {
+            continue;
+        }
+        uvec4 info = floatBitsToUint(anim[clipsAt + 2u * clip - 1u]);
+        uvec4 at = floatBitsToUint(anim[clipsAt + 2u * clip]);
+        uint track = animWord(at.y + b);
+        if (track == 0xffffffffu) {
+            continue;
+        }
+        uint mask = c.x >> 16u;
+        float mw = (mask == 0u || mask > head.y) ? 1.0 : uintBitsToFloat(animWord(head.w + (mask - 1u) * bones + b));
+        float w = min(weight * mw, 1.0);
+        if (!(w > 0.0)) {
+            continue;
+        }
+        uint tracks = info.w;
+        float f = clipTime(uintBitsToFloat(c.w), uintBitsToFloat(info.z), c.y & 0xffu) * uintBitsToFloat(info.y);
+        uint last = info.x - 1u;
+        uint fa = min(uint(max(f, 0.0)), last);
+        uint fb = min(fa + 1u, last);
+        Trs k = lerpTrs(trsAt(at.x + 3u * (fa * tracks + track)), trsAt(at.x + 3u * (fb * tracks + track)), clamp(f - float(fa), 0.0, 1.0));
+        if (((c.y >> 8u) & 0xffu) == 1u) {
+            // Additive: the clip's change from its first frame.
+            Trs r0 = trsAt(at.x + 3u * track);
+            p.t += (k.t - r0.t) * w;
+            vec3 ratio = vec3(r0.s.x != 0.0 ? k.s.x / r0.s.x : 1.0, r0.s.y != 0.0 ? k.s.y / r0.s.y : 1.0, r0.s.z != 0.0 ? k.s.z / r0.s.z : 1.0);
+            p.s *= 1.0 + (ratio - 1.0) * w;
+            p.r = qnorm(qmul(p.r, nlerp(vec4(0.0, 0.0, 0.0, 1.0), qmul(qconj(r0.r), k.r), w)));
+        } else {
+            p = lerpTrs(p, k, w);
+        }
+        posed = true;
+    }
+    // Manual entries shown on the bone: its rest transform, their values.
+    uint n = min(records[rec].y, 8u);
+    bool manual = false;
+    for (uint k = 0u; k < n; k++) {
+        uint word = records[rec + 5u + (k >> 2u)][k & 3u];
+        if ((word & 0xffffu) != b) {
+            continue;
+        }
+        if (!manual) {
+            p = trsAt(head.z + 3u * b);
+            manual = true;
+        }
+        vec4 v = uintBitsToFloat(records[rec + 7u + k]);
+        uint kind = word >> 16u;
+        if (kind == 1u || kind == 2u) {
+            p.r = v;
+        } else if (kind == 3u) {
+            p.t = v.xyz;
+        } else {
+            p.s = v.xyz;
+        }
+        posed = true;
+    }
+    return posed;
 }
 
 void main() {
@@ -44,18 +174,28 @@ void main() {
     uint row = rows[cap + job];
     uint scratch = rows[2u * cap + job];
     ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
-    // Key k is keys[3k .. 3k + 2]; bone b's are 2b (older) and 2b + 1.
-    uint first = 3u * attru(ATTR_POSE, row);
+    uint recA = attru(ATTR_POSE, row);
+    uint recB = recA + RECORD_CELLS;
+    uint ta = records[recA].x;
+    int span = int(records[recB].x - ta);
     float frac = uintBitsToFloat(u.anim.y);
+    float s = span == 0 ? 1.0 : clamp((float(int(u.anim.x - ta)) + frac) / float(span), 0.0, 1.0);
     uint bones = mc.pose.y;
     for (uint k = 0u; k < bones; k++) {
-        uint a = first + 6u * k;
-        uint b = a + 3u;
-        uint ta = floatBitsToUint(keys[a].w);
-        int span = int(floatBitsToUint(keys[b].w) - ta);
-        float s = span == 0 ? 1.0 : (float(int(u.anim.x - ta)) + frac) / float(span);
-        vec4 q = normalize(mix(keys[a + 1u], keys[b + 1u], s));
-        palette[scratch + k] = trs(mix(keys[a].xyz, keys[b].xyz, s), q, mix(keys[a + 2u].xyz, keys[b + 2u].xyz, s));
+        Trs a, b;
+        bool posed;
+        if (s <= 0.0) {
+            posed = evalBone(recA, k, bones, mc.pose.w, a);
+            b = a;
+        } else if (s >= 1.0) {
+            posed = evalBone(recB, k, bones, mc.pose.w, b);
+            a = b;
+        } else {
+            bool pa = evalBone(recA, k, bones, mc.pose.w, a);
+            bool pb = evalBone(recB, k, bones, mc.pose.w, b);
+            posed = pa || pb;
+        }
+        palette[scratch + k] = posed ? trsRows(lerpTrs(a, b, s)) : rowsAt(mc.pose.x + 4u * k);
     }
     // Parents come before their children (roots have none).
     for (uint k = 0u; k < bones; k++) {
