@@ -680,6 +680,31 @@ impl Runtime {
     /// `f(entity, value bytes)` for every live row of a component, by name,
     /// in table order (no copies).
     pub fn each_row(&self, w: &World, component: &str, mut f: impl FnMut(u64, &[u8])) -> Result<()> {
+        self.each_chunk(w, component, |ids, data| {
+            let size = data.len() / ids.len().max(1);
+            for (r, id) in ids.iter().enumerate() {
+                f(*id, &data[r * size..(r + 1) * size]);
+            }
+        })
+    }
+
+    /// Every chunk of entities with `component`, borrowed from the world:
+    /// their ids and the column's bytes (as [`Self::each_chunk`]). The
+    /// slices stay valid while `w` is borrowed: nothing changes a world's
+    /// tables without `&mut World`.
+    pub fn chunks<'w>(&self, w: &'w World, component: &str) -> Result<Vec<(&'w [u64], &'w [u8])>> {
+        let mut out = Vec::new();
+        self.each_chunk(w, component, |ids, data| {
+            // SAFETY: the tables' memory outlives the query, until the
+            // world is next changed (which needs `&mut World`).
+            out.push(unsafe { (std::slice::from_raw_parts(ids.as_ptr(), ids.len()), std::slice::from_raw_parts(data.as_ptr(), data.len())) });
+        })?;
+        Ok(out)
+    }
+
+    /// Every chunk of entities with `component` (between ticks): their ids
+    /// and the column's bytes, a row of the component's size per entity.
+    pub fn each_chunk(&self, w: &World, component: &str, mut f: impl FnMut(&[u64], &[u8])) -> Result<()> {
         let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
         let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
         let size = self.schema.components[i].size as usize;
@@ -689,9 +714,7 @@ impl Runtime {
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
                 let ids = std::slice::from_raw_parts(chunk.entities, chunk.count);
                 let data = std::slice::from_raw_parts(chunk.fields[0], chunk.count * size);
-                for (r, id) in ids.iter().enumerate() {
-                    f(*id, &data[r * size..(r + 1) * size]);
-                }
+                f(ids, data);
                 Ok(())
             });
             fb::fini_query(q);

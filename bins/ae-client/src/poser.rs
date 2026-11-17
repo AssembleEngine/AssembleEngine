@@ -17,7 +17,9 @@
 //! stamped the last tick and the new one goes over the older. A unit new
 //! to the table gets both records at its channels (no motion). A unit is
 //! posed when its class is drawn with a model and its `Anim` names that
-//! model. Units are packed in parallel (rayon), by slot.
+//! model. Units are packed in parallel (rayon), by slot, each record made
+//! straight from the unit's `Anim` in the sim's column (borrowed, not
+//! copied: `ae_sim::runtime::Runtime::chunks`).
 
 use ae_render::units::{AnimWrites, Cell, NO_POSE, POSE_CELLS, RECORD_CELLS};
 use ae_sdk::anim::{Anim, LAYERS, MANUAL, manual_flags, manual_kind};
@@ -58,12 +60,39 @@ pub struct Poser {
     started: bool,
     /// The next stream writes the whole table ([`Self::write_whole`]).
     whole_next: bool,
+    /// Scratch, kept from stream to stream: per unit its model if posed and
+    /// its kept slot; per slot its unit (`u32::MAX`: none) and freshness;
+    /// per slot the cells it wrote.
+    models: Vec<Option<u64>>,
+    kept: Vec<Option<u32>>,
+    job_of: Vec<(u32, bool)>,
+    /// Per block of [`BLOCK`] slots: the cells it wrote (places, values).
+    blocks: Vec<(Vec<u32>, Vec<Cell>)>,
+    /// The last stream's units, for their memory.
+    spare_units: Vec<Unit>,
 }
+
+/// Slots a thread packs at a time.
+const BLOCK: usize = 512;
 
 impl Poser {
     /// `classes`: each stream class's model id (`None`: not posed).
     pub fn new(classes: Vec<Option<u64>>) -> Self {
-        Self { classes, units: Vec::new(), slots: 0, free: Vec::new(), table: Vec::new(), written: Vec::new(), started: false, whole_next: false }
+        Self {
+            classes,
+            units: Vec::new(),
+            slots: 0,
+            free: Vec::new(),
+            table: Vec::new(),
+            written: Vec::new(),
+            started: false,
+            whole_next: false,
+            models: Vec::new(),
+            kept: Vec::new(),
+            job_of: Vec::new(),
+            blocks: Vec::new(),
+            spare_units: Vec::new(),
+        }
     }
 
     /// Pack `units` (key, class, channels; ascending by key) at `tick`:
@@ -76,18 +105,21 @@ impl Poser {
         writes.reset = whole;
         (self.started, self.whole_next) = (true, false);
         // Each unit's model, if posed.
-        let models: Vec<Option<u64>> = units
-            .iter()
-            .map(|&(_, class, anim)| match self.classes.get(class as usize) {
-                Some(&Some(model)) if anim.model == model => Some(model),
-                _ => None,
-            })
-            .collect();
+        let mut models = std::mem::take(&mut self.models);
+        models.clear();
+        models.extend(units.iter().map(|&(_, class, a)| match self.classes.get(class as usize) {
+            Some(&Some(model)) if a.model == model => Some(model),
+            _ => None,
+        }));
         // Units that stay keep their slots; the others' slots are freed
         // before new units take slots.
-        let mut kept = vec![None; units.len()];
+        let mut kept = std::mem::take(&mut self.kept);
+        kept.clear();
+        kept.resize(units.len(), None);
         let mut at = 0;
-        for unit in std::mem::take(&mut self.units) {
+        let mut last = std::mem::replace(&mut self.units, std::mem::take(&mut self.spare_units));
+        self.units.clear();
+        for &unit in &last {
             while at < units.len() && units[at].0 < unit.key {
                 at += 1;
             }
@@ -96,9 +128,11 @@ impl Poser {
                 _ => self.free.push(unit.slot),
             }
         }
-        let mut wanted = Vec::new();
+        last.clear();
+        self.spare_units = last;
+        let mut job_of = std::mem::take(&mut self.job_of);
         poses.clear();
-        for (i, &(key_of, _, anim)) in units.iter().enumerate() {
+        for (i, &(key_of, _, _)) in units.iter().enumerate() {
             let Some(model) = models[i] else {
                 poses.push(NO_POSE);
                 continue;
@@ -107,55 +141,51 @@ impl Poser {
                 Some(slot) => (slot, false),
                 None => (self.take_slot(), true),
             };
-            wanted.push((slot, anim, fresh));
+            if job_of.len() < self.slots {
+                job_of.resize(self.slots, (u32::MAX, false));
+            }
+            job_of[slot as usize] = (i as u32, fresh);
             self.units.push(Unit { key: key_of, model, slot });
             poses.push((slot as usize * POSE_CELLS) as u32);
         }
-        let mut jobs: Vec<Option<Job>> = vec![None; self.slots];
-        for (slot, anim, fresh) in wanted {
-            jobs[slot as usize] = Some(Job { anim, fresh });
+        job_of.resize(self.slots, (u32::MAX, false));
+        // Each block of slots packs its units and lists the cells it wrote,
+        // in slot order (in parallel; the lists keep their memory).
+        let mut blocks = std::mem::take(&mut self.blocks);
+        blocks.resize_with(self.slots.div_ceil(BLOCK), Default::default);
+        self.table
+            .par_chunks_mut(POSE_CELLS * BLOCK)
+            .zip(self.written.par_chunks_mut(BLOCK))
+            .zip(job_of.par_chunks_mut(BLOCK))
+            .zip(blocks.par_iter_mut())
+            .enumerate()
+            .for_each(|(b, (((cells, written), jobs), (at, out)))| {
+                (at.clear(), out.clear());
+                for (s, ((cells, w), job)) in cells.chunks_mut(POSE_CELLS).zip(written).zip(jobs).enumerate() {
+                    let (i, fresh) = std::mem::replace(job, (u32::MAX, false));
+                    *w = match units.get(i as usize) {
+                        Some(&(_, _, anim)) => pack_slot(&Job { anim, fresh }, now, cells),
+                        None => 0,
+                    };
+                    let base = (b * BLOCK + s) * POSE_CELLS;
+                    let mut bits = *w;
+                    while bits != 0 {
+                        let k = bits.trailing_zeros() as usize;
+                        at.push((base + k) as u32);
+                        out.push(cells[k]);
+                        bits &= bits - 1;
+                    }
+                }
+            });
+        // Their lists in block order (`writes` keeps its memory from
+        // stream to stream, see `UnitFeed::publish_reusing`).
+        writes.at.clear();
+        writes.cells.clear();
+        for (at, cells) in &blocks {
+            writes.at.extend_from_slice(at);
+            writes.cells.extend_from_slice(cells);
         }
-        let counts: Vec<u32> = self
-            .table
-            .par_chunks_mut(POSE_CELLS)
-            .zip(self.written.par_iter_mut())
-            .zip(jobs.par_iter())
-            .with_min_len(256)
-            .map(|((cells, written), job)| {
-                *written = match job {
-                    Some(job) => pack_slot(job, now, cells),
-                    None => 0,
-                };
-                written.count_ones()
-            })
-            .collect();
-        // The written cells in slot order, each slot's from its offset
-        // (filled in parallel; `writes` keeps its memory from stream to
-        // stream, see `UnitFeed::publish_reusing`).
-        let n = counts.iter().map(|&c| c as usize).sum();
-        // Every entry below `n` is written: only new length is cleared.
-        writes.at.truncate(n);
-        writes.at.resize(n, 0);
-        writes.cells.truncate(n);
-        writes.cells.resize(n, [0; 4]);
-        let (mut at_rest, mut cells_rest) = (&mut writes.at[..], &mut writes.cells[..]);
-        let mut outs = Vec::with_capacity(counts.len());
-        for &c in &counts {
-            let (a, ar) = std::mem::take(&mut at_rest).split_at_mut(c as usize);
-            let (k, kr) = std::mem::take(&mut cells_rest).split_at_mut(c as usize);
-            (at_rest, cells_rest) = (ar, kr);
-            outs.push((a, k));
-        }
-        let table = &self.table;
-        outs.into_par_iter().zip(self.written.par_iter()).enumerate().with_min_len(256).for_each(|(slot, ((at, cells), &written))| {
-            let (mut i, mut bits) = (0, written);
-            while bits != 0 {
-                let k = slot * POSE_CELLS + bits.trailing_zeros() as usize;
-                (at[i], cells[i]) = (k as u32, table[k]);
-                i += 1;
-                bits &= bits - 1;
-            }
-        });
+        (self.models, self.kept, self.job_of, self.blocks) = (models, kept, job_of, blocks);
         if whole {
             writes.at.clear();
             writes.at.extend(0..self.table.len() as u32);

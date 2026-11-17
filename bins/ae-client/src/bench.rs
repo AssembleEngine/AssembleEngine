@@ -39,7 +39,9 @@
 //! cells) and `anim_writes` (cells written a tick). `live-fox` keeps the
 //! sim ticking (every second frame, in the `--warmup` frames and the
 //! measured ones) and reports `cpu_anim_pack` and `anim_writes` over the
-//! measured ticks, `cpu_anim_publish` (the feed taking a tick's writes, on
+//! measured ticks (with two parts of the pack: `cpu_anim_pack_read`,
+//! reading the `Anim` column into records, and `cpu_anim_pack_poser`, the
+//! poser's comparing and copying; the rest is the stream's rows), `cpu_anim_publish` (the feed taking a tick's writes, on
 //! the sim thread), `cpu_anim_upload` (the render thread taking and
 //! staging them) and `anim_cells_uploaded`.
 
@@ -331,6 +333,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     // Live: a tick every `LIVE_FRAMES` frames, its packing time and
     // table writes.
     let (mut live_pose, mut live_writes, mut live_publish) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut live_read, mut live_poser) = (Vec::new(), Vec::new());
     let mut tick_live = |frame: usize, measured: bool| -> Result<()> {
         let Some((sim, feed)) = live.as_mut().filter(|_| frame % LIVE_FRAMES == 0) else { return Ok(()) };
         sim.tick()?;
@@ -344,6 +347,9 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         if measured {
             live_publish.push(started.elapsed().as_secs_f64() * 1e3);
             live_pose.push(sim.pose_ms());
+            let (read, poser) = sim.pose_parts_ms();
+            live_read.push(read);
+            live_poser.push(poser);
             live_writes.push(writes as f64);
         }
         sim.recycle(spare);
@@ -448,6 +454,8 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     if scene.live {
         anyhow::ensure!(!live_pose.is_empty() && !upload_ms.is_empty(), "no live ticks measured");
         report.time_with_tolerance("cpu_anim_pack", ns(&mut live_pose), CPU_TOLERANCE);
+        report.time_with_tolerance("cpu_anim_pack_read", ns(&mut live_read), CPU_TOLERANCE);
+        report.time_with_tolerance("cpu_anim_pack_poser", ns(&mut live_poser), CPU_TOLERANCE);
         report.time_with_tolerance("cpu_anim_publish", ns(&mut live_publish), CPU_TOLERANCE);
         report.time_with_tolerance("cpu_anim_upload", ns(&mut upload_ms), CPU_TOLERANCE);
         report.info("anim_writes", median(&mut live_writes), "");

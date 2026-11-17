@@ -246,10 +246,10 @@ pub struct Sim {
     /// The observer's line of sight at the last tick.
     last_los: Option<Bits>,
     /// The units' channels after the last tick, by entity (with a poser).
-    anims: Vec<(u64, Anim)>,
     /// Milliseconds of the last stream's posing (reading the channels
     /// included).
     pose_ms: f64,
+    read_ms: f64,
 }
 
 /// One observer's copy layer: the pipeline, the observer, what it has ever
@@ -325,7 +325,7 @@ impl Sim {
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { poser, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None, anims: Vec::new(), pose_ms: 0.0 })
+        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { poser, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None, pose_ms: 0.0, read_ms: 0.0 })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -449,13 +449,23 @@ impl Sim {
         }
         let Some(v) = self.view.as_mut() else {
             let t0 = Instant::now();
-            self.anims.clear();
+            // The `Anim` rows borrowed from the world, by entity.
+            let mut anims: Vec<(u64, &Anim)> = Vec::new();
             if self.streamer.poser.is_some() {
-                let anims = &mut self.anims;
-                self.rt.each_row(&self.world, "Anim", |e, bytes| anims.push((e, unsafe { bytes.as_ptr().cast::<Anim>().read_unaligned() })))?;
-                anims.sort_unstable_by_key(|a| a.0);
+                for (ids, bytes) in self.rt.chunks(&self.world, "Anim")? {
+                    anyhow::ensure!(bytes.len() == ids.len() * size_of::<Anim>() && bytes.as_ptr().align_offset(align_of::<Anim>()) == 0, "the `Anim` column is not `Anim`s");
+                    // SAFETY: plain data, aligned, a row per id.
+                    let rows = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<Anim>(), ids.len()) };
+                    anims.extend(ids.iter().copied().zip(rows));
+                }
+                // Tables hold rows in entity order while nothing has moved
+                // between them.
+                if !anims.is_sorted_by_key(|a| a.0) {
+                    anims.sort_unstable_by_key(|a| a.0);
+                }
             }
-            let stream = self.streamer.stream(&self.capture, &self.anims, Instant::now(), tick_seconds);
+            self.read_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let stream = self.streamer.stream(&self.capture, &anims, Instant::now(), tick_seconds);
             self.pose_ms = t0.elapsed().as_secs_f64() * 1e3;
             return Ok(stream);
         };
@@ -522,6 +532,12 @@ impl Sim {
     /// observer).
     pub fn pose_ms(&self) -> f64 {
         self.pose_ms
+    }
+
+    /// Of [`Self::pose_ms`]: reading the `Anim` column into records, and
+    /// the poser's comparing and copying (the rest is the stream's rows).
+    pub fn pose_parts_ms(&self) -> (f64, f64) {
+        (self.read_ms, self.streamer.poser_ms)
     }
 
     /// The last view's milliseconds: capture + coverage, build, rows + stream.
@@ -651,6 +667,8 @@ pub struct Streamer {
     poses: Vec<u32>,
     /// Table writes' memory back from the feed, for the next stream.
     pub spare: AnimWrites,
+    /// Milliseconds the poser took in the last stream.
+    pub poser_ms: f64,
 }
 
 impl Streamer {
@@ -659,7 +677,7 @@ impl Streamer {
     /// position in the previous capture (its current one if it is new);
     /// its heading is its velocity, or its last heading while it stands
     /// still.
-    pub fn stream(&mut self, capture: &Capture, anims: &[(u64, Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
+    pub fn stream(&mut self, capture: &Capture, anims: &[(u64, &Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
         let n = capture.len();
         self.order.clear();
         self.order.extend(0..n as u32);
@@ -687,7 +705,7 @@ impl Streamer {
     /// The stream of `rows` (ascending by key), matched to the previous
     /// stream by key; a row whose state changed starts where it is. Rows
     /// whose key has channels in `anims` (ascending by key) are posed.
-    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], anims: &[(u64, Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
+    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], anims: &[(u64, &Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
         let mut anim = std::mem::take(&mut self.spare);
         let mut next = Vec::with_capacity(rows.len());
@@ -709,7 +727,7 @@ impl Streamer {
             }
             if let (Some(_), Some((_, anim))) = (&self.poser, anims.get(a).filter(|x| x.0 == row.key)) {
                 posed.push(next.len());
-                units.push((row.key, row.class, anim));
+                units.push((row.key, row.class, *anim));
             }
             let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, NO_POSE];
             for (column, word) in columns.iter_mut().zip(words) {
@@ -718,7 +736,9 @@ impl Streamer {
             next.push(Shown { key: row.key, x, y, hx, hy, state: row.state });
         }
         if let Some(poser) = &mut self.poser {
+            let t0 = Instant::now();
             poser.pose(tick, &units, &mut self.poses, &mut anim);
+            self.poser_ms = t0.elapsed().as_secs_f64() * 1e3;
             for (&r, &pose) in posed.iter().zip(&self.poses) {
                 columns[ATTR_POSE][r] = pose;
             }
@@ -926,9 +946,12 @@ mod tests {
         let rows = [(3, 30.0, 0.0, 0.0, 0.0), (4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let now = Instant::now();
         let anims = |angle: f32| vec![(3, turned(angle, arm)), (4, turned(angle, arm)), (6, turned(angle, model_id("other")))];
+        fn refs(v: &[(u64, Anim)]) -> Vec<(u64, &Anim)> {
+            v.iter().map(|(e, a)| (*e, a)).collect()
+        }
         let mut table: Vec<Cell> = Vec::new();
         let ticks = |table: &[Cell]| (table[0][0], table[RECORD_CELLS][0]);
-        let first = s.stream(&capture(10, &rows), &anims(0.1), now, 0.1);
+        let first = s.stream(&capture(10, &rows), &refs(&anims(0.1)), now, 0.1);
         assert_eq!(first.columns[8], [0, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model");
         assert!(first.anim.reset && first.anim.at == (0..POSE_CELLS as u32).collect::<Vec<_>>(), "a new table, both records: {:?}", first.anim.at);
         first.anim.apply(&mut table);
@@ -936,33 +959,33 @@ mod tests {
         assert_eq!(table[1..RECORD_CELLS], table[RECORD_CELLS + 1..], "first posed: no motion");
         // The next tick's turn: the newer record is the last tick's, so
         // the new one goes over the older: its tick and the entry's value.
-        let second = s.stream(&capture(11, &rows), &anims(0.2), now, 0.1);
+        let second = s.stream(&capture(11, &rows), &refs(&anims(0.2)), now, 0.1);
         assert!(!second.anim.reset);
         assert_eq!(second.anim.at, [0, 7], "the older record's changed cells");
         second.anim.apply(&mut table);
         assert_eq!(ticks(&table), (11, 10));
         // Held there: nothing written.
-        assert!(s.stream(&capture(12, &rows), &anims(0.2), now, 0.1).anim.is_empty());
+        assert!(s.stream(&capture(12, &rows), &refs(&anims(0.2)), now, 0.1).anim.is_empty());
         // A tick later it turns back: the newer (11) stamped the last tick
         // (13, it held so), the new one over the older (which held that
         // turn already: only its tick).
-        let fourth = s.stream(&capture(14, &rows), &anims(0.1), now, 0.1);
+        let fourth = s.stream(&capture(14, &rows), &refs(&anims(0.1)), now, 0.1);
         assert_eq!(fourth.anim.at, [0, RECORD_CELLS as u32]);
         fourth.anim.apply(&mut table);
         assert_eq!(ticks(&table), (13, 14));
         assert_eq!(table[RECORD_CELLS + 7][1], (0.05f32).sin().to_bits());
-        assert!(s.stream(&capture(15, &rows), &anims(0.1), now, 0.1).anim.is_empty());
+        assert!(s.stream(&capture(15, &rows), &refs(&anims(0.1)), now, 0.1).anim.is_empty());
         // The reader missed writes: the whole table, as it stands.
         s.poser.as_mut().unwrap().write_whole();
-        let whole = s.stream(&capture(16, &rows), &anims(0.1), now, 0.1);
+        let whole = s.stream(&capture(16, &rows), &refs(&anims(0.1)), now, 0.1);
         assert!(whole.anim.reset && whole.anim.at.len() == POSE_CELLS);
         assert_eq!(whole.anim.cells, table, "the cells as written");
-        assert!(s.stream(&capture(17, &rows), &anims(0.1), now, 0.1).anim.is_empty(), "then only what changes");
+        assert!(s.stream(&capture(17, &rows), &refs(&anims(0.1)), now, 0.1).anim.is_empty(), "then only what changes");
         // Unit 3 gone, unit 6 now an arm: it takes the freed slot, fresh.
         let rows2 = [(4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let mut moved = anims(0.1);
         moved[2].1.model = arm;
-        let sixth = s.stream(&capture(18, &rows2), &moved[1..], now, 0.1);
+        let sixth = s.stream(&capture(18, &rows2), &refs(&moved[1..]), now, 0.1);
         assert_eq!(sixth.columns[8], [NO_POSE, 0]);
         assert_eq!(sixth.anim.at.len(), POSE_CELLS);
         assert_eq!(sixth.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
