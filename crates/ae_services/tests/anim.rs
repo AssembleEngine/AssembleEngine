@@ -5,12 +5,14 @@
 //!   layer 1 while a unit walks (its phase by the metre), and fades out and
 //!   is cleared when it stands; the head is taken from the clips and turned
 //!   while it stands, turned back and given back when it walks.
+//! * A unit's `Bounds` is its first pose's, then (once a cycle, after the
+//!   service) the box of its pose then (`anim:bounds`, `Rig::bounds`).
 //! * The world is the same at 1, 2, 4 and 8 workers.
 //!
 //! One runtime at a time: the column arena is process-wide.
 
 use ae_model::anim::Rig;
-use ae_sdk::anim::Anim;
+use ae_sdk::anim::{Anim, Bounds};
 use ae_services::anim::AnimPlugin;
 use ae_sim::runtime::{Runtime, RuntimeConfig};
 use anyhow::{Result, ensure};
@@ -25,6 +27,12 @@ fn fox() -> Rig {
     Rig::new(&ae_gltf::convert_file(&path).unwrap().model)
 }
 
+/// The cycle tick the scripted game measures bounds at (its
+/// `MEASURE_TICK`: 30 into the stand).
+fn scripted_measure_tick() -> u64 {
+    90 + 30
+}
+
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
     unsafe { bytes.as_ptr().cast::<T>().read_unaligned() }
@@ -36,7 +44,8 @@ fn units_walk_and_stand_animated() -> Result<()> {
     let plugin = AnimPlugin::new([("fox".to_string(), fox())], TICK);
     let rig = plugin.rig(ae_sdk::anim::model_id("fox")).unwrap().clone();
     let (survey, walk, head) = (rig.clip("Survey").unwrap(), rig.clip("Walk").unwrap(), rig.bone("b_Head_05").unwrap());
-    let run = |workers: usize, ticks: u64| -> Result<(u128, Vec<(u64, Anim)>)> {
+    type Rows<T> = Vec<(u64, T)>;
+    let run = |workers: usize, ticks: u64| -> Result<(u128, Rows<Anim>, Rows<Bounds>)> {
         let cfg = RuntimeConfig { max_workers: 8, range_rows: 256, ..RuntimeConfig::default() };
         let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(plugin.clone())])?;
         let mut world = rt.world_for(UNITS, workers)?;
@@ -44,10 +53,11 @@ fn units_walk_and_stand_animated() -> Result<()> {
             rt.tick(&mut world, workers)?;
         }
         let rows = rt.rows(&world, "Anim")?.into_iter().map(|(e, b)| (e, decode::<Anim>(&b))).collect();
-        Ok((rt.digest(&world)?.total, rows))
+        let bounds = rt.rows(&world, "Bounds")?.into_iter().map(|(e, b)| (e, decode::<Bounds>(&b))).collect();
+        Ok((rt.digest(&world)?.total, rows, bounds))
     };
     // Tick 120: every unit is some way into its walk-stand cycle of 150.
-    let (digest, rows) = run(1, 120)?;
+    let (digest, rows, bounds) = run(1, 120)?;
     ensure!(rows.len() == UNITS as usize);
     let (mut walking, mut standing, mut fading) = (0, 0, 0);
     for (e, a) in &rows {
@@ -75,8 +85,29 @@ fn units_walk_and_stand_animated() -> Result<()> {
         }
     }
     ensure!(walking > 500 && standing > 300 && fading > 50, "{walking} walking, {standing} standing, {fading} fading");
+    // Bounds: measured at the last tick (the pose now), never (the first
+    // pose, at rest), or earlier (something else).
+    let first = rig.bounds(&Default::default());
+    let b = |x: &Bounds| ae_model::Bounds { min: x.min, max: x.max };
+    ensure!(bounds.len() == rows.len() && first.max[0] > first.min[0]);
+    let (mut now, mut never) = (0, 0);
+    for ((e, a), (eb, got)) in rows.iter().zip(&bounds) {
+        ensure!(e == eb);
+        let k = (119 + (*e as u32 as u64) * 7) % 150;
+        let measured = scripted_measure_tick();
+        if k == measured {
+            now += 1;
+            ensure!(b(got) == rig.bounds(&ae_services::anim::channels(a)), "unit {e}: measured this tick: {got:?}");
+        } else if (measured - 30..measured).contains(&k) {
+            never += 1;
+            ensure!(b(got) == first, "unit {e} at {k}: not measured yet: {got:?}");
+        } else {
+            ensure!(b(got) != first, "unit {e} at {k}: measured standing: {got:?}");
+        }
+    }
+    ensure!(now > 5 && never > 300, "{now} measured now, {never} never");
     for workers in [2, 4, 8] {
-        let (d, _) = run(workers, 120)?;
+        let (d, _, _) = run(workers, 120)?;
         ensure!(d == digest, "{workers} workers: digest {d:x} vs {digest:x}");
     }
     Ok(())
@@ -120,7 +151,18 @@ fn aiming_helpers() -> Result<()> {
         input.extend_from_slice(&v.to_le_bytes());
     }
     let op = ae_abi::name_id(ae_abi::query::ANIM_DIR_IN);
-    ensure!(plugin.queries() == vec![op]);
+    let bounds_op = ae_abi::name_id(ae_abi::query::ANIM_BOUNDS);
+    ensure!(plugin.queries() == vec![op, bounds_op]);
+    // anim:bounds: the rig's box as min then max; zeros for an unknown model.
+    let mut out = [0u8; 24];
+    ensure!(plugin.query(bounds_op, &input[..size_of::<Anim>()], &mut out)? == 24);
+    let got: Vec<f32> = out.chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+    let want = rig.bounds(&ae_services::anim::channels(&a));
+    ensure!(got[..3] == want.min && got[3..] == want.max, "{got:?} vs {want:?}");
+    let unknown = Anim::new(5);
+    let bytes = unsafe { std::slice::from_raw_parts((&unknown as *const Anim).cast::<u8>(), size_of::<Anim>()) };
+    ensure!(plugin.query(bounds_op, bytes, &mut out)? == 24 && out == [0; 24]);
+    ensure!(plugin.query(bounds_op, &input, &mut out).is_err(), "the wrong input length is an error");
     let mut out = [0u8; 12];
     ensure!(plugin.query(op, &input, &mut out)? == 12);
     let got: Vec<f32> = out.chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();

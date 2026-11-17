@@ -342,6 +342,10 @@ pub mod engine {
     /// `Anim { model: u64, ... }`: a unit's animation channels (M14; the
     /// layout is `ae_sdk::anim::Anim`'s).
     pub const ANIM: u64 = 0xAE00_0000_0000_000E;
+    /// `Bounds { min, max: [f32; 3] }`: the box of a unit's posed mesh in
+    /// its model's space, as `ae_sdk::anim::Anim::update_bounds` last
+    /// measured it.
+    pub const BOUNDS: u64 = 0xAE00_0000_0000_000F;
 }
 
 /// Name lookups (`ae_lookup(scope, name)`): host plugins publish names in
@@ -369,4 +373,8 @@ pub mod query {
     /// `ae_model::anim::Rig::dir_in`. Input: the unit's `Anim` value, then
     /// the bone (`u32`) and the direction (3 × `f32`); output: 3 × `f32`.
     pub const ANIM_DIR_IN: &str = "anim:dir_in";
+    /// `ae_model::anim::Rig::bounds`. Input: the unit's `Anim` value;
+    /// output: the box's min then max (6 × `f32`), all zeros for a model
+    /// the plugin does not have.
+    pub const ANIM_BOUNDS: &str = "anim:bounds";
 }

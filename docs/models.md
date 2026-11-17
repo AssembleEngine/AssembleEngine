@@ -91,8 +91,8 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 - **Poses** (M14, hybrid animation, `docs/hybrid-animation.md`; replaced the CPU-posed joint
   keys of step 3, which replaced the GPU-baked clips): the GPU evaluates each unit's pose from
   its sim animation channels; nothing is posed on the CPU (the pose is presentation; the sim
-  answers its own joint questions, `Rig::dir_in`). The models' animation table (binding 8,
-  `models::animation`) holds each model's clips as the **sim's own bake**
+  answers its own joint questions, `Rig::dir_in`, and its bounds on demand, `Rig::bounds`).
+  The models' animation table (binding 8, `models::animation`) holds each model's clips as the **sim's own bake**
   (`ae_model::anim::Rig::clip_table`: per clip its frames at 60/s, a track word per bone, keys
   as translation, rotation, scale), its masks (a weight word per bone) and its rest transforms,
   from the rig the renderer is given per class (`UnitsSetup::rigs`: the client's are the sim's,

@@ -19,8 +19,11 @@
 //!   clips; `dir_in` and `turn_toward`), turned back to the front
 //!   and given back to them when it walks.
 //! * `host(anim)`: the engine advances the channels.
+//! * `measure`: a unit's `Bounds` (made with it from its first pose)
+//!   measured again once a cycle, [`MEASURE_TICK`] ticks into it (the head
+//!   turned while it stands).
 
-use ae_sdk::anim::{self, Anim, Axis, model_id};
+use ae_sdk::anim::{self, Anim, Axis, Bounds, model_id};
 use ae_sdk::nav::Body;
 use ae_sdk::{Component, Run, Spawn, schedule, system};
 
@@ -31,6 +34,8 @@ pub const WALK_TICKS: u64 = 90;
 pub const STAND_TICKS: u64 = 60;
 /// Metres a second, per metre of radius.
 pub const WALK_SPEED: f32 = 1.5;
+/// Where in its cycle a unit's bounds are measured.
+pub const MEASURE_TICK: u64 = WALK_TICKS + 30;
 /// Walking clip seconds per metre, times the radius.
 pub const WALK_PER_METRE: f32 = 0.6;
 
@@ -44,8 +49,13 @@ pub struct Walker {
     pub reserved: u32,
 }
 
+/// Where unit `entity` is in its walk-stand cycle at `tick`.
+pub fn cycle(tick: u64, entity: ae_sdk::Entity) -> u64 {
+    (tick + entity.index() as u64 * 7) % (WALK_TICKS + STAND_TICKS)
+}
+
 fn walking(tick: u64, entity: ae_sdk::Entity) -> bool {
-    (tick + entity.index() as u64 * 7) % (WALK_TICKS + STAND_TICKS) < WALK_TICKS
+    cycle(tick, entity) < WALK_TICKS
 }
 
 #[system()]
@@ -60,12 +70,15 @@ fn start(run: &Run) {
         s => s as f32,
     };
     let (x0, y0) = (((p >> 40) & 0xfff) as f32 * 16.0, ((p >> 52) & 0xfff) as f32 * 16.0);
+    let anim = Anim::new(model_id(MODEL));
+    let bounds = anim.bounds();
     for i in 0..n {
         let (x, y) = (x0 + (i % 100) as f32 * step, y0 + (i / 100) as f32 * step);
         Spawn::new()
             .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: step / 4.0 })
             .with(&Walker { dir: if i % 2 == 0 { 1.0 } else { -1.0 }, reserved: 0 })
-            .with(&Anim::new(model_id(MODEL)))
+            .with(&anim)
+            .with(&bounds)
             .submit();
     }
 }
@@ -131,4 +144,14 @@ fn animate(run: &Run) {
     }
 }
 
-schedule!(start, steer, animate, host(anim));
+#[system(read(Anim), write(Bounds))]
+fn measure(run: &Run) {
+    let (anims, bounds, ids) = (run.read::<Anim>(), run.write::<Bounds>(), run.entities());
+    for i in run.rows() {
+        if cycle(run.tick(), ids[i]) == MEASURE_TICK {
+            anims[i].update_bounds(&mut bounds[i]);
+        }
+    }
+}
+
+schedule!(start, steer, animate, host(anim), measure);

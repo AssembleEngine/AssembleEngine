@@ -178,6 +178,21 @@ pub struct Anim {
     pub rate: [f32; MANUAL],
 }
 
+/// The box of a unit's posed mesh, in its model's space (the unit's frame:
+/// x forward, y up, z right; the model's units, before the renderer fits
+/// the model to the unit's size). Measured on demand, not every tick: a
+/// unit's `Bounds` is what [`Anim::update_bounds`] last wrote (give a unit
+/// one when it is made, from its first `Anim`: [`Anim::bounds`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
+#[component(id = 0xAE00_0000_0000_000F)]
+pub struct Bounds {
+    #[field(view = "los")]
+    pub min: [f32; 3],
+    #[field(view = "los")]
+    pub max: [f32; 3],
+}
+
 impl Anim {
     /// Nothing playing on model `model` ([`model_id`]).
     pub const fn new(model: u64) -> Self {
@@ -373,6 +388,27 @@ impl Anim {
     /// `bone` is manual: the clips do not move it.
     pub fn is_manual(&self, bone: u16) -> bool {
         (0..MANUAL).any(|k| self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone)
+    }
+
+    /// The box of the mesh posed as these channels have it now: every
+    /// vertex skinned as the client draws it, in the engine's exact
+    /// arithmetic (synced; `ae_model::anim::Rig::bounds`). Commands not
+    /// yet taken by the engine (given this tick, before `host(anim)`) do
+    /// not count: measure after it to see them. All zeros for a model the
+    /// engine does not have. A pose of the whole mesh: cheap for one unit,
+    /// not for every unit every tick.
+    pub fn bounds(&self) -> Bounds {
+        const N: usize = size_of::<Anim>();
+        let mut out = [0f32; 6];
+        let op = abi::name_id(abi::query::ANIM_BOUNDS);
+        let n = unsafe { crate::host::ae_query(op, (self as *const Anim) as usize as u32, N as u32, out.as_mut_ptr() as usize as u32, 24) };
+        assert!(n == 24, "the engine has no animation service (`ae_query` {})", n);
+        Bounds { min: [out[0], out[1], out[2]], max: [out[3], out[4], out[5]] }
+    }
+
+    /// Measure the unit's bounds into `b` ([`Anim::bounds`]).
+    pub fn update_bounds(&self, b: &mut Bounds) {
+        *b = self.bounds();
     }
 
     fn manual_done(&self, k: usize) -> bool {

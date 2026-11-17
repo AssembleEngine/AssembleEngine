@@ -30,9 +30,12 @@
 //!   starts its entry from where the clip had it.
 //!
 //! A bone nothing touches keeps its rest matrix, which need not be a TRS.
+//!
+//! [`Rig::bounds`] is the box of the mesh skinned at a pose, in the same
+//! arithmetic: what the sim's on-demand bounds query returns.
 
 use crate::pose::{BAKE_RATE, PlayMode};
-use crate::{Interpolation, Model, Path};
+use crate::{Bounds, Interpolation, Model, Path};
 
 /// Clip layers per unit.
 pub const LAYERS: usize = 4;
@@ -281,6 +284,16 @@ pub struct Rig {
     clips: Vec<Baked>,
     clip_names: Vec<String>,
     masks: Vec<Mask>,
+    /// The mesh's distinct skinned positions, for [`Rig::bounds`].
+    skin: Vec<SkinVertex>,
+}
+
+/// A vertex as skinning sees it: position, joints, unorm16 weights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SkinVertex {
+    p: [u32; 3],
+    joints: [u16; 4],
+    weights: [u16; 4],
 }
 
 impl Rig {
@@ -295,6 +308,7 @@ impl Rig {
             clip_names: model.clips.iter().map(|c| c.name.clone()).collect(),
             masks: Vec::new(),
             rest_frame: Vec::new(),
+            skin: skin_vertices(model),
             rest,
         };
         rig.clips = (0..model.clips.len()).map(|c| bake(model, &rig.rest, c)).collect();
@@ -630,6 +644,37 @@ impl Rig {
         }
     }
 
+    /// The box of the mesh posed by `ch` (as [`Rig::pose`] has it: entries
+    /// still pending or fresh are not applied), in model space: each
+    /// distinct vertex skinned as the GPU draws it (its joints' palette
+    /// matrices blended by weight, in joint order, then the position
+    /// through the blend). Zero for a model without vertices.
+    pub fn bounds(&self, ch: &Channels) -> Bounds {
+        let mut pose = self.rest_pose();
+        self.pose(ch, &mut pose);
+        let mut globals = vec![IDENTITY; self.bones()];
+        self.globals(&pose, &mut globals);
+        let mut palette = vec![IDENTITY; self.joints()];
+        self.palette(&globals, &mut palette);
+        let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for v in &self.skin {
+            let mut m = [0.0f32; 12];
+            for k in 0..4 {
+                let Some(j) = palette.get(v.joints[k] as usize).filter(|_| v.weights[k] != 0) else { continue };
+                let w = v.weights[k] as f32 / 65535.0;
+                for (x, y) in m.iter_mut().zip(j) {
+                    *x += y * w;
+                }
+            }
+            let q = transform(&m, v.p.map(f32::from_bits));
+            for i in 0..3 {
+                min[i] = min[i].min(q[i]);
+                max[i] = max[i].max(q[i]);
+            }
+        }
+        if self.skin.is_empty() { Bounds::default() } else { Bounds { min, max } }
+    }
+
     /// Model-space bone matrices (parents come first).
     pub fn globals(&self, pose: &Pose, out: &mut [Affine]) {
         for b in 0..self.bones() {
@@ -648,6 +693,18 @@ impl Rig {
             *o = mul(&globals[*bone as usize], inverse_bind);
         }
     }
+}
+
+/// The model's vertices as skinning sees them, each distinct one once, in
+/// the order they first appear.
+fn skin_vertices(model: &Model) -> Vec<SkinVertex> {
+    let mut seen = std::collections::HashSet::new();
+    model
+        .vertices
+        .iter()
+        .map(|v| SkinVertex { p: v.position.map(f32::to_bits), joints: v.joints, weights: v.weights })
+        .filter(|v| seen.insert(*v))
+        .collect()
 }
 
 /// `x` moved toward `to` by at most `step` (or all the way, `at_once`).

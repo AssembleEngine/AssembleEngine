@@ -2760,6 +2760,20 @@ Design:
     frame slot that draws it (twice at 60 fps, 30 Hz), 0.055 ms a copy on the render thread
     (`live-fox`); copying once would save about 0.05 ms a tick, against a device-local table,
     a GPU copy and barrier, and changed graph declarations.
+  - Bounds — done (2026-11-17). `Rig::bounds(ch)`: the box of the mesh posed by the channels
+    (`Rig::pose`, `globals`, `palette`, then every distinct skinned vertex: its joints'
+    matrices blended by weight in joint order, the position through the blend; strict scalar
+    f32), in model space. The anim plugin answers `anim:bounds` (input the `Anim`; out min, max;
+    zeros for a model it does not have). SDK: component `Bounds { min, max }` (engine id
+    `…000F`), `Anim::bounds()`, `Anim::update_bounds(&mut Bounds)`: on demand, synced, no
+    per-tick cost; pending commands are not applied (measure after `host(anim)` to see them).
+    Test game: units spawn with their first pose's bounds and are measured once a cycle after
+    the service. Fox: 2.8 µs a call (1728 vertices). Tests: the arm model's exact boxes (rest,
+    a clip, a manual turn, a pending one ignored), the Fox's box against the glam skinning path
+    (every clip at three times, a head turn; tight on every face), the query's bytes, the game's
+    `Bounds` rows (this tick's pose, the first pose, the 1/2/4/8-worker digests). Not done: the
+    catalogue spawner does not fill `Bounds` (no def has an `Anim` yet); the renderer does not
+    use `Bounds`.
 
 ## Later improvements
 

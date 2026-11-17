@@ -221,6 +221,33 @@ fn turned_reach_bounds_any_turn() {
 }
 
 #[test]
+fn rig_bounds_of_a_pose() {
+    use crate::anim::{Channels, Layer, Manual, Rig, manual_flags, manual_kind};
+    let m = sample_model();
+    let rig = Rig::new(&m);
+    let close = |b: Bounds, min: [f32; 3], max: [f32; 3]| (0..3).all(|i| (b.min[i] - min[i]).abs() < 1e-5 && (b.max[i] - max[i]).abs() < 1e-5);
+    // At rest: the model's rest bounds.
+    let rest = rig.bounds(&Channels::default());
+    assert!(close(rest, m.bounds.min, m.bounds.max), "{rest:?}");
+    // Halfway through the clip the arm is at (1, 2, 0), its tip 1 further.
+    let mut ch = Channels::default();
+    ch.layers[0] = Layer { clip: 1, weight: 1.0, target: 1.0, phase: 1.0, ..Default::default() };
+    let b = rig.bounds(&ch);
+    assert!(close(b, [0.0; 3], [2.0, 2.0, 0.0]), "{b:?}");
+    // The arm turned a quarter about z (manual, over the clip): its tip at
+    // (1, 1, 0).
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    ch.manual[0] = Manual { bone: 1, kind: manual_kind::TURN, value: [0.0, 0.0, s, s], target: [0.0, 0.0, s, s], ..Default::default() };
+    let b = rig.bounds(&ch);
+    assert!(close(b, [0.0; 3], [1.0, 1.0, 0.0]), "{b:?}");
+    // A command not taken yet is not shown: the clip has the arm.
+    ch.manual[0].flags = manual_flags::PENDING | manual_flags::FRESH;
+    assert!(close(rig.bounds(&ch), [0.0; 3], [2.0, 2.0, 0.0]));
+    // Nothing to bound without vertices.
+    assert_eq!(Rig::new(&Model::default()).bounds(&Channels::default()), Bounds::default());
+}
+
+#[test]
 fn gltf_axes() {
     // glTF's front (+Z) is the engine's forward (+X); glTF's +X (the
     // model's left) the engine's -Z (left, +Z being right).

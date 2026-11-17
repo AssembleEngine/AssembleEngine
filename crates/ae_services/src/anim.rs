@@ -8,6 +8,11 @@
 //! bone and mask names for `ae_sdk::anim::{clip, bone, mask}`
 //! (`ae_abi::lookup`). A unit whose model the plugin does not have still
 //! advances, as a model without clips (phases stay at 0).
+//!
+//! Queries (`ae_abi::query`), pure functions of the content and the
+//! unit's `Anim`: `anim:dir_in` ([`Rig::dir_in`]) and `anim:bounds`
+//! ([`Rig::bounds`]: the box of the mesh posed as the `Anim` has it, for
+//! `ae_sdk::anim::Anim::update_bounds`).
 
 use ae_abi::engine::{ANIM, BODY};
 use ae_abi::{lookup, name_id, name_id_from, query};
@@ -94,12 +99,21 @@ impl HostPlugin for AnimPlugin {
     }
 
     fn queries(&self) -> Vec<u64> {
-        vec![name_id(query::ANIM_DIR_IN)]
+        vec![name_id(query::ANIM_DIR_IN), name_id(query::ANIM_BOUNDS)]
     }
 
     fn query(&self, op: u64, input: &[u8], out: &mut [u8]) -> Result<usize> {
-        ensure!(op == name_id(query::ANIM_DIR_IN), "query {op:#x} is not the animation plugin's");
         let n = size_of::<Anim>();
+        if op == name_id(query::ANIM_BOUNDS) {
+            ensure!(input.len() == n && out.len() >= 24, "bounds: {} bytes in, {} out", input.len(), out.len());
+            let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
+            let b = self.rigs.get(&a.model).map_or_else(ae_model::Bounds::default, |(_, r)| r.bounds(&channels(&a)));
+            for (k, x) in b.min.iter().chain(&b.max).enumerate() {
+                out[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
+            }
+            return Ok(24);
+        }
+        ensure!(op == name_id(query::ANIM_DIR_IN), "query {op:#x} is not the animation plugin's");
         ensure!(input.len() == n + 16 && out.len() >= 12, "dir_in: {} bytes in, {} out", input.len(), out.len());
         let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
         let word = |k: usize| u32::from_le_bytes(input[n + 4 * k..n + 4 * k + 4].try_into().unwrap());
