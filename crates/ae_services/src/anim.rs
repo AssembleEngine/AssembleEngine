@@ -7,7 +7,10 @@
 //! The plugin holds the content's models by name; it publishes their clip,
 //! bone and mask names for `ae_sdk::anim::{clip, bone, mask}`
 //! (`ae_abi::lookup`). A unit whose model the plugin does not have still
-//! advances, as a model without clips (phases stay at 0).
+//! advances, as a model without clips (phases stay at 0). Rows are
+//! independent: the ticker splits them across the world's workers (its own
+//! pool), with the same results for any split; a unit with nothing playing
+//! and no manual entry is skipped (a tick would not change it).
 //!
 //! Queries (`ae_abi::query`), pure functions of the content and the
 //! unit's `Anim`: `anim:dir_in` ([`Rig::dir_in`]) and `anim:bounds`
@@ -80,12 +83,12 @@ impl HostPlugin for AnimPlugin {
         Ok(())
     }
 
-    fn instantiate(&self, _init: &HostInit, _schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
+    fn instantiate(&self, init: &HostInit, _schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
         names
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 match name {
-                    "anim" => Ok(Box::new(Ticker { advance: self.advance() })),
+                    "anim" => Ok(Box::new(Ticker { advance: self.advance(), par: ae_nav::par::Par::new(init.workers) })),
                     other => bail!("no host system `{other}` in the animation plugin"),
                 }
             })
@@ -135,6 +138,8 @@ impl HostPlugin for AnimPlugin {
 
 struct Ticker {
     advance: Advance,
+    /// The world's workers (rows split across them; serial at 1).
+    par: ae_nav::par::Par,
 }
 
 impl HostSystem for Ticker {
@@ -142,7 +147,7 @@ impl HostSystem for Ticker {
         for chunk in ctx.chunks() {
             let anims = unsafe { chunk.column::<Anim>(0) };
             let bodies = unsafe { chunk.column::<Body>(1) };
-            self.advance.rows(anims, bodies);
+            self.advance.rows_par(&self.par, anims, bodies);
         }
         Ok(())
     }
@@ -161,6 +166,10 @@ impl Advance {
     /// `bodies[i]`.
     pub fn rows(&self, anims: &mut [Anim], bodies: &[Body]) {
         for (a, b) in anims.iter_mut().zip(bodies.iter()) {
+            // Nothing playing, fading or manual: a tick changes nothing.
+            if a.clip == [0; LAYERS] && a.flags == [0; LAYERS] && a.manual_kind == [0; MANUAL] {
+                continue;
+            }
             let rig = self.rigs.get(&a.model).map_or(&self.none, |(_, r)| r);
             let mut ch = channels(a);
             rig.advance(&mut ch, self.dt, (b.vx * b.vx + b.vy * b.vy).sqrt());
@@ -177,9 +186,8 @@ impl Advance {
 
 /// An `Anim` column value as the evaluator's channels.
 pub fn channels(a: &Anim) -> Channels {
-    let mut ch = Channels::default();
-    for (i, l) in ch.layers.iter_mut().enumerate() {
-        *l = Layer {
+    Channels {
+        layers: std::array::from_fn(|i| Layer {
             clip: a.clip[i],
             mask: a.mask[i],
             mode: a.mode[i],
@@ -191,10 +199,8 @@ pub fn channels(a: &Anim) -> Channels {
             fade: a.fade[i],
             speed: a.speed[i],
             phase: a.phase[i],
-        };
-    }
-    for (k, m) in ch.manual.iter_mut().enumerate() {
-        *m = Manual {
+        }),
+        manual: std::array::from_fn(|k| Manual {
             bone: a.bone[k],
             kind: a.manual_kind[k],
             flags: a.manual_flags[k],
@@ -204,9 +210,8 @@ pub fn channels(a: &Anim) -> Channels {
             accel: a.accel[k],
             decel: a.decel[k],
             rate: a.rate[k],
-        };
+        }),
     }
-    ch
 }
 
 /// Channels back into an `Anim` (its model unchanged).

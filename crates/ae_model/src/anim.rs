@@ -500,6 +500,9 @@ impl Rig {
     /// Pending manual entries into their bones' terms; fresh ones start from
     /// where their bone is shown.
     fn start_manual(&self, ch: &mut Channels) {
+        if !ch.manual.iter().any(|m| !m.is_empty() && m.flags & manual_flags::PENDING != 0) {
+            return;
+        }
         let before = *ch;
         for k in 0..MANUAL {
             let m = ch.manual[k];
@@ -718,7 +721,13 @@ fn wrap(x: f32, period: f32) -> f32 {
     if period <= 0.0 {
         return 0.0;
     }
-    let y = x - period * libm::floorf(x / period);
+    // Already within one period (the usual case): the floor is 0 and the
+    // result `x` itself, without calling it.
+    let q = x / period;
+    if (0.0..1.0).contains(&q) && x < period {
+        return x;
+    }
+    let y = x - period * libm::floorf(q);
     if (0.0..period).contains(&y) { y } else { 0.0 }
 }
 
