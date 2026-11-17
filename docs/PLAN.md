@@ -2752,6 +2752,14 @@ Design:
     parallel rows; integer phases re-pin digests), phase 4 (a synced facing for aim and fire,
     a schema change), phase 5 (`Bounds` and the callout, a schema change; pose after the cull),
     phase 6 (analytic phases). Not run yet: the windowed client.
+    Then (2026-11-17): the joint key helpers removed from `ae_model::anim`; the renderer poses
+    with the sim's rigs (`SimOptions::rigs` makes them for both, so content masks reach the
+    GPU); a unit with a manual joint shown is culled with a sphere covering any turn
+    (`ae_model::pose::turned_reach`, `models::turned_sphere`; manual moves and scales not
+    bounded). Phase 1 measured and not done: each tick's instance columns are copied once per
+    frame slot that draws it (twice at 60 fps, 30 Hz), 0.055 ms a copy on the render thread
+    (`live-fox`); copying once would save about 0.05 ms a tick, against a device-local table,
+    a GPU copy and barrier, and changed graph declarations.
 
 ## Later improvements
 

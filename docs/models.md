@@ -226,7 +226,8 @@ The CPU time is reading the units' `Anim` rows (536 bytes each), matching them t
 packing; no bone is evaluated. A walking Fox writes its record's tick and its layers' phases a
 tick (about three cells). The `units pose` pass samples the clips for both records only while
 the drawn tick is between them. `gpu_total` (baselines, `bench/results/baseline/gpu-*-fox.json`):
-8.3 ms `army-fox`, 8.2 ms `live-fox`, 6.9 ms `near-fox`, mostly the shadows (no earlier baseline
+8.6 ms `army-fox`, 8.6 ms `live-fox`, 7.2 ms `near-fox` (with the cull spheres for manual joints;
+8.3, 8.2 and 6.9 ms before them, within the spread), mostly the shadows (no earlier baseline
 of the `scripted` scenes to compare: the old ones were of the crossing army). Validation clean
 (`live-fox` and the GPU tests). A `--capture` of the scripted game shows the Foxes mid-stride
 and standing, as the sim plays them.
