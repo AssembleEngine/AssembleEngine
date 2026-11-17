@@ -100,6 +100,28 @@ pub struct HeldKeys {
     pub fast: bool,
 }
 
+/// The application icon, embedded so a built binary needs no asset files.
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
+
+/// Sets `window`'s icon from the embedded PNG. A window without an icon is
+/// still usable, so a broken icon only prints why it was skipped.
+unsafe fn set_window_icon(window: *mut sdl::SDL_Window) {
+    let stream = unsafe { sdl::SDL_IOFromConstMem(ICON_PNG.as_ptr().cast(), ICON_PNG.len()) };
+    if stream.is_null() {
+        eprintln!("window icon: {}", sdl_error());
+        return;
+    }
+    let surface = unsafe { sdl::SDL_LoadPNG_IO(stream, true) };
+    if surface.is_null() {
+        eprintln!("window icon: {}", sdl_error());
+        return;
+    }
+    unsafe {
+        sdl::SDL_SetWindowIcon(window, surface);
+        sdl::SDL_DestroySurface(surface);
+    }
+}
+
 /// The SDL video subsystem plus one Vulkan-capable window. Not `Send`: SDL
 /// requires window creation and event pumping on the main thread.
 pub struct SdlWindow {
@@ -129,6 +151,7 @@ impl SdlWindow {
                 sdl::SDL_Quit();
                 bail!("SDL_CreateWindow failed: {error}");
             }
+            set_window_icon(window);
             Ok(Self {
                 window,
                 trace: std::env::var("AE_RENDER_TRACE_EVENTS").is_ok_and(|raw| raw.trim() == "1"),

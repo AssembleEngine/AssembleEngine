@@ -20,3 +20,6 @@ serde_json.workspace = true
 ae_bench.workspace = true
 ae_profile.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

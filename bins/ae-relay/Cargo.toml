@@ -10,3 +10,6 @@ ae_net.workspace = true
 ae_replay.workspace = true
 ae_sim.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

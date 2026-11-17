@@ -25,6 +25,9 @@ ae_map.workspace = true
 ae_abi.workspace = true
 ae-sdk = { workspace = true, features = ["nav"] }
 
+[build-dependencies]
+embed-resource.workspace = true
+
 [dev-dependencies]
 ae_vfs.workspace = true
 ae_map.workspace = true

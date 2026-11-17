@@ -24,3 +24,6 @@ rayon.workspace = true
 glam = "0.30"
 ash.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
