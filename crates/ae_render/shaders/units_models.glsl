@@ -32,7 +32,7 @@ layout(std430, set = 1, binding = 2) readonly buffer Palette { mat3x4 palette[];
 struct ModelClass {
     vec4 sphere; // bounding sphere (at rest, or over its clips), fitted units
     uvec4 cmd;   // first entry in classCommands, commands (0: a dart), rest palette offset, joints
-    vec4 fit;    // x: 1 / footprint radius
+    vec4 fit;    // x: 1 / footprint radius; y: the sphere radius with manual joints (0: none), z: its centre over sphere.xyz
     uvec4 pose;  // in anim[]: first bone, bones, first joint, the clips' head
 };
 layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
@@ -76,6 +76,11 @@ layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; 
 // stagedAt[i].
 layout(std430, set = 1, binding = 10) readonly buffer Staged { uvec4 staged[]; };
 layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
+#elif defined(CULL)
+// The units' animation table, for the cull: a unit with manual joints
+// shown in either record is culled with ModelClass.fit's sphere.
+#define RECORD_CELLS 15u
+layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; };
 #endif
 
 // cascade: the shadow caster's (units_pose.comp: the number of jobs);

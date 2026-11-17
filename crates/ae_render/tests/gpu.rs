@@ -3549,7 +3549,8 @@ fn units_model_shadows_culled() {
 /// built here (a base and an arm, two clips through the hierarchy), the
 /// Fox (skinned) and BoxAnimated (animated pieces); the arm is drawn where
 /// its pose puts it; a unit whose rest sphere is off screen but whose clip
-/// reaches into it is not culled.
+/// reaches into it is not culled, nor one with a manual joint whose clips'
+/// sphere is off screen but whose sphere covering any turn is not.
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn units_pose_models() {
@@ -3724,6 +3725,21 @@ fn units_pose_models() {
     units.push(((x + 4.0, 512.0), heading, 20.0, 0, one(1, looped, 0.99, 0.99)));
     let reach_tip = at(x + 4.0, 512.0, heading, 20.0, Vec3::new(0.0, 1.39, 5.94));
     assert!(!outside(reach_tip, 0.0), "the off-screen unit's arm reaches into the view");
+    // A unit with a manual joint shown is culled with the sphere covering
+    // any turn (models.rs turned_sphere): off the right edge where its
+    // clips' sphere is out of view and that one is not, it is drawn.
+    let cull_sphere = ae_render::models::fit(&models[0]).1;
+    let clip_r = cull_sphere[3].max(ae_model::pose::animated_radius(&models[0], Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2])) * 1.05);
+    let [turned_r, along] = ae_render::models::turned_sphere([cull_sphere[0], cull_sphere[1], cull_sphere[2], clip_r], ae_model::pose::turned_reach(&models[0]));
+    let centre = Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2]);
+    let mut turned_x = 512.0;
+    while !outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre), clip_r * 20.0) {
+        turned_x += 2.0;
+    }
+    turned_x += 2.0;
+    assert!(!outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre * along), turned_r * 20.0), "the turned unit's sphere is in view");
+    let half_round = with(&[layer(1, looped, 0.99)], &[entry(1, manual_kind::TURN, about_y(180.0))]);
+    units.push(((turned_x, 512.0), (1.0, 0.0), 20.0, 0, Spec::Records(half_round, half_round, false)));
 
     // The sim's rigs; the arm's has a mask (its arm only), which the
     // renderer gets with the rig.

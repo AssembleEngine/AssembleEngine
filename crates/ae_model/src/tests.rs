@@ -189,6 +189,38 @@ fn animation_reach() {
 }
 
 #[test]
+fn turned_reach_bounds_any_turn() {
+    use crate::pose::turned_reach;
+    // Still: the arm bone 1 from the root, its tip 1 further: 2 with any
+    // turn.
+    let mut still = sample_model();
+    still.clips.clear();
+    assert!((turned_reach(&still) - 2.0).abs() < 1e-5);
+    // The clip carries the arm to (1, 4, 0): its longest translation
+    // (sqrt 17) and its change from the first frame (4, an additive layer
+    // on top), then the tip.
+    let m = sample_model();
+    let want = 17f32.sqrt() + 4.0 + 1.0;
+    assert!((turned_reach(&m) - want).abs() < 1e-4, "{}", turned_reach(&m));
+    // A root scaled 2 scales everything under it.
+    let mut scaled = sample_model();
+    scaled.bones[0].scale = [2.0; 3];
+    scaled.bones[0].rest = Mat4::from_scale(Vec3::splat(2.0)).to_cols_array();
+    assert!((turned_reach(&scaled) - 2.0 * want).abs() < 1e-3, "{}", turned_reach(&scaled));
+    // Any turn of the bones stays within it: the arm turned straight out.
+    let mut pose = Pose::rest(&m);
+    pose.sample(&m, 0, 2.0);
+    pose.rotation[1] = Quat::from_rotation_z(4f32.atan2(1.0));
+    let far = palette(&m, &globals(&m, &pose.locals(&m)));
+    let tip = far[1].transform_point3(Vec3::new(2.0, 0.0, 0.0));
+    assert!((tip.length() - (17f32.sqrt() + 1.0)).abs() < 1e-4 && tip.length() <= turned_reach(&m), "{tip}");
+    // Nothing moves without joints.
+    let mut rigid = still;
+    rigid.joints.clear();
+    assert_eq!(turned_reach(&rigid), 0.0);
+}
+
+#[test]
 fn gltf_axes() {
     // glTF's front (+Z) is the engine's forward (+X); glTF's +X (the
     // model's left) the engine's -Z (left, +Z being right).

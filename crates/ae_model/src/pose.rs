@@ -234,6 +234,79 @@ pub fn animated_radius(model: &Model, centre: Vec3) -> f32 {
     radius
 }
 
+/// How far from the model's origin a vertex can be with any of its bones
+/// turned any way (M14's manual turns and spins), each bone's translation
+/// and scale as its rest pose or a clip frame has them, a clip's change
+/// from its first frame added once (additive layers): a bound, not the
+/// farthest pose. Each bone's origin is at most its parent's reach plus
+/// its longest translation times the scales above it; a vertex at most its
+/// bone's reach plus its distance from the bone times the scales down to
+/// it (a skinned vertex: the most of its bones', the blend being a convex
+/// combination). Manual moves and scales are not bounded (they go
+/// anywhere). 0 without joints (nothing moves).
+pub fn turned_reach(model: &Model) -> f32 {
+    if model.joints.is_empty() {
+        return 0.0;
+    }
+    let n = model.bones.len();
+    // Per bone: its longest local translation and largest scale factor
+    // (the largest stretch of its local matrix: its largest scale when the
+    // rest matrix is its TRS, else bounded by the Frobenius norm).
+    let mut t: Vec<f32> = model.bones.iter().map(|b| Mat4::from_cols_array(&b.rest).w_axis.truncate().length()).collect();
+    let mut s: Vec<f32> = model
+        .bones
+        .iter()
+        .map(|b| {
+            let m = Mat4::from_cols_array(&b.rest);
+            let trs = Mat4::from_scale_rotation_translation(Vec3::from(b.scale), Quat::from_array(b.rotation).normalize(), Vec3::from(b.translation));
+            let scale = Vec3::from(b.scale).abs().max_element();
+            match m.abs_diff_eq(trs, 1e-4 * scale.max(1.0)) {
+                true => scale,
+                false => (m.x_axis.truncate().length_squared() + m.y_axis.truncate().length_squared() + m.z_axis.truncate().length_squared()).sqrt(),
+            }
+        })
+        .collect();
+    let (mut t_add, mut s_add) = (vec![0.0f32; n], vec![1.0f32; n]);
+    for clip in 0..model.clips.len() {
+        let baked = bake(model, clip);
+        let tracks = baked.tracks.len();
+        let (mut dt, mut ds) = (vec![0.0f32; tracks], vec![1.0f32; tracks]);
+        for (k, key) in baked.keys.iter().enumerate() {
+            let (i, b) = (k % tracks, baked.tracks[k % tracks] as usize);
+            let first = baked.keys[i];
+            t[b] = t[b].max(key.t.length());
+            s[b] = s[b].max(key.s.abs().max_element());
+            dt[i] = dt[i].max((key.t - first.t).length());
+            let ratio = Vec3::select(first.s.cmpne(Vec3::ZERO), key.s / first.s, Vec3::ONE);
+            ds[i] = ds[i].max(ratio.abs().max_element());
+        }
+        for (i, &b) in baked.tracks.iter().enumerate() {
+            t_add[b as usize] += dt[i];
+            s_add[b as usize] *= ds[i];
+        }
+    }
+    // Each bone's origin's reach, and the scale its children are under.
+    let (mut reach, mut scale) = (vec![0.0f32; n], vec![1.0f32; n]);
+    for (b, bone) in model.bones.iter().enumerate() {
+        let (r, sc) = bone.parent.map_or((0.0, 1.0), |p| (reach[p as usize], scale[p as usize]));
+        reach[b] = r + sc * (t[b] + t_add[b]);
+        scale[b] = sc * s[b] * s_add[b];
+    }
+    let mut most = 0.0f32;
+    for v in &model.vertices {
+        for k in 0..4 {
+            if v.weights[k] == 0 && k > 0 {
+                continue;
+            }
+            let j = &model.joints[v.joints[k] as usize];
+            let b = j.bone as usize;
+            let local = Mat4::from_cols_array(&j.inverse_bind).transform_point3(Vec3::from(v.position));
+            most = most.max(reach[b] + scale[b] * local.length());
+        }
+    }
+    most
+}
+
 /// One channel at time `t`; `n` components per value.
 fn sample_channel(times: &[f32], values: &[f32], n: usize, interp: Interpolation, rotation: bool, t: f32) -> Vec4 {
     let cubic = interp == Interpolation::CubicSpline;

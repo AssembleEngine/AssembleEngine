@@ -23,7 +23,8 @@
 //!   matrices). The animation table ([`ModelSet::anim`], [`animation`])
 //!   holds the bones, joints, and the rig's clips (the sim's bake), masks
 //!   and rest transforms. A model with clips is culled with a sphere that
-//!   covers every clip frame.
+//!   covers every clip frame; a unit with manual joints shown with one
+//!   that also covers any bone turned any way ([`turned_sphere`]).
 //! * A model is fitted to the unit: its footprint radius (the largest
 //!   distance of its rest bounds from the origin along x or z) is drawn at
 //!   the unit's drawn size, as the dart's body radius is. Model space is
@@ -84,7 +85,9 @@ struct GpuClass {
     /// First entry in the class-commands list, commands (0: no model, a
     /// dart), rest palette offset, joints.
     cmd: [u32; 4],
-    /// x: 1 / footprint radius.
+    /// x: 1 / footprint radius; y: the radius of the sphere a unit with
+    /// manual joints is culled with (0: as the others), z: its centre as a
+    /// multiple of `sphere`'s ([`turned_sphere`]).
     fit: [f32; 4],
     /// In the animation table (vec4s): the first bone, bones, the first
     /// joint, the clips' head.
@@ -160,6 +163,27 @@ pub struct ModelSet {
     pub template: Vec<u8>,
     /// Model class (index into `classes`) of each unit class.
     pub class_model: Vec<Option<usize>>,
+}
+
+/// The sphere a unit with manual joints shown is culled with: the one
+/// enclosing the model's `sphere` (centre, radius) and the sphere about the
+/// model's origin of radius `reach` (`ae_model::pose::turned_reach`: any
+/// bone turned any way), 1% larger; as (radius, centre as a multiple of
+/// `sphere`'s centre). (0, 0) without reach (a model without joints).
+pub fn turned_sphere(sphere: [f32; 4], reach: f32) -> [f32; 2] {
+    if reach <= 0.0 {
+        return [0.0, 0.0];
+    }
+    let (d, r) = (glam::Vec3::new(sphere[0], sphere[1], sphere[2]).length(), sphere[3]);
+    let (radius, along) = if reach >= d + r {
+        (reach, 0.0)
+    } else if r >= d + reach {
+        (r, 1.0)
+    } else {
+        let radius = 0.5 * (d + r + reach);
+        (radius, (radius - reach) / d)
+    };
+    [radius * 1.01, along]
 }
 
 /// glTF's sampler as Vulkan's.
@@ -407,7 +431,7 @@ impl ModelSet {
         let mut placed: Vec<(Vec<(u32, u32)>, u32)> = Vec::new();
         // Per unique model: its rest palette offset, its animation table
         // entry (`GpuClass::pose`), its cull sphere.
-        let mut posed: Vec<(u32, [u32; 4], [f32; 4])> = Vec::new();
+        let mut posed: Vec<(u32, [u32; 4], [f32; 4], [f32; 2])> = Vec::new();
         let mut anim: Vec<[f32; 4]> = Vec::new();
         let mut rest: Vec<f32> = Vec::new();
         let (mut max_joints, mut max_bones) = (0u32, 0u32);
@@ -446,7 +470,9 @@ impl ModelSet {
                 max_joints = max_joints.max(model.joints.len() as u32);
                 max_bones = max_bones.max(model.bones.len() as u32);
             }
-            posed.push((rest_offset, pose, sphere.map(|v| v / footprint)));
+            let sphere = sphere.map(|v| v / footprint);
+            let turned = turned_sphere(sphere, ae_model::pose::turned_reach(model) / footprint);
+            posed.push((rest_offset, pose, sphere, turned));
             unique.push(model.clone());
         }
 
@@ -469,9 +495,9 @@ impl ModelSet {
                 pending.push((masked, classes.len(), record, Draw { class: c as u32, index_count: p.index_count, first_index }));
             }
             let (footprint, _) = fit(model);
-            let (rest_offset, pose, sphere) = posed[m];
+            let (rest_offset, pose, sphere, turned) = posed[m];
             let joints = model.joints.len() as u32;
-            table[c] = GpuClass { sphere, cmd: [0, model.primitives.len() as u32, rest_offset, joints], fit: [1.0 / footprint, 0.0, 0.0, 0.0], pose };
+            table[c] = GpuClass { sphere, cmd: [0, model.primitives.len() as u32, rest_offset, joints], fit: [1.0 / footprint, turned[0], turned[1], 0.0], pose };
             class_model[c] = Some(classes.len());
             classes.push(ModelClass {
                 class: c as u32,

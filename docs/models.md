@@ -137,8 +137,15 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   and per frame slot staging for as many writes (4.8 MB + 4 bytes a cell, host visible); the
   CPU mirror is as large as the table. The Fox's clips take 0.6 MB of the models' table.
 - **Cull sphere**: a model with clips is culled with a sphere covering every vertex in every baked
-  frame of every clip, 5% larger (motion between frames), for all units of its class. Manual
-  joints (M14) can reach further: not covered yet.
+  frame of every clip, 5% larger (motion between frames), for all units of its class. A unit with
+  a manual joint shown in either of its animation records is culled (camera and cascades) with a
+  sphere that also covers any bone turned any way (`models::turned_sphere`, the class's `fit.yz`;
+  the reach, `ae_model::pose::turned_reach`: each bone's longest translation and largest scale
+  over the rest pose and every clip frame, a clip's change from its first frame added once for
+  additive layers, chained from the root; Fox: 180 model units from its origin against the clips'
+  92 about their centre). Manual moves and scales are not bounded (a move can go anywhere), nor
+  additive layers stacked on a unit without manual joints. Measured: 5 more Foxes drawn in
+  `army-fox`, 34 in `near-fox`, `gpu_total` within its spread.
 - **Fit and frame**: model space is the dart's local frame (+X along the heading, +Y up, +Z to the
   right). The model's footprint radius (its rest bounds' largest extent from the origin along x or
   z) is drawn at the unit's drawn size, so the minimum pixel size applies as for darts.
@@ -166,7 +173,8 @@ as writes over it, units at rest and with records not in the table, drawn half w
 records and on the newer; every row's palette read back equals the sim's (`Rig::pose` of each
 record's channels, lerped, `Rig::globals`, `Rig::palette`) to 1e-3 relative (checked to fail
 with the additive rotation or the manual rotations dropped from the shader); the arm is drawn
-where its pose puts it; a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
+where its pose puts it; a unit with a manual joint whose clips' sphere is off screen and whose
+sphere covering any turn is not is drawn (checked to fail without it); a unit whose rest sphere is off screen but whose arm reaches in is drawn. `units_model_shadows_culled`: a pillar far outside every
 cascade is counted in none; a pillar off screen toward the sun is in a cascade and shadows the
 ground in view (checked to fail when the cascades take only the units the camera sees). `ae_model` tests: baked clips against the sampler (linear
 translation, rotation across hemispheres, a duration not a whole number of frames, looping) and
