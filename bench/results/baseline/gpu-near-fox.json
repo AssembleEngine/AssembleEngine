@@ -1,22 +1,22 @@
 {
   "suite": "gpu-near-fox",
-  "commit": "60c2c8b-dirty",
+  "commit": "cdd4196-dirty",
   "machine": "local",
   "records": [
     {
       "metric": "model_setup",
       "kind": "time",
-      "value": 16761009.999999998,
+      "value": 15867043.0,
       "unit": "ns",
-      "spread": 0.10370431137503074,
+      "spread": 0.19199758896474914,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_anim_pack",
       "kind": "time",
-      "value": 1298989.0,
+      "value": 1077313.0000000002,
       "unit": "ns",
-      "spread": 0.6192877691804934,
+      "spread": 0.29663431147679453,
       "tolerance": 0.5
     },
     {
@@ -29,105 +29,105 @@
     {
       "metric": "anim_writes",
       "kind": "info",
-      "value": 28535.0,
+      "value": 28533.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "gpu_total",
       "kind": "time",
-      "value": 7165599.968167953,
+      "value": 7143104.0888419375,
       "unit": "ns",
-      "spread": 0.06335603033318256
+      "spread": 0.03962875557494183
     },
     {
       "metric": "pass/units reset",
       "kind": "time",
       "value": 1408.000010997057,
       "unit": "ns",
-      "spread": 0.045454560487515616,
+      "spread": 0.15909087902496877,
       "tolerance": 1.4545454431848586
     },
     {
       "metric": "pass/units pose",
       "kind": "time",
-      "value": 371071.994304657,
+      "value": 313055.99212646484,
       "unit": "ns",
-      "spread": 0.5313038757187111
+      "spread": 0.593478495139568
     },
     {
       "metric": "pass/terrain lod",
       "kind": "time",
-      "value": 227712.0053768158,
+      "value": 230112.0012998581,
       "unit": "ns",
-      "spread": 0.014052879908207928
+      "spread": 0.01279380257994872
     },
     {
       "metric": "pass/units cull",
       "kind": "time",
-      "value": 9600.000455975533,
+      "value": 7327.999919652939,
       "unit": "ns",
-      "spread": 0.09666662204079542,
-      "tolerance": 0.2133333232005442
+      "spread": 0.11790393956570476,
+      "tolerance": 0.27947598559703524
     },
     {
       "metric": "pass/units count",
       "kind": "time",
-      "value": 2176.000038161874,
+      "value": 2240.000059828162,
       "unit": "ns",
-      "spread": 0.3676470163384835,
-      "tolerance": 0.9411764540822348
+      "spread": 0.3714285313365612,
+      "tolerance": 0.9142856898660568
     },
     {
       "metric": "pass/units count read",
       "kind": "time",
-      "value": 1792.0000245794654,
+      "value": 1824.0000354126096,
       "unit": "ns",
-      "spread": 0.01785714865749164,
-      "tolerance": 1.1428571271814636
+      "spread": 0.03508773049547164,
+      "tolerance": 1.1228069957447775
     },
     {
       "metric": "pass/shadows",
       "kind": "time",
-      "value": 4563903.80859375,
+      "value": 4596384.048461914,
       "unit": "ns",
-      "spread": 0.0759839936476095
+      "spread": 0.045795988014087304
     },
     {
       "metric": "pass/terrain",
       "kind": "time",
-      "value": 406527.9960632324,
+      "value": 413695.9910392761,
       "unit": "ns",
-      "spread": 0.8614609272641754
+      "spread": 0.6757426195493891
     },
     {
       "metric": "pass/units",
       "kind": "time",
-      "value": 1413120.0313568115,
+      "value": 1432575.9410858154,
       "unit": "ns",
-      "spread": 0.032608690150504764
+      "spread": 0.030021424081479745
     },
     {
       "metric": "pass/water",
       "kind": "time",
-      "value": 178176.00071430206,
+      "value": 180224.0014076233,
       "unit": "ns",
-      "spread": 1.9425287634493358
+      "spread": 1.556818247117646
     },
     {
       "metric": "cpu_frame",
       "kind": "time",
-      "value": 107704.41531372121,
+      "value": 107642.08178710977,
       "unit": "ns",
-      "spread": 0.25097272131327353,
+      "spread": 0.3586128906405991,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_record",
       "kind": "time",
-      "value": 80320.99902629852,
+      "value": 80721.99672460556,
       "unit": "ns",
-      "spread": 0.28485705025610125,
+      "spread": 0.39717793165295145,
       "tolerance": 0.5
     },
     {
@@ -147,21 +147,21 @@
     {
       "metric": "units_visible",
       "kind": "info",
-      "value": 5910.0,
+      "value": 5907.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "units_cascade0",
       "kind": "info",
-      "value": 7955.0,
+      "value": 7960.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "units_cascade1",
       "kind": "info",
-      "value": 9907.0,
+      "value": 9906.0,
       "unit": "",
       "spread": 0.0
     },
