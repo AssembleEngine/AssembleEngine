@@ -54,7 +54,8 @@ use std::time::Instant;
 /// is a `u32` indexing [`UnitsSetup::classes`]. `pose` (a `u32`) is where
 /// a unit with a model finds its two animation records in the animation
 /// table (what the streams' [`InstanceStream::anim`] wrote; see
-/// [`RECORD_CELLS`]), or [`NO_POSE`] for the rest pose. Every other
+/// [`RECORD_CELLS`]), with [`POSE_MANUAL`] set when either record shows
+/// a manual joint, or [`NO_POSE`] for the rest pose. Every other
 /// attribute is an `f32`.
 pub const ATTRIBUTES: [&str; 9] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "pose"];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
@@ -63,6 +64,18 @@ const ATTR_CLASS: usize = 7;
 pub const ATTR_POSE: usize = 8;
 /// The `pose` of a unit drawn at its model's rest pose.
 pub const NO_POSE: u32 = u32::MAX;
+/// Set in a `pose` other than [`NO_POSE`] when either of the unit's
+/// records shows a manual joint: the cull takes the sphere covering any
+/// turn (`models::turned_sphere`) from it, not from the table. The rest
+/// is the first record's cell ([`pose_cell`]); a table never reaches
+/// `1 << 31` cells.
+pub const POSE_MANUAL: u32 = 1 << 31;
+
+/// The first record cell of `pose` (not [`NO_POSE`]), without
+/// [`POSE_MANUAL`].
+pub const fn pose_cell(pose: u32) -> u32 {
+    pose & !POSE_MANUAL
+}
 
 /// A cell of the animation table: four 32-bit words (a vec4 on the GPU).
 pub type Cell = [u32; 4];
@@ -487,7 +500,7 @@ impl Models {
             let Some(mc) = self.set.class_model[class_of(r)] else { continue };
             let mc = &self.set.classes[mc];
             let pose = stream.columns[ATTR_POSE][r];
-            words[r] = match mc.bones > 0 && pose != NO_POSE && pose as usize + POSE_CELLS <= fit {
+            words[r] = match mc.bones > 0 && pose != NO_POSE && pose_cell(pose) as usize + POSE_CELLS <= fit {
                 true => {
                     words[capacity + jobs] = r as u32;
                     words[2 * capacity + jobs] = scratch;

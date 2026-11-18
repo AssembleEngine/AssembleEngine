@@ -21,7 +21,7 @@
 //! straight from the unit's `Anim` in the sim's column (borrowed, not
 //! copied: `ae_sim::runtime::Runtime::chunks`).
 
-use ae_render::units::{AnimWrites, Cell, NO_POSE, POSE_CELLS, RECORD_CELLS};
+use ae_render::units::{AnimWrites, Cell, NO_POSE, POSE_CELLS, POSE_MANUAL, RECORD_CELLS};
 use ae_sdk::anim::{Anim, LAYERS, MANUAL, manual_flags, manual_kind};
 use rayon::prelude::*;
 
@@ -56,6 +56,8 @@ pub struct Poser {
     table: Vec<Cell>,
     /// Per slot: a bit per cell written this stream.
     written: Vec<u64>,
+    /// Per slot: either record shows a manual joint ([`POSE_MANUAL`]).
+    manual: Vec<bool>,
     /// A stream was made (the first one writes the whole table).
     started: bool,
     /// The next stream writes the whole table ([`Self::write_whole`]).
@@ -85,6 +87,7 @@ impl Poser {
             free: Vec::new(),
             table: Vec::new(),
             written: Vec::new(),
+            manual: Vec::new(),
             started: false,
             whole_next: false,
             models: Vec::new(),
@@ -97,7 +100,8 @@ impl Poser {
 
     /// Pack `units` (key, class, channels; ascending by key) at `tick`:
     /// each one's `pose` attribute into `poses` (cleared first;
-    /// [`NO_POSE`] when it is not posed), the cells that changed into
+    /// [`NO_POSE`] when it is not posed; [`POSE_MANUAL`] set when either
+    /// of its records shows a manual joint), the cells that changed into
     /// `writes` (replacing what it held; its memory is reused).
     pub fn pose(&mut self, tick: u64, units: &[(u64, u32, &Anim)], poses: &mut Vec<u32>, writes: &mut AnimWrites) {
         let now = tick as u32;
@@ -156,17 +160,19 @@ impl Poser {
         self.table
             .par_chunks_mut(POSE_CELLS * BLOCK)
             .zip(self.written.par_chunks_mut(BLOCK))
+            .zip(self.manual.par_chunks_mut(BLOCK))
             .zip(job_of.par_chunks_mut(BLOCK))
             .zip(blocks.par_iter_mut())
             .enumerate()
-            .for_each(|(b, (((cells, written), jobs), (at, out)))| {
+            .for_each(|(b, ((((cells, written), manual), jobs), (at, out)))| {
                 (at.clear(), out.clear());
-                for (s, ((cells, w), job)) in cells.chunks_mut(POSE_CELLS).zip(written).zip(jobs).enumerate() {
+                for (s, (((cells, w), m), job)) in cells.chunks_mut(POSE_CELLS).zip(written).zip(manual).zip(jobs).enumerate() {
                     let (i, fresh) = std::mem::replace(job, (u32::MAX, false));
                     *w = match units.get(i as usize) {
                         Some(&(_, _, anim)) => pack_slot(&Job { anim, fresh }, now, cells),
                         None => 0,
                     };
+                    *m = cells[0][1].max(cells[RECORD_CELLS][1]) > 0;
                     let base = (b * BLOCK + s) * POSE_CELLS;
                     let mut bits = *w;
                     while bits != 0 {
@@ -186,6 +192,12 @@ impl Poser {
             writes.cells.extend_from_slice(cells);
         }
         (self.models, self.kept, self.job_of, self.blocks) = (models, kept, job_of, blocks);
+        // The cull's sphere for manual joints from the records just packed.
+        for pose in poses.iter_mut().filter(|p| **p != NO_POSE) {
+            if self.manual[*pose as usize / POSE_CELLS] {
+                *pose |= POSE_MANUAL;
+            }
+        }
         if whole {
             writes.at.clear();
             writes.at.extend(0..self.table.len() as u32);
@@ -208,6 +220,7 @@ impl Poser {
         self.slots += 1;
         self.table.resize(self.slots * POSE_CELLS, [0; 4]);
         self.written.resize(self.slots, 0);
+        self.manual.resize(self.slots, false);
         (self.slots - 1) as u32
     }
 }

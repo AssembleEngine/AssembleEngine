@@ -3562,7 +3562,7 @@ fn units_pose_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, frustum_planes};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{AnimWrites, Cell, InstanceStream, NO_POSE, RECORD_CELLS, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{AnimWrites, Cell, InstanceStream, NO_POSE, POSE_MANUAL, RECORD_CELLS, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -3774,7 +3774,11 @@ fn units_pose_models() {
                     true => table.extend(b.iter().chain(&a)),
                     false => table.extend(a.iter().chain(&b)),
                 }
-                first
+                // As the client marks it: a manual joint shown in either.
+                match a[0][1].max(b[0][1]) > 0 {
+                    true => first | POSE_MANUAL,
+                    false => first,
+                }
             }
             Spec::Records(..) | Spec::Missing => 1 << 20,
             Spec::Rest => NO_POSE,

@@ -13,8 +13,11 @@
 #define ATTR_HEADING_Y 5u
 #define ATTR_RADIUS 6u
 #define ATTR_CLASS 7u
-// The unit's first animation record cell (ae_render::units::NO_POSE: at rest).
+// The unit's first animation record cell (ae_render::units::NO_POSE: at rest),
+// POSE_MANUAL set when either record shows a manual joint.
 #define ATTR_POSE 8u
+#define NO_POSE 0xffffffffu
+#define POSE_MANUAL 0x80000000u
 #define MAX_CLASSES 16u
 
 layout(std140, set = 0, binding = 0) uniform Frame {

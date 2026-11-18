@@ -174,7 +174,7 @@ void main() {
     uint row = rows[cap + job];
     uint scratch = rows[2u * cap + job];
     ModelClass mc = modelClasses[min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u)];
-    uint recA = attru(ATTR_POSE, row);
+    uint recA = attru(ATTR_POSE, row) & ~POSE_MANUAL;
     uint recB = recA + RECORD_CELLS;
     uint ta = records[recA].x;
     int span = int(records[recB].x - ta);

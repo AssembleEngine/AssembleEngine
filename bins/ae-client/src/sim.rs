@@ -924,7 +924,7 @@ mod tests {
     /// changed, one record a tick.
     #[test]
     fn streams_carry_poses() {
-        use ae_render::units::{Cell, POSE_CELLS, RECORD_CELLS};
+        use ae_render::units::{Cell, POSE_CELLS, POSE_MANUAL, RECORD_CELLS};
         use ae_sdk::anim::{manual_flags, manual_kind};
         let arm = model_id("arm");
         // Class = entity % 3: class 0 is drawn with the arm, class 1 not.
@@ -952,7 +952,7 @@ mod tests {
         let mut table: Vec<Cell> = Vec::new();
         let ticks = |table: &[Cell]| (table[0][0], table[RECORD_CELLS][0]);
         let first = s.stream(&capture(10, &rows), &refs(&anims(0.1)), now, 0.1);
-        assert_eq!(first.columns[8], [0, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model");
+        assert_eq!(first.columns[8], [POSE_MANUAL, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model; 3 shows a manual joint");
         assert!(first.anim.reset && first.anim.at == (0..POSE_CELLS as u32).collect::<Vec<_>>(), "a new table, both records: {:?}", first.anim.at);
         first.anim.apply(&mut table);
         assert_eq!(ticks(&table), (9, 10));
@@ -986,9 +986,19 @@ mod tests {
         let mut moved = anims(0.1);
         moved[2].1.model = arm;
         let sixth = s.stream(&capture(18, &rows2), &refs(&moved[1..]), now, 0.1);
-        assert_eq!(sixth.columns[8], [NO_POSE, 0]);
+        assert_eq!(sixth.columns[8], [NO_POSE, POSE_MANUAL]);
         assert_eq!(sixth.anim.at.len(), POSE_CELLS);
         assert_eq!(sixth.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
+        // Its manual joint gone: marked while the older record shows it.
+        moved[2].1.manual_kind = [manual_kind::NONE; _];
+        let seventh = s.stream(&capture(19, &rows2), &refs(&moved[1..]), now, 0.1);
+        assert_eq!(seventh.columns[8], [NO_POSE, POSE_MANUAL], "the older record still shows it");
+        // (Held, nothing is written and the older keeps it: as the table.)
+        let eighth = s.stream(&capture(20, &rows2), &refs(&moved[1..]), now, 0.1);
+        assert_eq!(eighth.columns[8], [NO_POSE, POSE_MANUAL], "held: the records as they were");
+        moved[2].1.phase[2] = 0.5;
+        let ninth = s.stream(&capture(21, &rows2), &refs(&moved[1..]), now, 0.1);
+        assert_eq!(ninth.columns[8], [NO_POSE, 0], "neither does");
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

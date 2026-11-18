@@ -1,7 +1,8 @@
 #version 460
 // units_cull.comp for a renderer with models: a unit of a class with a
 // model is tested with its model's bounding sphere (with manual joints
-// shown, the one covering any turn: models.rs turned_sphere) and appended to its
+// shown, POSE_MANUAL in its pose, the one covering any turn: models.rs
+// turned_sphere) and appended to its
 // class's region of the visible list, counted in each of the class's
 // commands (one per primitive, classCommands); the others as darts.
 // With the units' shadow map on, a model unit is also tested against each
@@ -56,11 +57,11 @@ void main() {
         return;
     }
     // Manual joints can reach past the clips' sphere: a unit with any
-    // shown (in either record) takes the sphere covering any turn.
+    // shown (in either record: its pose's POSE_MANUAL, so the cull does
+    // not read the animation table) takes the sphere covering any turn.
     vec4 sphere = mc.sphere;
-    uint rec = attru(ATTR_POSE, i);
-    if (mc.fit.y > 0.0 && rec != 0xffffffffu && rec + 2u * RECORD_CELLS <= 2u * RECORD_CELLS * u.counts.y
-        && max(records[rec].y, records[rec + RECORD_CELLS].y) > 0u) {
+    uint pose = attru(ATTR_POSE, i);
+    if (mc.fit.y > 0.0 && pose != NO_POSE && (pose & POSE_MANUAL) != 0u) {
         sphere = vec4(mc.sphere.xyz * mc.fit.z, mc.fit.y);
     }
     vec3 centre = place(unit, sphere.xyz);

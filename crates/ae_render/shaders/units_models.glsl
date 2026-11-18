@@ -76,11 +76,6 @@ layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; 
 // stagedAt[i].
 layout(std430, set = 1, binding = 10) readonly buffer Staged { uvec4 staged[]; };
 layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
-#elif defined(CULL)
-// The units' animation table, for the cull: a unit with manual joints
-// shown in either record is culled with ModelClass.fit's sphere.
-#define RECORD_CELLS 15u
-layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; };
 #endif
 
 // cascade: the shadow caster's (units_pose.comp: the number of jobs);
