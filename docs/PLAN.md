@@ -2799,6 +2799,26 @@ Design:
       every run since); the rest, and all of `army-fox`'s, is not explained. The fox scenes
       include the game's bounds calls (about 67 a tick, 0.19 ms of sim time).
 
+## TODO (open, not a priority now)
+
+From the M14 hybrid animation work (2026-11-18); each needs a decision before it is done.
+
+- **Animation pack under 0.3 ms.** `live-fox` `cpu_anim_pack` is 0.9–1.1 ms; the poser's
+  0.6 ms is bound by memory (2.8 MB of `Anim` fields, 4.8 MB of records a tick). Next lever: a
+  smaller animation state for the renderer to read (a trimmed or split `Anim`: a schema change).
+- **`Bounds` at creation.** Should the engine guarantee it (filled when a unit with an `Anim`
+  is spawned, the catalogue spawner included), rather than each game measuring once?
+- **`Bounds` units.** Model space today; metres (scaled by the unit's size) instead?
+- **Hybrid animation phases not done** (`docs/hybrid-animation.md`): phase 1 (instance
+  columns copied once a tick), the integer phases of phase 2 (re-pin digests), phase 4 (a
+  synced facing for aim and fire, a schema change), phase 5's pose after the cull, phase 6
+  (analytic phases).
+- **`SimOptions::rigs()` bakes every rig twice** (once for the sim, once for the renderer);
+  build once and share.
+- **The eaa0fa7 `gpu_total` rise** in the fox scenes not explained by `pass/water` (all of
+  `army-fox`'s, about half of the others'); `pass/water`'s two modes (3–4 vs about 180 µs)
+  not investigated.
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
