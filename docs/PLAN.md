@@ -2748,8 +2748,9 @@ Design:
     1.3–1.8 ms a tick (reading the `Anim` rows and packing; no bone evaluated), 154 000 keys
     (7.4 MB) → 28 500 cells (0.57 MB) a tick, upload 1.1 → 0.12 ms, `units pose` 0.43 → 0.37 ms;
     validation clean. Not done from the proposal (each needs a decision): phase 0's separate
-    ticker bench, phase 1 (instance columns once a tick), phase 2 (the ticker's copies, wrap,
-    parallel rows; integer phases re-pin digests), phase 4 (a synced facing for aim and fire,
+    ticker bench (done 2026-11-18, below), phase 1 (instance columns once a tick), phase 2 (the
+    ticker's copies, wrap, parallel rows: done 2026-11-18 but integer phases, which re-pin
+    digests), phase 4 (a synced facing for aim and fire,
     a schema change), phase 5 (`Bounds` and the callout, a schema change; pose after the cull),
     phase 6 (analytic phases). Not run yet: the windowed client.
     Then (2026-11-17): the joint key helpers removed from `ae_model::anim`; the renderer poses
@@ -2774,6 +2775,26 @@ Design:
     `Bounds` rows (this tick's pose, the first pose, the 1/2/4/8-worker digests). Not done: the
     catalogue spawner does not fill `Bounds` (no def has an `Anim` yet); the renderer does not
     use `Bounds`.
+  - Ticker, pack and cull — done (2026-11-18).
+    - Bench `anim` (`ae-tool bench anim`): the ticker's rows (`ae_services::anim::Advance`) on
+      seeded channels of a 27-bone model, 10k and 50k units, 1 and N threads; a digest of the
+      channels after 90 ticks, equal at both thread counts.
+    - Ticker (phase 2 less integer phases): `start_manual` copies only with a command pending,
+      `wrap` skips `floorf` in range, idle units skipped, `channels()` built in place, rows over
+      the world's workers. Digests unchanged (bit-identical). 10k: 0.885 → 0.653 ms (1 thread),
+      0.150 ms (8); 50k: 4.39 → 3.27 ms, 0.65 ms.
+    - Pack (`live-fox` `cpu_anim_pack` 1.44 → 0.9–1.1 ms; the 0.3 ms target not met): the stream
+      borrows the `Anim` column (`Runtime::chunks`: 0.38 → 0.013 ms); the poser packs blocks of
+      512 slots in parallel and keeps its scratch (about 0.6 ms, bound by memory); the rest is
+      the stream's other rows. New metrics `cpu_anim_pack_read`, `cpu_anim_pack_poser`. Next
+      lever: a smaller `Anim` for the renderer to read (a schema change, not decided).
+    - Cull: a unit's manual joints shown are its pose attribute's `POSE_MANUAL` bit (set by the
+      poser from the slot's two records, masked off by the pose pass), so the cull no longer
+      reads the animation table (it depended on `record_pose`'s barrier). `units cull` 9.7 →
+      7.3 µs. `units_pose_models` fails without the bit.
+    - The fox baselines re-taken: eaa0fa7's had `pass/water` in its other mode (3–4 vs about
+      180 µs, so its `gpu_total` rise was not the cull's); 180 µs in 4 of 4 runs now. The fox
+      scenes include the game's bounds calls (about 67 a tick, 0.19 ms of sim time).
 
 ## Later improvements
 

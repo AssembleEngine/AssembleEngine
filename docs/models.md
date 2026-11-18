@@ -221,14 +221,22 @@ M14 (RTX 3060 Ti, 24 threads, 2026-11-17; `live-fox` for the last two rows):
 | Joint keys in parallel (every key) | ~10 ms posing | 540 000 keys | not measured | 0.39 ms |
 | Joint keys: lines, slots, unchanged skipped | 6.5 ms posing | 154 000 keys (7.4 MB) | 1.1 ms | 0.43 ms (scatter included) |
 | Hybrid: records, clips sampled on the GPU | 1.3–1.8 ms packing | 28 500 cells (0.57 MB) | 0.12 ms | 0.37 ms (scatter included) |
+| Hybrid, the rows borrowed, packed per block of slots | 0.9–1.1 ms packing | 28 500 cells (0.57 MB) | 0.12 ms | 0.37 ms (scatter included) |
 
 The CPU time is reading the units' `Anim` rows (536 bytes each), matching them to the stream and
-packing; no bone is evaluated. A walking Fox writes its record's tick and its layers' phases a
+packing; no bone is evaluated. Since 2026-11-18 the stream borrows the `Anim` column in place
+(`Runtime::chunks`, 0.013 ms) and the poser packs blocks of 512 slots in parallel (about 0.6
+ms, bound by memory: 2.8 MB of `Anim` fields and 4.8 MB of records a tick; 0.68 ms on one
+thread); the rest of `cpu_anim_pack` is the stream's other rows. Under 0.3 ms needs a smaller
+animation state to read (a trimmed or split `Anim`, a schema change). A walking Fox writes its record's tick and its layers' phases a
 tick (about three cells). The `units pose` pass samples the clips for both records only while
 the drawn tick is between them. `gpu_total` (baselines, `bench/results/baseline/gpu-*-fox.json`):
-8.6 ms `army-fox`, 8.6 ms `live-fox`, 7.2 ms `near-fox` (with the cull spheres for manual joints;
-8.3, 8.2 and 6.9 ms before them, within the spread), mostly the shadows (no earlier baseline
-of the `scripted` scenes to compare: the old ones were of the crossing army). Validation clean
+8.5 ms `army-fox`, 8.6 ms `live-fox`, 7.1 ms `near-fox` (re-baselined 2026-11-18), mostly the
+shadows (no earlier baseline of the `scripted` scenes to compare: the old ones were of the
+crossing army). The cull spheres for manual joints cost `units cull` 6.9 → 9.7 µs while the
+cull read the animation table, 7.3 µs since it reads the pose attribute's `POSE_MANUAL` bit;
+the 0.3–0.4 ms rise of `gpu_total` in the baselines of eaa0fa7 was `pass/water` (3–4 µs then
+about 180 µs: it has two modes from run to run), not the cull. Validation clean
 (`live-fox` and the GPU tests). A `--capture` of the scripted game shows the Foxes mid-stride
 and standing, as the sim plays them.
 
