@@ -2792,9 +2792,12 @@ Design:
       poser from the slot's two records, masked off by the pose pass), so the cull no longer
       reads the animation table (it depended on `record_pose`'s barrier). `units cull` 9.7 →
       7.3 µs. `units_pose_models` fails without the bit.
-    - The fox baselines re-taken: eaa0fa7's had `pass/water` in its other mode (3–4 vs about
-      180 µs, so its `gpu_total` rise was not the cull's); 180 µs in 4 of 4 runs now. The fox
-      scenes include the game's bounds calls (about 67 a tick, 0.19 ms of sim time).
+    - The fox baselines re-taken at cdd4196 (`bench-diff` of two later runs: 82 metrics
+      unchanged). eaa0fa7's `gpu_total` rise (0.3–0.4 ms) was not the cull's (about 3 µs):
+      about half of `live-fox`'s and `near-fox`'s was `pass/water` going from 3–4 to about 180
+      µs (the baseline before had `army-fox` at 174 µs already: two modes, about 180 µs in
+      every run since); the rest, and all of `army-fox`'s, is not explained. The fox scenes
+      include the game's bounds calls (about 67 a tick, 0.19 ms of sim time).
 
 ## Later improvements
 

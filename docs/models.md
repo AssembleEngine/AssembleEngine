@@ -235,8 +235,10 @@ the drawn tick is between them. `gpu_total` (baselines, `bench/results/baseline/
 shadows (no earlier baseline of the `scripted` scenes to compare: the old ones were of the
 crossing army). The cull spheres for manual joints cost `units cull` 6.9 → 9.7 µs while the
 cull read the animation table, 7.3 µs since it reads the pose attribute's `POSE_MANUAL` bit;
-the 0.3–0.4 ms rise of `gpu_total` in the baselines of eaa0fa7 was `pass/water` (3–4 µs then
-about 180 µs: it has two modes from run to run), not the cull. Validation clean
+the 0.3–0.4 ms rise of `gpu_total` in the baselines of eaa0fa7 was not the cull. About half of
+`live-fox`'s and `near-fox`'s was `pass/water`, which has two modes (the baselines before
+eaa0fa7 had it at 174 µs in `army-fox` and 3–4 µs in the other two; about 180 µs in every run
+since); the rest, and all of `army-fox`'s (water 174 → 185 µs), is not explained. Validation clean
 (`live-fox` and the GPU tests). A `--capture` of the scripted game shows the Foxes mid-stride
 and standing, as the sim plays them.
 

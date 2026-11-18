@@ -165,7 +165,8 @@ impl Poser {
             .zip(blocks.par_iter_mut())
             .enumerate()
             .for_each(|(b, ((((cells, written), manual), jobs), (at, out)))| {
-                (at.clear(), out.clear());
+                at.clear();
+                out.clear();
                 for (s, (((cells, w), m), job)) in cells.chunks_mut(POSE_CELLS).zip(written).zip(manual).zip(jobs).enumerate() {
                     let (i, fresh) = std::mem::replace(job, (u32::MAX, false));
                     *w = match units.get(i as usize) {
