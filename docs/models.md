@@ -15,7 +15,7 @@ ae-tool model info FILE.aemodel                    # parts, textures, clips, loa
 
 ## The format
 
-Little-endian: magic `AEMODEL\0`, version (u32, now 3: models carry lights), header length (u32), a JSON header padded
+Little-endian: magic `AEMODEL\0`, version (u32, now 4: models carry physical lights), header length (u32), a JSON header padded
 to 16 bytes, then a blob. The header's byte ranges point into the blob, 16-byte aligned. A model
 of another version is refused ("convert it again").
 
@@ -53,10 +53,13 @@ of another version is refused ("convert it again").
   - The same image used as colour and as data is stored twice (sRGB and UNORM).
 - **Lights**: `KHR_lights_punctual` point and spot lights, each on the joint of the node that
   carries it (a joint with the identity inverse bind), so it follows the node's pose. A light
-  shines along its node's local -Z (glTF's convention). The colour is stored in the engine's
-  light units (`CANDELA_TO_ENGINE`: 100 cd = 1.0); a glTF `range` absent (infinite) becomes
-  `UNBOUNDED_RANGE` (10 km); the source size is `range / 8`. The renderer appends one light per
-  unit and model light to the frame's clustered light list (`docs/PLAN.md`, M12).
+  shines along its node's local -Z (glTF's convention; node scale is ignored). `color` is the
+  linear tint and `intensity` the luminous intensity in candela. A glTF `range` absent
+  (infinite) is `range = 0`: no authored cutoff, so the renderer derives one from the
+  intensity and the frame's exposure. The source radius is `range / 8`, or
+  `DEFAULT_SOURCE_RADIUS` (0.25 m) without a range. The renderer appends one light per unit and
+  model light to the frame's clustered light list (`docs/PLAN.md`, M12;
+  [lighting.md](lighting.md)).
 - **Clips**: glTF animations as data: per channel a bone, a path (translation, rotation, scale), the
   interpolation (step, linear, cubic spline) and the keys as they are. `pose::Pose::sample` plays
   them (slerp for linear rotations; held at the first and last key outside them).
@@ -299,18 +302,15 @@ Decisions taken with the user (docs/PLAN.md, M11):
   `KHR_lights_punctual`. Any other required extension (Draco, meshopt, ...) fails the conversion,
   naming it; optional ones are ignored with a warning.
 - Morph targets and their weight channels, points and lines, cameras: dropped, with a warning.
-- Lights (`KHR_lights_punctual`): point and spot become model lights (above) with the intensity in
-  candela mapped by `CANDELA_TO_ENGINE`. Deliberate deviations from the spec, all documented in
-  `ae_model`:
+- Lights (`KHR_lights_punctual`): point and spot become model lights (above) with the intensity
+  passed through as candela. Deliberate deviations from the spec, all documented in `ae_model`:
   - **Directional** lights are ignored with a warning naming the light and its node: the engine
     has one fixed sun, and a directional light on a unit would swing the scene's light with the
     unit's facing (and instancing gives one per unit).
-  - **Intensity** is a single documented candela-to-engine-unit constant, not photometric
-    calibration.
-  - **Range** is always finite: an absent range is `UNBOUNDED_RANGE` (10 km), so its cull keeps it
-    in every cluster instead of truly infinite reach.
-  - **Falloff** is the engine's `(1 − d²/r²)² / (1 + d²/s²)`, not the spec's recommended
-    inverse-square window near the edge.
+  - **Range** absent (infinite) is no authored cutoff; the renderer bounds it by the
+    exposure-derived cull radius.
+  - **Falloff** is physical inverse square with the spec's quartic window; the source radius
+    regularises only the near field (glTF has no source radius).
   - **Spot angles** are clamped to [0, π/2] and inner ≤ outer.
   - **Beams** (a capsule along a segment) are engine-only and not expressible in the extension, so
     no glTF asset produces one.

@@ -2451,10 +2451,11 @@ Steps (commit and stop for compaction after each):
     that.
   - The curve: clamped at 1 by default (the frames as before: the 27 GPU tests pass
     unchanged) or ACES (`ToneParams`, `TerrainApp::with_tone`; `ae-client --tonemap
-    clamp|aces --exposure X`). ACES at exposure 0.75 matches the clamp's mean luma in the
-    near-army view (129 against 129 of 255) and is more saturated (68 against 56). The default
-    stays the clamp until lights and the bloom give the scene light above 1 (my default, not
-    yet confirmed); with none, ACES only changes the look.
+    clamp|aces`). ACES at an exposure that matched the clamp's mean luma in the near-army
+    view (129 against 129 of 255) and is more saturated (68 against 56). The default
+    stayed the clamp until lights and the bloom gave the scene light above 1; the
+    photometric step below moves exposure before the scene's storage and makes it EV100
+    (`--ev100`), and the ACES switch is its own commit.
   - Cost (bench scenes, 1280×720, against 4c389da): the draws into RGBA16F within ±2% of the
     8-bit target; `pass/tonemap` 15–20 µs. B10G11R11F measured too: the tonemap 11–15 µs and
     the draws 1–2% faster, about 8 µs of `gpu_total` in all. RGBA16F kept: 10-bit mantissas
@@ -2536,18 +2537,17 @@ Steps (commit and stop for compaction after each):
     checks that it, too, is lit.
 - Step 2, second part: glTF `KHR_lights_punctual` lights, appended on the GPU from the posed
   units — done (2026-11-20).
-  - **The model carries them.** `ae_model` version 3: `ModelLight { name, joint, kind
-    (Point | Spot), color, range, inner_angle, outer_angle, size }`. The joint is the light
-    node's (an identity inverse bind), so the palette matrix gives its position, and its
-    direction is that node's local -Z through the pose (glTF's convention). The converter
-    reads `KHR_lights_punctual` (`ae_gltf`), clamps spot angles to [0, π/2] and inner ≤
-    outer, and maps candela to the engine's units with `CANDELA_TO_ENGINE` (100 cd = 1.0)
-    and an absent `range` (infinite in the spec) to `UNBOUNDED_RANGE` (10 km). Its source
-    size is `range / 8` (the falloff halves there). A **directional** light is ignored with
+  - **The model carries them.** `ae_model` version 4: `ModelLight { name, joint, kind
+    (Point | Spot), color, intensity, range, inner_angle, outer_angle, size }`. The joint is
+    the light node's (an identity inverse bind), so the palette matrix gives its position,
+    and its direction is that node's local -Z through the pose (glTF's convention), with the
+    node's scale ignored. The converter reads `KHR_lights_punctual` (`ae_gltf`), passes the
+    intensity through as candela, clamps spot angles to [0, π/2] and inner ≤ outer, and takes
+    an absent `range` as no authored cutoff (`range = 0`; the renderer derives a cull radius
+    from the intensity and exposure). Its source radius is `range / 8`, or
+    `DEFAULT_SOURCE_RADIUS` (0.25 m) without a range. A **directional** light is ignored with
     a warning naming it and its node: the engine has one fixed sun, and a per-unit
-    directional light would swing the scene with the unit's facing. The engine's falloff
-    formula stays (a documented deviation from the spec's recommended window); beams remain
-    engine-only.
+    directional light would swing the scene with the unit's facing. Beams remain engine-only.
   - **Appended where the rows are.** `UnitRenderer::write_rows` (which already walks a new
     stream's rows) also writes each row's light offset, in row order, and the slot's total;
     the append is one dispatch, `units_lights.comp`, in the `lights.cluster` pass between the
@@ -2582,6 +2582,43 @@ Steps (commit and stop for compaction after each):
     light does not scale its range with the model's fit (deliberate); a glTF directional
     light cannot become the sun (each model would carry one); assets with gaps in the model
     light table (only per class), and no light shadows.
+- Step 2.5: photometric lighting — done (2026-11-20). Full write-up with units, formulas,
+  calibration, the temporary bridge and verification: [lighting.md](lighting.md).
+  - **Units and constants** (`ae_render::lighting`): world units are metres; point/spot
+    intensity is candela, the sun is lux, emission is cd/m²; Lambertian radiance is
+    `albedo/pi * E`. Sun 100 000 lx and sky 20 000 lx on an upward surface, with unit-luminance
+    tints (mirrored in `shaders/photometry.glsl`). Exposure is EV100
+    (`1 / (1.2 * 2^EV100)`, default 14, which keeps the old `1.6` terrain look); the scene
+    passes apply it before storing into the RGBA16F scene, and `post.tonemap` only curves.
+    `ToneParams { ev100, curve, sun_illuminance }`; the client takes `--ev100` and `--sun-lux`
+    (replacing `--exposure`).
+  - **One direct-light contract** (`lights.glsl`): `lightIlluminance` returns the linear RGB
+    illuminance before the receiver cosine, with the true distance, the source-radius
+    denominator clamp, the glTF quartic range window (`range = 0`: none), a squared cosine
+    ramp for spots, and the beam's segment distance. Payload unchanged at 64 bytes: `profile`
+    is (inner cos, outer cos, source radius, intensity cd); `range` is the authored cutoff
+    only. The terrain, darts and models, water's foam and the particle simulation all consume
+    it; receivers apply `albedo/pi` and the cosine once. `lights_bounds`/`lights_tiles`/
+    `lights_cluster` bound a light at
+    `sqrt(max channel(tint * intensity) / (0.002 / exposure))` when it has no authored range
+    (about 5 m for 1 000 cd at EV14, 797 m for a 25 000 000 cd flash), capping at the authored
+    range; the shading window never sees the cull radius.
+  - **Migration bridge** (removed with the emitters): emission and the old water/fog/glow
+    values scale by the fixed EV14 reference exposure (≈19 661); particle burst lights are
+    matched to the old attenuation at a quarter of their range (so they keep their look at
+    that receiver, not at the source); water/fog/emissive/decals are still authored in the old
+    units.
+  - **Verification**: `lighting` and `lights::bounds` unit tests; `ae_gltf` candela
+    passthrough/omitted range/direction/warning; GPU
+    `photometric_sun_exposure_and_inverse_square` (sun scales with illuminance; one EV doubles
+    the *stored* scene, so exposure is before storage; 100 000 cd adds 4:1 at 2 m vs 4 m; a
+    source radius larger than the range does not extinguish the light). All 30 GPU tests pass
+    with validation; the image tests needed no re-baselining — a generated-map capture with 8
+    explosions differs from the old build by a mean 1.8/255 (0.4% of pixels above 8, the
+    burst lights' retuning). `ae-client --bench battle` is unchanged within the run spread.
+  - Not done (next commits of this step): the ACES default switch; re-authoring particles,
+    decals, water and fog in physical units and removing the bridge; auto-exposure after the
+    bloom; authored sources have no glTF radius (the range-derived size is a convention).
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
@@ -3148,21 +3185,23 @@ From M12 (2026-11-19):
   scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
   brightest few percent; the exposure eases toward the target key over time (faster when the
   scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
-  from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4), when the
-  scene has light above 1; until then the exposure is fixed (`--exposure`).
+  from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4); until then
+  the exposure is fixed (`--ev100`). Meter the image before the bloom and define when a new
+  EV takes effect; say whether the bloom threshold is scene-referred or exposure-relative.
 - **glTF `KHR_lights_punctual` conformance** — decided and done with M12 step 2's second part
   (2026-11-20). What the importer does, and where it deliberately differs:
   - Types: point and spot map to our point and cone; **directional** lights are ignored with a
     warning that names the light and its node (one fixed sun; a per-unit directional light
     would swing the scene with the unit's facing, and instancing would give one per unit). This
     knowingly departs from the spec's "must render all three types".
-  - Intensity: `color` (linear) × `intensity` (candela) × `ae_model::CANDELA_TO_ENGINE`
-    (100 cd = 1.0). Not a photometric calibration; the engine's light units are arbitrary.
-  - Range: absent (infinite in the spec) becomes `UNBOUNDED_RANGE` = 10 km, so its cull keeps
-    it in every cluster; a non-positive range warns and takes the same.
-  - Radial attenuation: the engine's `(1 − d²/r²)² / (1 + d²/s²)` stays (a deliberate
-    deviation from the spec's recommended window; the clustered-vs-unculled test compares us
-    with us, so it cannot catch this).
+  - Intensity: passed through as candela; the colour is the linear tint. (Superseded the
+    earlier `CANDELA_TO_ENGINE` bridge with step 2.5's photometric units.)
+  - Range: absent (infinite in the spec) is no authored cutoff (`range = 0`); the renderer
+    bounds it by the exposure-derived cull radius. A non-positive range warns and takes the
+    same.
+  - Radial attenuation: physical inverse square with the spec's quartic window
+    (`max(1 − (d/range)^4, 0) / max(d², r_s²)`), the source radius regularising only the near
+    field (step 2.5). Departs from the spec only in that regularisation.
   - Spot angles: clamped to [0, π/2] and inner ≤ outer, then our inner/outer cosines.
   - Beam: engine-only (not expressible in the extension; no glTF asset produces one).
   - Check: an authored glTF with point, spot and directional lights in `ae_gltf`'s tests;
