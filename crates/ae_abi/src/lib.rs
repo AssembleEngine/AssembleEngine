@@ -346,6 +346,28 @@ pub mod engine {
     /// its model's space, as `ae_sdk::anim::Anim::update_bounds` last
     /// measured it.
     pub const BOUNDS: u64 = 0xAE00_0000_0000_000F;
+    /// `Script { state, polls: u32, due: u64, ... }`: a unit's coroutine
+    /// (M14; the layout is `ae_sdk::script::Script`'s).
+    pub const SCRIPT: u64 = 0xAE00_0000_0000_0010;
+}
+
+/// Unit coroutines (M14, `ae_sdk::script`). A module that runs them
+/// declares its slot arena in a [`DATA`](script::DATA) record (payload:
+/// `u32 slot_bytes, u32 slots`); the host claims it in the shared memory,
+/// zeroes it for every new world, and publishes where it is as names in
+/// scope [`SCOPE`](script::SCOPE) (`ae_lookup`).
+pub mod script {
+    pub const DATA: &str = "script.slots";
+    /// The lookup scope: `name_id("script")`.
+    pub const SCOPE: u64 = super::name_id("script");
+    /// Guest offset of slot 0 (`name_id("base")`).
+    pub const BASE: u64 = super::name_id("base");
+    /// Bytes per slot, a multiple of 16 (`name_id("slot_bytes")`).
+    pub const SLOT_BYTES: u64 = super::name_id("slot_bytes");
+    /// Slots (`name_id("slots")`).
+    pub const SLOTS: u64 = super::name_id("slots");
+    /// Slot alignment.
+    pub const SLOT_ALIGN: u32 = 16;
 }
 
 /// Name lookups (`ae_lookup(scope, name)`): host plugins publish names in

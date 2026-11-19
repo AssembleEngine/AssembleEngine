@@ -21,3 +21,10 @@ catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`
 # service.
 anim = ["dep:libm"]
+# Unit coroutines (`ae_sdk::script`, M14): async scripts in host-owned
+# slots, resumed by a game system.
+script = []
+# Poison each script poll's heap when it ends, so a block kept across an
+# `await` reads as garbage (guest builds are always release, so this is a
+# feature, not `debug_assertions`).
+script-checks = ["script"]

@@ -1,0 +1,21 @@
+# Coroutine spike (M14 step 4): a plain Rust async script per unit, kept in
+# a host-owned slot and resumed on any worker, driven by
+# crates/ae_sim/tests/coroutines.rs. Built for wasm32-wasip1-threads; not
+# part of the main workspace.
+[package]
+name = "ae_game_coro"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["script-checks"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

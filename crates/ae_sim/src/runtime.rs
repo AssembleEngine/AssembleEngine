@@ -27,6 +27,20 @@ use anyhow::{Context, Result, anyhow, ensure};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Where a module's coroutine slots are (`ae_abi::script`).
+#[derive(Clone, Copy, Debug)]
+struct ScriptArena {
+    offset: u32,
+    slot_bytes: u32,
+    slots: u32,
+}
+
+impl ScriptArena {
+    fn len(&self) -> usize {
+        self.slot_bytes as usize * self.slots as usize
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
     /// Instances (and so the most workers a tick may use).
@@ -101,6 +115,8 @@ pub struct Runtime {
     shared: wasmtime::SharedMemory,
     crew: Crew,
     events_at: u32,
+    /// The module's coroutine slot arena (`ae_abi::script`), if it declares one.
+    scripts: Option<ScriptArena>,
     events_len: usize,
     /// Profiler zone name per layer.
     layer_labels: Vec<String>,
@@ -261,6 +277,16 @@ impl Runtime {
         let shared = memory.clone();
         let mut events_at = 0;
         let mut arena_base = 0usize;
+        let script_decl = match schema.data.get(ae_abi::script::DATA) {
+            Some(d) => {
+                ensure!(d.len() >= 8, "`{}` record is {} bytes", ae_abi::script::DATA, d.len());
+                let (slot_bytes, slots) = (ae_abi::get_u32(d, 0), ae_abi::get_u32(d, 4));
+                ensure!(slot_bytes > 0 && slot_bytes.is_multiple_of(ae_abi::script::SLOT_ALIGN) && slots > 0, "bad script slot arena: {slots} slots of {slot_bytes} bytes");
+                Some((slot_bytes, slots))
+            }
+            None => None,
+        };
+        let mut scripts = None;
         let mut set = InstanceSetBuilder {
             module: &module,
             count: cfg.max_workers,
@@ -274,6 +300,11 @@ impl Runtime {
             unsafe { ae_ecs::arena::install(base, (cfg.arena_pages * PAGE_BYTES) as usize).map_err(|e| anyhow!(e))? };
             arena_base = base as usize;
             events_at = claim_pages(memory, cfg.event_pages)?;
+            if let Some((slot_bytes, slots)) = script_decl {
+                let len = slot_bytes as u64 * slots as u64;
+                let offset = claim_pages(memory, len.div_ceil(PAGE_BYTES))?;
+                scripts = Some(ScriptArena { offset, slot_bytes, slots });
+            }
             Ok(())
         })?;
         let guest = set.guest_memory();
@@ -291,7 +322,7 @@ impl Runtime {
         }
         let crew = Crew::new(workers)?;
         let layer_labels = schedule.layers.iter().enumerate().map(|(k, l)| format!("layer {k}: {}", l.iter().map(|&i| &*systems[i].name).collect::<Vec<_>>().join(" "))).collect();
-        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels, arena_base })
+        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, scripts, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels, arena_base })
     }
 
     /// Current size of the shared guest memory, in bytes (column arena,
@@ -303,6 +334,16 @@ impl Runtime {
 
     pub fn memory_bytes(&self) -> usize {
         self.shared.data_size()
+    }
+
+    /// The coroutine slot arena's bytes (`ae_abi::script`; empty when the
+    /// module declares none). It belongs to the newest world: each new
+    /// world zeroes it. Between ticks only: workers write it during one.
+    pub fn script_slots(&self) -> &[u8] {
+        match &self.scripts {
+            Some(a) => unsafe { std::slice::from_raw_parts(self.memory.ptr(a.offset), a.len()) },
+            None => &[],
+        }
     }
 
     pub fn max_workers(&self) -> usize {
@@ -351,6 +392,12 @@ impl Runtime {
             emits[self.schedule.position[i] as usize] = s.decl.emits.clone();
         }
         ids.emits = emits;
+        if let Some(a) = &self.scripts {
+            // Every world starts with empty slots.
+            unsafe { std::ptr::write_bytes(self.memory.ptr(a.offset), 0, a.len()) };
+            use ae_abi::script::{BASE, SCOPE, SLOT_BYTES, SLOTS};
+            ids.names.extend([((SCOPE, BASE), a.offset), ((SCOPE, SLOT_BYTES), a.slot_bytes), ((SCOPE, SLOTS), a.slots)]);
+        }
         for plugin in &self.plugins {
             for (scope, name, value) in plugin.names() {
                 ids.names.insert((scope, name), value);

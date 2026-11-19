@@ -40,6 +40,9 @@ pub mod catalog;
 #[cfg(feature = "anim")]
 pub mod anim;
 
+#[cfg(feature = "script")]
+pub mod script;
+
 use abi::RunDesc;
 
 /// Engine entity id.
@@ -146,6 +149,15 @@ impl Run {
             Some(i) => i,
             None => panic!("system has no query term for {}", T::NAME),
         }
+    }
+
+    /// The first row of a term's column (`write`: a term declared `write`).
+    /// For the SDK's own row access (`script::Unit`).
+    #[doc(hidden)]
+    pub fn column_ptr<T: Component>(&self, write: bool) -> *mut T {
+        let i = self.term::<T>();
+        assert!(!write || self.desc.write_mask & (1 << i) != 0, "{} is a read-only term", T::NAME);
+        self.desc.columns[i] as usize as *mut T
     }
 
     /// The column of a term declared `read` or `write`.
