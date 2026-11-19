@@ -3020,6 +3020,15 @@ From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
   - The save → load → continue check with scripts suspended has to wait for M9, since saving
     doesn't exist yet.
 
+From M12 (2026-11-19):
+
+- **Automatic exposure (eye adaptation), as AAA games do.** A compute pass reduces the HDR
+  scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
+  brightest few percent; the exposure eases toward the target key over time (faster when the
+  scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
+  from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4), when the
+  scene has light above 1; until then the exposure is fixed (`--exposure`).
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
