@@ -2605,7 +2605,7 @@ Design:
   Save/load does not exist yet (M9): the save→load check waits for it.
 - Steps: (1) the pose evaluator; (2) channel components and the native ticker, driven by a
   plain game system; (3) the client poses on the CPU from the view, `--clip` goes; (4) a
-  coroutine spike (a future per unit, resumed on another worker, digests at 1/2/4/8 workers);
+  coroutine spike (a future per unit, resumed on another worker, digests at 1/2/4/8 workers; done);
   (5) the script API and callins; (6) the death sequence and the test unit.
 - **Joint keys** (step 3, decided with the user, 2026-11-16; replaces the per-unit palette
   slots of cf2acf2):
@@ -2798,6 +2798,41 @@ Design:
       µs (the baseline before had `army-fox` at 174 µs already: two modes, about 180 µs in
       every run since); the rest, and all of `army-fox`'s, is not explained. The fox scenes
       include the game's bounds calls (about 67 a tick, 0.19 ms of sim time).
+  - Step 4, coroutine spike — done (2026-11-19). The design holds: plain `async fn` scripts,
+    resumed on any worker, give the same result at any worker count.
+    - SDK `ae_sdk::script` (feature `script`): the module declares a slot arena
+      (`script_slots!(slot_bytes, slots)`, data record `script.slots`); the runtime claims it in
+      the shared memory, zeroes it for each world and publishes it (`ae_lookup` scope
+      `script`). A unit's slot is its entity index (no allocation, the same at any worker
+      count). Component `Script { state, polls, due, size, … }` (engine id `…0010`).
+    - `script::resume(run, script)` runs in an ordinary parallel system over the `Script` rows
+      (the fixed work ranges): a new row's future is written into its slot, a due row is polled
+      once (noop waker), a finished one is dropped and its slot zeroed. `Unit` reads and writes
+      the polled row (`get`, `set`, `update` with a closure, so no borrow lasts across an
+      `await`) through a per-instance poll context; `sleep_ticks`, `next_tick` set the wake
+      tick; a `Pending` poll that set none traps (it awaited something not the engine's).
+    - No heap across an `await`: `ScriptAlloc`, the module's global allocator, gives a poll
+      memory from its instance's bump arena (1 MiB, taken from the guest heap once per
+      instance, not host-claimed), reset after every poll (stricter than per tick); freeing or
+      growing a block from an earlier poll traps (`heap_survived_an_await`, named in the trap's
+      backtrace); feature `script-checks` also poisons the arena on reset (guests always build
+      release, so not `debug_assertions`). Outside polls it is the system allocator.
+    - Test `ae_sim/tests/coroutines.rs` on `games/coro`: 3750 units (a quarter joining at tick
+      40), 200 ticks, `range_rows` 128; each script sleeps 1–9 ticks per round, awaits a nested
+      `async fn` tick by tick, uses the heap inside a poll, spawns from a resumed poll, keeps
+      locals across awaits. Digests equal at 8/1/2/4 workers, and so is the whole slot arena's
+      hash at two ticks mid-run (the suspended futures' bytes, what a save would store: no
+      stray padding seen); 60–70% of polls at 2–8 workers ran on another instance than the poll
+      before; a future is 152 bytes. A `Vec` kept across an `await` reads back as poison, and
+      dropping it traps.
+    - Not done, for step 5: the global wake queue (every `Script` row is visited for its wake
+      tick; visiting only woken units needs runs over rows across tables, an ABI change, or
+      `Awake` tags by commands); callins; waits on the channels (`turned`, clips); `sleep` in
+      milliseconds (the tick rate is only the anim service's `tick_seconds` today); one script
+      per module (`resume` must get the same function every time; a type check is not done);
+      the slot size checked at run time, not from the future's type; a unit despawned
+      mid-script leaves its future in the slot (overwritten, never dropped, when the index is
+      reused: harmless while futures own no heap); save→load of the arena waits for M9.
 
 ## TODO (open, not a priority now)
 
