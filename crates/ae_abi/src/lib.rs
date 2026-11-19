@@ -349,6 +349,18 @@ pub mod engine {
     /// `Script { state, polls: u32, due: u64, ... }`: a unit's coroutine
     /// (M14; the layout is `ae_sdk::script::Script`'s).
     pub const SCRIPT: u64 = 0xAE00_0000_0000_0010;
+    /// `Callins { pending: u32, reserved: u32 }`: callins posted to a unit's
+    /// script, not yet seen (M14; `ae_sdk::script::Callins`).
+    pub const CALLINS: u64 = 0xAE00_0000_0000_0011;
+}
+
+/// The sim's own names (`ae_lookup` scope [`SCOPE`](sim::SCOPE)), the same
+/// for every module of a runtime.
+pub mod sim {
+    /// `name_id("sim")`.
+    pub const SCOPE: u64 = super::name_id("sim");
+    /// Ticks a second (`name_id("tick_hz")`), chosen once per engine start.
+    pub const TICK_HZ: u64 = super::name_id("tick_hz");
 }
 
 /// Unit coroutines (M14, `ae_sdk::script`). A module that runs them

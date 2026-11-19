@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*", "bins/*", "sdk/*", "spikes/parallel_guest"]
 # The flecs build crate keeps its own manifest (see vendor/README.md).
-exclude = ["vendor", "games/sandbox", "games/alloc", "games/coro", "games/crossing", "spikes/parallel_guest/guest", "spikes/parallel_guest/guest2", "crates/ae_sim/tests/guest", "render/default", "render/post"]
+exclude = ["vendor", "games/sandbox", "games/alloc", "games/coro", "games/puppet", "games/crossing", "spikes/parallel_guest/guest", "spikes/parallel_guest/guest2", "crates/ae_sim/tests/guest", "render/default", "render/post"]
 
 [workspace.package]
 version = "0.0.1"

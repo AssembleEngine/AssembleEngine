@@ -84,6 +84,9 @@ impl HostPlugin for AnimPlugin {
     }
 
     fn instantiate(&self, init: &HostInit, _schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
+        // One source of truth: the plugin's tick length is the runtime's.
+        let hz = 1.0 / self.tick_seconds;
+        ensure!((hz - init.tick_hz as f32).abs() < 1e-3 * hz, "the animation service ticks at {hz} Hz, the sim at {} Hz", init.tick_hz);
         names
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {

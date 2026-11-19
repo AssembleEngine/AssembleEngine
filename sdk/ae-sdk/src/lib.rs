@@ -151,6 +151,11 @@ impl Run {
         }
     }
 
+    /// The system has a query term for `T`.
+    pub fn has<T: Component>(&self) -> bool {
+        self.desc.term_ids[..self.desc.term_count as usize].contains(&T::ID)
+    }
+
     /// The first row of a term's column (`write`: a term declared `write`).
     /// For the SDK's own row access (`script::Unit`).
     #[doc(hidden)]

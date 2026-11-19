@@ -1,0 +1,21 @@
+# Puppet game: units with an animated model and a script (M14 step 5): the
+# script API test workload (callins, races, waits on the channels). Built
+# for wasm32-wasip1-threads by crates/ae_services/tests/scripts.rs; not part
+# of the main workspace.
+[package]
+name = "ae_game_puppet"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim", "script-checks"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

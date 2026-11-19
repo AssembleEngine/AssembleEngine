@@ -19,10 +19,10 @@
 use ae_sdk::script::{self, Script, ScriptAlloc, Unit};
 use ae_sdk::{Component, Entity, Run, Spawn, schedule, system};
 
-/// Slot bytes and slots (entity indices below it).
-pub const SLOT_BYTES: u32 = 512;
+/// Script slots (entity indices below it), each the size of [`unit`]'s
+/// future.
 pub const SLOTS: u32 = 16384;
-ae_sdk::script_slots!(SLOT_BYTES, SLOTS);
+ae_sdk::script_slots!(SLOTS, unit);
 
 #[global_allocator]
 static ALLOC: ScriptAlloc = ScriptAlloc;
@@ -83,8 +83,8 @@ async fn pulse(u: Unit, seed: u64, n: u64) {
 }
 
 /// A unit's script.
-async fn unit(u: Unit, param: u64) {
-    let me = u.entity();
+async fn unit(u: Unit) {
+    let (me, param) = (u.entity(), u.param());
     let mut acc = mix(me.0);
     let mut hist = [0u32; 8];
     let rounds = 4 + (acc % 6) as u32;
@@ -122,8 +122,7 @@ async fn unit(u: Unit, param: u64) {
 
 #[system(write(Script, Counter))]
 fn scripts(run: &Run) {
-    let param = run.param();
-    script::resume(run, move |u| unit(u, param));
+    script::resume(run, unit);
 }
 
 #[system(read(Spark))]

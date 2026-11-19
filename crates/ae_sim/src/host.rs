@@ -59,6 +59,8 @@ pub struct HostInit {
     /// Threads the world's ticks will use; host systems with their own
     /// thread pools size them by this. Results must not depend on it.
     pub workers: usize,
+    /// The sim's ticks a second (`RuntimeConfig::tick_hz`).
+    pub tick_hz: u32,
 }
 
 /// Provides host systems.

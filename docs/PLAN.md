@@ -2839,6 +2839,40 @@ Design:
     - The slot arena's equal hashes are observed, not guaranteed: a new future is copied into
       its slot with whatever its padding held on the making instance's stack. If they ever
       differ, look there first, not at the sim's determinism.
+  - Step 5, part 1: callins, races, waits — done (2026-11-19).
+    - Several things at once in one unit without more futures: `script::join` (both) and
+      `race` (the first; the other is dropped where it waits: Recoil's `Signal` killing a
+      thread), no heap. `race(look_around(u), u.callin(STARTED_MOVING))`.
+    - Callins: engine component `Callins { pending }` (`…0011`), bits of `script::callin`
+      (`STARTED_MOVING`, `STOPPED_MOVING`, `AIM`, `FIRED`, `HIT`, `KILLED`; `GAME` and up the
+      game's), posted by whatever system writes the unit's row (the one moving it; events
+      such as a hit applied to their target's row by a system, as skirmish's damage is).
+      `u.callin(kinds).await` returns the kinds that came and takes them; `Script::waits` (in
+      place of `reserved`) holds what the script waits for. A row is polled if its wake tick
+      has come or a pending callin is one it waits for; `resume` clears the pending bits it
+      sees, so callins nobody waits for are dropped (decided by me, not yet confirmed: state
+      to check later belongs in components). A unit waiting only for callins has `due`
+      `u64::MAX` and is not polled. Not the global wake queue: rows are still visited.
+    - Waits: `u.sleep(ms)` (`ceil(ms × rate / 1000)` ticks); the rate is the new
+      `RuntimeConfig::tick_hz` (default 30), published as `ae_abi::sim::TICK_HZ` and in
+      `HostInit::tick_hz`; the anim plugin checks its tick length against it. `u.until(f)`
+      (checked each tick), and with `anim`: `u.turned(bone)`, `u.moved(bone)`,
+      `u.ended(layer)` (a turn or play set in the poll is not done in it). `u.param()`.
+    - Step 4 leftovers: a slot starts with a 16-byte header (owner, the future type's tag,
+      its drop function), so a new script on a slot drops what a unit despawned mid-script
+      left there, and resuming a unit with another future type traps (several script types
+      per module are fine, one per unit). The slot size comes from the futures' types:
+      `script_slots!(slots, unit, ...)` lists the script functions.
+    - Test `ae_services/tests/scripts.rs` on the new game `games/puppet` (Foxes walk and
+      stand as in `scripted`, but a script plays the clips and turns the head, posted
+      start/stop callins): every posted callin handled; looks finished and cut by walking;
+      `sleep(ms)` exact; no turn over in its poll; about 27% of unit-ticks polled; digests
+      equal at 8/1/2/4 workers; units despawned mid-script and new ones on their indices
+      (254 reused), equal at 8 and 1. Coro's digest changed (the `Script` and slot layouts).
+    - Not done: the aim callin's direction, `to_unit` and the aim-from / fire-from bones'
+      world positions (they need a synced facing: hybrid phase 4, a schema change, not
+      decided); queries of other units; effects at joints; nothing engine-side posts
+      callins yet (nav could post the moves).
 
 ## TODO (open, not a priority now)
 

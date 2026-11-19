@@ -62,6 +62,9 @@ pub struct RuntimeConfig {
     /// (otherwise: module systems first, then host systems). Never changes
     /// results: commands and events are keyed by schedule position.
     pub overlap_hosts: bool,
+    /// Ticks a second. Published to modules (`ae_abi::sim::TICK_HZ`) and
+    /// host plugins ([`HostInit::tick_hz`]); a world's results depend on it.
+    pub tick_hz: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -75,6 +78,7 @@ impl Default for RuntimeConfig {
             stack_bytes: ae_wasm::DEFAULT_STACK_BYTES,
             metering: Metering::None,
             overlap_hosts: true,
+            tick_hz: 30,
         }
     }
 }
@@ -212,7 +216,7 @@ impl Runtime {
     /// (the first plugin providing a name wins).
     pub fn with_hosts(wasm: &[u8], cfg: RuntimeConfig, plugins: Vec<Arc<dyn HostPlugin>>) -> Result<Self> {
         let schema = Schema::from_module(wasm)?;
-        ensure!(cfg.max_workers >= 1 && cfg.range_rows >= 1, "bad runtime config");
+        ensure!(cfg.max_workers >= 1 && cfg.range_rows >= 1 && cfg.tick_hz >= 1, "bad runtime config");
         let offered: Vec<Vec<HostDecl>> = plugins.iter().map(|p| p.systems()).collect();
         // The schedule only needs resource identity, so it is computed on
         // stable ids, once.
@@ -392,6 +396,7 @@ impl Runtime {
             emits[self.schedule.position[i] as usize] = s.decl.emits.clone();
         }
         ids.emits = emits;
+        ids.names.insert((ae_abi::sim::SCOPE, ae_abi::sim::TICK_HZ), self.cfg.tick_hz);
         if let Some(a) = &self.scripts {
             // Every world starts with empty slots.
             unsafe { std::ptr::write_bytes(self.memory.ptr(a.offset), 0, a.len()) };
@@ -437,7 +442,7 @@ impl Runtime {
                 events.add_reader(stream, i)?;
             }
         }
-        let init = HostInit { param, workers };
+        let init = HostInit { param, workers, tick_hz: self.cfg.tick_hz };
         let mut hosts: Vec<Option<Box<dyn HostSystem>>> = (0..self.hosts.len()).map(|_| None).collect();
         for (p, plugin) in self.plugins.iter().enumerate() {
             let mine: Vec<usize> = (0..self.hosts.len()).filter(|&h| self.hosts[h].plugin == p).collect();
