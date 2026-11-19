@@ -3,6 +3,7 @@
 // mesh resolution: coarse triangles in flat areas are indistinguishable from fine ones.
 #define GRAPHICS
 #include "terrain_common.glsl"
+#include "photometry.glsl"
 #include "terrain_shading.glsl"
 #include "terrain_decals.glsl"
 #define LIGHT_SET 1
@@ -378,12 +379,15 @@ void main() {
     vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
     vec3 tint;
     float units = unitSunAt(ground, n, tint);
+    // Direct sun and sky as illuminance (lux) before the Lambertian 1/pi;
+    // the sky is the hemispherical approximation (half on verticals).
     vec3 diff = max(dot(shadeN, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
-    vec3 sky = vec3(0.45, 0.55, 0.7);
-    vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * shadeN.y));
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
+    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
+    vec3 color = albedo * (sunE + skyE) / AE_PI;
     // The clustered lights (no shadows).
     if (lightsOn()) {
-        color += albedo * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, shadeN);
+        color += albedo * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, shadeN) / AE_PI;
     }
 
     // Ground under water (AssembleEngine addition): tint by the depth of the
@@ -401,10 +405,12 @@ void main() {
             float r0 = 1.0 - abs(valueNoise(q + vec2(t * 0.11, t * 0.07)) * 2.0 - 1.0);
             float r1 = 1.0 - abs(valueNoise(q * 1.37 + vec2(-t * 0.09, t * 0.12) + 5.3) * 2.0 - 1.0);
             float caustic = pow(r0 * r1, 6.0) * exp(-depth * 0.18) * smoothstep(0.0, 0.5, depth);
-            color += albedo * vec3(1.0, 0.95, 0.85) * 1.6 * diff * caustic * 0.9;
+            color += albedo * aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff) * caustic * 0.9 / AE_PI;
         }
-        vec3 deep = vec3(0.04, 0.16, 0.24);
-        vec3 shallow = vec3(0.16, 0.38, 0.42);
+        // The bridge: the water's deep and shallow tints are still old
+        // linear values (re-authored with the water).
+        vec3 deep = vec3(0.04, 0.16, 0.24) * u.photometry.y;
+        vec3 shallow = vec3(0.16, 0.38, 0.42) * u.photometry.y;
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
         color = mix(color * vec3(0.6, 0.8, 0.85), tint, 1.0 - exp(-depth * u.water.z));
         // Water puts a glow out within a metre.
@@ -414,7 +420,9 @@ void main() {
     // Emissive: after the light and the shadows. Explosions go off only in
     // sight (the client's rule); if the spot falls out of sight while it
     // glows, the fog of war dims the glow as it dims the scar under it.
-    color += glow;
+    // The bridge: the scar's glow is still authored in the old linear
+    // units (re-authored in cd/m^2 with the emitters).
+    color += glow * u.photometry.y;
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         color = applyVision(color, inWorld.xz);
@@ -422,6 +430,8 @@ void main() {
 
     float dist = distance(inWorld, u.camPos.xyz);
     color = mix(color, u.fog.rgb, fogAmount(dist));
+    // The scene buffer holds exposed radiance (the tonemap only curves).
+    color *= u.photometry.x;
 
 #ifdef BARY
     // Wireframe overlay. Sub-mesh triangles are emitted as (v0, apex, v2), so the

@@ -31,15 +31,16 @@ bool reaches(Light l) {
     vec3 c = 0.5 * (boxMin + boxMax);
     float boxRadius = 0.5 * length(boxMax - boxMin);
     vec3 p = toView(l.position);
+    float light = lightReach(l);
     if (l.kind == LIGHT_BEAM) {
         // The segment's nearest point to the box's centre, against the
         // box's bounding sphere (conservative).
         vec3 axis = toViewDir(l.direction);
         vec3 q = p + axis * clamp(dot(c - p, axis), -l.halfLength, l.halfLength);
-        float reach = l.range + boxRadius;
+        float reach = light + boxRadius;
         return dot(c - q, c - q) <= reach * reach;
     }
-    if (boxDistance2(p) > l.range * l.range) {
+    if (boxDistance2(p) > light * light) {
         return false;
     }
     if (l.kind == LIGHT_CONE) {

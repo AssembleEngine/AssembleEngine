@@ -3,6 +3,7 @@
 // alpha mask (the masked pipeline, MASKED defined), normal map, occlusion
 // and emissive; no metallic-roughness yet.
 #define MODELS
+#include "photometry.glsl"
 #include "units_common.glsl"
 #include "units_models.glsl"
 #define LIGHT_SET 2
@@ -58,12 +59,16 @@ void main() {
     vec3 tint;
     float units = unitSunAt(inWorld, n, tint);
     vec3 diff = max(dot(n, normalize(u.sun.xyz)), 0.0) * min(sunAt(inWorld), units) * tint;
-    vec3 sky = vec3(0.45, 0.55, 0.7);
-    vec3 color = base.rgb * (vec3(1.0, 0.95, 0.85) * 1.4 * diff + sky * (0.35 + 0.25 * n.y) * ao) + emissive;
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
+    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
+    vec3 color = base.rgb * (sunE + skyE) / AE_PI;
+    // The bridge: the material's emissive is still the old linear value
+    // (re-authored as cd/m² with the emitters).
+    color += emissive * u.photometry.y;
     if (lightsOn()) {
-        color += base.rgb * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n);
+        color += base.rgb * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n) / AE_PI;
     }
     float dist = distance(inWorld, u.camPos.xyz);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
-    outColor = vec4(mix(color, u.fog.rgb, fog), 1.0);
+    outColor = vec4(mix(color, u.fog.rgb, fog) * u.photometry.x, 1.0);
 }

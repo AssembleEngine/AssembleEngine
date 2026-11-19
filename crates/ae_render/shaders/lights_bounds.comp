@@ -13,11 +13,14 @@ void main() {
         return;
     }
     Light l = lights[i];
-    float radius = l.range + (l.kind == LIGHT_BEAM ? l.halfLength : 0.0);
+    float radius = lightReach(l);
+    if (l.kind == LIGHT_BEAM) {
+        radius += l.halfLength;
+    }
     uvec2 bounds = uvec2(0u);
     float z = toView(l.position).z;
     float near = lf.camPos.w;
-    if (l.range > 0.0 && any(notEqual(l.color, vec3(0.0))) && z + radius > near) {
+    if (radius > 0.0 && any(notEqual(l.color, vec3(0.0))) && z + radius > near) {
         vec2 size = lf.slicing.zw;
         vec2 lo = vec2(0.0), hi = size;
         bool behind = false;

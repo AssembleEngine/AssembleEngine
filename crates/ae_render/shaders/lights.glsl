@@ -7,11 +7,12 @@
 // LIGHT_SLICES slices of view depth, spaced exponentially from
 // lf.slicing.x; a tile lists the lights whose bounding spheres reach its
 // frustum (lights_tiles.comp), and a cluster those of its tile whose
-// bounds reach its box (lights_cluster.comp), both in light order. Kinds and falloffs after ~/particles (particle_lights.glsl):
+// bounds reach its box (lights_cluster.comp), both in light order. Kinds:
 // point, cone (between two cosines about its axis), beam (a capsule along
-// a segment). Distances in the falloff are in units of the light's source
-// size (profile.z), so one formula serves a muzzle flash and a burning
-// tank alike.
+// a segment). A light gives illuminance in lux (src/lighting.rs): intensity
+// (profile.w, candela) times the glTF quartic range window over the squared
+// distance, the near field regularised by the source radius (profile.z).
+// The receiver masks it by its cosine once and multiplies by albedo/pi.
 
 #ifndef LIGHTS_GLSL
 #define LIGHTS_GLSL
@@ -33,12 +34,12 @@
 
 struct Light {
     vec3 position;
-    float range;     // nothing past it
-    vec3 color;      // linear, may exceed 1
-    uint kind;       // LIGHT_POINT, LIGHT_CONE, LIGHT_BEAM
-    vec3 direction;  // a cone's axis, a beam's segment (unit)
+    float range;      // the authored cutoff (metres); 0: none
+    vec3 color;       // linear tint, unit luminance
+    uint kind;        // LIGHT_POINT, LIGHT_CONE, LIGHT_BEAM
+    vec3 direction;   // a cone's axis, a beam's segment (unit)
     float halfLength; // a beam's half length
-    vec4 profile;    // x, y: a cone's inner and outer cosines; z: source size (> 0)
+    vec4 profile;     // x, y: a cone's inner and outer cosines; z: source radius (m); w: intensity (cd)
 };
 
 layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
@@ -51,6 +52,7 @@ layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
     uvec4 grid;       // tiles x, y, slices; w: 1 when the lights are on this frame, 2 on and unculled (every light at every pixel: the reference)
     vec4 slicing;     // x: first slice's far depth; y: slices per log unit of depth; z, w: viewport size (px)
     uvec4 model;      // x: the host's lights (where the units' model lights append at); y: the units' rows; z, w: unused
+    vec4 photometry;  // x: the cull cutoff (lux): bounds = sqrt(intensity / x)
 } lf;
 
 #ifdef LIGHTS_WRITE
@@ -115,16 +117,23 @@ uint lightClusterAt(mat4 viewProj, vec3 p) {
     return lightCluster((ndc * 0.5 + 0.5) * lf.slicing.zw, clip.w);
 }
 
-// ~/particles' falloff, distances over the source size: (1 - d²/r²)² /
-// (1 + d²/s²).
-float lightFalloff(Light l, float d2) {
-    float edge = max(1.0 - d2 / (l.range * l.range), 0.0);
-    return edge * edge / (1.0 + d2 / (l.profile.z * l.profile.z));
+// The radius at which a light is not worth drawing: its authored cutoff,
+// or (without one) the distance its illuminance falls to the frame's cull
+// cutoff. The bounds and the cluster cull use it; the shading window uses
+// only the authored range.
+float lightReach(Light l) {
+    // Conservatively by the brightest channel: a saturated tint can exceed
+    // the luminance intensity in one channel.
+    float brightest = max(max(l.color.r, l.color.g), max(l.color.b, 0.0));
+    float reach = l.profile.w > 0.0 ? sqrt(l.profile.w * brightest / max(lf.photometry.x, 1e-9)) : 0.0;
+    return l.range > 0.0 ? min(l.range, reach) : reach;
 }
 
-// Light l at p: the vector to it (to the beam's nearest point) and its
-// attenuation.
-float lightAt(Light l, vec3 p, out vec3 toLight) {
+// The directional illuminance (lux) of light l arriving at p, before the
+// receiver cosine. `L` is the unit direction to the light (to the beam's
+// nearest point). A range of 0 is no authored cutoff; the distance is
+// regularised by the source radius, and a cone cuts between its cosines.
+vec3 lightIlluminance(Light l, vec3 p, out vec3 L) {
     vec3 source = l.position;
     float ends = 1.0;
     if (l.kind == LIGHT_BEAM) {
@@ -132,13 +141,29 @@ float lightAt(Light l, vec3 p, out vec3 toLight) {
         source += l.direction * clamp(along, -l.halfLength, l.halfLength);
         ends = 1.0 - smoothstep(0.85, 1.0, abs(along) / max(l.halfLength, 1e-4));
     }
-    toLight = source - p;
+    vec3 toLight = source - p;
     float d2 = dot(toLight, toLight);
-    float a = lightFalloff(l, d2) * ends;
-    if (l.kind == LIGHT_CONE && d2 > 0.0) {
-        a *= smoothstep(l.profile.y, l.profile.x, dot(-toLight, l.direction) * inversesqrt(d2));
+    if (d2 <= 0.0 || l.profile.w <= 0.0) {
+        L = vec3(0.0, 1.0, 0.0);
+        return vec3(0.0);
     }
-    return a;
+    L = toLight * inversesqrt(d2);
+    float window = 1.0;
+    if (l.range > 0.0) {
+        float q = d2 / (l.range * l.range);
+        window = max(1.0 - q * q, 0.0);
+    }
+    float cone = 1.0;
+    if (l.kind == LIGHT_CONE) {
+        // glTF's two half-angles, clamped by the CPU: a squared cosine ramp
+        // between the outer and inner cosines.
+        float scale = 1.0 / max(l.profile.x - l.profile.y, 1e-5);
+        float t = clamp(dot(l.direction, -L) * scale - l.profile.y * scale, 0.0, 1.0);
+        cone = t * t;
+    }
+    float radius = l.profile.z;
+    float denom = max(d2, radius * radius);
+    return l.color * (l.profile.w * window * cone * ends / denom);
 }
 
 // The lights to sum at a cluster: (first, count), and whether they are
@@ -148,7 +173,8 @@ uvec2 lightRange(uint cluster, out bool unculled) {
     return unculled ? uvec2(0u, lightCount) : clusterRange[cluster];
 }
 
-// Diffuse light (to multiply by the albedo) at p with normal n.
+// The illuminance at p (lux) from the lights that reach it, times the
+// receiver cosine: what a Lambertian surface multiplies by albedo/pi.
 vec3 lightsDiffuse(uint cluster, vec3 p, vec3 n) {
     if (!lightsOn()) {
         return vec3(0.0);
@@ -158,16 +184,15 @@ vec3 lightsDiffuse(uint cluster, vec3 p, vec3 n) {
     vec3 sum = vec3(0.0);
     for (uint k = 0u; k < range.y; ++k) {
         Light l = lights[unculled ? k : lightIndex[range.x + k]];
-        vec3 toLight;
-        float a = lightAt(l, p, toLight);
-        float d = length(toLight);
-        float lambert = d > 1e-4 ? max(dot(n, toLight / d), 0.0) : 1.0;
-        sum += l.color * (a * lambert);
+        vec3 L;
+        vec3 E = lightIlluminance(l, p, L);
+        sum += E * max(dot(n, L), 0.0);
     }
     return sum;
 }
 
-// Light arriving at p from every direction (a medium: smoke, dust).
+// The illuminance (lux) arriving at p from every direction (a medium:
+// smoke, dust): no receiver cosine.
 vec3 lightsAround(uint cluster, vec3 p) {
     if (!lightsOn()) {
         return vec3(0.0);
@@ -177,8 +202,8 @@ vec3 lightsAround(uint cluster, vec3 p) {
     vec3 sum = vec3(0.0);
     for (uint k = 0u; k < range.y; ++k) {
         Light l = lights[unculled ? k : lightIndex[range.x + k]];
-        vec3 toLight;
-        sum += l.color * lightAt(l, p, toLight);
+        vec3 L;
+        sum += lightIlluminance(l, p, L);
     }
     return sum;
 }

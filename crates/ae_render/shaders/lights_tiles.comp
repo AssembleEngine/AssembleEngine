@@ -38,7 +38,7 @@ void main() {
             hit = b.y != 0u && t.x >= r.x && t.y >= r.y && t.x <= r.z && t.y <= r.w;
             if (hit) {
                 Light l = lights[i];
-                float radius = l.range + (l.kind == LIGHT_BEAM ? l.halfLength : 0.0);
+                float radius = lightReach(l) + (l.kind == LIGHT_BEAM ? l.halfLength : 0.0);
                 vec3 p = toView(l.position);
                 for (int k = 0; k < 4; ++k) {
                     hit = hit && dot(planes[k].xyz, p) >= -radius;

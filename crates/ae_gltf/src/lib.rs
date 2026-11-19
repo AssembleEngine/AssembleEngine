@@ -29,8 +29,8 @@ mod mesh;
 pub mod textures;
 
 use ae_model::{
-    AlphaMode, Bone, Bounds, CANDELA_TO_ENGINE, Channel, Clip, Filter, GLTF_TO_ENGINE, Interpolation, Joint, LightKind, Material, Model, ModelLight, Path as BonePath, Primitive, Range, Sampler,
-    TextureRef, UNBOUNDED_RANGE, UvTransform, Wrap, pose,
+    AlphaMode, Bone, Bounds, DEFAULT_SOURCE_RADIUS, Channel, Clip, Filter, GLTF_TO_ENGINE, Interpolation, Joint, LightKind, Material, Model, ModelLight, Path as BonePath, Primitive, Range,
+    Sampler, TextureRef, UvTransform, Wrap, pose,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::Engine as _;
@@ -228,23 +228,26 @@ impl<'a> Converter<'a> {
                     let range = match range {
                         Some(r) if r.is_finite() && r > 0.0 => r,
                         Some(r) => {
-                            self.warn(format!("{what}: range {r} is not positive; using {UNBOUNDED_RANGE} m"));
-                            UNBOUNDED_RANGE
+                            self.warn(format!("{what}: range {r} is not positive; treated as no cutoff"));
+                            0.0
                         }
-                        None => UNBOUNDED_RANGE,
+                        None => 0.0,
                     };
-                    let color = color.map(|c| c * intensity * CANDELA_TO_ENGINE);
                     self.model.lights.push(ModelLight {
                         name: what,
                         joint: joint.into(),
                         kind,
+                        // glTF's intensity is already candela (point and
+                        // spot); the colour is the linear tint.
                         color,
+                        intensity: intensity.max(0.0),
                         range,
                         inner_angle,
                         outer_angle,
-                        // A source an eighth of the range across: the falloff
-                        // halves at that distance.
-                        size: (range / 8.0).max(0.05),
+                        // The source radius regularises the near field; glTF
+                        // has none, so a range-derived size or a small
+                        // default.
+                        size: if range > 0.0 { (range / 8.0).max(0.05) } else { DEFAULT_SOURCE_RADIUS },
                     });
                 }
             }

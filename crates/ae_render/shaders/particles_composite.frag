@@ -48,4 +48,6 @@ void main() {
     if (outColor == vec4(0.0)) {
         discard;
     }
+    // The target holds physical radiance; the scene is exposed radiance.
+    outColor.rgb *= u.photometry.x;
 }

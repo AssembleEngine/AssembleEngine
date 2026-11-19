@@ -115,17 +115,19 @@ pub struct Draw {
     pub first_index: u32,
 }
 
-/// A model light as `units_lights.glsl` reads it (32 bytes): the colour and
-/// range, the spot's cosines and source size, and the joint and kind.
+/// A model light as `units_lights.glsl` reads it (48 bytes): the colour and
+/// range, the spot's cosines/source size/joint/kind, and its intensity.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct GpuModelLight {
-    /// rgb; w: the range (metres).
+    /// rgb: the linear tint; w: the range (metres; 0: none).
     color: [f32; 4],
-    /// x, y: a spot's inner and outer cosines; z: the source size; w: the
+    /// x, y: a spot's inner and outer cosines; z: the source radius; w: the
     /// joint in the low 16 bits, the kind (1 point, 2 spot) above it
     /// (`f32` bits).
     params: [f32; 4],
+    /// x: the intensity (candela); y, z, w: 0.
+    energy: [f32; 4],
 }
 
 /// A unit class drawn with a model.
@@ -510,6 +512,7 @@ impl ModelSet {
                         l.size.max(1e-3),
                         f32::from_bits(l.joint | ((if l.kind == ae_model::LightKind::Spot { 2 } else { 1 }) << 16)),
                     ],
+                    energy: [l.intensity, 0.0, 0.0, 0.0],
                 })
                 .collect();
             posed.push(Posed { rest_offset, pose, sphere, turned, lights });

@@ -212,7 +212,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--exposure X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--ev100 X] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -266,7 +266,8 @@ fn parse() -> Result<Options> {
                     other => bail!("--tonemap {other:?}: clamp or aces"),
                 }
             }
-            "--exposure" => o.tone.exposure = value("--exposure", &mut args)?.parse().context("--exposure")?,
+            "--ev100" => o.tone.ev100 = value("--ev100", &mut args)?.parse().context("--ev100")?,
+            "--sun-lux" => o.tone.sun_illuminance = value("--sun-lux", &mut args)?.parse().context("--sun-lux")?,
             "--no-particles" => o.particles = false,
             "--no-decals" => o.decals = false,
             "--scars" => o.scars = Some(value("--scars", &mut args)?),

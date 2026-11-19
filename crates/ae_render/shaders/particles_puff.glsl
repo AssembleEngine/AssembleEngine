@@ -4,6 +4,7 @@
 // the hills) and the sky and fogged, emissive particles add their colour
 // and fade in fog. Shared by the draw's vertex shader and the froxels'
 // binning, so both see the same puff. After particles_common.glsl.
+#include "photometry.glsl"
 
 layout(set = 0, binding = 7) uniform sampler2D sunShadowTex;
 
@@ -41,15 +42,19 @@ Puff puffOf(uint slot) {
     float dist = distance(p.posAge.xyz, u.camPos.xyz);
     float fog = u.fog.w > 0.0 ? 1.0 - exp(-pow(dist * u.fog.w, 1.5)) : 0.0;
     if (physics.z > 0.5) {
-        f.color = vec4(color.rgb * color.a * (1.0 - fog), 0.0);
+        // The bridge: old additive linear value to exposed physical
+        // radiance of a unit luminance? No: emission is radiance directly.
+        f.color = vec4(color.rgb * color.a * (1.0 - fog) * u.photometry.y, 0.0);
     } else {
+        // The media's lighting is still the old expression (re-authored with
+        // the emitters): its sun/sky coefficients through the bridge, the
+        // clustered lights (physical illuminance) back into those units.
         vec3 sky = vec3(0.45, 0.55, 0.7);
         vec3 light = vec3(1.0, 0.95, 0.85) * 1.1 * sunAt(p.posAge.xyz) + sky * 0.55;
         if (p.info.w != 0u) {
-            // The clustered lights (particles_sim.comp).
-            light += unpackParticleLight(p.info.w);
+            light += unpackParticleLight(p.info.w) / AE_PI;
         }
-        vec3 lit = mix(color.rgb * light, u.fog.rgb, fog);
+        vec3 lit = mix(color.rgb * light * u.photometry.y, u.fog.rgb, fog);
         f.color = vec4(lit * color.a, color.a);
     }
     return f;

@@ -11,11 +11,12 @@
 #define MODEL_SET 1
 #endif
 
-// Two vec4 each: the colour and range, and the spot's cosines, the
-// source size and (in the low 16 bits) the joint, with the kind above it.
+// Three vec4 each: the colour and range, the spot's cosines / source radius
+// / joint and kind, and the intensity in candela.
 struct ModelLight {
-    vec4 color;   // rgb; w: nothing past range
-    vec4 params;  // x, y: a spot's inner and outer cosines; z: source size; w: joint | kind << 16 (bits)
+    vec4 color;   // rgb: linear tint; w: the authored range (0: none)
+    vec4 params;  // x, y: a spot's inner and outer cosines; z: source radius; w: joint | kind << 16 (bits)
+    vec4 energy;  // x: intensity (cd)
 };
 
 // Per class: the first model light of its model and how many.

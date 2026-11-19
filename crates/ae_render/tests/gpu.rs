@@ -784,6 +784,100 @@ fn terrain_edits_reach_the_heightfield() {
     assert_clean(&gpu);
 }
 
+/// Photometric lighting (M12): the scene's sun scales with its illuminance,
+/// the exposure applies before the scene is stored (one EV halves it), and
+/// a point light with no authored range follows the inverse square: at 4 m
+/// it adds a quarter of what it adds at 2 m. All read back through the
+/// clamp curve, so linear values decode exactly.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn photometric_sun_exposure_and_inverse_square() {
+    use ae_render::lights::Light;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let target = Vec2::new(512.0, 512.0);
+    let ground = 50.0;
+    let camera = std::cell::Cell::new(None);
+    let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_lights(lights)
+            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun });
+        if unculled {
+            app = app.with_unculled_lights();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = target;
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+            camera.set(Some(view.camera));
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target_info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target_info, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    // The sun: half the illuminance gives half the added (sun-only) light,
+    // and one EV more doubles the stored scene.
+    let sky14 = render(0.0, 14.0, Vec::new(), false);
+    let sun100 = render(100_000.0, 14.0, Vec::new(), false);
+    let sun50 = render(50_000.0, 14.0, Vec::new(), false);
+    let sky13 = render(0.0, 13.0, Vec::new(), false);
+    let dark = render(0.0, 14.0, Vec::new(), false);
+    let light = |h: f32| Light::point(Vec3::new(target.x, ground + h, target.y), Vec3::ONE, 100_000.0, 0.0, 0.05);
+    let at2 = render(0.0, 14.0, vec![light(2.0)], false);
+    let at4 = render(0.0, 14.0, vec![light(4.0)], false);
+
+
+    let view_proj = lod_view(&source, &camera.get().unwrap(), extent.width, extent.height).view_proj;
+    let pixel = |x: f32, y: f32, h: f32| -> usize {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        let u = (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32;
+        let v = (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32;
+        (v as usize * extent.width as usize + u as usize) * 4
+    };
+    let at = pixel(target.x, target.y, ground);
+    let lin = |pixels: &[u8], c: usize| -> f32 {
+        let v = pixels[at + c] as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let add = |a: &[u8], b: &[u8]| -> f32 { (0..3).map(|c| lin(a, c) - lin(b, c)).sum::<f32>() / 3.0 };
+    let (d100, d50) = (add(&sun100, &sky14), add(&sun50, &sky14));
+    assert!(d100 > 0.2 && d50 > 0.1, "the sun lights the ground: {d100} {d50}");
+    assert!((d100 / d50 - 2.0).abs() < 0.05, "sun illuminance scales: {:.4} vs {:.4}", d100 / d50, 2.0);
+    // The scene is stored exposed (the tonemap only curves): one EV more
+    // doubles the stored sky, which stays below the clamp's ceiling.
+    let (s14, s13) = (lin(&sky14, 1), lin(&sky13, 1));
+    assert!(s14 > 0.1 && s13 < 0.98, "the sky is in range: {s14} {s13}");
+    assert!((s13 / s14 - 2.0).abs() < 0.08, "one EV doubles the stored light: {:.4}", s13 / s14);
+
+    // A point light with no range: 4 m adds a quarter of 2 m.
+    let (a2, a4) = (add(&at2, &dark), add(&at4, &dark));
+    assert!(a2 > 0.05 && a4 > 0.01, "the point light adds light: {a2} {a4}");
+    assert!((a2 / a4 - 4.0).abs() < 0.2, "inverse square: {:.3} (2 m vs 4 m)", a2 / a4);
+    // A source radius larger than the authored range clamps the near field
+    // without extinguishing the light: the range window still applies.
+    let big = render(0.0, 14.0, vec![Light::point(Vec3::new(target.x, ground + 1.0, target.y), Vec3::ONE, 1.0e9, 2.0, 100.0)], false);
+    assert!(add(&big, &dark) > 0.02, "the regularisation radius does not put the light out: {}", add(&big, &dark));
+    assert_clean(&gpu);
+}
+
 /// The models' punctual lights (M12, `KHR_lights_punctual`): with no host
 /// light, a unit whose model carries a point light lights the ground
 /// around it, and a spot lights the ground its node's -Z faces and not the
@@ -823,10 +917,10 @@ fn model_lights_light_the_ground() {
         m.validate().unwrap();
         m
     };
-    let point = model_with(ModelLight { name: "lamp".into(), joint: 1, kind: LightKind::Point, color: [40.0, 16.0, 5.0], range: 40.0, inner_angle: 0.0, outer_angle: 0.0, size: 4.0 });
+    let point = model_with(ModelLight { name: "lamp".into(), joint: 1, kind: LightKind::Point, color: [1.0, 0.4, 0.12], intensity: 6_000_000.0, range: 40.0, inner_angle: 0.0, outer_angle: 0.0, size: 4.0 });
     // A wide cone, so the ground in front of the unit (past its own model)
     // is inside it; model -z is world -z with the heading +x.
-    let spot = model_with(ModelLight { name: "headlight".into(), joint: 1, kind: LightKind::Spot, color: [5.0, 10.0, 30.0], range: 40.0, inner_angle: 0.9, outer_angle: 1.2, size: 4.0 });
+    let spot = model_with(ModelLight { name: "headlight".into(), joint: 1, kind: LightKind::Spot, color: [0.2, 0.4, 1.0], intensity: 5_000_000.0, range: 40.0, inner_angle: 0.9, outer_angle: 1.2, size: 4.0 });
     let mut unlit = point.clone();
     unlit.lights.clear();
     unlit.validate().unwrap();
@@ -1165,7 +1259,20 @@ fn cull_on_gpu(
     let counts = app.last_unit_counts().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
     let view = lod_view(&source, &cam, extent.width, extent.height);
-    let frame = UnitFrame { view_proj: view.view_proj, cam_pos: view.pos, proj_scale: view.proj_scale, fog: [0.0; 4], shadows: false, unit_shadows: None };
+    let frame = UnitFrame {
+        view_proj: view.view_proj,
+        cam_pos: view.pos,
+        proj_scale: view.proj_scale,
+        fog: [0.0; 4],
+        shadows: false,
+        unit_shadows: None,
+        photometry: [
+            ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100),
+            ae_render::lighting::legacy_emission_scale(),
+            ae_render::lighting::SUN_ILLUMINANCE,
+            ae_render::lighting::SKY_ILLUMINANCE,
+        ],
+    };
     (counts, stream, frame)
 }
 
@@ -4055,8 +4162,27 @@ fn lights_clusters_match_the_unculled_reference() {
         let a = k as f32 * 0.7;
         let p = centre + Vec2::new(a.cos(), a.sin()) * (60.0 + 8.0 * k as f32);
         let base = Vec3::new(p.x, height(p) + 25.0, p.y);
-        lights.push(Light::cone(base, Vec3::new(0.3 * a.sin(), -1.0, 0.3 * a.cos()), Vec3::new(0.4, 0.8, 2.0), 60.0, 12.0, 0.25, 0.45));
-        lights.push(Light::beam(base - Vec3::X * 30.0, base + Vec3::new(30.0, -20.0, 10.0), Vec3::new(2.0, 0.2, 0.2), 6.0, 2.0));
+        let scale = ae_render::lighting::legacy_light_scale();
+        let cone_color = Vec3::new(0.4, 0.8, 2.0);
+        let beam_color = Vec3::new(2.0, 0.2, 0.2);
+        lights.push(Light::cone(
+            base,
+            Vec3::new(0.3 * a.sin(), -1.0, 0.3 * a.cos()),
+            cone_color,
+            ae_render::lighting::luminance(cone_color.to_array()) * scale,
+            60.0,
+            12.0,
+            0.25,
+            0.45,
+        ));
+        lights.push(Light::beam(
+            base - Vec3::X * 30.0,
+            base + Vec3::new(30.0, -20.0, 10.0),
+            beam_color,
+            ae_render::lighting::luminance(beam_color.to_array()) * scale,
+            6.0,
+            2.0,
+        ));
     }
     // Darts in a ring, smoke over the middle.
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();

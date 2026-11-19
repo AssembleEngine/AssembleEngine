@@ -1,6 +1,7 @@
 #version 460
 // Flat-shaded unit faces, lit like the terrain (sun + sky), with its fog.
 #include "units_common.glsl"
+#include "photometry.glsl"
 #define LIGHT_SET 2
 #include "lights.glsl"
 
@@ -15,12 +16,14 @@ void main() {
     vec3 tint;
     float units = unitSunAt(inWorld, n, tint);
     vec3 diff = max(dot(n, normalize(u.sun.xyz)), 0.0) * min(sunAt(inWorld), units) * tint;
-    vec3 sky = vec3(0.45, 0.55, 0.7);
-    vec3 color = inColor * (vec3(1.0, 0.95, 0.85) * 1.4 * diff + sky * (0.35 + 0.25 * n.y));
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
+    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y));
+    vec3 color = inColor * (sunE + skyE) / AE_PI;
     if (lightsOn()) {
-        color += inColor * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n);
+        color += inColor * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n) / AE_PI;
     }
     float dist = distance(inWorld, u.camPos.xyz);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
-    outColor = vec4(mix(color, u.fog.rgb, fog), 1.0);
+    // Fog is physical radiance; exposure applies after the mix.
+    outColor = vec4(mix(color, u.fog.rgb, fog) * u.photometry.x, 1.0);
 }

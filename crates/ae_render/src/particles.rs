@@ -429,6 +429,9 @@ pub struct ParticleFrame {
     /// The units' shadow cascades when the graph draws the particles'
     /// coloured shadows this frame (else the pass draws nothing).
     pub unit_shadows: Option<crate::shadow::Cascades>,
+    /// Photometric lighting: exposure, the legacy emission bridge, and the
+    /// sun's and sky's illuminances in lux.
+    pub photometry: [f32; 4],
 }
 
 #[repr(C)]
@@ -445,7 +448,8 @@ struct FrameUbo {
     /// capacity, spawn records, spawn total, ring head.
     pool: [u32; 4],
     /// flags (1: hills' shadows), find the depth range (moments), list
-    /// the shadow casters, 0.
+    /// the shadow casters, w: 1 when the draw writes the scene itself
+    /// (downscale 1) and must apply the exposure.
     flags: [u32; 4],
     map: [f32; 4],
     height: [f32; 4],
@@ -453,6 +457,8 @@ struct FrameUbo {
     fog: [f32; 4],
     shadow: crate::shadow::CascadeUniforms,
     effects: [[[f32; 4]; 5]; MAX_EFFECTS],
+    /// x: exposure, y: legacy emission scale, z: sun lux, w: sky lux.
+    photometry: [f32; 4],
 }
 
 /// A burst as the spawn shader reads it.
@@ -877,8 +883,22 @@ impl ParticleRenderer {
                 pos.y += water.map_or(h, |w| h.max(w));
             }
             pos.y += l.height * scale;
-            let color = glam::Vec3::from(l.color) * fade;
-            out.push(crate::lights::Light::point(pos, color, l.range * scale, l.size * scale));
+            // The bridge: the old arbitrary-unit light, matched to the old
+            // attenuation at a reference distance (a quarter of its range)
+            // through the new Lambertian response. Re-authored in candela
+            // with the emitters.
+            let color = glam::Vec3::from(l.color);
+            let y = crate::lighting::luminance(color.to_array()) * fade;
+            let (range, size) = (l.range * scale, l.size * scale);
+            let d = (0.25 * range).max(1.0);
+            let old = {
+                let q = (d / range).min(1.0);
+                let edge = (1.0 - q * q).max(0.0);
+                edge * edge / (1.0 + d * d / (size * size).max(1e-6))
+            };
+            let window = (1.0 - (d / range).clamp(0.0, 1.0).powi(4)).max(0.0);
+            let intensity = y * old * crate::lighting::legacy_light_scale() * d * d / window.max(1e-6);
+            out.push(crate::lights::Light::point(pos, color, intensity, range, size));
         }
     }
 
@@ -963,13 +983,19 @@ impl ParticleRenderer {
             frustum: frustum_planes(frame.view_proj),
             step: [dt, self.sim_time, 1.0 / frame.extent.width.max(1) as f32, 1.0 / frame.extent.height.max(1) as f32],
             pool: [self.capacity, records.len() as u32, total, head],
-            flags: [(frame.shadows && self.shadows) as u32, matches!(self.blend, ParticleBlend::Moments | ParticleBlend::Froxels) as u32, frame.unit_shadows.is_some() as u32, 0],
+            flags: [
+                (frame.shadows && self.shadows) as u32,
+                matches!(self.blend, ParticleBlend::Moments | ParticleBlend::Froxels) as u32,
+                frame.unit_shadows.is_some() as u32,
+                (self.downscale == 1) as u32,
+            ],
             map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, 0.0],
             height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
             sun: crate::terrain::sun::direction().extend(0.0).to_array(),
             fog: frame.fog,
             shadow: crate::shadow::Cascades::uniforms(frame.unit_shadows.as_ref()),
             effects,
+            photometry: frame.photometry,
         };
         self.casting[slot] = frame.unit_shadows.is_some();
         if let Some(bytes) = self.ubos[slot].mapped() {

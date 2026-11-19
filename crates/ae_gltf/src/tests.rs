@@ -121,7 +121,8 @@ fn punctual_lights_ride_their_nodes() {
     let point = &m.lights[0];
     assert_eq!(point.kind, LightKind::Point);
     assert_eq!(point.name, "light (unnamed) on node lamp");
-    assert!(Vec3::from(point.color).abs_diff_eq(Vec3::new(0.5, 0.4, 0.3) * 40.0 * ae_model::CANDELA_TO_ENGINE, 1e-6), "{:?}", point.color);
+    assert!(Vec3::from(point.color).abs_diff_eq(Vec3::new(0.5, 0.4, 0.3), 1e-6), "{:?}", point.color);
+    assert_eq!(point.intensity, 40.0);
     assert_eq!((point.range, point.inner_angle, point.outer_angle), (25.0, 0.0, 0.0));
     assert_eq!(point.size, 25.0 / 8.0);
 
@@ -140,6 +141,9 @@ fn punctual_lights_ride_their_nodes() {
     let spot = &m.lights[1];
     assert_eq!(spot.kind, LightKind::Spot);
     assert!(spot.inner_angle == 0.2 && spot.outer_angle == 0.5);
+    // No range in the glTF: no authored cutoff, and the default source
+    // radius.
+    assert_eq!((spot.range, spot.size), (0.0, ae_model::DEFAULT_SOURCE_RADIUS));
     let m4 = palette[spot.joint as usize];
     let dir = m4.transform_vector3(Vec3::NEG_Z).normalize();
     let want = (GLTF_TO_ENGINE * (quarter * Vec3::NEG_Z)).normalize();

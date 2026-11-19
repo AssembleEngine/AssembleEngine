@@ -26,6 +26,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     // death, (size birth, size death, life min, life max), (speed min,
     // speed max, up, spread), (gravity, drag, emissive, fade in).
     vec4 effects[MAX_EFFECTS * 5];
+    vec4 photometry;  // x: exposure, y: legacy emission scale, z: sun lux, w: sky lux
 } u;
 
 // One particle: position and age; velocity and life (dead when age >=

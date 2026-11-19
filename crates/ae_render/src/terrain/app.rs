@@ -380,7 +380,7 @@ impl TerrainApp {
         self.light_stats.clone()
     }
 
-    /// The tonemap's exposure and curve (by default exposure 1, clamped).
+    /// The camera exposure (EV100) and tone curve (by default EV14, clamped).
     pub fn with_tone(mut self, tone: ToneParams) -> Self {
         self.tone = tone;
         self
@@ -567,6 +567,7 @@ impl TerrainApp {
             time,
             effect_time,
             shadows: view.shadows && self.shadows,
+            photometry: [self.tone.exposure(), crate::lighting::legacy_emission_scale(), self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
             // The units' shadows when the graph draws them.
             // (and the particles' coloured shadows when it draws those).
             unit_shadows: (view.shadows && self.shadows && self.graph_has(LibraryResource::ShadowMap)).then(|| crate::shadow::Cascades {
@@ -586,9 +587,12 @@ impl TerrainApp {
 
 /// The terrain's fog (colour and density) for other passes, as the terrain
 /// renderer sets it.
+/// Distance fog as physical radiance (the bridge until it becomes sky
+/// radiance) and its density.
 fn fog(info: &TerrainInfo, on: bool) -> [f32; 4] {
     let density = if on { 1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2) } else { 0.0 };
-    [0.62, 0.70, 0.80, density]
+    let s = crate::lighting::legacy_emission_scale();
+    [0.62 * s, 0.70 * s, 0.80 * s, density]
 }
 
 /// The view a frozen LOD would keep (call on the main thread with the
@@ -782,6 +786,7 @@ impl RenderApp for TerrainApp {
                 fog: fog(&self.source.info, params.fog),
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows,
+                photometry: params.photometry,
             };
             units.write_frame(slot, &frame, &setup.feed, Instant::now());
         }
@@ -800,6 +805,7 @@ impl RenderApp for TerrainApp {
                 fog: fog(&self.source.info, params.fog),
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows.filter(|c| c.tinted),
+                photometry: params.photometry,
             };
             let gpu = self.gpu.clone().context("no device")?;
             particles.write_frame(&gpu, slot, &frame)?;
@@ -815,8 +821,9 @@ impl RenderApp for TerrainApp {
                 particles.lights(&|p| source.height_at(p), &mut list);
             }
             let planes = super::renderer::frustum_planes(params.view_proj);
+            let cutoff = crate::lighting::cull_cutoff(self.tone.exposure());
             list.retain(|l| {
-                let (c, r) = l.bounds();
+                let (c, r) = l.bounds(cutoff);
                 planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
             });
             let clustered = self.wiring.as_ref().is_some_and(|w| w.resources.contains(&Some(LibraryResource::LightClusters)));
@@ -833,7 +840,7 @@ impl RenderApp for TerrainApp {
             let (y_lo, y_hi) = (i.height_offset, i.height_offset + i.height_scale + 80.0);
             let depths = crate::lights::depth_range(params.view_proj, params.cam_pos, axes[2], camera.near(), y_lo, y_hi);
             let on = clustered && (!list.is_empty() || model_lights);
-            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on, depths, unit_rows, unit_lights };
+            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on, depths, unit_rows, unit_lights, cutoff };
             lights.write_frame(slot, &frame, &list);
             *self.light_stats.lock().unwrap_or_else(|p| p.into_inner()) = lights.stats();
             self.frame_lights = list;

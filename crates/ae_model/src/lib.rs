@@ -46,20 +46,13 @@ use serde::{Deserialize, Serialize};
 compile_error!("ae_model assumes a little-endian host");
 
 pub const MAGIC: [u8; 8] = *b"AEMODEL\0";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// Influences per vertex.
 pub const MAX_INFLUENCES: usize = 4;
 
-/// glTF's candela (point and spot intensity) to the engine's light units
-/// (the renderer's `Light::color`): 100 cd is 1.0, a light as bright as
-/// the sun's diffuse term at the source. Engine light units are arbitrary;
-/// this is the documented mapping the importer uses.
-pub const CANDELA_TO_ENGINE: f32 = 0.01;
-/// A glTF light without a `range` is infinite (the spec's default). The
-/// engine's lights are all finite: the importer gives such a light this
-/// range (the map's widest scale), so its cutoff is beyond anything the
-/// camera sees and its cull keeps it in every cluster.
-pub const UNBOUNDED_RANGE: f32 = 10_000.0;
+/// The source radius given to a glTF light that has no range (glTF carries
+/// none): the regularisation radius of its near field, in metres.
+pub const DEFAULT_SOURCE_RADIUS: f32 = 0.25;
 
 /// glTF (+Y up, front +Z, +X left) to the engine (+X forward, +Y up, +Z
 /// right): a quarter turn about +Y, so glTF +Z goes to +X and +X to -Z.
@@ -132,15 +125,17 @@ pub struct ModelLight {
     /// and its direction (the node's local -Z, glTF's convention).
     pub joint: u32,
     pub kind: LightKind,
-    /// Linear RGB in the engine's light units ([`CANDELA_TO_ENGINE`]).
+    /// The linear tint (unit luminance); [`Self::intensity`] scales it.
     pub color: [f32; 3],
-    /// The distance past which it lights nothing (metres,
-    /// [`UNBOUNDED_RANGE`] when the glTF has none).
+    /// Luminous intensity in candela (glTF's `intensity`).
+    pub intensity: f32,
+    /// The authored cutoff in metres; 0 when the glTF has none (the
+    /// renderer derives a cull radius from the intensity and exposure).
     pub range: f32,
     /// A spot's half-angles from its axis (radians). 0 for a point.
     pub inner_angle: f32,
     pub outer_angle: f32,
-    /// The source's size (metres), which regularises the falloff near it.
+    /// The source (regularisation) radius in metres.
     pub size: f32,
 }
 
@@ -478,7 +473,8 @@ impl Model {
         }
         for (i, l) in self.lights.iter().enumerate() {
             ensure!((l.joint as usize) < self.joints.len(), "light {i} ({}): joint {} out of range", l.name, l.joint);
-            ensure!(l.range.is_finite() && l.range > 0.0, "light {i} ({}): range {}", l.name, l.range);
+            ensure!(l.range.is_finite() && l.range >= 0.0, "light {i} ({}): range {}", l.name, l.range);
+            ensure!(l.intensity.is_finite() && l.intensity >= 0.0, "light {i} ({}): intensity {}", l.name, l.intensity);
             ensure!(l.size.is_finite() && l.size > 0.0, "light {i} ({}): size {}", l.name, l.size);
             ensure!(
                 l.inner_angle.is_finite() && l.outer_angle.is_finite() && 0.0 <= l.inner_angle && l.inner_angle <= l.outer_angle && l.outer_angle <= std::f32::consts::FRAC_PI_2,

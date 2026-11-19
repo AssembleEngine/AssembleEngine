@@ -1,6 +1,6 @@
 //! `post.tonemap`: the HDR scene ([`ae_render_abi::module::SCENE_FORMAT`],
-//! linear light) to the output, by exposure and a tone curve
-//! (`shaders/tonemap.frag`), as one fullscreen triangle.
+//! linear light, already exposed by the scene passes) to the output by a
+//! tone curve (`shaders/tonemap.frag`), as one fullscreen triangle.
 
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
@@ -19,16 +19,28 @@ pub enum Curve {
     Aces,
 }
 
-/// Exposure and curve.
+/// The camera exposure and the curve. The exposure is applied by the scene
+/// passes before they store into the HDR buffer
+/// ([`crate::lighting::exposure`]), so the tonemap itself only curves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ToneParams {
-    pub exposure: f32,
+    pub ev100: f32,
     pub curve: Curve,
+    /// The sun's direct-normal illuminance (lux): a capture override for
+    /// [`crate::lighting::SUN_ILLUMINANCE`].
+    pub sun_illuminance: f32,
+}
+
+impl ToneParams {
+    /// The frame's exposure factor.
+    pub fn exposure(&self) -> f32 {
+        crate::lighting::exposure(self.ev100)
+    }
 }
 
 impl Default for ToneParams {
     fn default() -> Self {
-        Self { exposure: 1.0, curve: Curve::Clamp }
+        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Clamp, sun_illuminance: crate::lighting::SUN_ILLUMINANCE }
     }
 }
 
@@ -44,7 +56,9 @@ impl Tonemap {
 
     /// Frame slot `slot`'s parameters (before it records).
     pub fn write(&mut self, slot: usize, params: ToneParams) {
-        let words = [params.exposure, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, 0.0, 0.0];
+        // Exposure was applied before the scene was stored; only the curve
+        // is left here.
+        let words: [f32; 4] = [1.0, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, 0.0, 0.0];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.program.write_uniforms(slot, &bytes);
     }

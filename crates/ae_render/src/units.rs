@@ -365,6 +365,9 @@ pub struct UnitFrame {
     /// Draw and shade by the units' shadow map with these cascades (the
     /// graph has it this frame).
     pub unit_shadows: Option<crate::shadow::Cascades>,
+    /// Photometric lighting: exposure, the legacy emission bridge, and the
+    /// sun's and sky's illuminances in lux.
+    pub photometry: [f32; 4],
 }
 
 #[repr(C)]
@@ -384,6 +387,8 @@ struct FrameUbo {
     /// past it (`f32` bits; poses are drawn there), z: animation table
     /// writes this frame.
     anim: [u32; 4],
+    /// x: exposure, y: the legacy emission scale, z: sun lux, w: sky lux.
+    photometry: [f32; 4],
 }
 
 /// Makes a graphics pipeline from a vertex and a fragment shader, with the
@@ -978,6 +983,7 @@ impl UnitRenderer {
             classes: self.classes,
             unit_shadow,
             anim: [stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32), alpha.to_bits(), self.models.as_ref().map_or(0, |m| m.writes[slot]), 0],
+            photometry: frame.photometry,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));

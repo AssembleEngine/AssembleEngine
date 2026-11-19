@@ -23,6 +23,7 @@
 //   terrain mesh and the plane meet (RA3's soft waterline).
 #define GRAPHICS
 #include "terrain_common.glsl"
+#include "photometry.glsl"
 #include "terrain_shading.glsl"
 #define LIGHT_SET 1
 #include "lights.glsl"
@@ -60,7 +61,9 @@ vec2 waveSlope(vec2 p, float t, float pix, out float lost) {
 }
 
 vec3 skyColor(vec3 dir) {
-    return mix(u.fog.rgb, ZENITH, sqrt(clamp(dir.y, 0.0, 1.0)));
+    // The horizon is the fog colour; both are still authored in the old
+    // units (the surface is re-authored with the emitters).
+    return mix(u.fog.rgb * u.photometry.x, ZENITH, sqrt(clamp(dir.y, 0.0, 1.0)));
 }
 
 void main() {
@@ -119,7 +122,10 @@ void main() {
     // The clustered lights on the foam (their glints on the water come
     // with the speculars).
     if (lightsOn()) {
-        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N);
+        // Into the bridge's units: E / legacy_light_scale, with
+        // legacy_light_scale = pi / reference exposure and
+        // photometry.y = 1 / reference exposure.
+        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N) / (u.photometry.y * AE_PI);
     }
     rgb = rgb * (1.0 - foam) + foamColor * foam;
     alpha = alpha * (1.0 - foam) + foam;
@@ -133,6 +139,9 @@ void main() {
     }
     // Distance fog over the surface's share (what lies under it is fogged
     // already): the blend then gives mix(surface over ground, fog, f).
-    rgb = mix(rgb, u.fog.rgb * alpha, fogAmount(dist));
-    outColor = vec4(rgb, alpha);
+    // The fog colour is physical radiance; the water is still authored in
+    // the bridge's units until the surface is re-authored.
+    rgb = mix(rgb, u.fog.rgb * u.photometry.x * alpha, fogAmount(dist));
+    // The bridge: old linear water radiance to exposed physical radiance.
+    outColor = vec4(rgb * u.photometry.y * u.photometry.x, alpha);
 }

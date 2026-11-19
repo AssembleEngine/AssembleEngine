@@ -1,10 +1,12 @@
 //! Clustered lights (M12): the frame's light list and, per view cluster,
 //! the lights that reach it.
 //!
-//! * A [`Light`] is a point, a cone or a beam (a capsule along a segment),
-//!   with `~/particles`' falloff (`shaders/lights.glsl`): `(1 − d²/r²)² /
-//!   (1 + d²/s²)`, `d` the distance, `r` the range and `s` the source size,
-//!   a cone's cut by a smoothstep between two cosines.
+//! * A [`Light`] is a point, a cone or a beam (a capsule along a segment).
+//!   Its intensity is in candela and its colour a linear tint (unitless):
+//!   the illuminance it gives a receiver is `rgb * intensity * w / d²` with
+//!   the glTF window `w = 1 − (d/range)⁴` (1 when no range is authored),
+//!   the distance regularised by the source radius (see
+//!   [`crate::lighting`]). A cone cuts it between two cosines.
 //! * The view is cut into [`TILES_X`] × [`TILES_Y`] screen tiles (about
 //!   32 pixels at 1280×720) and [`SLICES`] slices of view depth, spaced
 //!   exponentially over the depths the map can occupy in view
@@ -65,41 +67,76 @@ pub const BEAM: u32 = 4;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub position: [f32; 3],
-    /// Nothing past it (metres).
+    /// The authored cutoff (metres); 0: none (infinite in glTF's sense).
     pub range: f32,
-    /// Linear, may exceed 1.
+    /// The linear tint (unitless); [`Self::intensity`] carries the scale.
     pub color: [f32; 3],
     pub kind: u32,
     /// A cone's axis, a beam's segment (unit).
     pub direction: [f32; 3],
     /// A beam's half length.
     pub half_length: f32,
-    /// x, y: a cone's inner and outer cosines; z: the source size (> 0).
+    /// x, y: a cone's inner and outer cosines; z: the source
+    /// (regularisation) radius in metres; w: the intensity in candela.
     pub profile: [f32; 4],
 }
 
 impl Light {
-    /// A point light of `color` reaching `range`, from a source of `size`.
-    pub fn point(position: Vec3, color: Vec3, range: f32, size: f32) -> Self {
-        Self { position: position.to_array(), range, color: color.to_array(), kind: POINT, direction: [0.0, -1.0, 0.0], half_length: 0.0, profile: [0.0, 0.0, size.max(1e-3), 0.0] }
+    /// A point light of `intensity` candela and a linear `color` tint;
+    /// `range` 0: no authored cutoff. `radius` regularises the near field.
+    pub fn point(position: Vec3, color: Vec3, intensity: f32, range: f32, radius: f32) -> Self {
+        let color = Vec3::from_array(crate::lighting::unit_tint(color.to_array()));
+        Self { position: position.to_array(), range, color: color.to_array(), kind: POINT, direction: [0.0, -1.0, 0.0], half_length: 0.0, profile: [0.0, 0.0, radius.max(1e-3), intensity.max(0.0)] }
     }
 
     /// A cone along `direction`, full inside `inner` and dark outside
     /// `outer` (half-angles, radians).
-    pub fn cone(position: Vec3, direction: Vec3, color: Vec3, range: f32, size: f32, inner: f32, outer: f32) -> Self {
+    pub fn cone(position: Vec3, direction: Vec3, color: Vec3, intensity: f32, range: f32, radius: f32, inner: f32, outer: f32) -> Self {
         let outer = outer.max(inner + 1e-3);
-        Self { position: position.to_array(), range, color: color.to_array(), kind: CONE, direction: direction.normalize_or(Vec3::NEG_Y).to_array(), half_length: 0.0, profile: [inner.cos(), outer.cos(), size.max(1e-3), 0.0] }
+        Self {
+            position: position.to_array(),
+            range,
+            color: crate::lighting::unit_tint(color.to_array()),
+            kind: CONE,
+            direction: direction.normalize_or(Vec3::NEG_Y).to_array(),
+            half_length: 0.0,
+            profile: [inner.cos(), outer.cos(), radius.max(1e-3), intensity.max(0.0)],
+        }
     }
 
-    /// A beam from `a` to `b`, `range` around the segment.
-    pub fn beam(a: Vec3, b: Vec3, color: Vec3, range: f32, size: f32) -> Self {
+    /// A beam from `a` to `b`, `intensity` candela over the capsule.
+    pub fn beam(a: Vec3, b: Vec3, color: Vec3, intensity: f32, range: f32, radius: f32) -> Self {
         let d = b - a;
-        Self { position: ((a + b) * 0.5).to_array(), range, color: color.to_array(), kind: BEAM, direction: d.normalize_or(Vec3::X).to_array(), half_length: d.length() * 0.5, profile: [0.0, 0.0, size.max(1e-3), 0.0] }
+        Self {
+            position: ((a + b) * 0.5).to_array(),
+            range,
+            color: crate::lighting::unit_tint(color.to_array()),
+            kind: BEAM,
+            direction: d.normalize_or(Vec3::X).to_array(),
+            half_length: d.length() * 0.5,
+            profile: [0.0, 0.0, radius.max(1e-3), intensity.max(0.0)],
+        }
     }
 
-    /// Centre and radius of a sphere holding everything it lights.
-    pub fn bounds(&self) -> (Vec3, f32) {
-        (Vec3::from(self.position), self.range + if self.kind == BEAM { self.half_length } else { 0.0 })
+    /// The intensity in candela.
+    pub fn intensity(&self) -> f32 {
+        self.profile[3]
+    }
+
+    /// Centre and radius of a sphere holding everything the light can
+    /// visibly reach, for culling at `cutoff` lux (`lighting::cull_cutoff`):
+    /// `sqrt(I / cutoff)`, or the authored range when that is nearer.
+    pub fn bounds(&self, cutoff: f32) -> (Vec3, f32) {
+        let i = self.intensity();
+        if i <= 0.0 {
+            return (Vec3::from(self.position), 0.0);
+        }
+        // Conservatively by the brightest channel: a saturated tint can
+        // exceed the luminance intensity in one channel.
+        let brightest = self.color[0].max(self.color[1]).max(self.color[2]).max(0.0);
+        let reach = (i * brightest / cutoff.max(1e-9)).sqrt();
+        let radius = if self.range > 0.0 { self.range.min(reach) } else { reach };
+        (Vec3::from(self.position), radius + if self.kind == BEAM { self.half_length } else { 0.0 })
     }
 }
 
@@ -110,8 +147,9 @@ fn slices_from_env() -> u32 {
 
 /// `n` point lights scattered over a disc of `radius` around `centre`
 /// (x, z), each `lift` metres over the ground (`ground` gives its height):
-/// warm and cool colours, ranges of 15 to 45 m. Seeded: the same lights
-/// for the same arguments (a test and benchmark of the clusters).
+/// warm and cool colours, ranges of 15 to 45 m, intensities of a few
+/// million candela (what reads over that distance). Seeded: the same
+/// lights for the same arguments (a test and benchmark of the clusters).
 pub fn scatter(n: u32, centre: glam::Vec2, radius: f32, lift: f32, seed: u32, ground: &dyn Fn(glam::Vec2) -> f32) -> Vec<Light> {
     let mut state = seed.wrapping_mul(0x9e37_79b9) ^ 0x85eb_ca6b;
     let mut next = || {
@@ -125,9 +163,12 @@ pub fn scatter(n: u32, centre: glam::Vec2, radius: f32, lift: f32, seed: u32, gr
             let (a, r) = (next() * std::f32::consts::TAU, radius * next().sqrt());
             let p = centre + glam::Vec2::new(a.cos(), a.sin()) * r;
             let hue = next();
-            let color = Vec3::new(1.0, 0.55, 0.2).lerp(Vec3::new(0.35, 0.6, 1.0), hue) * (1.0 + 2.0 * next());
+            let color = Vec3::new(1.0, 0.55, 0.2).lerp(Vec3::new(0.35, 0.6, 1.0), hue);
+            // A few million candela: what reads at the ten-to-forty metres
+            // these cluster test lights sit over.
+            let intensity = 2.0e6 * (1.0 + 2.0 * next());
             let range = 15.0 + 30.0 * next();
-            Light::point(Vec3::new(p.x, ground(p) + lift, p.y), color, range, range * 0.25)
+            Light::point(Vec3::new(p.x, ground(p) + lift, p.y), color, intensity, range, range * 0.25)
         })
         .collect()
 }
@@ -154,6 +195,9 @@ pub struct LightFrame {
     pub unit_rows: u32,
     /// How many model lights those rows carry ([`crate::units::UnitRenderer::model_light_total`]).
     pub unit_lights: u32,
+    /// The cull cutoff in lux for this frame's exposure
+    /// ([`crate::lighting::cull_cutoff`]).
+    pub cutoff: f32,
 }
 
 /// The view depths of the part of the view between heights `y_lo` and
@@ -202,6 +246,8 @@ struct FrameUbo {
     /// x: the host's lights (where the models' append at); y: the units'
     /// rows (their model lights); z, w: unused.
     model: [u32; 4],
+    /// x: the cull cutoff (lux): a light bounds at `sqrt(intensity / x)`.
+    photometry: [f32; 4],
 }
 
 /// What the last completed frame of a slot cut.
@@ -356,6 +402,7 @@ impl LightRenderer {
             grid: [TILES_X, TILES_Y, self.slices, if frame.on { 1 + self.unculled as u32 } else { 0 }],
             slicing: [frame.depths.0, (self.slices.max(2) - 1) as f32 / (frame.depths.1 / frame.depths.0).ln(), frame.extent.width.max(1) as f32, frame.extent.height.max(1) as f32],
             model: [count as u32, if frame.on { frame.unit_rows } else { 0 }, 0, 0],
+            photometry: [frame.cutoff, 0.0, 0.0, 0.0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
@@ -487,6 +534,22 @@ mod tests {
     #[test]
     fn light_is_64_bytes() {
         assert_eq!(size_of::<Light>(), 64);
-        assert_eq!(size_of::<FrameUbo>(), 128 + 16 * 7);
+        assert_eq!(size_of::<FrameUbo>(), 128 + 16 * 8);
+    }
+
+    #[test]
+    fn bounds_follow_intensity_range_and_the_cutoff() {
+        let cutoff = crate::lighting::cull_cutoff(crate::lighting::exposure(14.0));
+        // 1000 cd to 39.3 lx: about 5 m (sqrt(1000 / 39.32)).
+        let p = Light::point(Vec3::ZERO, Vec3::ONE, 1000.0, 0.0, 0.1);
+        let (_, r) = p.bounds(cutoff);
+        assert!((r - (1000.0f32 / cutoff).sqrt()).abs() < 1e-3, "{r}");
+        // An authored range caps it; a nearer one is the bound.
+        assert!((Light::point(Vec3::ZERO, Vec3::ONE, 1.0e6, 2.0, 0.1).bounds(cutoff).1 - 2.0).abs() < 1e-6);
+        assert!((Light { range: 50.0, ..p }.bounds(cutoff).1 - (1000.0f32 / cutoff).sqrt()).abs() < 1e-3);
+        // No light, no bound; a beam adds its half length.
+        assert_eq!(Light::point(Vec3::ZERO, Vec3::ONE, 0.0, 0.0, 0.1).bounds(cutoff).1, 0.0);
+        let beam = Light::beam(Vec3::ZERO, Vec3::new(6.0, 0.0, 0.0), Vec3::ONE, 1.0e5, 0.0, 0.1);
+        assert!((beam.bounds(cutoff).1 - ((1.0e5f32 / cutoff).sqrt() + 3.0)).abs() < 1e-3);
     }
 }

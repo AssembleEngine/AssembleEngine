@@ -160,7 +160,7 @@ pub enum LibraryPass {
     LightsCluster,
     /// The HDR scene image (sampled in the fragment stage, of the scene's
     /// format) to the output (one colour attachment of the target's
-    /// format): exposure and the tone curve.
+    /// format): the tone curve (the scene is stored exposed).
     Tonemap,
     /// Copy an image to [`LibraryResource::ReadbackBuffer`].
     ReadbackCopy,

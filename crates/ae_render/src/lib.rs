@@ -20,6 +20,7 @@ pub mod executor;
 pub mod fullscreen;
 pub mod graph_file;
 pub mod library;
+pub mod lighting;
 pub mod lights;
 pub mod memory;
 pub mod models;

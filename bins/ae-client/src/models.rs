@@ -87,6 +87,7 @@ pub fn fox_with_light() -> Result<ClassModel> {
         joint: 0,
         kind: ae_model::LightKind::Point,
         color: [6.0, 3.0, 1.5],
+        intensity: 2000.0,
         range: 15.0,
         inner_angle: 0.0,
         outer_angle: 0.0,

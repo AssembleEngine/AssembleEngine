@@ -11,5 +11,11 @@ void main() {
     if (k <= 0.0) {
         discard;
     }
-    outColor = inColor * k;
+    vec4 c = inColor * k;
+    // Full resolution draws straight into the scene (downscale 1): the
+    // half-resolution path is exposed by the composite.
+    if ((u.flags.w & 1u) != 0u) {
+        c.rgb *= u.photometry.x;
+    }
+    outColor = c;
 }
