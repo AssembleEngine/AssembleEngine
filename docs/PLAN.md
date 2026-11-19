@@ -2616,9 +2616,14 @@ Steps (commit and stop for compaction after each):
     with validation; the image tests needed no re-baselining — a generated-map capture with 8
     explosions differs from the old build by a mean 1.8/255 (0.4% of pixels above 8, the
     burst lights' retuning). `ae-client --bench battle` is unchanged within the run spread.
-  - Not done (next commits of this step): the ACES default switch; re-authoring particles,
-    decals, water and fog in physical units and removing the bridge; auto-exposure after the
-    bloom; authored sources have no glTF radius (the range-derived size is a convention).
+  - **ACES default** (its own commit, 2026-11-20): `ToneParams::default` is now
+    `Curve::Aces`; `Clamp` stays for migration captures. The scene clear colour is the bridge's
+    sky radiance times exposure. Five GPU tests with absolute thresholds were re-baselined for
+    the curve (the generated-map capture with eight explosions shifts by a mean 24/255; blur
+    and pop measures that read display bytes now see roughly 70% of the clamp values).
+  - Not done (next commit of this step): re-authoring particles, decals, water and fog in
+    physical units and removing the bridge; auto-exposure after the bloom; authored sources have
+    no glTF radius (the range-derived size is a convention).
 
 ### M13 — HDR output on a supporting display (priority: lower)
 

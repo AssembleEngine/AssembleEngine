@@ -17,7 +17,8 @@ and specular consume the same direct-light inputs.
 - Camera exposure is EV100 with `exposure = 1 / (1.2 * 2^EV100)`; the default
   is EV14 (≈ 5.086e-5), which keeps the old terrain look: a fully lit
   Lambertian surface gets `100000 * exposure / pi ≈ 1.62`, the old `1.6` sun
-  coefficient. The default curve stays `Clamp` until the ACES switch.
+  coefficient. The default tone curve is ACES; `Clamp` stays for migration
+  captures and debugging.
 - The exposure is applied by the scene passes before they store into the
   RGBA16F scene; `post.tonemap` only curves. Every pass that writes the
   scene (terrain, units, water, the particle modes' final writes) uses the
@@ -112,13 +113,14 @@ cached models of older versions are converted again.
   100 000 cd light adds a quarter at 4 m of what it adds at 2 m (inverse
   square, read through the clamp curve); a source radius larger than the
   range clamps the near field without extinguishing the light.
-- The 30 GPU tests pass with validation. Existing image tests were not
-  re-baselined: the calibrated EV14 output matches the old frames closely
-  (a generated-map capture with eight explosions differs by a mean 1.8/255,
-  0.4% of pixels above 8, from the explosion lights' retuning).
+- The 30 GPU tests pass with validation. Under `Clamp`, the calibrated EV14
+  output matches the old frames closely (a generated-map capture with eight
+  explosions differs by a mean 1.8/255, 0.4% of pixels above 8, from the
+  explosion lights' retuning). The ACES default changes the look (the same
+  capture: mean 24/255 absolute difference from the clamp frame); five GPU
+  tests with absolute thresholds were re-baselined for it.
 - `ae-client --bench battle`: unchanged pass structure and timings within
   run-to-run spread; the new bench label is `m12-photometric`.
 
-Open: speculars (M12 step 3) consume the same `E`; the ACES default switch
-(step 2 of the landing sequence); re-authoring the emitters/water/fog;
-auto-exposure after the bloom.
+Open: speculars (M12 step 3) consume the same `E`; re-authoring the
+emitters/water/fog and removing the bridge; auto-exposure after the bloom.
