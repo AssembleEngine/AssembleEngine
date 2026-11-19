@@ -3990,13 +3990,18 @@ fn lights_clusters_match_the_unculled_reference() {
     };
     for pitch in [1.1, 0.3] {
         let dark = render(Vec::new(), false, pitch);
-        let lit = render(lights.clone(), false, pitch);
+        // The reference first, so it cannot reuse the clustered run's
+        // memory.
         let reference = render(lights.clone(), true, pitch);
+        let lit = render(lights.clone(), false, pitch);
         let differ = lit.chunks(4).zip(reference.chunks(4)).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "pitch {pitch}: the clustered frame equals the unculled one");
-        let brighter = lit.chunks(4).zip(dark.chunks(4)).filter(|(a, b)| a[..3].iter().zip(&b[..3]).map(|(x, y)| *x as i32 - *y as i32).sum::<i32>() > 12).count();
+        let brighter = |frame: &[u8]| frame.chunks(4).zip(dark.chunks(4)).filter(|(a, b)| a[..3].iter().zip(&b[..3]).map(|(x, y)| *x as i32 - *y as i32).sum::<i32>() > 12).count();
         let total = lit.len() / 4;
-        assert!(brighter > total / 50, "pitch {pitch}: the lights light the ground ({brighter} of {total} pixels brighter)");
+        for (name, frame) in [("reference", &reference), ("clustered", &lit)] {
+            let n = brighter(frame);
+            assert!(n > total / 50, "pitch {pitch}: the {name} lights light the ground ({n} of {total} pixels brighter)");
+        }
     }
     assert_clean(&gpu);
 }

@@ -377,8 +377,9 @@ impl LightRenderer {
     /// The clusters' lists. Records inside a compute pass that writes
     /// [`Self::list`] and [`Self::clusters`]: copies the host's list in
     /// (with its own barrier to the cull), then the cull.
+    /// Unculled ([`Self::set_unculled`]), only the copy.
     pub fn record_cluster(&self, ctx: &PassContext<'_>) {
-        if !self.on[ctx.slot] || self.unculled {
+        if !self.on[ctx.slot] {
             return;
         }
         unsafe {
@@ -390,6 +391,9 @@ impl LightRenderer {
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             ctx.device.cmd_pipeline_barrier2(ctx.cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
+            if self.unculled {
+                return;
+            }
             ctx.device.cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
             let step = || {
                 let memory = [vk::MemoryBarrier2::default()

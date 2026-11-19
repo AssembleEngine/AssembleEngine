@@ -2530,6 +2530,19 @@ Steps (commit and stop for compaction after each):
     lights are unchanged (the pass records nothing, `pass/lights` 0). `battle` (210 burst
     lights) costs +180 µs: lights 57, terrain +77, units +32, particle sim +12. `army-fox`
     `pass/water` 4 → 174 µs is the water's two modes (TODO), not this change.
+  - Fixed after the commit: unculled, the pass skipped the host list's copy too, and the
+    reference test passed only because the reference ran after the clustered frame and got
+    its freed memory. The pass now always copies. The test renders the reference first and
+    checks that it, too, is lit.
+  - For the second part (glTF lights, appended on the GPU from the posed units):
+    - `lights_bounds` takes its group count from the host (the staged count). Lights appended
+      on the GPU need an indirect dispatch written by the append, or `MAX_LIGHTS / 64` groups
+      (the shader stops at `lightCount`). Otherwise they stay unbounded and light nothing,
+      with nothing to flag it.
+    - The append caps at `MAX_LIGHTS` (`LIGHT_MAX`, which also sizes `lightBounds`) and
+      counts the rest in `dropped`.
+    - It runs inside `lights.cluster` after the copy and before the bounds. The pass is
+      declared after `units.pose`, which writes the palettes it reads.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
