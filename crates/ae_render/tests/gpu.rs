@@ -2354,6 +2354,7 @@ fn particles_sort_blend_and_soften() {
         drag: 0.0,
         emissive,
         fade_in: 0.0,
+        light: None,
     };
     // 0 red, 1 blue, 2 a big grey puff, 3 red that dies at once.
     let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false, 100.0), still([0.05, 0.05, 0.9, 1.0], 12.0, false, 100.0), still([0.6, 0.6, 0.6, 0.9], 40.0, false, 100.0), still([0.9, 0.05, 0.05, 1.0], 12.0, false, 0.02)];
@@ -2505,7 +2506,7 @@ fn render_particles(
 
 /// Particles that hold still: one colour and size over a long life.
 fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::particles::EffectDef {
-    ae_render::particles::EffectDef { color_start: color, color_end: color, size: [size, size], life: [100.0, 100.0], speed: [0.0, 0.0], up: 0.0, spread: 0.0, gravity: 0.0, drag: 0.0, emissive, fade_in: 0.0 }
+    ae_render::particles::EffectDef { color_start: color, color_end: color, size: [size, size], life: [100.0, 100.0], speed: [0.0, 0.0], up: 0.0, spread: 0.0, gravity: 0.0, drag: 0.0, emissive, fade_in: 0.0, light: None }
 }
 
 /// Order independence, measured (all at half resolution, against the exact
@@ -3900,6 +3901,102 @@ fn units_pose_models() {
         let (x, y, h, r) = unit(9);
         assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))), "played once, held at full reach (looping it would be half way)");
         assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "and not half way");
+    }
+    assert_clean(&gpu);
+}
+
+/// The clustered lights (M12): the frames lit through the tiles and
+/// clusters are exactly the frames lit by every light at every pixel and
+/// particle (a light the culls leave out of a cluster adds exactly 0
+/// there), from above and from low over the ground (where the slices
+/// matter), with points, cones and beams; and the lights do light the
+/// terrain, the units and the smoke.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn lights_clusters_match_the_unculled_reference() {
+    use ae_render::lights::{Light, scatter};
+    use ae_render::particles::{Burst, ParticleBlend, ParticleFeed, ParticlesSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{build_pyramid, generate};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let heightmap = generate(257, 257, 11);
+    let pyramid = build_pyramid(&heightmap, 200.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 200.0, 0.0, Some(40.0));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let centre = Vec2::new(512.0, 512.0);
+    let height = |p: Vec2| source.height_at(p);
+    let mut lights = scatter(600, centre, 450.0, 3.0, 5, &height);
+    for k in 0..40 {
+        let a = k as f32 * 0.7;
+        let p = centre + Vec2::new(a.cos(), a.sin()) * (60.0 + 8.0 * k as f32);
+        let base = Vec3::new(p.x, height(p) + 25.0, p.y);
+        lights.push(Light::cone(base, Vec3::new(0.3 * a.sin(), -1.0, 0.3 * a.cos()), Vec3::new(0.4, 0.8, 2.0), 60.0, 12.0, 0.25, 0.45));
+        lights.push(Light::beam(base - Vec3::X * 30.0, base + Vec3::new(30.0, -20.0, 10.0), Vec3::new(2.0, 0.2, 0.2), 6.0, 2.0));
+    }
+    // Darts in a ring, smoke over the middle.
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for k in 0..48 {
+        let a = k as f32 * std::f32::consts::TAU / 48.0;
+        let (x, y) = (centre.x + 150.0 * a.cos(), centre.y + 150.0 * a.sin());
+        for (attr, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), 0].into_iter().enumerate() {
+            columns[attr].push(word);
+        }
+    }
+    let render = |lights: Vec<Light>, unculled: bool, pitch: f32| -> Vec<u8> {
+        let listed = lights.len();
+        let units = Arc::new(UnitFeed::default());
+        units.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
+        let setup = UnitsSetup { feed: units, capacity: 64, classes: vec![UnitClass { color: [0.7, 0.7, 0.7], floats: false }], min_pixels: 8.0, models: Vec::new(), rigs: Vec::new() };
+        let particles = Arc::new(ParticleFeed::default());
+        let effects = vec![still_effect([0.4, 0.4, 0.4, 0.6], 30.0, false)];
+        for k in 0..12 {
+            particles.emit(Burst { pos: [centre.x + 20.0 * k as f32 - 120.0, 30.0, centre.y], ground: true, effect: 0, count: 1, scale: 1.0, seed: k });
+        }
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_water()
+            .with_units(setup)
+            .with_particles(ParticlesSetup { feed: particles, capacity: 64, effects, downscale: 2, blend: ParticleBlend::Sorted })
+            .with_lights(lights);
+        if unculled {
+            app = app.with_unculled_lights();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = centre;
+            view.camera.pitch = pitch;
+            view.camera.distance = 700.0;
+        }
+        let extent = vk::Extent2D { width: 320, height: 200 };
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        let stats = *app.light_stats().lock().unwrap();
+        if !unculled && listed > 0 {
+            // The culls listed some lights in the clusters (far fewer than
+            // every light in every cluster) and cut none.
+            assert!(stats.indices > 0 && (stats.indices as usize) < listed * 1000, "{stats:?}");
+            assert_eq!((stats.overflow, stats.dropped), (0, 0), "no list cut: {stats:?}");
+        }
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    for pitch in [1.1, 0.3] {
+        let dark = render(Vec::new(), false, pitch);
+        let lit = render(lights.clone(), false, pitch);
+        let reference = render(lights.clone(), true, pitch);
+        let differ = lit.chunks(4).zip(reference.chunks(4)).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "pitch {pitch}: the clustered frame equals the unculled one");
+        let brighter = lit.chunks(4).zip(dark.chunks(4)).filter(|(a, b)| a[..3].iter().zip(&b[..3]).map(|(x, y)| *x as i32 - *y as i32).sum::<i32>() > 12).count();
+        let total = lit.len() / 4;
+        assert!(brighter > total / 50, "pitch {pitch}: the lights light the ground ({brighter} of {total} pixels brighter)");
     }
     assert_clean(&gpu);
 }

@@ -65,6 +65,18 @@ layout(std430, set = 0, binding = 5) buffer KeysTmp { uint keysTmp[]; };
 layout(std430, set = 0, binding = 6) buffer Histograms { uint histograms[]; };
 #endif
 
+// A particle's light from the clustered lights (particles_sim.comp, in
+// Particle.info.w): per channel x / (1 + x) in 10 bits.
+uint packParticleLight(vec3 c) {
+    uvec3 q = uvec3(round(clamp(c / (1.0 + c), 0.0, 1.0) * 1023.0));
+    return q.r | (q.g << 10) | (q.b << 20);
+}
+
+vec3 unpackParticleLight(uint w) {
+    vec3 x = min(vec3(uvec3(w, w >> 10, w >> 20) & 1023u) / 1023.0, vec3(1022.0 / 1023.0));
+    return x / (1.0 - x);
+}
+
 uint hash(uint x) {
     x ^= x >> 16;
     x *= 0x7feb352du;

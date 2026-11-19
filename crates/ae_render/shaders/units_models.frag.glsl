@@ -5,6 +5,8 @@
 #define MODELS
 #include "units_common.glsl"
 #include "units_models.glsl"
+#define LIGHT_SET 2
+#include "lights.glsl"
 
 layout(location = 0) in vec3 inWorld;
 layout(location = 1) in vec3 inNormal;
@@ -58,6 +60,9 @@ void main() {
     vec3 diff = max(dot(n, normalize(u.sun.xyz)), 0.0) * min(sunAt(inWorld), units) * tint;
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = base.rgb * (vec3(1.0, 0.95, 0.85) * 1.4 * diff + sky * (0.35 + 0.25 * n.y) * ao) + emissive;
+    if (lightsOn()) {
+        color += base.rgb * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n);
+    }
     float dist = distance(inWorld, u.camPos.xyz);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
     outColor = vec4(mix(color, u.fog.rgb, fog), 1.0);

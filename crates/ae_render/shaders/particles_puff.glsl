@@ -45,6 +45,10 @@ Puff puffOf(uint slot) {
     } else {
         vec3 sky = vec3(0.45, 0.55, 0.7);
         vec3 light = vec3(1.0, 0.95, 0.85) * 1.1 * sunAt(p.posAge.xyz) + sky * 0.55;
+        if (p.info.w != 0u) {
+            // The clustered lights (particles_sim.comp).
+            light += unpackParticleLight(p.info.w);
+        }
         vec3 lit = mix(color.rgb * light, u.fog.rgb, fog);
         f.color = vec4(lit * color.a, color.a);
     }

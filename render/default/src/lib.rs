@@ -38,6 +38,8 @@ impl RenderModule for Scene {
         // The particles' coloured shadows, with the map.
         let tint = (map.is_some() && particles.is_some()).then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
         let maps = [map, tint];
+        // The clustered lights: the list the host writes and each cluster's.
+        let lights = [library(&mut g, "lights.list"), library(&mut g, "lights.clusters")];
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
@@ -60,6 +62,10 @@ impl RenderModule for Scene {
                 .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
                 .id();
         }
+        // The lights' clusters, before anything lit.
+        let cluster = p.library("lights.cluster");
+        let write = Role::StorageBufferWrite(ShaderStage::Compute);
+        g.pass("lights", PassKind::Compute, cluster).access(lights[0], write).access(lights[1], write).id();
         // The units' shadows: the units drawn from the sun, before the
         // passes that sample the map.
         if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
@@ -91,6 +97,7 @@ impl RenderModule for Scene {
                 .color(scene, LoadOp::Clear)
                 .depth(depth, LoadOp::Clear),
             maps,
+            lights,
         )
         .id();
         if let Some([instances, visible, draws, counts, palette]) = units {
@@ -104,6 +111,7 @@ impl RenderModule for Scene {
                     .color(scene, LoadOp::Load)
                     .depth(depth, LoadOp::Load),
                 maps,
+                lights,
             )
             .id();
             let count = p.library("units.count");
@@ -113,13 +121,12 @@ impl RenderModule for Scene {
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth), maps).id();
+            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth), maps, lights).id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
             let sim = p.library("particles.sim");
-            let write = Role::StorageBufferWrite(ShaderStage::Compute);
-            g.pass("particles sim", PassKind::Compute, sim).access(state, write).access(keys, write).access(draws, write).id();
+            lit(g.pass("particles sim", PassKind::Compute, sim).access(state, write).access(keys, write).access(draws, write), lights, ShaderStage::Compute).id();
             let draw = p.library("particles.draw");
             g.pass("particles", PassKind::Graphics, draw)
                 .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
@@ -145,12 +152,17 @@ impl RenderModule for Scene {
     }
 }
 
-/// A receiver samples the shadow maps the graph has.
-fn receive(mut pass: PassWriter<'_>, maps: [Option<ResourceRef>; 2]) -> PassWriter<'_> {
+/// A receiver samples the shadow maps the graph has, and reads the lights.
+fn receive(mut pass: PassWriter<'_>, maps: [Option<ResourceRef>; 2], lights: [ResourceRef; 2]) -> PassWriter<'_> {
     for map in maps.into_iter().flatten() {
         pass = pass.sampled(map, ShaderStage::Fragment);
     }
-    pass
+    lit(pass, lights, ShaderStage::Fragment)
+}
+
+/// A lit pass reads the light list and the clusters.
+fn lit(pass: PassWriter<'_>, lights: [ResourceRef; 2], stage: ShaderStage) -> PassWriter<'_> {
+    pass.access(lights[0], Role::StorageBufferRead(stage)).access(lights[1], Role::StorageBufferRead(stage))
 }
 
 render_module!(Scene);

@@ -1,0 +1,62 @@
+#version 460
+// lights.cluster, second step (src/lights.rs): one workgroup per screen
+// tile, listing the lights whose tile rectangles (lights_bounds.comp)
+// hold it and whose bounding spheres reach inside the tile's frustum (its
+// four side planes through the eye, view space), in light order
+// (lights_cull.glsl), at most LIGHT_PER_TILE.
+#include "lights_cull.glsl"
+
+shared vec4 planes[4];
+
+void main() {
+    uint tile = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationIndex;
+    uvec2 t = uvec2(tile % lf.grid.x, tile / lf.grid.x);
+    if (lane == 0u) {
+        vec4 r = tileRect(t);
+        // The corners' rays (view space; the eye is the origin).
+        vec3 d00 = toView(unproject(r.xy, 100.0));
+        vec3 d10 = toView(unproject(r.zy, 100.0));
+        vec3 d01 = toView(unproject(r.xw, 100.0));
+        vec3 d11 = toView(unproject(r.zw, 100.0));
+        vec3 centre = d00 + d10 + d01 + d11;
+        vec3 n[4] = vec3[](cross(d00, d01), cross(d10, d00), cross(d11, d10), cross(d01, d11));
+        for (int k = 0; k < 4; ++k) {
+            vec3 m = normalize(n[k]);
+            planes[k] = vec4(dot(m, centre) < 0.0 ? -m : m, 0.0);
+        }
+    }
+    barrier();
+    uint n = 0u;
+    bool cut = false;
+    for (uint first = 0u; first < lightCount; first += 64u) {
+        uint i = first + lane;
+        bool hit = false;
+        if (i < lightCount) {
+            uvec2 b = lightBounds[i];
+            uvec4 r = uvec4(b.x & 255u, (b.x >> 8) & 255u, (b.x >> 16) & 255u, b.x >> 24);
+            hit = b.y != 0u && t.x >= r.x && t.y >= r.y && t.x <= r.z && t.y <= r.w;
+            if (hit) {
+                Light l = lights[i];
+                float radius = l.range + (l.kind == LIGHT_BEAM ? l.halfLength : 0.0);
+                vec3 p = toView(l.position);
+                for (int k = 0; k < 4; ++k) {
+                    hit = hit && dot(planes[k].xyz, p) >= -radius;
+                }
+            }
+        }
+        uint place;
+        uint sum = compact(hit, n, place);
+        if (hit && place < LIGHT_PER_TILE) {
+            tileLights[tile * LIGHT_PER_TILE + place] = i;
+        }
+        cut = cut || n + sum > LIGHT_PER_TILE;
+        n = min(n + sum, LIGHT_PER_TILE);
+    }
+    if (lane == 0u) {
+        tileCount[tile] = n;
+        if (cut) {
+            atomicAdd(overflow, 1u);
+        }
+    }
+}

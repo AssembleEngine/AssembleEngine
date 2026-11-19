@@ -172,6 +172,11 @@ struct Options {
     particle_blend: ae_render::particles::ParticleBlend,
     /// `--explode`: explosions around the camera target before a capture.
     explode: u32,
+    /// `--capture-frames`: frames rendered before the capture is read.
+    capture_frames: u32,
+    /// `--lights N`: N fixed point lights scattered around the camera
+    /// target (a test of the clustered lights).
+    lights: u32,
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
@@ -203,11 +208,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, tone: Default::default(), particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, tone: Default::default(), particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--exposure X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--exposure X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -276,6 +281,8 @@ fn parse() -> Result<Options> {
                 }
             }
             "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,
+            "--capture-frames" => o.capture_frames = value("--capture-frames", &mut args)?.parse::<u32>().context("--capture-frames N")?.max(1),
+            "--lights" => o.lights = value("--lights", &mut args)?.parse().context("--lights N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
             "--frames" => o.bench.get_or_insert_with(Default::default).frames = value("--frames", &mut args)?.parse().context("--frames")?,
@@ -728,6 +735,11 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         app = app.with_units(units_setup(&s, feed)?);
     }
     place_camera(&app, o.camera);
+    if o.lights > 0 {
+        let target = app.view().lock().unwrap().camera.target;
+        let source = app.source().clone();
+        app = app.with_lights(ae_render::lights::scatter(o.lights, target, 400.0, 4.0, 7, &|p| source.height_at(p)));
+    }
     if let Some(feed) = &effects_feed {
         let target = app.view().lock().unwrap().camera.target;
         let seen = explode_around(feed, target, o.explode, 1);
@@ -738,7 +750,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
     let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
-    let executor = run_headless(&gpu, &mut app, target, 60, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, record_threads: o.record_threads, ..ExecutorConfig::default() })?;
+    let executor = run_headless(&gpu, &mut app, target, o.capture_frames as usize, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, record_threads: o.record_threads, ..ExecutorConfig::default() })?;
     let pixels = app.readback().context("no readback")?;
     let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
     ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));

@@ -1,0 +1,123 @@
+#version 460
+// lights.cluster, third step (src/lights.rs): one workgroup per cluster,
+// listing the lights of its tile (lights_tiles.comp) whose slices
+// (lights_bounds.comp) hold its own and whose bounds reach its box (in
+// view space, the bound of its eight corners unprojected from its tile's
+// corners at its slice's two depths), in order (lights_cull.glsl); one
+// atomic then reserves the cluster's range of the index list. Past
+// MAX_PER_CLUSTER, or past the index list's end, lights are cut and
+// counted.
+#include "lights_cull.glsl"
+
+#define MAX_PER_CLUSTER 256u
+
+shared uint picked[MAX_PER_CLUSTER];
+shared vec3 boxMin;
+shared vec3 boxMax;
+shared uint base;
+shared uint fitted;
+
+float sliceDepth(uint s) {
+    // Slice 0 reaches from the near plane to slicing.x.
+    return s == 0u ? lf.camPos.w : lf.slicing.x * exp(float(s - 1u) / lf.slicing.y);
+}
+
+float boxDistance2(vec3 p) {
+    vec3 d = max(max(boxMin - p, p - boxMax), vec3(0.0));
+    return dot(d, d);
+}
+
+bool reaches(Light l) {
+    vec3 c = 0.5 * (boxMin + boxMax);
+    float boxRadius = 0.5 * length(boxMax - boxMin);
+    vec3 p = toView(l.position);
+    if (l.kind == LIGHT_BEAM) {
+        // The segment's nearest point to the box's centre, against the
+        // box's bounding sphere (conservative).
+        vec3 axis = toViewDir(l.direction);
+        vec3 q = p + axis * clamp(dot(c - p, axis), -l.halfLength, l.halfLength);
+        float reach = l.range + boxRadius;
+        return dot(c - q, c - q) <= reach * reach;
+    }
+    if (boxDistance2(p) > l.range * l.range) {
+        return false;
+    }
+    if (l.kind == LIGHT_CONE) {
+        // The cone against the box's bounding sphere (~/particles).
+        vec3 axis = toViewDir(l.direction);
+        vec3 delta = c - p;
+        float along = dot(delta, axis);
+        if (along < -boxRadius) {
+            return false;
+        }
+        float radial = length(delta - along * axis);
+        float outerCos = l.profile.y;
+        float outerSin = sqrt(max(1.0 - outerCos * outerCos, 0.0));
+        return radial * outerCos - along * outerSin <= boxRadius;
+    }
+    return true;
+}
+
+void main() {
+    uint cluster = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationIndex;
+    uint tiles = lf.grid.x * lf.grid.y;
+    uint tile = cluster % tiles;
+    uint slice = cluster / tiles;
+    uint candidates = tileCount[tile];
+    if (candidates == 0u) {
+        if (lane == 0u) {
+            clusterRange[cluster] = uvec2(0u);
+        }
+        return;
+    }
+    if (lane < 8u) {
+        // Lane k: corner k (x, y from bits 0 and 1; the far depth from bit 2).
+        vec4 r = tileRect(uvec2(tile % lf.grid.x, tile / lf.grid.x));
+        vec2 px = vec2((lane & 1u) != 0u ? r.z : r.x, (lane & 2u) != 0u ? r.w : r.y);
+        bool far = (lane & 4u) != 0u;
+        // The last slice reaches to the horizon: bound it far away.
+        float z = far && slice + 1u == lf.grid.z ? 1e7 : sliceDepth(slice + (far ? 1u : 0u));
+        vec3 v = toView(unproject(px, z));
+        // Lanes 0..7 share the first subgroup (any size from 8 up).
+        vec3 lo = subgroupMin(v), hi = subgroupMax(v);
+        if (lane == 0u) {
+            boxMin = lo;
+            boxMax = hi;
+        }
+    }
+    barrier();
+    uint count = 0u;
+    bool cut = false;
+    for (uint first = 0u; first < candidates; first += 64u) {
+        uint k = first + lane;
+        uint i = k < candidates ? tileLights[tile * LIGHT_PER_TILE + k] : 0u;
+        uint s = k < candidates ? lightBounds[i].y : 0u;
+        bool hit = k < candidates && slice >= (s & 255u) && slice <= ((s >> 8) & 255u);
+        if (hit) {
+            hit = reaches(lights[i]);
+        }
+        uint place;
+        uint sum = compact(hit, count, place);
+        if (hit && place < MAX_PER_CLUSTER) {
+            picked[place] = i;
+        }
+        cut = cut || count + sum > MAX_PER_CLUSTER;
+        count = min(count + sum, MAX_PER_CLUSTER);
+    }
+    barrier();
+    if (lane == 0u) {
+        uint at = count > 0u ? atomicAdd(indexCount, count) : 0u;
+        uint fits = at < LIGHT_INDEX_CAPACITY ? min(count, LIGHT_INDEX_CAPACITY - at) : 0u;
+        if (cut || fits < count) {
+            atomicAdd(overflow, 1u);
+        }
+        base = at;
+        fitted = fits;
+        clusterRange[cluster] = uvec2(at, fits);
+    }
+    barrier();
+    for (uint k = lane; k < fitted; k += 64u) {
+        lightIndex[base + k] = picked[k];
+    }
+}

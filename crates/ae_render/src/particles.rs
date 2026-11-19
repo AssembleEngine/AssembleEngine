@@ -101,6 +101,27 @@ pub struct EffectDef {
     pub emissive: bool,
     /// Fades in over this fraction of the life (0: born at full opacity).
     pub fade_in: f32,
+    /// The light a burst of it gives (one per burst, client-side:
+    /// [`ParticleRenderer::lights`]).
+    pub light: Option<EffectLight>,
+}
+
+/// A burst's light: a point light over the burst that fades out over its
+/// life. Lengths are multiplied by the burst's scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EffectLight {
+    /// Linear colour at birth (the intensity included; may exceed 1).
+    pub color: [f32; 3],
+    /// Nothing past it (metres).
+    pub range: f32,
+    /// The source size the falloff is measured in (`crate::lights`).
+    pub size: f32,
+    /// Over the burst (metres).
+    pub height: f32,
+    /// Seconds; the light falls as (1 − t)² over it.
+    pub life: f32,
+    /// How much it flickers (0: steady; 1: down to nothing).
+    pub flicker: f32,
 }
 
 impl EffectDef {
@@ -144,6 +165,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             drag: 0.0,
             emissive: true,
             fade_in: 0.0,
+            light: Some(EffectLight { color: [6.0, 4.0, 2.0], range: 70.0, size: 16.0, height: 6.0, life: 0.3, flicker: 0.0 }),
         },
         // FIRE: rising flames that cool from yellow to dark red.
         EffectDef {
@@ -158,6 +180,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             drag: 2.0,
             emissive: true,
             fade_in: 0.08,
+            light: Some(EffectLight { color: [2.2, 0.95, 0.28], range: 40.0, size: 10.0, height: 4.0, life: 1.2, flicker: 0.35 }),
         },
         // SPARKS: small, fast, falling.
         EffectDef {
@@ -172,6 +195,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             drag: 0.6,
             emissive: true,
             fade_in: 0.0,
+            light: None,
         },
         // SMOKE: dark, rising, spreading, thinning.
         EffectDef {
@@ -186,6 +210,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             drag: 0.7,
             emissive: false,
             fade_in: 0.1,
+            light: None,
         },
         // DUST: low, brown, short.
         EffectDef {
@@ -200,6 +225,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             drag: 1.2,
             emissive: false,
             fade_in: 0.05,
+            light: None,
         },
     ]
 }
@@ -453,6 +479,8 @@ pub struct ParticleRenderer {
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
+    /// The clustered lights' sets (set 2 of the simulation; crate::lights).
+    light_sets: Vec<vk::DescriptorSet>,
     depth_sets: Vec<vk::DescriptorSet>,
     depth_sampler: vk::Sampler,
     /// Every particle's shape: a soft ball broken up by noise (mipmapped).
@@ -476,6 +504,9 @@ pub struct ParticleRenderer {
     active: Vec<bool>,
     head: u32,
     last_time: Option<f32>,
+    /// The bursts whose effects give light, with when they spawned (sim
+    /// time), oldest first.
+    burst_lights: Vec<(Burst, f32)>,
     /// Simulation time when the last particle spawned so far dies.
     alive_until: f32,
     sim_time: f32,
@@ -504,7 +535,7 @@ pub struct ParticleRenderer {
 }
 
 impl ParticleRenderer {
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, setup: &ParticlesSetup, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &ParticlesSetup, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         ensure!((1..=MAX_CAPACITY).contains(&setup.capacity), "particle capacity {} (1..={MAX_CAPACITY})", setup.capacity);
         ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
         ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
@@ -577,8 +608,9 @@ impl ParticleRenderer {
             // compute).
             let f = vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE;
             let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f), (ssbo, f)])?;
-            // The sort's push constant: shift, direction.
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout], 8, vk::ShaderStageFlags::COMPUTE)?;
+            // The sort's push constant: shift, direction. Set 2: the
+            // clustered lights (the simulation lights each particle).
+            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout, lights.set_layout()], 8, vk::ShaderStageFlags::COMPUTE)?;
             let fragment = vk::ShaderStageFlags::FRAGMENT;
             let composite_layout = pipeline::set_layout(device, &[(image, fragment), (image, fragment), (image, fragment)])?;
             let composite_pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, composite_layout], 0, vk::ShaderStageFlags::FRAGMENT)?;
@@ -703,6 +735,7 @@ impl ParticleRenderer {
             pipeline_layout,
             desc_pool,
             sets,
+            light_sets: lights.sets(),
             depth_sets,
             depth_sampler,
             puff,
@@ -723,6 +756,7 @@ impl ParticleRenderer {
             active: vec![false; frames_in_flight],
             head: 0,
             last_time: None,
+            burst_lights: Vec::new(),
             alive_until: f32::NEG_INFINITY,
             sim_time: 0.0,
             downscale: setup.downscale,
@@ -816,6 +850,38 @@ impl ParticleRenderer {
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
     }
 
+    /// The lights of the bursts still glowing (after [`Self::write_frame`]:
+    /// at its sim time), appended to `out`; expired ones are forgotten.
+    /// `ground` gives the terrain's height under a point (x, z); a ground
+    /// burst's height is over it, or over the water where that is higher.
+    pub fn lights(&mut self, ground: &dyn Fn(glam::Vec2) -> f32, out: &mut Vec<crate::lights::Light>) {
+        let now = self.sim_time;
+        let effects = &self.effects;
+        self.burst_lights.retain(|(b, born)| effects.get(b.effect as usize).and_then(|d| d.light).is_some_and(|l| now - born < l.life * b.scale.max(0.25).sqrt()));
+        let water = self.info.water_level;
+        for (b, born) in &self.burst_lights {
+            let Some(l) = self.effects[b.effect as usize].light else { continue };
+            let scale = b.scale.max(1e-3);
+            let life = l.life * scale.max(0.25).sqrt();
+            let t = ((now - born) / life).clamp(0.0, 1.0);
+            let mut fade = (1.0 - t) * (1.0 - t);
+            if l.flicker > 0.0 {
+                // Two incommensurate waves, phased by the burst's seed.
+                let phase = (b.seed % 1024) as f32 * 0.0061;
+                let wave = 0.5 + 0.25 * ((now * 23.0 + phase * 7.0).sin() + (now * 37.0 + phase * 13.0).sin());
+                fade *= 1.0 - l.flicker * wave;
+            }
+            let mut pos = glam::Vec3::from(b.pos);
+            if b.ground {
+                let h = ground(glam::Vec2::new(pos.x, pos.z));
+                pos.y += water.map_or(h, |w| h.max(w));
+            }
+            pos.y += l.height * scale;
+            let color = glam::Vec3::from(l.color) * fade;
+            out.push(crate::lights::Light::point(pos, color, l.range * scale, l.size * scale));
+        }
+    }
+
     pub fn capacity(&self) -> u32 {
         self.capacity
     }
@@ -864,6 +930,9 @@ impl ParticleRenderer {
             let count = b.count.min(self.capacity - total);
             if count == 0 {
                 continue;
+            }
+            if def.light.is_some() {
+                self.burst_lights.push((*b, self.sim_time));
             }
             records.push(SpawnRecord { pos: [b.pos[0], b.pos[1], b.pos[2], b.scale], info: [b.effect | (b.ground as u32) << 16, count, total, b.seed] });
             total += count;
@@ -931,6 +1000,7 @@ impl ParticleRenderer {
         };
         unsafe {
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 2, &[self.light_sets[ctx.slot]], &[]);
             // Spawn (its first invocation also zeroes the instance count).
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.spawn);
             device.cmd_dispatch(cmd, total.div_ceil(64).max(1), 1, 1);

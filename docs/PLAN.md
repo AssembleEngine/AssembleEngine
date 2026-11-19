@@ -2460,6 +2460,76 @@ Steps (commit and stop for compaction after each):
     the draws 1–2% faster, about 8 µs of `gpu_total` in all. RGBA16F kept: 10-bit mantissas
     against B10G11R11F's 5–6 (banding and hue shifts in dark gradients), and alpha. The glow
     target can be B10G11R11F (as RA3-graphics').
+- Step 2, first part: the light list, the clusters, diffuse light, the particles lit, the
+  bursts' lights — done (2026-11-19). glTF lights (`KHR_lights_punctual`) are the second part.
+  - `ae_render::lights`, `shaders/lights*.{glsl,comp}`. A `Light` (64 bytes) is a point, a
+    cone or a beam, with `~/particles`' falloff, distance measured in units of the light's
+    source size (`profile.z`). This way one formula suits a muzzle flash and a burning tank.
+  - The library pass `lights.cluster` (compute) writes `lights.list` and `lights.clusters`:
+    - It copies the host's list into device memory. The list lives in host-visible memory
+      otherwise: every workgroup and pixel read it over the bus, and the cull took 0.3 ms at
+      200 lights.
+    - It bounds each light by the tiles and slices its sphere reaches.
+    - It lists each screen tile's lights, by those bounds and then the tile's four frustum
+      planes.
+    - It lists each cluster's lights from its tile's list, by slice and then the cluster's
+      view-space box.
+    - Every list is in light order, compacted by a workgroup prefix sum, so sums are the same
+      every run. Cuts are counted (`LightStats`): at most 1024 lights a tile, 256 a cluster,
+      8192 a frame.
+  - The grid: 40×24 tiles (about 32 px at 1280×720) × 16 slices. The slices are spaced
+    exponentially over the depths the map's height range (plus 80 m) can occupy in view
+    (`lights::depth_range`, from the frustum's corner rays), not over a fixed near and far.
+    `AE_LIGHT_SLICES` overrides the slice count, to measure.
+  - Optional in a graph, like the shadow maps. A graph that declares the two buffers has every
+    lit pass read them (`LibraryPass::lit`): the terrain, units and water draws in the fragment
+    stage, `particles.sim` in compute. The native graph, both modules and both JSON graphs
+    declare them; the reload test's hand-built graph doesn't.
+  - Lit passes use the lights' own descriptor set: set 1 for the terrain and water, set 2 for
+    the units (an empty set 1 without models) and the particles.
+  - Diffuse light is added to each existing lighting term: terrain, darts, models, and the
+    water's foam (the water's glints from the lights come with step 3).
+  - Media particles in view are lit once per particle in `particles_sim.comp`, the light packed
+    into `Particle.info.w` and added in `puffOf`. Every blend mode gets it.
+  - No light and no lights pass leaves the frames unchanged: the 27 GPU tests passed unchanged
+    before any light source existed.
+  - Sources: `EffectDef::light` (`EffectLight`) gives a burst one point light over it. FLASH
+    has range 70 m, source size 16 m and lasts 0.3 s; FIRE has range 40 m, source size 10 m,
+    lasts 1.2 s and flickers. Lengths are × the burst's scale, life × √scale, and the light
+    falls off as (1 − t)². So `explosion()` gives two lights. They follow sim time, sit over
+    the ground or water for ground bursts, and are culled against the frustum on the CPU.
+  - `TerrainApp::with_lights` takes fixed lights. `lights::scatter` gives seeded test lights;
+    `ae-client --lights N` uses it, as do the bench scenes `lights-200`, `lights-1000`,
+    `lights-4000` (the battle camera) and `lights-low` (1000 lights, camera pitch 0.3).
+  - The reference: `with_unculled_lights` makes every pixel and particle sum every light.
+    `lights_clusters_match_the_unculled_reference` (GPU) checks clustered frames are
+    byte-identical to it, from above and low, with 600 points plus 40 cones and 40 beams over
+    a generated map with water, units and smoke. It also checks nothing is cut. New flags:
+    `ae-client --capture-frames N` and `--lights N`.
+  - Measured (1280×720, `gpu_total` in µs), against Forward+ without its depth bounds. This
+    engine has no depth prepass, so 1 slice means 2D tiles; a true Forward+ would need a depth
+    prepass first.
+
+    | Scene | 1 slice | 24 fixed slices | 16 fitted slices (chosen) |
+    |---|---|---|---|
+    | battle | 893 | 926 | 902 |
+    | lights-200 | 623 | 664 | 644 |
+    | lights-4000 | 1458 | 1490 | 1393 |
+    | lights-low | 987 | 919 | 918 |
+
+    - From the RTS's usual height depth slices hardly matter; low over the ground they save
+      about 70 µs. Fitting the slices to the map's depths lowers the lit passes' cost; at
+      4000 lights the terrain goes from 715 µs (1 slice) to 657.
+    - The cull: 22 µs (1 slice) to 48 µs (16) at 200 lights, 151 µs at 4000. Most of the
+      cost is the clusters' workgroups, one per cluster even when the cluster is empty
+      (possible later: one workgroup per tile walking its slices).
+    - Earlier designs, measured: 16×9 tiles × 24 slices testing every light per cluster cost
+      970 µs for the cull and 1559 µs for the terrain at 4000 lights. Bounds alone (no plane
+      or box test) made the cull cheap but the lists loose (terrain 1051 µs at 4000).
+  - Against 5b282ed (`bench-diff`, army, battle, close, army-fox, overview): scenes without
+    lights are unchanged (the pass records nothing, `pass/lights` 0). `battle` (210 burst
+    lights) costs +180 µs: lights 57, terrain +77, units +32, particle sim +12. `army-fox`
+    `pass/water` 4 → 174 µs is the water's two modes (TODO), not this change.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 

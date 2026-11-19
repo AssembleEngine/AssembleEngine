@@ -439,9 +439,13 @@ pub struct UnitRenderer {
     /// The terrain has shadow heights to shade the units by.
     shadows: bool,
     set_layout: vk::DescriptorSetLayout,
+    /// Set 1 of the layout without models.
+    empty_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
+    /// The clustered lights' sets (set 2 of the draws; crate::lights).
+    light_sets: Vec<vk::DescriptorSet>,
     cull: vk::Pipeline,
     draw: vk::Pipeline,
     /// Into the units' shadow map (`None` when the terrain renderer has
@@ -523,7 +527,7 @@ impl UnitRenderer {
     /// Units over `terrain` (its height texture places them), drawn into a
     /// pass with a `color_format` target and a `depth_format` reverse-Z
     /// depth buffer.
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, setup: &UnitsSetup, color_format: vk::Format, depth_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &UnitsSetup, color_format: vk::Format, depth_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         ensure!(setup.capacity > 0, "unit capacity 0");
         let device = &gpu.device;
         let capacity = setup.capacity;
@@ -594,7 +598,7 @@ impl UnitRenderer {
             }),
             None => None,
         };
-        let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
+        let (set_layout, empty_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
                 &[
@@ -610,9 +614,12 @@ impl UnitRenderer {
             )?;
             // The caster's push constant: the cascade it draws; with models
             // also the multi-draw's first command (every stage).
+            // Set 2: the clustered lights (the draws' fragments read them;
+            // an empty set 1 without models).
+            let empty_layout = pipeline::set_layout(device, &[])?;
             let pipeline_layout = match model_layout {
-                Some(models) => pipeline::pipeline_layout(device, &[set_layout, models], 8, all)?,
-                None => pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?,
+                Some(models) => pipeline::pipeline_layout(device, &[set_layout, models, lights.set_layout()], 8, all)?,
+                None => pipeline::pipeline_layout(device, &[set_layout, empty_layout, lights.set_layout()], 4, vk::ShaderStageFlags::VERTEX)?,
             };
             let n = frames_in_flight as u32;
             let m = model_layout.is_some() as u32;
@@ -645,7 +652,7 @@ impl UnitRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&tint));
                 device.update_descriptor_sets(&writes, &[]);
             }
-            (set_layout, pipeline_layout, desc_pool, sets)
+            (set_layout, empty_layout, pipeline_layout, desc_pool, sets)
         };
         let cull_code: &[u8] = if model_set.is_some() { spirv!("units_models_cull.comp") } else { spirv!("units_cull.comp") };
         let cull = pipeline::compute_pipeline(device, cull_code, pipeline_layout).context("unit cull pipeline")?;
@@ -685,9 +692,11 @@ impl UnitRenderer {
             min_pixels: setup.min_pixels,
             shadows: terrain.has_shadows(),
             set_layout,
+            empty_layout,
             pipeline_layout,
             desc_pool,
             sets,
+            light_sets: lights.sets(),
             cull,
             draw,
             caster,
@@ -1023,6 +1032,7 @@ impl UnitRenderer {
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 2, &[self.light_sets[ctx.slot]], &[]);
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
             if let Some(m) = &self.models {
                 // Every model command in two multi-draws: opaque, masked.
@@ -1127,6 +1137,7 @@ impl UnitRenderer {
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_pool(self.desc_pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_set_layout(self.empty_layout, None);
         }
         for b in self.instances.iter_mut().chain(self.ubos.iter_mut()).chain(self.counts.iter_mut()) {
             b.destroy(gpu);

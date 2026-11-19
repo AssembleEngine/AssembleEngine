@@ -5,6 +5,8 @@
 #include "terrain_common.glsl"
 #include "terrain_shading.glsl"
 #include "terrain_decals.glsl"
+#define LIGHT_SET 1
+#include "lights.glsl"
 #ifdef BARY
 #extension GL_EXT_fragment_shader_barycentric : require
 #endif
@@ -379,6 +381,10 @@ void main() {
     vec3 diff = max(dot(shadeN, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
     vec3 sky = vec3(0.45, 0.55, 0.7);
     vec3 color = albedo * (vec3(1.0, 0.95, 0.85) * 1.6 * diff + sky * (0.25 + 0.25 * shadeN.y));
+    // The clustered lights (no shadows).
+    if (lightsOn()) {
+        color += albedo * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, shadeN);
+    }
 
     // Ground under water (AssembleEngine addition): tint by the depth of the
     // water column. This is the part of RA3's underwater pass the water

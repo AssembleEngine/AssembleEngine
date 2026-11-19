@@ -22,6 +22,12 @@
 //! `shadows.particles`) come with it: a graph that declares them also
 //! declares `shadows.map`, and every receiver samples both.
 //!
+//! The clustered lights (`lights.list`, `lights.clusters`, written by
+//! `lights.cluster`; [`crate::lights`]) are the graph's choice the same
+//! way: a graph that declares them has every lit pass (the three receivers
+//! in the fragment stage, `particles.sim` in compute) read both
+//! ([`LibraryPass::lit`]); a graph without them renders unlit by them.
+//!
 //! Particles (`particles.sim`, `particles.draw`) are drawn after
 //! everything opaque and the water: the draw blends into the colour target
 //! and samples the depth buffer (it tests depth itself, fading where a
@@ -62,10 +68,17 @@ pub enum LibraryResource {
     /// sun-nearest particle's depth, laid out like [`Self::ShadowMap`]
     /// ([`ae_render_abi::module::particle_shadow_spec`]).
     ParticleShadows,
+    /// The frame's light list (the host writes it; `lights.cluster` counts
+    /// into its header): optional, like the shadow maps. A graph that
+    /// declares it and [`Self::LightClusters`] has every lit pass read
+    /// both ([`LibraryPass::lit`]).
+    LightList,
+    /// The lights of each view cluster (`lights.cluster` writes).
+    LightClusters,
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 14] = [
+    pub const ALL: [LibraryResource; 16] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
         Self::UnitInstances,
@@ -80,6 +93,8 @@ impl LibraryResource {
         Self::ParticleKeys,
         Self::ParticleIndirect,
         Self::ParticleShadows,
+        Self::LightList,
+        Self::LightClusters,
     ];
 
     pub fn name(self) -> &'static str {
@@ -98,6 +113,8 @@ impl LibraryResource {
             Self::ParticleKeys => "particles.keys",
             Self::ParticleIndirect => "particles.indirect",
             Self::ParticleShadows => ae_render_abi::module::PARTICLE_SHADOW_NAME,
+            Self::LightList => "lights.list",
+            Self::LightClusters => "lights.clusters",
         }
     }
 
@@ -138,6 +155,9 @@ pub enum LibraryPass {
     /// The particles, back to front, blended over the scene; samples the
     /// depth buffer.
     ParticlesDraw,
+    /// Each view cluster's lights, from [`LibraryResource::LightList`]
+    /// into [`LibraryResource::LightClusters`] (compute).
+    LightsCluster,
     /// The HDR scene image (sampled in the fragment stage, of the scene's
     /// format) to the output (one colour attachment of the target's
     /// format): exposure and the tone curve.
@@ -169,7 +189,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 16] = [
+    pub const ALL: [LibraryPass; 17] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -182,6 +202,7 @@ impl LibraryPass {
         Self::WaterDraw,
         Self::ParticlesSim,
         Self::ParticlesDraw,
+        Self::LightsCluster,
         Self::Tonemap,
         Self::ReadbackCopy,
         Self::HostRead,
@@ -202,6 +223,7 @@ impl LibraryPass {
             Self::WaterDraw => "water.draw",
             Self::ParticlesSim => "particles.sim",
             Self::ParticlesDraw => "particles.draw",
+            Self::LightsCluster => "lights.cluster",
             Self::Tonemap => "post.tonemap",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
@@ -215,7 +237,7 @@ impl LibraryPass {
 
     pub fn kind(self) -> PassKind {
         match self {
-            Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim => PassKind::Compute,
+            Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim | Self::LightsCluster => PassKind::Compute,
             Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
@@ -265,6 +287,7 @@ impl LibraryPass {
                 (R::ParticleKeys, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::ParticleIndirect, Role::IndirectBuffer),
             ],
+            Self::LightsCluster => &[(R::LightList, Role::StorageBufferWrite(ShaderStage::Compute)), (R::LightClusters, Role::StorageBufferWrite(ShaderStage::Compute))],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
             Self::WaterDraw | Self::Tonemap | Self::HostRead | Self::Present => &[],
         }
@@ -296,6 +319,17 @@ impl LibraryPass {
     /// it must sample each in this role.
     pub fn receives(self) -> Option<Role> {
         matches!(self, Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw).then_some(Role::Sampled(ShaderStage::Fragment))
+    }
+
+    /// Whether it is lit by the clustered lights: in a graph that declares
+    /// [`LibraryResource::LightList`] and [`LibraryResource::LightClusters`]
+    /// it must read both in this role.
+    pub fn lit(self) -> Option<Role> {
+        match self {
+            Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw => Some(Role::StorageBufferRead(ShaderStage::Fragment)),
+            Self::ParticlesSim => Some(Role::StorageBufferRead(ShaderStage::Compute)),
+            _ => None,
+        }
     }
 }
 
@@ -433,10 +467,15 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
         .into_iter()
         .filter(|r| map.contains(&Some(*r)))
         .filter_map(|r| lib.receives().map(|role| (r, role)))
+        .chain([LibraryResource::LightList, LibraryResource::LightClusters].into_iter().filter(|r| map.contains(&Some(*r))).filter_map(|r| lib.lit().map(|role| (r, role))))
         .collect();
     for &(needed, role) in lib.requires().iter().chain(&receives) {
         if !p.intents.iter().any(|i| map[i.resource.index()] == Some(needed) && i.role == role) {
-            let why = if receives.iter().any(|r| r.0 == needed) { format!(" (the graph declares `{}`: every receiver samples it)", needed.name()) } else { String::new() };
+            let why = match needed {
+                LibraryResource::LightList | LibraryResource::LightClusters if receives.iter().any(|r| r.0 == needed) => format!(" (the graph declares `{}`: every lit pass reads it)", needed.name()),
+                _ if receives.iter().any(|r| r.0 == needed) => format!(" (the graph declares `{}`: every receiver samples it)", needed.name()),
+                _ => String::new(),
+            };
             return Err(error(format!("pass `{name}` ({}) must use `{}` as {role:?}{why}", lib.name(), needed.name())));
         }
     }
@@ -541,6 +580,13 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
     }
     if particles && !written(LibraryPass::ShadowsParticles) {
         return Err(error("the graph declares `shadows.color` but no `shadows.particles` pass writes it".into()));
+    }
+    let (list, clusters) = (map.contains(&Some(LibraryResource::LightList)), map.contains(&Some(LibraryResource::LightClusters)));
+    if list != clusters {
+        return Err(error("the graph declares one of `lights.list` and `lights.clusters`; the lights need both".into()));
+    }
+    if clusters && !written(LibraryPass::LightsCluster) {
+        return Err(error("the graph declares `lights.clusters` but no `lights.cluster` pass writes it".into()));
     }
     Ok(())
 }

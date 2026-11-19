@@ -2,13 +2,16 @@ digraph frame_graph {
   rankdir=LR;
   node [shape=box, style=filled];
   p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p1 [label="1: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p2 [label="2: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p3 [label="3: present\nPresent", fillcolor="#e2e3e5"];
-  p0 -> p1 [label="terrain.leaves"];
-  p0 -> p1 [label="terrain.indirect"];
-  p1 -> p2 [label="scene"];
-  p2 -> p3 [label="target"];
+  p1 [label="1: lights\nCompute", fillcolor="#d1e7dd"];
+  p2 [label="2: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p3 [label="3: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p4 [label="4: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p2 [label="terrain.leaves"];
+  p0 -> p2 [label="terrain.indirect"];
+  p1 -> p2 [label="lights.list"];
+  p1 -> p2 [label="lights.clusters"];
+  p2 -> p3 [label="scene"];
+  p3 -> p4 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
 }

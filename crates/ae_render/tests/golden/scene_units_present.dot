@@ -4,25 +4,30 @@ digraph frame_graph {
   p2 [label="0: units reset\nTransfer", fillcolor="#fff3cd"];
   p1 [label="1: units pose\nCompute", fillcolor="#d1e7dd"];
   p3 [label="2: units cull\nCompute", fillcolor="#d1e7dd"];
-  p6 [label="3: units count\nTransfer", fillcolor="#fff3cd"];
-  p7 [label="4: units count read\nTransfer", fillcolor="#fff3cd"];
+  p7 [label="3: units count\nTransfer", fillcolor="#fff3cd"];
+  p8 [label="4: units count read\nTransfer", fillcolor="#fff3cd"];
   p0 [label="5: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p4 [label="6: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p5 [label="7: units\nGraphics", fillcolor="#cfe2ff"];
-  p8 [label="8: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p9 [label="9: present\nPresent", fillcolor="#e2e3e5"];
-  p0 -> p4 [label="terrain.leaves"];
-  p0 -> p4 [label="terrain.indirect"];
-  p1 -> p5 [label="units.palette"];
+  p4 [label="6: lights\nCompute", fillcolor="#d1e7dd"];
+  p5 [label="7: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p6 [label="8: units\nGraphics", fillcolor="#cfe2ff"];
+  p9 [label="9: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p10 [label="10: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p5 [label="terrain.leaves"];
+  p0 -> p5 [label="terrain.indirect"];
+  p1 -> p6 [label="units.palette"];
   p2 -> p3 [label="units.indirect"];
-  p3 -> p5 [label="units.visible"];
-  p3 -> p5 [label="units.indirect"];
+  p3 -> p6 [label="units.visible"];
   p3 -> p6 [label="units.indirect"];
-  p4 -> p5 [label="depth"];
-  p4 -> p5 [label="scene"];
-  p5 -> p8 [label="scene"];
-  p6 -> p7 [label="units.counts"];
-  p8 -> p9 [label="target"];
+  p3 -> p7 [label="units.indirect"];
+  p4 -> p5 [label="lights.list"];
+  p4 -> p5 [label="lights.clusters"];
+  p4 -> p6 [label="lights.list"];
+  p4 -> p6 [label="lights.clusters"];
+  p5 -> p6 [label="depth"];
+  p5 -> p6 [label="scene"];
+  p6 -> p9 [label="scene"];
+  p7 -> p8 [label="units.counts"];
+  p9 -> p10 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
 }

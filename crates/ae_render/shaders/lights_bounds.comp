@@ -1,0 +1,44 @@
+#version 460
+// lights.cluster, first step (src/lights.rs): one invocation per light,
+// its tiles and slices (lights.glsl lightBounds). The tiles bound the
+// corners of its bounding sphere's box as projected (all of them when the
+// box reaches behind the eye); the slices its sphere's view depths. A
+// light with no range or colour, or wholly behind the near plane or off
+// the screen, gets 0 and lights nothing.
+#include "lights_cull.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= lightCount) {
+        return;
+    }
+    Light l = lights[i];
+    float radius = l.range + (l.kind == LIGHT_BEAM ? l.halfLength : 0.0);
+    uvec2 bounds = uvec2(0u);
+    float z = toView(l.position).z;
+    float near = lf.camPos.w;
+    if (l.range > 0.0 && any(notEqual(l.color, vec3(0.0))) && z + radius > near) {
+        vec2 size = lf.slicing.zw;
+        vec2 lo = vec2(0.0), hi = size;
+        bool behind = false;
+        vec2 a = vec2(3.4e38), b = vec2(-3.4e38);
+        for (uint k = 0u; k < 8u; ++k) {
+            vec3 corner = l.position + radius * vec3((k & 1u) != 0u ? 1.0 : -1.0, (k & 2u) != 0u ? 1.0 : -1.0, (k & 4u) != 0u ? 1.0 : -1.0);
+            vec4 clip = lf.viewProj * vec4(corner, 1.0);
+            behind = behind || clip.w <= near;
+            vec2 px = (clip.xy / max(clip.w, 1e-6) * 0.5 + 0.5) * size;
+            a = min(a, px);
+            b = max(b, px);
+        }
+        if (!behind) {
+            lo = a;
+            hi = b;
+        }
+        if (all(greaterThanEqual(hi, vec2(0.0))) && all(lessThanEqual(lo, size))) {
+            uvec2 t0 = lightTile(lo), t1 = lightTile(hi);
+            bounds.x = t0.x | (t0.y << 8) | (t1.x << 16) | (t1.y << 24);
+            bounds.y = lightSlice(max(z - radius, near)) | (lightSlice(z + radius) << 8) | (1u << 16);
+        }
+    }
+    lightBounds[i] = bounds;
+}

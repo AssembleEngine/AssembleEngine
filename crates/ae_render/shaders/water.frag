@@ -24,6 +24,8 @@
 #define GRAPHICS
 #include "terrain_common.glsl"
 #include "terrain_shading.glsl"
+#define LIGHT_SET 1
+#include "lights.glsl"
 
 layout(location = 0) in vec3 inWorld;
 layout(location = 0) out vec4 outColor;
@@ -114,6 +116,11 @@ void main() {
     float texture_ = valueNoise(P.xz * 0.45 + vec2(t * 0.05, -t * 0.03)) * 0.6 + valueNoise(P.xz * 1.1 + vec2(-t * 0.07, t * 0.04) + 7.1) * 0.4;
     float foam = clamp((crest * 0.8 + edge * 0.75) * smoothstep(0.3, 0.7, texture_ + 0.2 * edge), 0.0, 0.9);
     vec3 foamColor = vec3(0.86, 0.90, 0.90) * (SUN_COLOR * max(L.y, 0.0) * 0.45 + vec3(0.17, 0.20, 0.22));
+    // The clustered lights on the foam (their glints on the water come
+    // with the speculars).
+    if (lightsOn()) {
+        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N);
+    }
     rgb = rgb * (1.0 - foam) + foamColor * foam;
     alpha = alpha * (1.0 - foam) + foam;
 

@@ -40,6 +40,7 @@ use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
 use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
+use crate::lights::{Light, LightFrame, LightRenderer, LightStats};
 use crate::tonemap::{ToneParams, Tonemap};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
@@ -256,6 +257,15 @@ pub struct TerrainApp {
     /// `post.tonemap`, for the output's format.
     tonemap: Option<Tonemap>,
     tone: ToneParams,
+    /// The clustered lights (made before the renderers that read them).
+    lights: Option<LightRenderer>,
+    /// Lights the app was given (`with_lights`), listed every frame.
+    fixed_lights: Vec<Light>,
+    /// This frame's list (kept to reuse its allocation).
+    frame_lights: Vec<Light>,
+    light_stats: Arc<Mutex<LightStats>>,
+    /// Every light at every pixel (`with_unculled_lights`).
+    unculled_lights: bool,
     /// The output's format (the swapchain's or the readback image's).
     output_format: vk::Format,
     decals: Option<DecalsSetup>,
@@ -309,6 +319,11 @@ impl TerrainApp {
             particle_renderer: None,
             tonemap: None,
             tone: ToneParams::default(),
+            lights: None,
+            fixed_lights: Vec::new(),
+            frame_lights: Vec::new(),
+            light_stats: Arc::default(),
+            unculled_lights: false,
             output_format: vk::Format::UNDEFINED,
             decals: None,
             decal_set: None,
@@ -340,6 +355,29 @@ impl TerrainApp {
     pub fn with_water(mut self) -> Self {
         self.water = self.source.info.water_level.is_some();
         self
+    }
+
+    /// The map the app draws.
+    pub fn source(&self) -> &Arc<TerrainSource> {
+        &self.source
+    }
+
+    /// Lights listed every frame besides the bursts' (fixed in the world).
+    pub fn with_lights(mut self, lights: Vec<Light>) -> Self {
+        self.fixed_lights = lights;
+        self
+    }
+
+    /// Light by every light everywhere, without the clusters: the
+    /// reference they must match (tests, measurements).
+    pub fn with_unculled_lights(mut self) -> Self {
+        self.unculled_lights = true;
+        self
+    }
+
+    /// What the clustered lights cut, from the last completed frame.
+    pub fn light_stats(&self) -> Arc<Mutex<LightStats>> {
+        self.light_stats.clone()
     }
 
     /// The tonemap's exposure and curve (by default exposure 1, clamped).
@@ -579,6 +617,9 @@ impl RenderApp for TerrainApp {
         if let Some(mut old) = self.renderer.take() {
             old.destroy(gpu);
         }
+        if let Some(mut old) = self.lights.take() {
+            old.destroy(gpu);
+        }
         self.gpu = Some(gpu.clone());
         self.frames_in_flight = frames_in_flight;
         if self.sampler == vk::Sampler::null() {
@@ -593,6 +634,8 @@ impl RenderApp for TerrainApp {
         let output = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
         self.output_format = output;
         self.tonemap = Some(Tonemap::new(gpu, output, frames_in_flight).context("tonemap")?);
+        let mut lights = LightRenderer::new(gpu, frames_in_flight).context("lights")?;
+        lights.set_unculled(self.unculled_lights);
         // The scene's draws write the HDR scene image.
         let color = SCENE_FORMAT;
         let s = &self.source;
@@ -612,15 +655,16 @@ impl RenderApp for TerrainApp {
             None => None,
         };
         self.decals_written.clear();
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, color, DEPTH_FORMAT, frames_in_flight)
+        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, &lights, color, DEPTH_FORMAT, frames_in_flight)
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
-            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }
         if let Some(setup) = &self.particles {
-            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, setup, color, frames_in_flight).context("particle renderer")?);
+            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, setup, color, frames_in_flight).context("particle renderer")?);
         }
         self.renderer = Some(terrain);
+        self.lights = Some(lights);
         Ok(())
     }
 
@@ -741,11 +785,11 @@ impl RenderApp for TerrainApp {
             };
             units.write_frame(slot, &frame, &setup.feed, Instant::now());
         }
+        let mut camera = view.camera;
+        camera.ground = self.source.height_at(camera.target);
+        let v = camera.view(params.cam_pos);
+        let axes = [v.row(0).truncate(), v.row(1).truncate(), -v.row(2).truncate()];
         if let Some(particles) = self.particle_renderer.as_mut() {
-            let mut camera = view.camera;
-            camera.ground = self.source.height_at(camera.target);
-            let v = camera.view(params.cam_pos);
-            let axes = [v.row(0).truncate(), v.row(1).truncate(), -v.row(2).truncate()];
             let frame = ParticleFrame {
                 view_proj: params.view_proj,
                 cam_pos: params.cam_pos,
@@ -759,6 +803,32 @@ impl RenderApp for TerrainApp {
             };
             let gpu = self.gpu.clone().context("no device")?;
             particles.write_frame(&gpu, slot, &frame)?;
+        }
+        if let Some(lights) = self.lights.as_mut() {
+            // The fixed lights and the bursts', those that can reach the
+            // view (by their bounding spheres).
+            let mut list = std::mem::take(&mut self.frame_lights);
+            list.clear();
+            list.extend_from_slice(&self.fixed_lights);
+            if let Some(particles) = self.particle_renderer.as_mut() {
+                let source = &self.source;
+                particles.lights(&|p| source.height_at(p), &mut list);
+            }
+            let planes = super::renderer::frustum_planes(params.view_proj);
+            list.retain(|l| {
+                let (c, r) = l.bounds();
+                planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
+            });
+            let clustered = self.wiring.as_ref().is_some_and(|w| w.resources.contains(&Some(LibraryResource::LightClusters)));
+            // The map's heights, with room above for the units, the
+            // particles and the lights over them.
+            let i = &self.source.info;
+            let (y_lo, y_hi) = (i.height_offset, i.height_offset + i.height_scale + 80.0);
+            let depths = crate::lights::depth_range(params.view_proj, params.cam_pos, axes[2], camera.near(), y_lo, y_hi);
+            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on: clustered && !list.is_empty(), depths };
+            lights.write_frame(slot, &frame, &list);
+            *self.light_stats.lock().unwrap_or_else(|p| p.into_inner()) = lights.stats();
+            self.frame_lights = list;
         }
         if let Some(state) = self.module.as_mut().filter(|m| !m.failed) {
             let mut input = FrameInput {
@@ -821,6 +891,8 @@ impl RenderApp for TerrainApp {
             LibraryResource::ParticleState => Binding::Buffer(self.particle_renderer.as_ref()?.state()),
             LibraryResource::ParticleKeys => Binding::Buffer(self.particle_renderer.as_ref()?.keys()),
             LibraryResource::ParticleIndirect => Binding::Buffer(self.particle_renderer.as_ref()?.indirect()),
+            LibraryResource::LightList => Binding::Buffer(self.lights.as_ref()?.list(slot)),
+            LibraryResource::LightClusters => Binding::Buffer(self.lights.as_ref()?.clusters(slot)),
         })
     }
 
@@ -861,6 +933,9 @@ impl RenderApp for TerrainApp {
         }
         if let Some(mut renderer) = self.renderer.take() {
             renderer.destroy(gpu);
+        }
+        if let Some(mut lights) = self.lights.take() {
+            lights.destroy(gpu);
         }
         if let Some(mut offscreen) = self.offscreen.take() {
             offscreen.image.destroy(gpu);
@@ -917,6 +992,7 @@ impl TerrainApp {
             units: self.unit_renderer.as_ref(),
             particles: self.particle_renderer.as_ref(),
             tonemap: self.tonemap.as_ref(),
+            lights: self.lights.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
             update_lod: self.update_lod,
@@ -932,6 +1008,7 @@ struct SceneRecorder<'a> {
     units: Option<&'a UnitRenderer>,
     particles: Option<&'a ParticleRenderer>,
     tonemap: Option<&'a Tonemap>,
+    lights: Option<&'a LightRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
     update_lod: bool,
@@ -961,6 +1038,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     }
                 }
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
+                LibraryPass::LightsCluster => self.lights.context("lights not created")?.record_cluster(ctx),
                 LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
@@ -1021,13 +1099,18 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     let particles = env.particles.then(|| [LibraryResource::ParticleState, LibraryResource::ParticleKeys, LibraryResource::ParticleIndirect].map(|r| library_buffer(&mut graph, r)));
     // The particles' coloured shadows, with the map.
     let tint = (map.is_some() && particles.is_some()).then(|| library_particle_shadows(&mut graph));
-    // A receiver samples the maps the graph has.
+    // The clustered lights: the list the host writes and each cluster's.
+    let lights = [LibraryResource::LightList, LibraryResource::LightClusters].map(|r| library_buffer(&mut graph, r));
+    // A receiver samples the maps the graph has, and reads the lights.
     let receivers = [map, tint];
-    fn receive(mut pass: ae_framegraph::PassBuilder<'_, LibraryPass>, maps: [Option<ResourceId>; 2]) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
+    fn lit(pass: ae_framegraph::PassBuilder<'_, LibraryPass>, lights: [ResourceId; 2], stage: ShaderStage) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
+        pass.access(lights[0], Role::StorageBufferRead(stage)).access(lights[1], Role::StorageBufferRead(stage))
+    }
+    fn receive(mut pass: ae_framegraph::PassBuilder<'_, LibraryPass>, maps: [Option<ResourceId>; 2], lights: [ResourceId; 2]) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
         for map in maps.into_iter().flatten() {
             pass = pass.sampled(map, ShaderStage::Fragment);
         }
-        pass
+        lit(pass, lights, ShaderStage::Fragment)
     }
     graph
         .pass("terrain lod", PassKind::Compute, LibraryPass::TerrainLod)
@@ -1050,6 +1133,9 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
             .id();
     }
+    // The lights' clusters, before anything lit.
+    let write = Role::StorageBufferWrite(ShaderStage::Compute);
+    graph.pass("lights", PassKind::Compute, LibraryPass::LightsCluster).access(lights[0], write).access(lights[1], write).id();
     // The units' shadows: the units drawn from the sun, before anything
     // that samples the map.
     if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
@@ -1082,6 +1168,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .color(scene, LoadOp::Clear)
             .depth(depth, LoadOp::Clear),
         receivers,
+        lights,
     )
     .id();
     if let Some([instances, visible, draws, counts, palette]) = units {
@@ -1097,6 +1184,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
                 .color(scene, LoadOp::Load)
                 .depth(depth, LoadOp::Load),
             receivers,
+            lights,
         )
         .id();
         graph.pass("units count", PassKind::Transfer, LibraryPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
@@ -1105,11 +1193,10 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     if env.water {
         // After the units (a third writer of the target), testing against
         // the depth they leave without writing it.
-        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(scene, LoadOp::Load).depth_read(depth), receivers).id();
+        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(scene, LoadOp::Load).depth_read(depth), receivers, lights).id();
     }
     if let Some([state, keys, draws]) = particles {
-        let write = Role::StorageBufferWrite(ShaderStage::Compute);
-        graph.pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim).access(state, write).access(keys, write).access(draws, write).id();
+        lit(graph.pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim).access(state, write).access(keys, write).access(draws, write), lights, ShaderStage::Compute).id();
         // Over everything else, sampling the depth the scene left.
         graph
             .pass("particles", PassKind::Graphics, LibraryPass::ParticlesDraw)
@@ -1283,6 +1370,8 @@ impl TerrainApp {
             LibraryResource::ParticleState => self.particle_renderer.as_ref().map(|p| p.state_desc()),
             LibraryResource::ParticleKeys => self.particle_renderer.as_ref().map(|p| p.keys_desc()),
             LibraryResource::ParticleIndirect => self.particle_renderer.as_ref().map(|p| p.indirect_desc()),
+            LibraryResource::LightList => self.lights.as_ref().map(|l| l.list_desc()),
+            LibraryResource::LightClusters => self.lights.as_ref().map(|l| l.clusters_desc()),
             LibraryResource::ReadbackTarget | LibraryResource::ShadowMap | LibraryResource::ParticleShadows => None,
         })?;
         if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {

@@ -8,6 +8,8 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #define PARTICLES_WRITE
 #include "particles_common.glsl"
+#define LIGHT_SET 2
+#include "lights.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -44,6 +46,11 @@ void main() {
         visible = visible && dot(u.frustum[k].xyz, p.posAge.xyz) + u.frustum[k].w >= -radius;
     }
     float d = dot(p.posAge.xyz - u.camPos.xyz, u.camForward.xyz);
+    // A medium in view is lit by the clustered lights once a frame, here
+    // (the puff reads it); an emissive particle lights itself.
+    if (physics.z < 0.5) {
+        particles[i].info.w = visible && lightsOn() ? packParticleLight(lightsAround(lightClusterAt(u.viewProj, p.posAge.xyz), p.posAge.xyz)) : 0u;
+    }
     if (visible) {
         float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);
         uint key = ((65535u - uint(q * 65535.0)) << 16) | i;

@@ -201,6 +201,8 @@ pub struct TerrainRenderer {
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
+    /// The clustered lights' sets (set 1 of the draws; crate::lights).
+    light_sets: Vec<vk::DescriptorSet>,
     prepare: vk::Pipeline,
     update: vk::Pipeline,
     reduce: vk::Pipeline,
@@ -300,6 +302,7 @@ impl TerrainRenderer {
         shadows: Option<&[f32]>,
         unit_shadows: bool,
         decals: Option<(&DecalAtlas, u32)>,
+        lights: &crate::lights::LightRenderer,
         color_format: vk::Format,
         depth_format: vk::Format,
         frames_in_flight: usize,
@@ -472,7 +475,8 @@ impl TerrainRenderer {
                 b(20, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], size_of::<PushConstants>() as u32, all)?;
+            // Set 1: the clustered lights (the terrain and the water read them).
+            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, lights.set_layout()], size_of::<PushConstants>() as u32, all)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
@@ -579,6 +583,7 @@ impl TerrainRenderer {
             pipeline_layout,
             desc_pool,
             sets,
+            light_sets: lights.sets(),
             prepare,
             update,
             reduce,
@@ -848,7 +853,7 @@ impl TerrainRenderer {
     pub fn record_draw(&self, ctx: &PassContext<'_>, wireframe: Wireframe) {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot], self.light_sets[ctx.slot]], &[]);
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
             let terrain = match self.terrain_decals {
@@ -876,7 +881,7 @@ impl TerrainRenderer {
         let Some(water) = self.water else { return };
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[ctx.slot], self.light_sets[ctx.slot]], &[]);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, water);
             device.cmd_draw(cmd, 6, 1, 0, 0);
         }
