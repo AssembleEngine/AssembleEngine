@@ -981,7 +981,12 @@ impl Recorder<ScenePass> for TerrainApp {
         match pass.work {
             // No optical depth, no particle toward the sun.
             PassWork::Library(LibraryPass::ShadowsParticles) => [0.0; 4],
-            _ => SKY,
+            // The sky behind the terrain: the bridge's radiance times the
+            // frame exposure (it is stored exposed like the scene).
+            _ => {
+                let s = crate::lighting::legacy_emission_scale() * self.tone.exposure();
+                [SKY[0] * s, SKY[1] * s, SKY[2] * s, 1.0]
+            }
         }
     }
 

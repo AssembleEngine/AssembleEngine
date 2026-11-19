@@ -545,7 +545,9 @@ fn terrain_renders_offscreen() {
     }
     // The capture is sRGB-encoded, like the swapchain.
     let encode = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-    let sky: Vec<u8> = SKY.iter().map(|&c| (encode(c) * 255.0).round() as u8).collect();
+    // The tonemap's ACES fit (the default curve).
+    let aces = |x: f32| ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0);
+    let sky: Vec<u8> = SKY.iter().map(|&c| (encode(aces(c)) * 255.0).round() as u8).collect();
     let is_sky = |p: &[u8]| p[..3].iter().zip(&sky).all(|(a, b)| a.abs_diff(*b) <= 2);
     let sky_pixels = pixels.chunks(4).filter(|p| is_sky(p)).count();
     let total = (extent.width * extent.height) as usize;
@@ -986,14 +988,14 @@ fn model_lights_light_the_ground() {
     let near = project(462.0, 512.0, ground);
     let (was, now) = (rgb(&dark, near), rgb(&lit, near));
     let gain = |c: usize| now[c] - was[c];
-    assert!(gain(0) > 8 && gain(0) > 2 * gain(2), "point light: {was:?} -> {now:?}");
+    assert!(gain(0) > 3 && gain(0) > 2 * gain(2), "point light: {was:?} -> {now:?}");
     // In front of the spot (world -z) and behind it (world +z): its blue
     // light raises blue, and nothing behind it.
     let front = project(574.0, 500.0, ground);
     let behind = project(574.0, 526.0, ground);
     let (was, now) = (rgb(&dark, front), rgb(&lit, front));
     let gain = |c: usize| now[c] - was[c];
-    assert!(gain(2) > 8 && gain(2) > 2 * gain(0), "spot front: {was:?} -> {now:?}");
+    assert!(gain(2) > 3 && gain(2) > 2 * gain(0), "spot front: {was:?} -> {now:?}");
     assert_eq!(rgb(&lit, behind), rgb(&dark, behind), "the spot lights nothing behind its node");
     assert_clean(&gpu);
 }
@@ -1975,7 +1977,7 @@ fn water_covers_the_low_ground_only() {
     assert_eq!(changed(&fogged_plain, &fogged, &land), 0, "land in sight: unchanged by the water");
     let (lit, unseen) = (mean_diff(&plain, &on, &water), mean_diff(&fogged_plain, &fogged, &water));
     println!("what the surface adds: {lit:.1} in sight, {unseen:.1} never seen");
-    assert!(unseen < 0.6 * lit, "out of sight the surface's share is dimmed: {unseen:.1} vs {lit:.1}");
+    assert!(unseen < 0.75 * lit, "out of sight the surface's share is dimmed: {unseen:.1} vs {lit:.1}");
 
     assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
     let moved = changed(&on, &later, &water);
@@ -2629,7 +2631,7 @@ fn particles_sort_blend_and_soften() {
         let strongest = column.iter().cloned().fold(0.0, f32::max);
         let step = column.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
         println!("  ground-cut puff: strongest {strongest:.1}, largest step {step:.1}");
-        assert!(strongest > 40.0, "the puff shows: {strongest}");
+        assert!(strongest > 25.0, "the puff shows: {strongest}");
         assert!(step < 0.25 * strongest, "a hard edge: step {step} of {strongest}");
 
         // The default effects.
@@ -2942,7 +2944,7 @@ fn particles_order_independence() {
     }
     let swap = apart[0][1].iter().zip(&apart[1][1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
     println!("apart: the volume's largest change between blue in front and behind {swap}");
-    assert!(swap > 100, "the volume loses the order: {swap}");
+    assert!(swap > 60, "the volume loses the order: {swap}");
 
     let mut pops = Vec::new();
     let mut against_volume = Vec::new();
@@ -2968,10 +2970,11 @@ fn particles_order_independence() {
     // exact order, and the moments about as close.
     assert!(sorted_mean < 2.5 && moments_mean < 2.5, "cluster error: sorted {sorted_mean}, moments {moments_mean}");
     // Measured: the exact per-pixel order pops about as much as the centre
-    // sort (179 against 208 pixel-frames over 40; both 116 at worst): the
-    // jump comes from blending particles as flat layers, whatever the order.
+    // sort (77 against 106 pixel-frames over 40; both 73 at worst under the
+    // ACES curve): the jump comes from blending particles as flat layers,
+    // whatever the order.
     let (sorted_pop, reference_pop) = (pops[0], pops[2]);
-    assert!(reference_pop.0 > 80.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
+    assert!(reference_pop.0 > 60.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
     // Measured: the volume (puffs mixed by how much of their thickness
     // overlaps) changes by 7 at most between frames, no pixel by over 40.
     let volume_pop = pops[3];
@@ -3051,8 +3054,8 @@ fn particles_order_independence() {
             })
             .collect();
         println!("apart{what}: the largest change between blue in front and behind, volume {}, froxels {}", swaps[0], swaps[1]);
-        // Measured: 66 either way (the columns' blur lowers the peak).
-        assert!(swaps[1] > 50, "apart{what}, the froxels lose the order: {}", swaps[1]);
+        // Measured under ACES: 49 (the columns' blur lowers the peak).
+        assert!(swaps[1] > 40, "apart{what}, the froxels lose the order: {}", swaps[1]);
     }
     assert_clean(&gpu);
 }

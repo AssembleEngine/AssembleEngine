@@ -40,7 +40,7 @@ impl ToneParams {
 
 impl Default for ToneParams {
     fn default() -> Self {
-        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Clamp, sun_illuminance: crate::lighting::SUN_ILLUMINANCE }
+        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Aces, sun_illuminance: crate::lighting::SUN_ILLUMINANCE }
     }
 }
 
