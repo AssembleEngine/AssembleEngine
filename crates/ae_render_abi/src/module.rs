@@ -101,6 +101,19 @@ pub fn particle_shadow_spec() -> crate::ImageSpec {
     crate::ImageSpec::color_2d(PARTICLE_SHADOW_FORMAT, PARTICLE_SHADOW_WIDTH, PARTICLE_SHADOW_HEIGHT, 0x4 | 0x10)
 }
 
+/// The scene's colour image (HDR): what `terrain.draw`, `units.draw`,
+/// `water.draw` and `particles.draw` draw into (linear light, may exceed
+/// 1). A graph declares it itself (any name, usually [`SCENE_NAME`];
+/// `Transient`) with this format and with sampled usage, and a
+/// `post.tonemap` pass (graphics; the scene `sampled:fragment`, one colour
+/// attachment of the target's format) turns it into the output.
+pub const SCENE_FORMAT: u32 = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
+pub const SCENE_NAME: &str = "scene";
+pub fn scene_spec(width: u32, height: u32) -> crate::ImageSpec {
+    // Usage: sampled (0x4) | colour attachment (0x10).
+    crate::ImageSpec::color_2d(SCENE_FORMAT, width, height, 0x4 | 0x10)
+}
+
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
 pub const PROGRAM_VERSION: u32 = 1;
 const PROGRAM_HEADER_WORDS: usize = 4;

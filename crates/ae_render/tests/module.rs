@@ -41,7 +41,7 @@ fn the_default_module_declares_the_native_graph() {
         .flat_map(|(units, shadows)| [true, false].into_iter().flat_map(move |water| [TerrainOutput::Present, TerrainOutput::Readback].map(|output| (units, shadows, water, output))))
         .flat_map(|scene| [false, true].map(|particles| (scene, particles)));
     for ((units, shadows, water, output), particles) in scenes {
-        let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows, particles };
+        let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, scene_format: ae_render::terrain::app::SCENE_FORMAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows, particles };
         let flags = if units { DECLARE_UNITS } else { 0 }
             | if output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 }
             | if water { DECLARE_WATER } else { 0 }

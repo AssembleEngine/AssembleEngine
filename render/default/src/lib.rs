@@ -1,11 +1,12 @@
 //! The default render module: the terrain, then the units over it (sharing
 //! its colour target and depth buffer), the water surface when the scene
 //! has it, then present or readback, all
-//! from the engine's pass library. It declares the same graph the engine
+//! from the engine's pass library; the draws write the HDR scene image,
+//! which `post.tonemap` turns into the target. It declares the same graph the engine
 //! declares natively (`ae_render::terrain::app::native_graph`), which the
 //! host's tests check pass for pass.
 
-use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, shadow_map_spec, vk};
+use ae_render_sdk::{Class, Declaration, DeclareEnv, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 #[derive(Default)]
 struct Scene;
@@ -28,6 +29,8 @@ impl RenderModule for Scene {
         } else {
             g.image("target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT), Class::Backbuffer)
         };
+        // The HDR scene the draws write; `post.tonemap` turns it into the target.
+        let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
         // The unit buffers, then the units' shadow map.
         let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts", "units.palette"].map(|name| library(&mut g, name)));
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
@@ -85,7 +88,7 @@ impl RenderModule for Scene {
             g.pass("terrain", PassKind::Graphics, draw)
                 .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(indirect, Role::IndirectBuffer)
-                .color(target, LoadOp::Clear)
+                .color(scene, LoadOp::Clear)
                 .depth(depth, LoadOp::Clear),
             maps,
         )
@@ -98,7 +101,7 @@ impl RenderModule for Scene {
                     .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                     .access(draws, Role::IndirectBuffer)
                     .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                    .color(target, LoadOp::Load)
+                    .color(scene, LoadOp::Load)
                     .depth(depth, LoadOp::Load),
                 maps,
             )
@@ -110,7 +113,7 @@ impl RenderModule for Scene {
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(target, LoadOp::Load).depth_read(depth), maps).id();
+            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth), maps).id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
@@ -122,10 +125,12 @@ impl RenderModule for Scene {
                 .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
-                .color(target, LoadOp::Load)
+                .color(scene, LoadOp::Load)
                 .sampled(depth, ShaderStage::Fragment)
                 .id();
         }
+        let tonemap = p.library("post.tonemap");
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");

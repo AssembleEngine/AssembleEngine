@@ -29,6 +29,7 @@ pub mod shadow;
 pub mod swapchain;
 pub mod terrain;
 pub mod thread;
+pub mod tonemap;
 pub mod units;
 pub mod upload;
 pub mod window;

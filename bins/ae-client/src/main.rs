@@ -157,6 +157,8 @@ struct Options {
     water: bool,
     /// The sun's shadows.
     shadows: bool,
+    /// The tonemap's exposure and curve.
+    tone: ae_render::tonemap::ToneParams,
     /// Particles (explosions).
     particles: bool,
     /// Scorch marks where explosions go off (`--no-decals`).
@@ -201,11 +203,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, anti_tiling: true, weights: false, water: true, shadows: true, tone: Default::default(), particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--no-anti-tiling] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--exposure X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels] [--explode N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -252,6 +254,14 @@ fn parse() -> Result<Options> {
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
+            "--tonemap" => {
+                o.tone.curve = match value("--tonemap", &mut args)?.as_str() {
+                    "clamp" => ae_render::tonemap::Curve::Clamp,
+                    "aces" => ae_render::tonemap::Curve::Aces,
+                    other => bail!("--tonemap {other:?}: clamp or aces"),
+                }
+            }
+            "--exposure" => o.tone.exposure = value("--exposure", &mut args)?.parse().context("--exposure")?,
             "--no-particles" => o.particles = false,
             "--no-decals" => o.decals = false,
             "--scars" => o.scars = Some(value("--scars", &mut args)?),
@@ -540,6 +550,7 @@ fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) ->
     if o.shadows {
         app = app.with_shadows();
     }
+    app = app.with_tone(o.tone);
     app.view().lock().unwrap().weights = o.weights;
     app
 }

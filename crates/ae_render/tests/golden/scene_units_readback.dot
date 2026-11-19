@@ -9,8 +9,9 @@ digraph frame_graph {
   p0 [label="5: terrain lod\nCompute", fillcolor="#d1e7dd"];
   p4 [label="6: terrain\nGraphics", fillcolor="#cfe2ff"];
   p5 [label="7: units\nGraphics", fillcolor="#cfe2ff"];
-  p8 [label="8: copy\nTransfer", fillcolor="#fff3cd"];
-  p9 [label="9: host read\nTransfer", fillcolor="#fff3cd"];
+  p8 [label="8: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p9 [label="9: copy\nTransfer", fillcolor="#fff3cd"];
+  p10 [label="10: host read\nTransfer", fillcolor="#fff3cd"];
   p0 -> p4 [label="terrain.leaves"];
   p0 -> p4 [label="terrain.indirect"];
   p1 -> p5 [label="units.palette"];
@@ -19,9 +20,11 @@ digraph frame_graph {
   p3 -> p5 [label="units.indirect"];
   p3 -> p6 [label="units.indirect"];
   p4 -> p5 [label="depth"];
-  p4 -> p5 [label="readback.target"];
-  p5 -> p8 [label="readback.target"];
+  p4 -> p5 [label="scene"];
+  p5 -> p8 [label="scene"];
   p6 -> p7 [label="units.counts"];
-  p8 -> p9 [label="readback.buffer"];
+  p8 -> p9 [label="readback.target"];
+  p9 -> p10 [label="readback.buffer"];
   // physical 0 Transient: depth
+  // physical 1 Transient: scene
 }

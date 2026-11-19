@@ -1,11 +1,12 @@
 //! A render module with post-processing: the terrain and units (engine
-//! library passes) draw into an intermediate `scene` image; a fullscreen
-//! program of this module grades it into the target; a second one, a
+//! library passes) draw into the HDR `scene` image; the engine's
+//! `post.tonemap` turns it into `ldr` (the target's format); a fullscreen
+//! program of this module grades that into the target; a second one, a
 //! vignette, blends over the target when the host sets flag bit 0 (it is a
 //! conditional pass the module disables otherwise). Then present or
 //! readback, as in the default module.
 
-use ae_render_sdk::{Class, Declaration, DeclareEnv, FrameInput, FrameOutput, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, shadow_map_spec, vk};
+use ae_render_sdk::{Class, Declaration, DeclareEnv, FrameInput, FrameOutput, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 const GRADE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grade.frag.spv"));
 const VIGNETTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vignette.frag.spv"));
@@ -37,7 +38,8 @@ impl RenderModule for Post {
         let leaves = library(&mut g, "terrain.leaves");
         let indirect = library(&mut g, "terrain.indirect");
         let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
-        let scene = g.image("scene", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
+        let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
+        let ldr = g.image("ldr", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
         let target = if env.readback {
             g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
         } else {
@@ -141,8 +143,10 @@ impl RenderModule for Post {
                 .sampled(depth, ShaderStage::Fragment)
                 .id();
         }
+        let tonemap = p.library("post.tonemap");
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
         let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
-        g.pass("grade", PassKind::Graphics, grade).sampled(scene, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        g.pass("grade", PassKind::Graphics, grade).sampled(ldr, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });
         g.pass("vignette", PassKind::Graphics, self.vignette).color(target, LoadOp::Load).conditional().id();
         if env.readback {

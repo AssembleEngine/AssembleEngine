@@ -243,15 +243,18 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Vulkan format by name (the ones render graphs use), or `target`.
+/// Vulkan format by name (the ones render graphs use), `target` (the
+/// output's) or `scene` (the HDR scene's, [`ae_render_abi::module::SCENE_FORMAT`]).
 fn format(name: &str, target: u32) -> Result<u32> {
     Ok(match name {
         "target" => target,
+        "scene" => ae_render_abi::module::SCENE_FORMAT,
         "R8G8B8A8_UNORM" => 37,
         "R8G8B8A8_SRGB" => 43,
         "B8G8R8A8_UNORM" => 44,
         "B8G8R8A8_SRGB" => 50,
         "R16G16B16A16_SFLOAT" => 97,
+        "B10G11R11_UFLOAT_PACK32" => 122,
         "R32_SFLOAT" => 100,
         "R32G32B32A32_SFLOAT" => 109,
         "D32_SFLOAT" => 126,

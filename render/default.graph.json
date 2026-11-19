@@ -5,6 +5,7 @@
     { "name": "terrain.indirect", "kind": "library" },
     { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment", "sampled"] },
     { "name": "target", "kind": "output" },
+    { "name": "scene", "kind": "image", "format": "scene", "usage": ["color_attachment", "sampled"] },
     { "name": "units.instances", "kind": "library", "when": "units" },
     { "name": "units.visible", "kind": "library", "when": "units" },
     { "name": "units.indirect", "kind": "library", "when": "units" },
@@ -30,18 +31,20 @@
     { "name": "particle shadows", "kind": "graphics", "library": "shadows.particles", "when": "particle_shadows",
       "access": ["particles.state storage_buffer_read:vertex", "particles.keys storage_buffer_read:vertex", "particles.indirect indirect", "shadows.color color:clear"] },
     { "name": "terrain", "kind": "graphics", "library": "terrain.draw",
-      "access": ["terrain.leaves storage_buffer_read:vertex", "terrain.indirect indirect", "target color:clear", "depth depth:clear", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
+      "access": ["terrain.leaves storage_buffer_read:vertex", "terrain.indirect indirect", "scene color:clear", "depth depth:clear", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
     { "name": "units", "kind": "graphics", "library": "units.draw", "when": "units",
-      "access": ["units.instances storage_buffer_read:vertex", "units.visible storage_buffer_read:vertex", "units.indirect indirect", "units.palette storage_buffer_read:vertex", "target color:load", "depth depth:load", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
+      "access": ["units.instances storage_buffer_read:vertex", "units.visible storage_buffer_read:vertex", "units.indirect indirect", "units.palette storage_buffer_read:vertex", "scene color:load", "depth depth:load", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
     { "name": "units count", "kind": "transfer", "library": "units.count", "when": "units",
       "access": ["units.indirect transfer_src", "units.counts transfer_dst discard"] },
     { "name": "units count read", "kind": "transfer", "library": "host.read", "when": "units", "root": true,
       "access": ["units.counts host_read"] },
     { "name": "water", "kind": "graphics", "library": "water.draw", "when": "water",
-      "access": ["target color:load", "depth depth_read", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
+      "access": ["scene color:load", "depth depth_read", "shadows.map sampled:fragment", "shadows.color sampled:fragment"] },
     { "name": "particles sim", "kind": "compute", "library": "particles.sim", "when": "particles",
       "access": ["particles.state storage_buffer_write:compute", "particles.keys storage_buffer_write:compute", "particles.indirect storage_buffer_write:compute"] },
     { "name": "particles", "kind": "graphics", "library": "particles.draw", "when": "particles",
-      "access": ["particles.state storage_buffer_read:vertex", "particles.keys storage_buffer_read:vertex", "particles.indirect indirect", "target color:load", "depth sampled:fragment"] }
+      "access": ["particles.state storage_buffer_read:vertex", "particles.keys storage_buffer_read:vertex", "particles.indirect indirect", "scene color:load", "depth sampled:fragment"] },
+    { "name": "tonemap", "kind": "graphics", "library": "post.tonemap",
+      "access": ["scene sampled:fragment", "target color:dont_care"] }
   ]
 }

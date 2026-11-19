@@ -138,6 +138,10 @@ pub enum LibraryPass {
     /// The particles, back to front, blended over the scene; samples the
     /// depth buffer.
     ParticlesDraw,
+    /// The HDR scene image (sampled in the fragment stage, of the scene's
+    /// format) to the output (one colour attachment of the target's
+    /// format): exposure and the tone curve.
+    Tonemap,
     /// Copy an image to [`LibraryResource::ReadbackBuffer`].
     ReadbackCopy,
     /// Records nothing: the pass that declares host reads.
@@ -165,7 +169,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 15] = [
+    pub const ALL: [LibraryPass; 16] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -178,6 +182,7 @@ impl LibraryPass {
         Self::WaterDraw,
         Self::ParticlesSim,
         Self::ParticlesDraw,
+        Self::Tonemap,
         Self::ReadbackCopy,
         Self::HostRead,
         Self::Present,
@@ -197,6 +202,7 @@ impl LibraryPass {
             Self::WaterDraw => "water.draw",
             Self::ParticlesSim => "particles.sim",
             Self::ParticlesDraw => "particles.draw",
+            Self::Tonemap => "post.tonemap",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
             Self::Present => "present",
@@ -210,7 +216,7 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw => PassKind::Graphics,
+            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -260,7 +266,7 @@ impl LibraryPass {
                 (R::ParticleIndirect, Role::IndirectBuffer),
             ],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
-            Self::WaterDraw | Self::HostRead | Self::Present => &[],
+            Self::WaterDraw | Self::Tonemap | Self::HostRead | Self::Present => &[],
         }
     }
 
@@ -312,7 +318,12 @@ fn error(text: String) -> LibraryError {
 /// The host's formats and sizes the graph must agree with.
 #[derive(Clone, Copy, Debug)]
 pub struct LibraryEnv {
+    /// The output's format (the swapchain's or the readback image's):
+    /// what `post.tonemap` writes.
     pub color_format: vk::Format,
+    /// The HDR scene's (`ae_render_abi::module::SCENE_FORMAT`): what the
+    /// scene's draws write and `post.tonemap` samples.
+    pub scene_format: vk::Format,
     pub depth_format: vk::Format,
     pub extent: vk::Extent2D,
     /// Units exist in this scene.
@@ -429,6 +440,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
             return Err(error(format!("pass `{name}` ({}) must use `{}` as {role:?}{why}", lib.name(), needed.name())));
         }
     }
+    if lib == LibraryPass::Tonemap {
+        return check_tonemap(graph, pass, env);
+    }
     let (mut color, mut depth) = (0, 0);
     for intent in &p.intents {
         let r = resource(intent.resource);
@@ -439,9 +453,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
             (_, Role::ColorAttachment(_)) if lib.attachments().is_some() => {
                 color += 1;
                 if let ResourceDesc::Image(image) = r.desc
-                    && image.format != env.color_format
+                    && image.format != env.scene_format
                 {
-                    return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target {:?}", r.name, image.format, env.color_format)));
+                    return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target the scene's {:?}", r.name, image.format, env.scene_format)));
                 }
             }
             (_, Role::DepthAttachment(_)) | (_, Role::DepthRead) | (_, Role::Sampled(ShaderStage::Fragment))
@@ -483,6 +497,31 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     Ok(())
 }
 
+/// `post.tonemap`: one image of the scene's format sampled in the fragment
+/// stage and one colour attachment of the output's, nothing else.
+fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Result<(), LibraryError> {
+    let p = &graph.passes[pass];
+    let name = &p.name;
+    let (mut scene, mut color) = (0, 0);
+    for intent in &p.intents {
+        let r = &graph.resources[intent.resource.index()];
+        let ResourceDesc::Image(image) = r.desc else {
+            return Err(error(format!("pass `{name}` (post.tonemap) does not use buffer `{}`", r.name)));
+        };
+        match intent.role {
+            Role::Sampled(ShaderStage::Fragment) if image.format == env.scene_format => scene += 1,
+            Role::Sampled(ShaderStage::Fragment) => return Err(error(format!("pass `{name}` (post.tonemap) samples `{}` ({:?}); the scene is {:?}", r.name, image.format, env.scene_format))),
+            Role::ColorAttachment(_) if image.format == env.color_format => color += 1,
+            Role::ColorAttachment(_) => return Err(error(format!("pass `{name}` (post.tonemap) writes `{}` ({:?}); the output is {:?}", r.name, image.format, env.color_format))),
+            role => return Err(error(format!("pass `{name}` (post.tonemap) does not use `{}` as {role:?}", r.name))),
+        }
+    }
+    if scene != 1 || color != 1 {
+        return Err(error(format!("pass `{name}` (post.tonemap) samples one scene image and writes one colour attachment; it has {scene} and {color}")));
+    }
+    Ok(())
+}
+
 /// Graph-wide: a graph that draws the units (or their shadows) poses them
 /// (`units.pose`, which alone writes their palettes); a graph that declares
 /// the units' shadow map has a `shadows.draw` pass write it, and one that
@@ -512,7 +551,7 @@ mod tests {
     use crate::terrain::app::{TerrainOutput, native_graph};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, scene_format: vk::Format::R16G16B16A16_SFLOAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {
@@ -576,9 +615,18 @@ mod tests {
         assert!(e.contains("does not use `mine`"), "{e}");
 
         // Attachments in formats the library's pipelines do not target.
+        let other = LibraryEnv { scene_format: vk::Format::B10G11R11_UFLOAT_PACK32, ..env() };
+        let e = err(native_graph(&other, TerrainOutput::Present), &env());
+        assert!(e.contains("draws into `scene`"), "{e}");
         let other = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, ..env() };
         let e = err(native_graph(&other, TerrainOutput::Present), &env());
-        assert!(e.contains("draws into `target`"), "{e}");
+        assert!(e.contains("(post.tonemap) writes `target`"), "{e}");
+        // The tonemap sampling no scene.
+        let mut g = base();
+        let t = pass(&g, LibraryPass::Tonemap);
+        g.passes[t].intents.retain(|i| !matches!(i.role, Role::Sampled(_)));
+        let e = err(g, &env());
+        assert!(e.contains("samples one scene image"), "{e}");
         let other = LibraryEnv { depth_format: vk::Format::D32_SFLOAT_S8_UINT, ..env() };
         let e = err(native_graph(&other, TerrainOutput::Present), &env());
         assert!(e.contains("uses depth `depth`"), "{e}");

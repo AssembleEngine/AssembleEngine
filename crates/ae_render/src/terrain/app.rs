@@ -40,6 +40,7 @@ use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
 use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
+use crate::tonemap::{ToneParams, Tonemap};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
 use ash::vk;
@@ -49,6 +50,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+/// The HDR scene's format ([`ae_render_abi::module::SCENE_FORMAT`]).
+pub const SCENE_FORMAT: vk::Format = vk::Format::from_raw(ae_render_abi::module::SCENE_FORMAT as i32);
 /// Sky / fog colour (linear).
 pub const SKY: [f32; 4] = [0.62, 0.70, 0.80, 1.0];
 /// sRGB like the swapchain, so a capture shows what the window shows.
@@ -174,6 +177,8 @@ pub enum PassWork {
     /// [`LibraryPass::ParticlesDraw`] with its colour attachment and the
     /// depth buffer it samples.
     Particles { color: ResourceId, depth: ResourceId },
+    /// [`LibraryPass::Tonemap`] with the scene image it samples.
+    Tonemap { scene: ResourceId },
 }
 
 /// The render module driving the graph, with its wired declaration.
@@ -248,6 +253,11 @@ pub struct TerrainApp {
     unit_counts: Arc<Mutex<(u32, u32)>>,
     particles: Option<ParticlesSetup>,
     particle_renderer: Option<ParticleRenderer>,
+    /// `post.tonemap`, for the output's format.
+    tonemap: Option<Tonemap>,
+    tone: ToneParams,
+    /// The output's format (the swapchain's or the readback image's).
+    output_format: vk::Format,
     decals: Option<DecalsSetup>,
     /// The live decals (kept across renderer re-creation).
     decal_set: Option<DecalSet>,
@@ -297,6 +307,9 @@ impl TerrainApp {
             unit_counts: Arc::default(),
             particles: None,
             particle_renderer: None,
+            tonemap: None,
+            tone: ToneParams::default(),
+            output_format: vk::Format::UNDEFINED,
             decals: None,
             decal_set: None,
             decals_written: Vec::new(),
@@ -326,6 +339,12 @@ impl TerrainApp {
     /// with a water level; on a map without one this does nothing.
     pub fn with_water(mut self) -> Self {
         self.water = self.source.info.water_level.is_some();
+        self
+    }
+
+    /// The tonemap's exposure and curve (by default exposure 1, clamped).
+    pub fn with_tone(mut self, tone: ToneParams) -> Self {
+        self.tone = tone;
         self
     }
 
@@ -548,6 +567,9 @@ impl RenderApp for TerrainApp {
     type Pass = ScenePass;
 
     fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
+        if let Some(mut old) = self.tonemap.take() {
+            old.destroy(gpu);
+        }
         if let Some(mut old) = self.particle_renderer.take() {
             old.destroy(gpu);
         }
@@ -568,7 +590,11 @@ impl RenderApp for TerrainApp {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
-        let color = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
+        let output = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
+        self.output_format = output;
+        self.tonemap = Some(Tonemap::new(gpu, output, frames_in_flight).context("tonemap")?);
+        // The scene's draws write the HDR scene image.
+        let color = SCENE_FORMAT;
         let s = &self.source;
         let shadows = self.shadows.then(|| sun::shadow_heights(&s.heightmap, s.info.cell_size, s.info.height_scale, s.info.height_offset, sun::direction()));
         let default_atlas;
@@ -658,6 +684,9 @@ impl RenderApp for TerrainApp {
         self.wireframe = params.wireframe;
         self.water_on = params.water;
         self.frames += 1;
+        if let Some(tonemap) = &mut self.tonemap {
+            tonemap.write(slot, self.tone);
+        }
         let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
         let stats = renderer.read_stats(slot);
         *self.stats.lock().unwrap_or_else(|p| p.into_inner()) = stats;
@@ -821,6 +850,9 @@ impl RenderApp for TerrainApp {
             unsafe { gpu.device.destroy_sampler(self.sampler, None) };
             self.sampler = vk::Sampler::null();
         }
+        if let Some(mut tonemap) = self.tonemap.take() {
+            tonemap.destroy(gpu);
+        }
         if let Some(mut particles) = self.particle_renderer.take() {
             particles.destroy(gpu);
         }
@@ -884,6 +916,7 @@ impl TerrainApp {
             renderer: self.renderer.as_ref(),
             units: self.unit_renderer.as_ref(),
             particles: self.particle_renderer.as_ref(),
+            tonemap: self.tonemap.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
             update_lod: self.update_lod,
@@ -898,6 +931,7 @@ struct SceneRecorder<'a> {
     renderer: Option<&'a TerrainRenderer>,
     units: Option<&'a UnitRenderer>,
     particles: Option<&'a ParticleRenderer>,
+    tonemap: Option<&'a Tonemap>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
     update_lod: bool,
@@ -929,6 +963,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
                 LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
+                LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
             PassWork::Fullscreen { sampled } => {
@@ -938,6 +973,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 program.record(ctx, &images, self.sampler)?;
             }
             PassWork::Particles { color, depth } => particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?)?,
+            PassWork::Tonemap { scene } => self.tonemap.context("tonemap not created")?.record(ctx, ctx.image(*scene)?, self.sampler)?,
             PassWork::Readback { image, buffer } => {
                 let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
                 crate::demo::record_readback(ctx, image, buffer);
@@ -977,6 +1013,8 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             ResourceClass::External,
         ),
     };
+    // The HDR scene the draws write; `post.tonemap` turns it into the target.
+    let scene = graph.image(ae_render_abi::module::SCENE_NAME, ImageDesc::color_2d(env.scene_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
     // The unit buffers, then the units' shadow map.
     let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts, LibraryResource::UnitPalette].map(|r| library_buffer(&mut graph, r)));
     let map = (env.units && env.shadows).then(|| library_shadow_map(&mut graph));
@@ -1041,7 +1079,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .pass("terrain", PassKind::Graphics, LibraryPass::TerrainDraw)
             .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
             .access(indirect, Role::IndirectBuffer)
-            .color(target, LoadOp::Clear)
+            .color(scene, LoadOp::Clear)
             .depth(depth, LoadOp::Clear),
         receivers,
     )
@@ -1056,7 +1094,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
                 .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
                 .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                .color(target, LoadOp::Load)
+                .color(scene, LoadOp::Load)
                 .depth(depth, LoadOp::Load),
             receivers,
         )
@@ -1067,7 +1105,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     if env.water {
         // After the units (a third writer of the target), testing against
         // the depth they leave without writing it.
-        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(target, LoadOp::Load).depth_read(depth), receivers).id();
+        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(scene, LoadOp::Load).depth_read(depth), receivers).id();
     }
     if let Some([state, keys, draws]) = particles {
         let write = Role::StorageBufferWrite(ShaderStage::Compute);
@@ -1078,10 +1116,11 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
             .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
             .access(draws, Role::IndirectBuffer)
-            .color(target, LoadOp::Load)
+            .color(scene, LoadOp::Load)
             .sampled(depth, ShaderStage::Fragment)
             .id();
     }
+    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
     match output {
         TerrainOutput::Present => {
             graph.pass("present", PassKind::Present, LibraryPass::Present).present(target).root().id();
@@ -1219,7 +1258,7 @@ impl TerrainApp {
     /// What the library needs to agree with for `target`.
     fn env(&self, target: TargetInfo) -> Result<LibraryEnv> {
         let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
-        Ok(LibraryEnv { color_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(),
+        Ok(LibraryEnv { color_format: self.output_format, scene_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(),
             water: self.water && renderer.has_water(),
             shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
             particles: self.particle_renderer.is_some(),
@@ -1265,6 +1304,10 @@ impl TerrainApp {
                             let depth = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment) && resources[i.resource.index()].is_none()).map(|i| i.resource).context("particles depth")?;
                             let color = pass.intents.iter().find(|i| matches!(i.role, Role::ColorAttachment(_))).map(|i| i.resource).context("particles colour")?;
                             PassWork::Particles { color, depth }
+                        }
+                        LibraryPass::Tonemap => {
+                            let scene = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).context("tonemap scene")?;
+                            PassWork::Tonemap { scene }
                         }
                         lib => PassWork::Library(lib),
                     }

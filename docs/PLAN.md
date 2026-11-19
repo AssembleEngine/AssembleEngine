@@ -2439,6 +2439,28 @@ Steps (commit and stop for compaction after each):
 5. The particles' blend mode 8 from `~/particles` (tile bins walked in packets of pixels),
    measured against the sorted default.
 
+- Step 1, the HDR scene target and the tonemap — done (2026-11-19).
+  - The terrain, units, water and particles draw into `scene`
+    (`ae_render_abi::module::SCENE_FORMAT`, RGBA16F; `scene_spec`, `SCENE_NAME`; format name
+    `scene` in graph files), and the new library pass `post.tonemap` (graphics: the scene
+    `sampled:fragment`, one colour attachment of the output's format;
+    `ae_render::tonemap`, `shaders/tonemap.frag`) writes the target. `LibraryEnv` has the
+    scene's format apart from the output's; the library checks the draws against the one and
+    the tonemap against the other. The native graph, the default and post modules and both
+    JSON graphs do it; the post module tonemaps into `ldr` (the target's format) and grades
+    that.
+  - The curve: clamped at 1 by default (the frames as before: the 27 GPU tests pass
+    unchanged) or ACES (`ToneParams`, `TerrainApp::with_tone`; `ae-client --tonemap
+    clamp|aces --exposure X`). ACES at exposure 0.75 matches the clamp's mean luma in the
+    near-army view (129 against 129 of 255) and is more saturated (68 against 56). The default
+    stays the clamp until lights and the bloom give the scene light above 1 (my default, not
+    yet confirmed); with none, ACES only changes the look.
+  - Cost (bench scenes, 1280×720, against 4c389da): the draws into RGBA16F within ±2% of the
+    8-bit target; `pass/tonemap` 15–20 µs. B10G11R11F measured too: the tonemap 11–15 µs and
+    the draws 1–2% faster, about 8 µs of `gpu_total` in all. RGBA16F kept: 10-bit mantissas
+    against B10G11R11F's 5–6 (banding and hue shifts in dark gradients), and alpha. The glow
+    target can be B10G11R11F (as RA3-graphics').
+
 ### M13 — HDR output on a supporting display (priority: lower)
 
 - After M12 (needs the HDR scene target).

@@ -10,7 +10,8 @@ digraph frame_graph {
   p4 [label="6: terrain\nGraphics", fillcolor="#cfe2ff"];
   p5 [label="7: units\nGraphics", fillcolor="#cfe2ff"];
   p8 [label="8: water\nGraphics", fillcolor="#cfe2ff"];
-  p9 [label="9: present\nPresent", fillcolor="#e2e3e5"];
+  p9 [label="9: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p10 [label="10: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p4 [label="terrain.leaves"];
   p0 -> p4 [label="terrain.indirect"];
   p1 -> p5 [label="units.palette"];
@@ -19,10 +20,12 @@ digraph frame_graph {
   p3 -> p5 [label="units.indirect"];
   p3 -> p6 [label="units.indirect"];
   p4 -> p5 [label="depth"];
-  p4 -> p5 [label="target"];
+  p4 -> p5 [label="scene"];
   p5 -> p8 [label="depth"];
-  p5 -> p8 [label="target"];
+  p5 -> p8 [label="scene"];
   p6 -> p7 [label="units.counts"];
-  p8 -> p9 [label="target"];
+  p8 -> p9 [label="scene"];
+  p9 -> p10 [label="target"];
   // physical 0 Transient: depth
+  // physical 1 Transient: scene
 }

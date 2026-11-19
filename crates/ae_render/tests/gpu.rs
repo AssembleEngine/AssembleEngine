@@ -1309,7 +1309,8 @@ fn render_modules_reload_while_running() {
         let leaves = g.buffer("terrain.leaves", 0, 0, Class::External);
         let indirect = g.buffer("terrain.indirect", 0, 0, Class::External);
         let depth = g.image("depth", ImageSpec::depth_2d(vk::Format::D32_SFLOAT.as_raw() as u32, w, h, 0x20), Class::Transient);
-        let scene = g.image("scene", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
+        let scene = g.image("scene", ae_render_abi::module::scene_spec(w, h), Class::Transient);
+        let ldr = g.image("ldr", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
         let mid = g.image("mid", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
         let target = g.image("readback.target", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x1), Class::External);
         let buffer = g.buffer("readback.buffer", 0, 0, Class::External);
@@ -1317,8 +1318,10 @@ fn render_modules_reload_while_running() {
         g.pass("terrain lod", PassKind::Compute, lod).access(leaves, Role::StorageBufferWrite(ShaderStage::Compute)).access(indirect, Role::StorageBufferWrite(ShaderStage::Compute)).id();
         let draw = p.library("terrain.draw");
         g.pass("terrain", PassKind::Graphics, draw).access(leaves, Role::StorageBufferRead(ShaderStage::Vertex)).access(indirect, Role::IndirectBuffer).color(scene, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
+        let tonemap = p.library("post.tonemap");
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
         let program = p.push(Program::Fullscreen { label: "grade", spirv: &grade.unwrap(), uniform_bytes: 32 });
-        g.pass("grade once", PassKind::Graphics, program).sampled(scene, ShaderStage::Fragment).color(mid, LoadOp::DontCare).id();
+        g.pass("grade once", PassKind::Graphics, program).sampled(ldr, ShaderStage::Fragment).color(mid, LoadOp::DontCare).id();
         g.pass("grade twice", PassKind::Graphics, program).sampled(mid, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         let copy = p.library("readback.copy");
         g.pass("copy", PassKind::Transfer, copy).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
