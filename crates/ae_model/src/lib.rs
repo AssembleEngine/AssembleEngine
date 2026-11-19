@@ -20,6 +20,11 @@
 //! * **Clips** are glTF's animations as data: keyframes per bone and path,
 //!   with their interpolation ([`pose`] samples them, and bakes them at a
 //!   fixed rate for the renderer).
+//! * **Lights** are glTF's punctual lights (`KHR_lights_punctual`): each
+//!   rides the joint of the node that carries it and shines along that
+//!   node's local -Z (glTF's convention). Their colour is already in the
+//!   engine's light units; the renderer appends one light per unit and
+//!   model light to the frame's light list.
 //!
 //! Engine model space: +X forward, +Y up, +Z right (a unit's heading turns
 //! +X onto it), metres.
@@ -41,9 +46,20 @@ use serde::{Deserialize, Serialize};
 compile_error!("ae_model assumes a little-endian host");
 
 pub const MAGIC: [u8; 8] = *b"AEMODEL\0";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Influences per vertex.
 pub const MAX_INFLUENCES: usize = 4;
+
+/// glTF's candela (point and spot intensity) to the engine's light units
+/// (the renderer's `Light::color`): 100 cd is 1.0, a light as bright as
+/// the sun's diffuse term at the source. Engine light units are arbitrary;
+/// this is the documented mapping the importer uses.
+pub const CANDELA_TO_ENGINE: f32 = 0.01;
+/// A glTF light without a `range` is infinite (the spec's default). The
+/// engine's lights are all finite: the importer gives such a light this
+/// range (the map's widest scale), so its cutoff is beyond anything the
+/// camera sees and its cull keeps it in every cluster.
+pub const UNBOUNDED_RANGE: f32 = 10_000.0;
 
 /// glTF (+Y up, front +Z, +X left) to the engine (+X forward, +Y up, +Z
 /// right): a quarter turn about +Y, so glTF +Z goes to +X and +X to -Z.
@@ -97,6 +113,35 @@ pub struct Joint {
     pub bone: u32,
     /// Column-major.
     pub inverse_bind: [f32; 16],
+}
+
+/// A glTF punctual light (`KHR_lights_punctual`) that rides a bone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LightKind {
+    Point,
+    Spot,
+}
+
+/// A light of the model, carried by a node: the renderer appends one light
+/// per unit and model light to the frame's light list.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelLight {
+    pub name: String,
+    /// The joint of the node carrying it (index into [`Model::joints`]):
+    /// its palette matrix, with the node's pose, gives the light's position
+    /// and its direction (the node's local -Z, glTF's convention).
+    pub joint: u32,
+    pub kind: LightKind,
+    /// Linear RGB in the engine's light units ([`CANDELA_TO_ENGINE`]).
+    pub color: [f32; 3],
+    /// The distance past which it lights nothing (metres,
+    /// [`UNBOUNDED_RANGE`] when the glTF has none).
+    pub range: f32,
+    /// A spot's half-angles from its axis (radians). 0 for a point.
+    pub inner_angle: f32,
+    pub outer_angle: f32,
+    /// The source's size (metres), which regularises the falloff near it.
+    pub size: f32,
 }
 
 /// How a primitive's vertices are packed for the GPU (vertex pulling).
@@ -316,6 +361,7 @@ pub struct Bounds {
 struct Header {
     bones: Vec<Bone>,
     joints: Vec<Joint>,
+    lights: Vec<ModelLight>,
     primitives: Vec<Primitive>,
     materials: Vec<Material>,
     textures: Vec<Texture>,
@@ -330,6 +376,7 @@ struct Header {
 pub struct Model {
     pub bones: Vec<Bone>,
     pub joints: Vec<Joint>,
+    pub lights: Vec<ModelLight>,
     pub primitives: Vec<Primitive>,
     pub materials: Vec<Material>,
     pub vertices: Vec<Vertex>,
@@ -429,6 +476,18 @@ impl Model {
         for (i, j) in self.joints.iter().enumerate() {
             ensure!((j.bone as usize) < self.bones.len(), "joint {i}: bone {} out of range", j.bone);
         }
+        for (i, l) in self.lights.iter().enumerate() {
+            ensure!((l.joint as usize) < self.joints.len(), "light {i} ({}): joint {} out of range", l.name, l.joint);
+            ensure!(l.range.is_finite() && l.range > 0.0, "light {i} ({}): range {}", l.name, l.range);
+            ensure!(l.size.is_finite() && l.size > 0.0, "light {i} ({}): size {}", l.name, l.size);
+            ensure!(
+                l.inner_angle.is_finite() && l.outer_angle.is_finite() && 0.0 <= l.inner_angle && l.inner_angle <= l.outer_angle && l.outer_angle <= std::f32::consts::FRAC_PI_2,
+                "light {i} ({}): angles {}..{} rad",
+                l.name,
+                l.inner_angle,
+                l.outer_angle
+            );
+        }
         ensure!(self.texture_names.len() == self.textures.len(), "texture names and data differ in count");
         let tex_ok = |t: &Option<TextureRef>| t.is_none_or(|t| (t.texture as usize) < self.textures.len() && t.uv < 2);
         for (i, m) in self.materials.iter().enumerate() {
@@ -486,6 +545,7 @@ impl Model {
         let header = Header {
             bones: self.bones.clone(),
             joints: self.joints.clone(),
+            lights: self.lights.clone(),
             primitives: self.primitives.clone(),
             materials: self.materials.clone(),
             textures,
@@ -553,6 +613,7 @@ impl Model {
         let model = Model {
             bones: header.bones,
             joints: header.joints,
+            lights: header.lights,
             primitives: header.primitives,
             materials: header.materials,
             vertices,

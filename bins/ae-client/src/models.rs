@@ -33,7 +33,17 @@ pub fn parse_arg(text: &str) -> Result<ClassModel> {
     };
     let model = load(Path::new(file))?;
     let name = Path::new(file).file_stem().and_then(|s| s.to_str()).context("model file name")?.to_ascii_lowercase();
-    eprintln!("model {name} ({file}): {} vertices, {} joints, {} clip(s){}", model.vertices.len(), model.joints.len(), model.clips.len(), clip_names(&model));
+    eprintln!(
+        "model {name} ({file}): {} vertices, {} joints, {} clip(s){}{}",
+        model.vertices.len(),
+        model.joints.len(),
+        model.clips.len(),
+        clip_names(&model),
+        match model.lights.len() {
+            0 => String::new(),
+            n => format!(", {n} light(s)"),
+        }
+    );
     Ok(ClassModel { class, name, model: Arc::new(model) })
 }
 
@@ -66,6 +76,26 @@ pub fn fox() -> Result<ClassModel> {
     Ok(ClassModel { class: None, name: "fox".into(), model: Arc::new(load(&repo_root().join("assets/models/khronos/Fox/Fox.glb"))?) })
 }
 
+/// The Fox with a point light on its first bone: the bench scene of the
+/// models' lights, one appended light per unit.
+pub fn fox_with_light() -> Result<ClassModel> {
+    let mut fox = fox()?;
+    let mut model = (*fox.model).clone();
+    ensure!(!model.joints.is_empty(), "the Fox has no joints to carry a light");
+    model.lights.push(ae_model::ModelLight {
+        name: "bench".into(),
+        joint: 0,
+        kind: ae_model::LightKind::Point,
+        color: [6.0, 3.0, 1.5],
+        range: 15.0,
+        inner_angle: 0.0,
+        outer_angle: 0.0,
+        size: 3.0,
+    });
+    fox.model = Arc::new(model);
+    Ok(fox)
+}
+
 /// `target/models/<stem>.aemodel`, converted when missing or older than
 /// the glTF.
 fn converted(gltf: &Path) -> Result<PathBuf> {
@@ -73,7 +103,12 @@ fn converted(gltf: &Path) -> Result<PathBuf> {
     let out = repo_root().join("target/models").join(format!("{stem}.aemodel"));
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let source = modified(gltf).with_context(|| format!("no model {}", gltf.display()))?;
-    if modified(&out).is_some_and(|m| m >= source) {
+    // Also when the cache is of another format version (a newer engine).
+    let cached = || -> Option<u32> {
+        let bytes = std::fs::read(&out).ok()?;
+        (bytes.len() >= 12 && bytes[..8] == ae_model::MAGIC).then(|| u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
+    };
+    if modified(&out).is_some_and(|m| m >= source) && cached() == Some(ae_model::VERSION) {
         return Ok(out);
     }
     std::fs::create_dir_all(out.parent().unwrap())?;

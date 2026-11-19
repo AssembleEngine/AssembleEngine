@@ -149,6 +149,11 @@ pub struct LightFrame {
     /// reaches to the first, the others are spaced exponentially to the
     /// second, the last reaching past it.
     pub depths: (f32, f32),
+    /// The units' rows this frame (`units.instances`), whose models' lights
+    /// the pass appends; 0 when there are no units or no lights pass.
+    pub unit_rows: u32,
+    /// How many model lights those rows carry ([`crate::units::UnitRenderer::model_light_total`]).
+    pub unit_lights: u32,
 }
 
 /// The view depths of the part of the view between heights `y_lo` and
@@ -194,6 +199,9 @@ struct FrameUbo {
     forward: [f32; 4],
     grid: [u32; 4],
     slicing: [f32; 4],
+    /// x: the host's lights (where the models' append at); y: the units'
+    /// rows (their model lights); z, w: unused.
+    model: [u32; 4],
 }
 
 /// What the last completed frame of a slot cut.
@@ -318,8 +326,13 @@ impl LightRenderer {
     pub fn write_frame(&mut self, slot: usize, frame: &LightFrame, lights: &[Light]) {
         let n = lights.len().min(MAX_LIGHTS);
         let count = if frame.on { n } else { 0 };
+        // The model lights the append adds, after the host's: what fits
+        // under the cap (the rest is dropped, the append's writes past
+        // the count ignored).
+        let appended = if frame.on { (frame.unit_lights as usize).min(MAX_LIGHTS - count) } else { 0 };
         if let Some(bytes) = self.staging[slot].mapped() {
-            let header = [count as u32, 0, 0, (lights.len() - n) as u32];
+            let dropped = lights.len() - n + frame.unit_lights as usize * frame.on as usize - appended;
+            let header = [(count + appended) as u32, 0, 0, dropped as u32];
             bytes[..16].copy_from_slice(pipeline::slice_bytes(&header));
             let raw = pipeline::slice_bytes(&lights[..count]);
             bytes[16..16 + raw.len()].copy_from_slice(raw);
@@ -342,6 +355,7 @@ impl LightRenderer {
             forward: forward.extend(0.0).to_array(),
             grid: [TILES_X, TILES_Y, self.slices, if frame.on { 1 + self.unculled as u32 } else { 0 }],
             slicing: [frame.depths.0, (self.slices.max(2) - 1) as f32 / (frame.depths.1 / frame.depths.0).ln(), frame.extent.width.max(1) as f32, frame.extent.height.max(1) as f32],
+            model: [count as u32, if frame.on { frame.unit_rows } else { 0 }, 0, 0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
@@ -376,9 +390,10 @@ impl LightRenderer {
 
     /// The clusters' lists. Records inside a compute pass that writes
     /// [`Self::list`] and [`Self::clusters`]: copies the host's list in
-    /// (with its own barrier to the cull), then the cull.
-    /// Unculled ([`Self::set_unculled`]), only the copy.
-    pub fn record_cluster(&self, ctx: &PassContext<'_>) {
+    /// (with its own barrier to the cull), appends the units' model lights
+    /// ([`crate::units::UnitRenderer::record_lights`]), then culls.
+    /// Unculled ([`Self::set_unculled`]), only the copy and the append.
+    pub fn record_cluster(&self, ctx: &PassContext<'_>, units: Option<&crate::units::UnitRenderer>) {
         if !self.on[ctx.slot] {
             return;
         }
@@ -391,10 +406,7 @@ impl LightRenderer {
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             ctx.device.cmd_pipeline_barrier2(ctx.cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
-            if self.unculled {
-                return;
-            }
-            ctx.device.cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
+            let appended = units.is_some_and(|u| u.record_lights(ctx));
             let step = || {
                 let memory = [vk::MemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -403,9 +415,17 @@ impl LightRenderer {
                     .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
                 ctx.device.cmd_pipeline_barrier2(ctx.cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
             };
+            if self.unculled {
+                return;
+            }
+            step();
+            ctx.device.cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
             let listed = ((self.staged[ctx.slot] - HEADER_BYTES) / size_of::<Light>() as u64) as u32;
+            // The append may have made it longer than the host's list: walk
+            // the whole table (the shader stops at the list's count).
+            let groups = if appended { (MAX_LIGHTS as u32).div_ceil(64) } else { listed.div_ceil(64) };
             ctx.device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.bounds);
-            ctx.device.cmd_dispatch(ctx.cmd, listed.div_ceil(64), 1, 1);
+            ctx.device.cmd_dispatch(ctx.cmd, groups.max(1), 1, 1);
             step();
             ctx.device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.tiles);
             ctx.device.cmd_dispatch(ctx.cmd, TILES, 1, 1);
@@ -467,6 +487,6 @@ mod tests {
     #[test]
     fn light_is_64_bytes() {
         assert_eq!(size_of::<Light>(), 64);
-        assert_eq!(size_of::<FrameUbo>(), 128 + 16 * 6);
+        assert_eq!(size_of::<FrameUbo>(), 128 + 16 * 7);
     }
 }

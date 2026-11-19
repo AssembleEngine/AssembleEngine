@@ -85,6 +85,72 @@ fn rest_positions(m: &Model) -> Vec<Vec3> {
         .collect()
 }
 
+/// Punctual lights: a point light and a turned spot become model lights on
+/// their nodes' joints (engine position and direction from the pose), a
+/// directional light is ignored with a warning naming it, and the model
+/// round-trips with its lights.
+#[test]
+fn punctual_lights_ride_their_nodes() {
+    use ae_model::LightKind;
+
+    let mut b = Builder::default();
+    let pos = b.floats(&TRI, "VEC3");
+    let quarter = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    let gltf = b.finish(json!({
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1, 2, 3]}],
+        "extensionsUsed": ["KHR_lights_punctual"],
+        "extensions": {"KHR_lights_punctual": {"lights": [
+            {"type": "point", "color": [0.5, 0.4, 0.3], "intensity": 40.0, "range": 25.0},
+            {"type": "spot", "color": [1.0, 1.0, 1.0], "intensity": 10.0, "spot": {"innerConeAngle": 0.2, "outerConeAngle": 0.5}},
+            {"type": "directional", "color": [1.0, 1.0, 1.0], "intensity": 3.0}
+        ]}},
+        "nodes": [
+            {"name": "hull", "mesh": 0},
+            {"name": "lamp", "translation": [1.0, 2.0, 3.0], "extensions": {"KHR_lights_punctual": {"light": 0}}},
+            {"name": "headlight", "translation": [-2.0, 1.0, 0.0], "rotation": [quarter.x, quarter.y, quarter.z, quarter.w], "extensions": {"KHR_lights_punctual": {"light": 1}}},
+            {"name": "sun", "extensions": {"KHR_lights_punctual": {"light": 2}}}
+        ],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": pos}}]}]
+    }));
+    let c = convert(&gltf, None).unwrap();
+    let m = &c.model;
+    assert_eq!(m.lights.len(), 2, "the directional light is not a model light");
+    assert!(c.warnings.iter().any(|w| w.contains("sun") && w.contains("directional")), "{:?}", c.warnings);
+
+    let point = &m.lights[0];
+    assert_eq!(point.kind, LightKind::Point);
+    assert_eq!(point.name, "light (unnamed) on node lamp");
+    assert!(Vec3::from(point.color).abs_diff_eq(Vec3::new(0.5, 0.4, 0.3) * 40.0 * ae_model::CANDELA_TO_ENGINE, 1e-6), "{:?}", point.color);
+    assert_eq!((point.range, point.inner_angle, point.outer_angle), (25.0, 0.0, 0.0));
+    assert_eq!(point.size, 25.0 / 8.0);
+
+    // Its joint is the lamp node: the rest palette puts it where the node
+    // is, and the node's local -Z is the light's direction.
+    let palette = pose::rest_palette(m);
+    let m4 = palette[point.joint as usize];
+    let want = GLTF_TO_ENGINE * Vec3::new(1.0, 2.0, 3.0);
+    assert!(m4.transform_point3(Vec3::ZERO).abs_diff_eq(want, 1e-5), "{} vs {want}", m4.transform_point3(Vec3::ZERO));
+    // The hull's joint stays at the origin (no translation crept in).
+    assert!(palette[m.joints[0].bone as usize].transform_point3(Vec3::ZERO).length() < 1e-6);
+
+    // The spot: two angles, and a quarter turn about glTF +Y turns its
+    // local -Z to glTF -X (engine -Z, since glTF -X maps to engine -Z?):
+    // root (+Z to +X) after the turn: -Z -> -X -> engine -Z.
+    let spot = &m.lights[1];
+    assert_eq!(spot.kind, LightKind::Spot);
+    assert!(spot.inner_angle == 0.2 && spot.outer_angle == 0.5);
+    let m4 = palette[spot.joint as usize];
+    let dir = m4.transform_vector3(Vec3::NEG_Z).normalize();
+    let want = (GLTF_TO_ENGINE * (quarter * Vec3::NEG_Z)).normalize();
+    assert!(dir.abs_diff_eq(want, 1e-5), "{dir} vs {want}");
+    let _ = LightKind::Spot;
+
+    // The round trip keeps them.
+    let back = Model::from_bytes(&m.to_bytes()).unwrap();
+    assert_eq!(&back, m);
+}
+
 #[test]
 fn pieces_and_axes() {
     let mut b = Builder::default();

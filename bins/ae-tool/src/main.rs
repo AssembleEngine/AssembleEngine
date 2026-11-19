@@ -100,7 +100,7 @@ fn model_info(file: &str) -> Result<()> {
     let texture_bytes: usize = m.textures.iter().map(Vec::len).sum();
     println!("{file}: {} bytes, loaded in {:.3} ms", bytes.len(), best * 1e3);
     println!(
-        "  {} bones, {} joints, {} primitives, {} materials, {} vertices ({} bytes), {} triangles, {} textures ({} bytes), {} clips",
+        "  {} bones, {} joints, {} primitives, {} materials, {} vertices ({} bytes), {} triangles, {} textures ({} bytes), {} clips, {} lights",
         m.bones.len(),
         m.joints.len(),
         m.primitives.len(),
@@ -110,8 +110,12 @@ fn model_info(file: &str) -> Result<()> {
         m.indices.len() / 3,
         m.textures.len(),
         texture_bytes,
-        m.clips.len()
+        m.clips.len(),
+        m.lights.len()
     );
+    for (i, l) in m.lights.iter().enumerate() {
+        println!("  light {i} {:?} ({}): joint {}, range {} m, colour {:?}, angles {:.3}..{:.3} rad", l.kind, l.name, l.joint, l.range, l.color, l.inner_angle, l.outer_angle);
+    }
     println!("  bounds {:?} .. {:?}", m.bounds.min, m.bounds.max);
     let gpu_bytes: usize = m.primitives.iter().map(|p| p.vertex_count as usize * p.layout.words() * 4).sum();
     println!("  GPU vertices: {gpu_bytes} bytes");

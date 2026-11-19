@@ -1,0 +1,54 @@
+#version 460
+// lights.cluster: one invocation per unit row, one light per light of its
+// model, appended to the frame's list where the row's offset (written with
+// the rows) puts them. The light rides the node's joint: its palette
+// matrix gives its position and its direction (the node's local -Z,
+// glTF's convention). It is placed as the unit's model is drawn (fitted
+// and turned by the unit's heading and size); its range and colour are
+// the model's (metres, engine light units).
+#define LIGHT_SET 2
+#define LIGHTS_WRITE
+#include "lights.glsl"
+#include "units_common.glsl"
+#include "units_models.glsl"
+#include "units_dart.glsl"
+#include "units_lights.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= lf.model.y) {
+        return;
+    }
+    uint cls = min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u);
+    uvec2 range = classLights[cls];
+    if (range.y == 0u) {
+        return;
+    }
+    Unit unit = loadUnit(row);
+    uint pbase = poseOffset(row);
+    uint first = lf.model.x + unitLightAt[row];
+    float fit = modelClasses[cls].fit.x;
+    for (uint k = 0u; k < range.y; ++k) {
+        uint at = first + k;
+        if (at >= LIGHT_MAX) {
+            return;
+        }
+        ModelLight ml = modelLights[range.x + k];
+        uint bits = floatBitsToUint(ml.params.w);
+        uint kind = bits >> 16u;
+        mat3x4 m = palette[pbase + (bits & 0xffffu)];
+        vec3 modelPos = vec4(0.0, 0.0, 0.0, 1.0) * m;
+        vec3 modelDir = vec3(0.0, 0.0, -1.0) * mat3(m);
+        Light l;
+        l.position = place(unit, modelPos * fit);
+        l.range = ml.color.w;
+        l.color = ml.color.xyz;
+        l.kind = kind;
+        l.direction = kind == LIGHT_CONE ? normalize(orient(unit, normalize(modelDir))) : vec3(0.0, -1.0, 0.0);
+        l.halfLength = 0.0;
+        l.profile = vec4(ml.params.x, ml.params.y, ml.params.z, 0.0);
+        lights[at] = l;
+    }
+}

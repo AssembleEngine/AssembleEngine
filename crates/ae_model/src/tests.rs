@@ -20,6 +20,7 @@ fn sample_model() -> Model {
         }],
         vertices: vec![v(0.0, 0), v(1.0, 1), v(2.0, 1)],
         indices: vec![0, 1, 2],
+        lights: Vec::new(),
         texture_names: vec!["t".into()],
         textures: vec![tex],
         clips: vec![Clip {

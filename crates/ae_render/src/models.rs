@@ -115,6 +115,19 @@ pub struct Draw {
     pub first_index: u32,
 }
 
+/// A model light as `units_lights.glsl` reads it (32 bytes): the colour and
+/// range, the spot's cosines and source size, and the joint and kind.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct GpuModelLight {
+    /// rgb; w: the range (metres).
+    color: [f32; 4],
+    /// x, y: a spot's inner and outer cosines; z: the source size; w: the
+    /// joint in the low 16 bits, the kind (1 point, 2 spot) above it
+    /// (`f32` bits).
+    params: [f32; 4],
+}
+
 /// A unit class drawn with a model.
 #[derive(Clone, Debug)]
 pub struct ModelClass {
@@ -140,6 +153,14 @@ pub struct ModelSet {
     /// The animation table, vec4s: per model its bones, joints, clips,
     /// masks and rest transforms ([`animation`]).
     pub anim: OwnedBuffer,
+    /// How many lights the classes have (`units_lights.comp` appends them).
+    pub light_count: u32,
+    /// Per unit class, the range of its model's lights in the table
+    /// (first, count); the host's light offsets use it.
+    pub class_lights: Vec<[u32; 2]>,
+    /// `class_lights` and `model_lights` as the models' set binds them.
+    pub class_light_table: OwnedBuffer,
+    pub model_light_table: OwnedBuffer,
     images: Vec<OwnedImage>,
     samplers: Vec<vk::Sampler>,
     /// Texture descriptors (slot 0 first); the array's rest is unbound.
@@ -429,8 +450,15 @@ impl ModelSet {
         // the base material.
         let mut placed: Vec<(Vec<(u32, u32)>, u32)> = Vec::new();
         // Per unique model: its rest palette offset, its animation table
-        // entry (`GpuClass::pose`), its cull sphere.
-        let mut posed: Vec<(u32, [u32; 4], [f32; 4], [f32; 2])> = Vec::new();
+        // entry (`GpuClass::pose`), its cull sphere, its lights.
+        struct Posed {
+            rest_offset: u32,
+            pose: [u32; 4],
+            sphere: [f32; 4],
+            turned: [f32; 2],
+            lights: Vec<GpuModelLight>,
+        }
+        let mut posed: Vec<Posed> = Vec::new();
         let mut anim: Vec<[f32; 4]> = Vec::new();
         let mut rest: Vec<f32> = Vec::new();
         let (mut max_joints, mut max_bones) = (0u32, 0u32);
@@ -471,7 +499,20 @@ impl ModelSet {
             }
             let sphere = sphere.map(|v| v / footprint);
             let turned = turned_sphere(sphere, ae_model::pose::turned_reach(model) / footprint);
-            posed.push((rest_offset, pose, sphere, turned));
+            let lights = model
+                .lights
+                .iter()
+                .map(|l| GpuModelLight {
+                    color: [l.color[0], l.color[1], l.color[2], l.range],
+                    params: [
+                        if l.kind == ae_model::LightKind::Spot { l.inner_angle.cos() } else { 1.0 },
+                        if l.kind == ae_model::LightKind::Spot { l.outer_angle.cos() } else { 1.0 },
+                        l.size.max(1e-3),
+                        f32::from_bits(l.joint | ((if l.kind == ae_model::LightKind::Spot { 2 } else { 1 }) << 16)),
+                    ],
+                })
+                .collect();
+            posed.push(Posed { rest_offset, pose, sphere, turned, lights });
             unique.push(model.clone());
         }
 
@@ -479,6 +520,8 @@ impl ModelSet {
         let mut classes: Vec<ModelClass> = Vec::new();
         let mut table = vec![GpuClass::default(); max_classes];
         let mut class_model = vec![None; max_classes];
+        let mut class_lights = vec![[0u32; 2]; max_classes];
+        let mut model_lights: Vec<GpuModelLight> = Vec::new();
         // (masked, class, draw record, command)
         let mut pending: Vec<(bool, usize, GpuDraw, Draw)> = Vec::new();
         for (c, model) in models.iter().take(max_classes).enumerate() {
@@ -494,13 +537,17 @@ impl ModelSet {
                 pending.push((masked, classes.len(), record, Draw { class: c as u32, index_count: p.index_count, first_index }));
             }
             let (footprint, _) = fit(model);
-            let (rest_offset, pose, sphere, turned) = posed[m];
+            let Posed { rest_offset, pose, sphere, turned, lights } = &posed[m];
             let joints = model.joints.len() as u32;
-            table[c] = GpuClass { sphere, cmd: [0, model.primitives.len() as u32, rest_offset, joints], fit: [1.0 / footprint, turned[0], turned[1], 0.0], pose };
+            table[c] = GpuClass { sphere: *sphere, cmd: [0, model.primitives.len() as u32, *rest_offset, joints], fit: [1.0 / footprint, turned[0], turned[1], 0.0], pose: *pose };
+            if !lights.is_empty() {
+                class_lights[c] = [model_lights.len() as u32, lights.len() as u32];
+                model_lights.extend_from_slice(lights);
+            }
             class_model[c] = Some(classes.len());
             classes.push(ModelClass {
                 class: c as u32,
-                palette_offset: rest_offset,
+                palette_offset: *rest_offset,
                 joints,
                 bones: model.bones.len() as u32,
                 visible_base,
@@ -554,6 +601,8 @@ impl ModelSet {
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&records), storage, "model draws")?);
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&class_commands), storage, "model class commands")?);
             made.push(upload::buffer(gpu, pipeline::slice_bytes(&anim), storage, "model animation")?);
+            made.push(upload::buffer(gpu, pipeline::slice_bytes(&class_lights), storage, "model class lights")?);
+            made.push(upload::buffer(gpu, pipeline::slice_bytes(&model_lights), storage, "model lights")?);
             Ok(())
         })();
         if let Err(err) = result {
@@ -562,7 +611,7 @@ impl ModelSet {
             }
             return Err(err);
         }
-        let [geometry, materials, class_table, draw_table, class_commands, anim]: [OwnedBuffer; 6] = made.try_into().ok().unwrap();
+        let [geometry, materials, class_table, draw_table, class_commands, anim, class_light_table, model_light_table]: [OwnedBuffer; 8] = made.try_into().ok().unwrap();
         Ok(Self {
             geometry,
             index_offset,
@@ -571,6 +620,10 @@ impl ModelSet {
             draw_table,
             class_commands,
             anim,
+            light_count: model_lights.len() as u32,
+            class_lights,
+            class_light_table,
+            model_light_table,
             images: std::mem::take(&mut tex.images),
             samplers: tex.samplers.drain(..).map(|(_, s)| s).collect(),
             slots,
@@ -614,7 +667,16 @@ impl ModelSet {
             unsafe { gpu.device.destroy_sampler(s, None) };
         }
         self.samplers.clear();
-        for b in [&mut self.geometry, &mut self.materials, &mut self.class_table, &mut self.draw_table, &mut self.class_commands, &mut self.anim] {
+        for b in [
+            &mut self.geometry,
+            &mut self.materials,
+            &mut self.class_table,
+            &mut self.draw_table,
+            &mut self.class_commands,
+            &mut self.anim,
+            &mut self.class_light_table,
+            &mut self.model_light_table,
+        ] {
             b.destroy(gpu);
         }
     }

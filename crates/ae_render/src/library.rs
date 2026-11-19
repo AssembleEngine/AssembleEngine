@@ -588,6 +588,16 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
     if clusters && !written(LibraryPass::LightsCluster) {
         return Err(error("the graph declares `lights.clusters` but no `lights.cluster` pass writes it".into()));
     }
+    // The pass appends the units' model lights from the palettes
+    // `units.pose` writes: it must run after it.
+    if clusters && written(LibraryPass::UnitsPose) {
+        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib));
+        if let (Some(cluster), Some(pose)) = (first(LibraryPass::LightsCluster), first(LibraryPass::UnitsPose))
+            && cluster < pose
+        {
+            return Err(error("the graph clusters the lights before `units.pose`; the pass appends the units' model lights from the palettes it writes".into()));
+        }
+    }
     Ok(())
 }
 
@@ -762,6 +772,11 @@ mod tests {
         };
         let g = base();
         assert_eq!(shadows(&g), Ok(()));
+        let mut g = base();
+        let (cluster, pose) = (pass(&g, LibraryPass::LightsCluster), pass(&g, LibraryPass::UnitsPose));
+        g.passes.swap(cluster, pose);
+        let e = shadows(&g).unwrap_err();
+        assert!(e.contains("clusters the lights before `units.pose`"), "{e}");
         let mut g = base();
         g.passes.retain(|p| p.record != LibraryPass::ShadowsParticles);
         let e = shadows(&g).unwrap_err();

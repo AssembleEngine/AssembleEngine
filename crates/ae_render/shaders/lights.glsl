@@ -50,6 +50,7 @@ layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
     vec4 camForward;
     uvec4 grid;       // tiles x, y, slices; w: 1 when the lights are on this frame, 2 on and unculled (every light at every pixel: the reference)
     vec4 slicing;     // x: first slice's far depth; y: slices per log unit of depth; z, w: viewport size (px)
+    uvec4 model;      // x: the host's lights (where the units' model lights append at); y: the units' rows; z, w: unused
 } lf;
 
 #ifdef LIGHTS_WRITE

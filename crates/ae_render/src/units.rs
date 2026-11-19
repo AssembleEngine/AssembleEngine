@@ -420,6 +420,12 @@ struct Models {
     jobs: Vec<u32>,
     pose: vk::Pipeline,
     scatter: vk::Pipeline,
+    /// Per slot: the offset of each unit's model lights in the frame's
+    /// light list (the host writes it with the rows;
+    /// `units_lights.comp` reads it), and how many there are in all.
+    light_offsets: Vec<OwnedBuffer>,
+    light_totals: Vec<u32>,
+    lights_append: vk::Pipeline,
     /// The indirect buffer's initial contents, copied in by the reset.
     template: OwnedBuffer,
     opaque: vk::Pipeline,
@@ -497,10 +503,19 @@ impl Models {
     fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize) {
         let class_of = |r: usize| (stream.columns[ATTR_CLASS][r] as usize).min(MAX_CLASSES - 1);
         let mut words = vec![0u32; 3 * capacity];
+        // Model light offsets, in row order (the appended lights keep the
+        // list's order deterministic; the host has the rows already).
+        let mut offsets = vec![0u32; capacity];
+        let mut lights = 0u32;
         let (ranges, scratch, _) = self.set.palette_layout(capacity as u32);
         let (mut range, mut scratch, mut jobs) = (ranges as u32, scratch as u32, 0);
         let fit = self.table_cells;
         for r in 0..rows {
+            let n = self.set.class_lights[class_of(r)][1];
+            if n > 0 {
+                offsets[r] = lights;
+                lights = lights.saturating_add(n);
+            }
             let Some(mc) = self.set.class_model[class_of(r)] else { continue };
             let mc = &self.set.classes[mc];
             let pose = stream.columns[ATTR_POSE][r];
@@ -517,8 +532,12 @@ impl Models {
             };
         }
         self.jobs[slot] = jobs as u32;
+        self.light_totals[slot] = lights;
         if let Some(bytes) = self.rows[slot].mapped() {
             bytes[..words.len() * 4].copy_from_slice(pipeline::slice_bytes(&words));
+        }
+        if let Some(bytes) = self.light_offsets[slot].mapped() {
+            bytes[..offsets.len() * 4].copy_from_slice(pipeline::slice_bytes(&offsets));
         }
     }
 }
@@ -581,18 +600,19 @@ impl UnitRenderer {
         let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
         // Set 1 of the models: seven storage buffers, the texture array
         // (partially bound), the models' animation table, the units'
-        // animation table, the frame's writes to it and their places.
+        // animation table, the frame's writes to it and their places, and
+        // the models' lights (their tables and the frame's offsets).
         let model_layout = match &model_set {
             Some(_) => Some(unsafe {
                 let storage = |b: u32| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(all);
                 let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
                 bindings.push(vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(models::MAX_TEXTURES).stage_flags(vk::ShaderStageFlags::FRAGMENT));
                 bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
-                for b in 9..12 {
+                for b in 9..15 {
                     bindings.push(storage(b).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 }
                 let none = vk::DescriptorBindingFlags::empty();
-                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none, none, none]).collect::<Vec<_>>();
+                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none, none, none, none, none, none]).collect::<Vec<_>>();
                 let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
                 device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings).push_next(&mut flag_info), None)?
             }),
@@ -625,7 +645,7 @@ impl UnitRenderer {
             let m = model_layout.is_some() as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 11 * m) * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 14 * m) * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: (4 + models::MAX_TEXTURES * m) * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n * (1 + m)).pool_sizes(&sizes), None)?;
@@ -735,6 +755,9 @@ impl UnitRenderer {
         let table = OwnedBuffer::new(gpu, BufferDesc { size: (table_cells * size_of::<Cell>()) as u64, usage: storage }, MemoryLocation::GpuOnly, "unit animation table")?;
         let staged = (0..frames_in_flight).map(|_| host((table_cells * size_of::<Cell>()) as u64, storage, "unit animation writes")).collect::<Result<Vec<_>>>()?;
         let staged_at = (0..frames_in_flight).map(|_| host(table_cells as u64 * 4, storage, "unit animation write places")).collect::<Result<Vec<_>>>()?;
+        let light_offsets = (0..frames_in_flight)
+            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: storage }, MemoryLocation::CpuToGpu, "unit light offsets"))
+            .collect::<Result<Vec<_>>>()?;
         let template = upload::buffer(gpu, &set.template, vk::BufferUsageFlags::TRANSFER_SRC, "unit indirect template")?;
         let layouts = vec![set_layout; frames_in_flight];
         let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }?;
@@ -753,10 +776,15 @@ impl UnitRenderer {
             for (b, k) in cells.iter().enumerate() {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(9 + b as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(k));
             }
+            let lights = [info(&set.class_light_table), info(&set.model_light_table), info(&light_offsets[slot])];
+            for (b, k) in lights.iter().enumerate() {
+                writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(12 + b as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(k));
+            }
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
         let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout).context("unit pose pipeline")?;
         let scatter = pipeline::compute_pipeline(device, spirv!("units_anim_writes.comp"), pipeline_layout).context("unit animation write pipeline")?;
+        let lights_append = pipeline::compute_pipeline(device, spirv!("units_lights.comp"), pipeline_layout).context("unit light append pipeline")?;
         let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true).context("unit model pipeline")?;
         let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true).context("unit masked model pipeline")?;
         let caster = match casts {
@@ -782,6 +810,9 @@ impl UnitRenderer {
             jobs: vec![0; frames_in_flight],
             pose,
             scatter,
+            light_offsets,
+            light_totals: vec![0; frames_in_flight],
+            lights_append,
             template,
             opaque,
             masked,
@@ -1007,6 +1038,50 @@ impl UnitRenderer {
         }
     }
 
+    /// Whether any unit class's model has lights (the lights pass appends
+    /// them, even with no host light).
+    pub fn has_model_lights(&self) -> bool {
+        self.models.as_ref().is_some_and(|m| m.set.light_count > 0)
+    }
+
+    /// `slot`'s model lights in all (one per unit of a class whose model
+    /// has any), as its stream's rows were written.
+    pub fn model_light_total(&self, slot: usize) -> u32 {
+        self.models.as_ref().map_or(0, |m| m.light_totals[slot])
+    }
+
+    /// This frame's model lights, appended to the frame's light list: one
+    /// per unit of a class whose model has any, at the pose the units are
+    /// drawn at. The `lights.cluster` pass calls this between its copy and
+    /// its bounds; it records one dispatch, reading [`Self::instances`] and
+    /// [`Self::palette`] (its offsets by row are host-written with the
+    /// rows) and writing the light list. Returns whether any were
+    /// appended.
+    pub fn record_lights(&self, ctx: &PassContext<'_>) -> bool {
+        let Some(m) = &self.models else { return false };
+        let rows = self.rows(ctx.slot);
+        if rows == 0 || m.set.light_count == 0 || m.light_totals[ctx.slot] == 0 {
+            return false;
+        }
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let mut sets = self.bound_sets(ctx.slot);
+        sets.push(self.light_sets[ctx.slot]);
+        unsafe {
+            // The pose pass's palette writes (an earlier pass) to the
+            // append's reads.
+            let memory = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
+            device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
+            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &sets, &[]);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.lights_append);
+            device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
+        }
+        true
+    }
+
     /// Frustum culling. Records inside a compute pass that reads
     /// [`Self::instances`] and writes [`Self::visible`] and
     /// [`Self::indirect`].
@@ -1116,12 +1191,12 @@ impl UnitRenderer {
         let device = &gpu.device;
         if let Some(mut m) = self.models.take() {
             unsafe {
-                for p in [m.pose, m.scatter, m.opaque, m.masked].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
+                for p in [m.pose, m.scatter, m.opaque, m.masked, m.lights_append].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
                     device.destroy_pipeline(p, None);
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);
             }
-            for b in m.rows.iter_mut().chain(&mut m.staged).chain(&mut m.staged_at) {
+            for b in m.rows.iter_mut().chain(&mut m.staged).chain(&mut m.staged_at).chain(&mut m.light_offsets) {
                 b.destroy(gpu);
             }
             m.table.destroy(gpu);

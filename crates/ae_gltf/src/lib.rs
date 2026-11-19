@@ -14,18 +14,23 @@
 //!   JOINTS_0/1 + WEIGHTS_0/1 (the four strongest kept, renormalised);
 //!   sparse accessors;
 //! * animations as clips (translation, rotation, scale; their keys and
-//!   interpolation as they are).
+//!   interpolation as they are);
+//! * `KHR_lights_punctual`: point and spot lights become
+//!   [`ae_model::ModelLight`]s on the joint of the node carrying them
+//!   (their colour already in the engine's units). Directional lights are
+//!   ignored with a warning naming them: the engine has one fixed sun.
 //!
 //! Warned and dropped: TEXCOORD_2+, COLOR_1+, more than four influences,
 //! morph targets and their weight channels, points and lines, cameras,
-//! lights (M12), unknown optional extensions. Refused: any required
-//! extension besides the three above (Draco and meshopt among them).
+//! directional lights, unknown optional extensions. Refused: any required
+//! extension besides the four above (Draco and meshopt among them).
 
 mod mesh;
 pub mod textures;
 
 use ae_model::{
-    AlphaMode, Bone, Bounds, Channel, Clip, Filter, GLTF_TO_ENGINE, Interpolation, Joint, Material, Model, Path as BonePath, Primitive, Range, Sampler, TextureRef, UvTransform, Wrap, pose,
+    AlphaMode, Bone, Bounds, CANDELA_TO_ENGINE, Channel, Clip, Filter, GLTF_TO_ENGINE, Interpolation, Joint, LightKind, Material, Model, ModelLight, Path as BonePath, Primitive, Range, Sampler,
+    TextureRef, UNBOUNDED_RANGE, UvTransform, Wrap, pose,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::Engine as _;
@@ -34,7 +39,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Required extensions the converter handles.
-pub const ACCEPTED_EXTENSIONS: [&str; 3] = ["KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_texture_basisu"];
+pub const ACCEPTED_EXTENSIONS: [&str; 4] = ["KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_texture_basisu", "KHR_lights_punctual"];
 
 pub struct Converted {
     pub model: Model,
@@ -179,9 +184,6 @@ impl<'a> Converter<'a> {
         if self.doc.cameras().len() > 0 {
             self.warn("cameras ignored".into());
         }
-        if self.doc.as_json().extensions_used.iter().any(|e| e == "KHR_lights_punctual") {
-            self.warn("KHR_lights_punctual: lights ignored until M12".into());
-        }
         for node in order {
             if let Some(m) = node.mesh() {
                 self.add_mesh(&node, &m)?;
@@ -202,6 +204,51 @@ impl<'a> Converter<'a> {
         let rest = Mat4::from_cols_array_2d(&node.transform().matrix());
         let (t, r, s) = node.transform().decomposed();
         let name = node.name().map(str::to_owned).unwrap_or_else(|| format!("node{}", node.index()));
+        if let Some(light) = node.light() {
+            let what = format!("light {} on node {}", light.name().unwrap_or("(unnamed)"), name);
+            let kind = light.kind();
+            let intensity = light.intensity();
+            let color = light.color();
+            let range = light.range();
+            match kind {
+                gltf::khr_lights_punctual::Kind::Directional => {
+                    // The engine has one sun; a directional light on a unit
+                    // would swing it, and instancing would make one per unit.
+                    self.warn(format!("{what}: directional light ignored (the engine's sun is fixed)"));
+                }
+                kind => {
+                    let joint = self.joint(bone, Mat4::IDENTITY)?;
+                    let (kind, inner_angle, outer_angle) = match kind {
+                        gltf::khr_lights_punctual::Kind::Spot { inner_cone_angle, outer_cone_angle } => {
+                            let outer = outer_cone_angle.clamp(1e-3, std::f32::consts::FRAC_PI_2);
+                            (LightKind::Spot, inner_cone_angle.clamp(0.0, outer), outer)
+                        }
+                        _ => (LightKind::Point, 0.0, 0.0),
+                    };
+                    let range = match range {
+                        Some(r) if r.is_finite() && r > 0.0 => r,
+                        Some(r) => {
+                            self.warn(format!("{what}: range {r} is not positive; using {UNBOUNDED_RANGE} m"));
+                            UNBOUNDED_RANGE
+                        }
+                        None => UNBOUNDED_RANGE,
+                    };
+                    let color = color.map(|c| c * intensity * CANDELA_TO_ENGINE);
+                    self.model.lights.push(ModelLight {
+                        name: what,
+                        joint: joint.into(),
+                        kind,
+                        color,
+                        range,
+                        inner_angle,
+                        outer_angle,
+                        // A source an eighth of the range across: the falloff
+                        // halves at that distance.
+                        size: (range / 8.0).max(0.05),
+                    });
+                }
+            }
+        }
         self.model.bones.push(Bone { name, parent: Some(parent), rest: rest.to_cols_array(), translation: t, rotation: r, scale: s });
         order.push(node.clone());
         for c in node.children() {

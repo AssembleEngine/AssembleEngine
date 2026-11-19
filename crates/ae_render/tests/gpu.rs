@@ -784,6 +784,126 @@ fn terrain_edits_reach_the_heightfield() {
     assert_clean(&gpu);
 }
 
+/// The models' punctual lights (M12, `KHR_lights_punctual`): with no host
+/// light, a unit whose model carries a point light lights the ground
+/// around it, and a spot lights the ground its node's -Z faces and not the
+/// other side. The clustered frame equals the unculled reference (the
+/// append is the only source of both), the light is counted, a model
+/// without lights changes nothing, and a second frame is byte-identical.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn model_lights_light_the_ground() {
+    use ae_model::{Bone, Joint, LightKind, Material, Model, ModelLight};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec4};
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let bone = |name: &str, parent: Option<u32>, y: f32| Bone { name: name.into(), parent, rest: Mat4::from_translation(glam::Vec3::new(0.0, y, 0.0)).to_cols_array(), translation: [0.0, y, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] };
+    let model_with = |light: ModelLight| {
+        let mut m = Model {
+            bones: vec![bone("root", None, 0.0), bone("lamp", Some(0), 1.0)],
+            joints: vec![Joint { bone: 0, inverse_bind: identity }, Joint { bone: 1, inverse_bind: identity }],
+            lights: vec![light],
+            materials: vec![Material { name: "m".into(), base_color: [0.5, 0.5, 0.5, 1.0], ..Default::default() }],
+            ..Default::default()
+        };
+        model_box(&mut m, [-1.0, 0.0, -1.0], [1.0, 1.0, 1.0], 0);
+        m.bounds = ae_model::Bounds { min: [-1.0, 0.0, -1.0], max: [1.0, 1.0, 1.0] };
+        m.merge_primitives();
+        m.validate().unwrap();
+        m
+    };
+    let point = model_with(ModelLight { name: "lamp".into(), joint: 1, kind: LightKind::Point, color: [40.0, 16.0, 5.0], range: 40.0, inner_angle: 0.0, outer_angle: 0.0, size: 4.0 });
+    // A wide cone, so the ground in front of the unit (past its own model)
+    // is inside it; model -z is world -z with the heading +x.
+    let spot = model_with(ModelLight { name: "headlight".into(), joint: 1, kind: LightKind::Spot, color: [5.0, 10.0, 30.0], range: 40.0, inner_angle: 0.9, outer_angle: 1.2, size: 4.0 });
+    let mut unlit = point.clone();
+    unlit.lights.clear();
+    unlit.validate().unwrap();
+
+    // Two units, both facing +x, far enough apart that their lights miss
+    // each other: the first has the point light, the second the spot.
+    let units = [(450.0f32, 512.0f32, 0u32), (574.0, 512.0, 1u32)];
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for &(x, y, class) in &units {
+        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), class].into_iter().enumerate() {
+            columns[a].push(word);
+        }
+    }
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = None;
+    let mut render = |point: Arc<Model>, spot: Arc<Model>, unculled: bool| -> (Vec<u8>, ae_render::lights::LightStats) {
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
+        let classes = vec![UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [0.5; 3], floats: false }];
+        let setup = UnitsSetup { feed, capacity: 16, classes, min_pixels: 8.0, models: vec![Some(point), Some(spot)], rigs: Vec::new() };
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
+        if unculled {
+            app = app.with_unculled_lights();
+        }
+        let view = app.view();
+        {
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.45;
+            view.camera.distance = 260.0;
+            view.fog = false;
+            camera = Some(view.camera);
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        let stats = *app.light_stats().lock().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        (pixels, stats)
+    };
+    let dark = render(Arc::new(unlit.clone()), Arc::new(unlit.clone()), false).0;
+    let (lit, stats) = render(Arc::new(point.clone()), Arc::new(spot.clone()), false);
+    let reference = render(Arc::new(point.clone()), Arc::new(spot.clone()), true).0;
+    let again = render(Arc::new(point.clone()), Arc::new(spot.clone()), false).0;
+    assert_eq!(lit, again, "the appended lights are deterministic");
+    assert_eq!(lit, reference, "clustered equals every light at every pixel");
+    assert_eq!((stats.lights, stats.dropped), (2, 0), "one light per unit was appended: {stats:?}");
+
+    let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
+    let project = |x: f32, y: f32, h: f32| -> (f32, f32) {
+        let clip = view_proj * Vec4::new(x, h, y, 1.0);
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+    };
+    let rgb = |pixels: &[u8], (u, v): (f32, f32)| -> [i32; 3] {
+        let i = (v as usize * extent.width as usize + u as usize) * 4;
+        [pixels[i] as i32, pixels[i + 1] as i32, pixels[i + 2] as i32]
+    };
+    let ground = 50.0;
+    // Beside the point light's unit, clear of its model: its warm light
+    // raises red much more than blue.
+    let near = project(462.0, 512.0, ground);
+    let (was, now) = (rgb(&dark, near), rgb(&lit, near));
+    let gain = |c: usize| now[c] - was[c];
+    assert!(gain(0) > 8 && gain(0) > 2 * gain(2), "point light: {was:?} -> {now:?}");
+    // In front of the spot (world -z) and behind it (world +z): its blue
+    // light raises blue, and nothing behind it.
+    let front = project(574.0, 500.0, ground);
+    let behind = project(574.0, 526.0, ground);
+    let (was, now) = (rgb(&dark, front), rgb(&lit, front));
+    let gain = |c: usize| now[c] - was[c];
+    assert!(gain(2) > 8 && gain(2) > 2 * gain(0), "spot front: {was:?} -> {now:?}");
+    assert_eq!(rgb(&lit, behind), rgb(&dark, behind), "the spot lights nothing behind its node");
+    assert_clean(&gpu);
+}
+
 /// A 64 x 64-cell map (8 m cells) from `ground(x, y)` and `material(x, y)`
 /// seen from straight above its centre at `distance`, rendered offscreen with `tileset`
 /// (and its weights view if `weights`): the pixels and a world → pixel

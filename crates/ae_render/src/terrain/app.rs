@@ -820,12 +820,20 @@ impl RenderApp for TerrainApp {
                 planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
             });
             let clustered = self.wiring.as_ref().is_some_and(|w| w.resources.contains(&Some(LibraryResource::LightClusters)));
+            // The units' models may carry lights, which the pass appends
+            // even with no host light.
+            let unit_rows = self.unit_renderer.as_ref().map_or(0, |u| u.rows(slot));
+            // The append needs the rows; without them the slot's total is
+            // stale (no stream this frame) and must not reach the header.
+            let unit_lights = if unit_rows > 0 { self.unit_renderer.as_ref().map_or(0, |u| u.model_light_total(slot)) } else { 0 };
+            let model_lights = unit_lights > 0 && self.unit_renderer.as_ref().is_some_and(|u| u.has_model_lights());
             // The map's heights, with room above for the units, the
             // particles and the lights over them.
             let i = &self.source.info;
             let (y_lo, y_hi) = (i.height_offset, i.height_offset + i.height_scale + 80.0);
             let depths = crate::lights::depth_range(params.view_proj, params.cam_pos, axes[2], camera.near(), y_lo, y_hi);
-            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on: clustered && !list.is_empty(), depths };
+            let on = clustered && (!list.is_empty() || model_lights);
+            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on, depths, unit_rows, unit_lights };
             lights.write_frame(slot, &frame, &list);
             *self.light_stats.lock().unwrap_or_else(|p| p.into_inner()) = lights.stats();
             self.frame_lights = list;
@@ -1038,7 +1046,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     }
                 }
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
-                LibraryPass::LightsCluster => self.lights.context("lights not created")?.record_cluster(ctx),
+                LibraryPass::LightsCluster => self.lights.context("lights not created")?.record_cluster(ctx, self.units),
                 LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
