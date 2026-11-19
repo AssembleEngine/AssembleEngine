@@ -3111,6 +3111,15 @@ From M12 (2026-11-19):
   scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
   from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4), when the
   scene has light above 1; until then the exposure is fixed (`--exposure`).
+- **Lights seen in the air (participating media, maybe particles).** A light with nothing
+  opaque near it (a flare or tracer in the air, a flash over water or a cliff edge) shows
+  nothing today: only surfaces and particles take light. Let a scene define a medium (haze,
+  dust, smoke, fog: a density and colour, global or in volumes) that the lights scatter in, so
+  they show as glows or shafts in the air. Options to weigh: froxel in-scattering on the light
+  clusters' grid (with the sun's shadow map for shafts), an analytic glow per light (the
+  integral of its falloff along the view ray, cheap but without occlusion), or emitting
+  particles (dust or sparks) for a light to light. Bloom (M12 step 4) covers only the sources
+  themselves.
 
 ## Later improvements
 
