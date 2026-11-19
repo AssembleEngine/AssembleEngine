@@ -15,7 +15,7 @@ ae-tool model info FILE.aemodel                    # parts, textures, clips, loa
 
 ## The format
 
-Little-endian: magic `AEMODEL\0`, version (u32, now 2: primitives have a layout), header length (u32), a JSON header padded
+Little-endian: magic `AEMODEL\0`, version (u32, now 3: models carry lights), header length (u32), a JSON header padded
 to 16 bytes, then a blob. The header's byte ranges point into the blob, 16-byte aligned. A model
 of another version is refused ("convert it again").
 
@@ -51,6 +51,12 @@ of another version is refused ("convert it again").
   - Basis Universal KTX2 (`KHR_texture_basisu`, ETC1S or UASTC): transcoded to BC7, every level
     it has. The runtime needs no transcoder.
   - The same image used as colour and as data is stored twice (sRGB and UNORM).
+- **Lights**: `KHR_lights_punctual` point and spot lights, each on the joint of the node that
+  carries it (a joint with the identity inverse bind), so it follows the node's pose. A light
+  shines along its node's local -Z (glTF's convention). The colour is stored in the engine's
+  light units (`CANDELA_TO_ENGINE`: 100 cd = 1.0); a glTF `range` absent (infinite) becomes
+  `UNBOUNDED_RANGE` (10 km); the source size is `range / 8`. The renderer appends one light per
+  unit and model light to the frame's clustered light list (`docs/PLAN.md`, M12).
 - **Clips**: glTF animations as data: per channel a bone, a path (translation, rotation, scale), the
   interpolation (step, linear, cubic spline) and the keys as they are. `pose::Pose::sample` plays
   them (slerp for linear rotations; held at the first and last key outside them).
@@ -70,8 +76,17 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
 - **Resources**: one geometry buffer (every model's vertices packed per primitive in its layout,
   read by vertex pulling, then every index); one material table; one partially bound array of
   1024 textures the materials index; an animation table (bones, joints, clips, baked frames); one
-  palette buffer (`units.palette`); per frame slot a rows buffer (pose offsets and jobs). The
-  visible list holds per model class a region for the camera and one per shadow cascade.
+  palette buffer (`units.palette`); per frame slot a rows buffer (pose offsets and jobs) and a
+  light-offset buffer. The visible list holds per model class a region for the camera and one
+  per shadow cascade.
+- **Lights** (`units_lights.comp`, M12): each model's `ModelLight`s are a table per class; when
+  the stream's rows are written, the host also writes each row's offset in the frame's light
+  list and the slot's total. The `lights.cluster` pass appends one light per unit and model
+  light, between its copy and its bounds: the light's palette joint gives its world position
+  and direction (the node's -Z), placed as the model is drawn (fitted, turned, at the unit's
+  height and drawn size). Host lights come first, then model lights in row order; the list is
+  capped at `MAX_LIGHTS` and the rest is counted as dropped. A graph that clusters the lights
+  before `units.pose` is rejected: the append reads the palettes it writes.
 - **Commands**: one `VkDrawIndexedIndirectCommand` per (class, primitive), with a draw record
   (material, class, vertex base and layout, the class's region of the visible list) the shaders
   read by `gl_DrawID`. Opaque commands first, then alpha-masked ones: two pipelines, because a
@@ -280,11 +295,25 @@ Decisions taken with the user (docs/PLAN.md, M11):
 - More than four influences: the four strongest kept and renormalised, with a warning.
 - TEXCOORD_2 and above, COLOR_1 and above: dropped, with a warning.
 - Non-uniform node scale: kept (bones are full matrices).
-- Taken extensions: `KHR_texture_transform`, `KHR_materials_emissive_strength`, `KHR_texture_basisu`.
-  Any other required extension (Draco, meshopt, ...) fails the conversion, naming it; optional
-  ones are ignored with a warning.
+- Taken extensions: `KHR_texture_transform`, `KHR_materials_emissive_strength`, `KHR_texture_basisu`,
+  `KHR_lights_punctual`. Any other required extension (Draco, meshopt, ...) fails the conversion,
+  naming it; optional ones are ignored with a warning.
 - Morph targets and their weight channels, points and lines, cameras: dropped, with a warning.
-- Lights (`KHR_lights_punctual`): ignored until M12.
+- Lights (`KHR_lights_punctual`): point and spot become model lights (above) with the intensity in
+  candela mapped by `CANDELA_TO_ENGINE`. Deliberate deviations from the spec, all documented in
+  `ae_model`:
+  - **Directional** lights are ignored with a warning naming the light and its node: the engine
+    has one fixed sun, and a directional light on a unit would swing the scene's light with the
+    unit's facing (and instancing gives one per unit).
+  - **Intensity** is a single documented candela-to-engine-unit constant, not photometric
+    calibration.
+  - **Range** is always finite: an absent range is `UNBOUNDED_RANGE` (10 km), so its cull keeps it
+    in every cluster instead of truly infinite reach.
+  - **Falloff** is the engine's `(1 − d²/r²)² / (1 + d²/s²)`, not the spec's recommended
+    inverse-square window near the edge.
+  - **Spot angles** are clamped to [0, π/2] and inner ≤ outer.
+  - **Beams** (a capsule along a segment) are engine-only and not expressible in the extension, so
+    no glTF asset produces one.
 
 ## Measured
 

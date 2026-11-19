@@ -2461,7 +2461,7 @@ Steps (commit and stop for compaction after each):
     against B10G11R11F's 5–6 (banding and hue shifts in dark gradients), and alpha. The glow
     target can be B10G11R11F (as RA3-graphics').
 - Step 2, first part: the light list, the clusters, diffuse light, the particles lit, the
-  bursts' lights — done (2026-11-19). glTF lights (`KHR_lights_punctual`) are the second part.
+  bursts' lights — done (2026-11-19).
   - `ae_render::lights`, `shaders/lights*.{glsl,comp}`. A `Light` (64 bytes) is a point, a
     cone or a beam, with `~/particles`' falloff, distance measured in units of the light's
     source size (`profile.z`). This way one formula suits a muzzle flash and a burning tank.
@@ -2534,15 +2534,54 @@ Steps (commit and stop for compaction after each):
     reference test passed only because the reference ran after the clustered frame and got
     its freed memory. The pass now always copies. The test renders the reference first and
     checks that it, too, is lit.
-  - For the second part (glTF lights, appended on the GPU from the posed units):
-    - `lights_bounds` takes its group count from the host (the staged count). Lights appended
-      on the GPU need an indirect dispatch written by the append, or `MAX_LIGHTS / 64` groups
-      (the shader stops at `lightCount`). Otherwise they stay unbounded and light nothing,
-      with nothing to flag it.
-    - The append caps at `MAX_LIGHTS` (`LIGHT_MAX`, which also sizes `lightBounds`) and
-      counts the rest in `dropped`.
-    - It runs inside `lights.cluster` after the copy and before the bounds. The pass is
-      declared after `units.pose`, which writes the palettes it reads.
+- Step 2, second part: glTF `KHR_lights_punctual` lights, appended on the GPU from the posed
+  units — done (2026-11-20).
+  - **The model carries them.** `ae_model` version 3: `ModelLight { name, joint, kind
+    (Point | Spot), color, range, inner_angle, outer_angle, size }`. The joint is the light
+    node's (an identity inverse bind), so the palette matrix gives its position, and its
+    direction is that node's local -Z through the pose (glTF's convention). The converter
+    reads `KHR_lights_punctual` (`ae_gltf`), clamps spot angles to [0, π/2] and inner ≤
+    outer, and maps candela to the engine's units with `CANDELA_TO_ENGINE` (100 cd = 1.0)
+    and an absent `range` (infinite in the spec) to `UNBOUNDED_RANGE` (10 km). Its source
+    size is `range / 8` (the falloff halves there). A **directional** light is ignored with
+    a warning naming it and its node: the engine has one fixed sun, and a per-unit
+    directional light would swing the scene with the unit's facing. The engine's falloff
+    formula stays (a documented deviation from the spec's recommended window); beams remain
+    engine-only.
+  - **Appended where the rows are.** `UnitRenderer::write_rows` (which already walks a new
+    stream's rows) also writes each row's light offset, in row order, and the slot's total;
+    the append is one dispatch, `units_lights.comp`, in the `lights.cluster` pass between the
+    copy and the bounds (a host-side prefix first cost 500 µs a frame walked serially by one
+    workgroup; the rows are already being walked on the host). The dispatch walks every unit
+    row, reads the light's palette joint (the `units.pose` pass, an earlier graph pass, writes
+    it: the append's barrier makes it visible) and the class's light range, and places the
+    light as the unit's model is drawn (fitted, turned, at the unit's height and drawn size).
+    The list's count and dropped count are written by the host: host lights first, then model
+    lights in row order, capped at `MAX_LIGHTS` (`LIGHT_MAX`); the bounds then walk the whole
+    table (`MAX_LIGHTS / 64` groups) because the append made it longer than the host's list.
+    The light's `range` is not scaled by the unit's model fit (metres stay metres). A graph
+    that clusters the lights before `units.pose` is rejected: the append reads the palettes
+    it writes.
+  - **Tests.** `ae_gltf` converts a point light, a turned spot and a directional one: the
+    palette gives the node's world position and the spot's direction, the point's colour and
+    range are the candela mapping, the directional warns, and the model round-trips.
+    GPU `model_lights_light_the_ground` (validation on): two units (one point, one spot) with
+    no host light; the point raises the red channel of the ground beside it, the spot raises
+    blue in front of its node (world -z) and leaves the ground behind it byte-identical, the
+    clustered frame equals the unculled reference, a second render is byte-identical, a model
+    without lights leaves the frame as before, and the stats count exactly two appended
+    lights. All 29 GPU tests pass.
+  - **Cost.** New bench scene `army-model-lights` (army camera, 10 000 Foxes each with a
+    point light of range 15 m): `pass/lights` 557 µs (copy, append of 8 192 lights,
+    bounds/tiles/cull; 8 192 listed, 1 808 dropped by the cap), against 0 in `army-fox`;
+    the units' draw +493 µs from summing the lights that reach the view. Same-session pair:
+    `gpu_total` 8 612 → 9 630 µs (the terrain and water differences are the known run-to-run
+    spread). The append is skipped with no model lights: `army-fox` and every earlier scene
+    are unchanged. Validation clean (`AE_VK_VALIDATION=1`, 0 errors/warnings).
+  - Not done: a light's direction is only tested through a horizontal, wide cone; a model's
+    light does not scale its range with the model's fit (deliberate); a glTF directional
+    light cannot become the sun (each model would carry one); assets with gaps in the model
+    light table (only per class), and no light shadows.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
@@ -3111,40 +3150,24 @@ From M12 (2026-11-19):
   scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
   from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4), when the
   scene has light above 1; until then the exposure is fixed (`--exposure`).
-- **glTF `KHR_lights_punctual` conformance** (2026-11-19; needed by M12 step 2, second part).
-  `ae_gltf` drops the extension with a warning (`crates/ae_gltf/src/lib.rs:182`). Importing it
-  means mapping the spec's lights onto our kinds and recording where we deliberately differ.
-  - Types: the spec has `directional`, `point` and `spot`; `ae_render::lights::Light` has point,
-    cone and beam. Point and spot map to point and cone.
-  - **Directional lights have no kind here and no sensible per-unit use** (no position, no
-    attenuation, only orientation; on a unit its facing would swing the whole scene's light,
-    and instancing would make one "sun" per unit). **If a loaded asset has a directional light,
-    ignore it with a warning** naming the light (and node), rather than silently; do not fold it
-    into the sun unless a scene-level policy is decided. Document that this knowingly departs
-    from the spec's "must render all three types".
-  - Intensity: the spec's `intensity` is photometric (candela for point/spot, lux for
-    directional) and `color` is a linear multiplier. Our `Light.color` is the whole emission in
-    arbitrary units, so an importer must pick a documented candela → engine-unit constant (or
-    add an `intensity` field); otherwise the photometric part is not met.
-  - Range: in the spec `range` applies only to point/spot, must be > 0, and *absent* means
-    infinite. Ours is always finite, and `range = 0` gives no light. Give the shader an
-    explicit infinite case (pure inverse-square, and no range-based cull for such a light) or
-    map it to a large finite value and say that range culling is lost.
-  - Radial attenuation: the spec requires inverse-square inside the range (recommended
-    `max(min(1 - (d/range)^4, 1), 0) / d²`, with non-quadratic falloff allowed near the edge to
-    avoid a hard cutoff). Ours is `(1 - d²/r²)² / (1 + d²/s²)`: inverse-square only in the far
-    field, regularised at the source, with a different edge window. Either switch
-    `lightFalloff` to the recommended formula or record it as a deliberate deviation; the
-    clustered-vs-unculled test compares us with us, so it cannot catch this.
-  - Spot angles: `innerConeAngle`/`outerConeAngle` (defaults 0 and π/4, outer ≤ π/2) map to our
-    inner/outer cosines; our `smoothstep` is an acceptable steeper curve. Validate/clamp them
-    on import.
-  - Beam: not a punctual light and not expressible in `KHR_lights_punctual` (a laser is a
-    capsule); keep it engine-only, or add a custom `AE_lights_beam` extension for authored
-    assets and state that such assets will not load elsewhere.
-  - Check: import a Khronos sample or a small authored glTF with point, spot and directional
-    lights; check position/direction/angles/intensity mapping, and that the directional one is
-    ignored with a warning that names it.
+- **glTF `KHR_lights_punctual` conformance** — decided and done with M12 step 2's second part
+  (2026-11-20). What the importer does, and where it deliberately differs:
+  - Types: point and spot map to our point and cone; **directional** lights are ignored with a
+    warning that names the light and its node (one fixed sun; a per-unit directional light
+    would swing the scene with the unit's facing, and instancing would give one per unit). This
+    knowingly departs from the spec's "must render all three types".
+  - Intensity: `color` (linear) × `intensity` (candela) × `ae_model::CANDELA_TO_ENGINE`
+    (100 cd = 1.0). Not a photometric calibration; the engine's light units are arbitrary.
+  - Range: absent (infinite in the spec) becomes `UNBOUNDED_RANGE` = 10 km, so its cull keeps
+    it in every cluster; a non-positive range warns and takes the same.
+  - Radial attenuation: the engine's `(1 − d²/r²)² / (1 + d²/s²)` stays (a deliberate
+    deviation from the spec's recommended window; the clustered-vs-unculled test compares us
+    with us, so it cannot catch this).
+  - Spot angles: clamped to [0, π/2] and inner ≤ outer, then our inner/outer cosines.
+  - Beam: engine-only (not expressible in the extension; no glTF asset produces one).
+  - Check: an authored glTF with point, spot and directional lights in `ae_gltf`'s tests;
+    position and direction through the rest palette, the candela mapping, the warning, and the
+    model's round trip. The GPU side is `model_lights_light_the_ground` (above).
 - **Lights seen in the air (participating media, maybe particles).** A light with nothing
   opaque near it (a flare or tracer in the air, a flash over water or a cliff edge) shows
   nothing today: only surfaces and particles take light. Let a scene define a medium (haze,
