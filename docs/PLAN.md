@@ -3111,6 +3111,40 @@ From M12 (2026-11-19):
   scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
   from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4), when the
   scene has light above 1; until then the exposure is fixed (`--exposure`).
+- **glTF `KHR_lights_punctual` conformance** (2026-11-19; needed by M12 step 2, second part).
+  `ae_gltf` drops the extension with a warning (`crates/ae_gltf/src/lib.rs:182`). Importing it
+  means mapping the spec's lights onto our kinds and recording where we deliberately differ.
+  - Types: the spec has `directional`, `point` and `spot`; `ae_render::lights::Light` has point,
+    cone and beam. Point and spot map to point and cone.
+  - **Directional lights have no kind here and no sensible per-unit use** (no position, no
+    attenuation, only orientation; on a unit its facing would swing the whole scene's light,
+    and instancing would make one "sun" per unit). **If a loaded asset has a directional light,
+    ignore it with a warning** naming the light (and node), rather than silently; do not fold it
+    into the sun unless a scene-level policy is decided. Document that this knowingly departs
+    from the spec's "must render all three types".
+  - Intensity: the spec's `intensity` is photometric (candela for point/spot, lux for
+    directional) and `color` is a linear multiplier. Our `Light.color` is the whole emission in
+    arbitrary units, so an importer must pick a documented candela → engine-unit constant (or
+    add an `intensity` field); otherwise the photometric part is not met.
+  - Range: in the spec `range` applies only to point/spot, must be > 0, and *absent* means
+    infinite. Ours is always finite, and `range = 0` gives no light. Give the shader an
+    explicit infinite case (pure inverse-square, and no range-based cull for such a light) or
+    map it to a large finite value and say that range culling is lost.
+  - Radial attenuation: the spec requires inverse-square inside the range (recommended
+    `max(min(1 - (d/range)^4, 1), 0) / d²`, with non-quadratic falloff allowed near the edge to
+    avoid a hard cutoff). Ours is `(1 - d²/r²)² / (1 + d²/s²)`: inverse-square only in the far
+    field, regularised at the source, with a different edge window. Either switch
+    `lightFalloff` to the recommended formula or record it as a deliberate deviation; the
+    clustered-vs-unculled test compares us with us, so it cannot catch this.
+  - Spot angles: `innerConeAngle`/`outerConeAngle` (defaults 0 and π/4, outer ≤ π/2) map to our
+    inner/outer cosines; our `smoothstep` is an acceptable steeper curve. Validate/clamp them
+    on import.
+  - Beam: not a punctual light and not expressible in `KHR_lights_punctual` (a laser is a
+    capsule); keep it engine-only, or add a custom `AE_lights_beam` extension for authored
+    assets and state that such assets will not load elsewhere.
+  - Check: import a Khronos sample or a small authored glTF with point, spot and directional
+    lights; check position/direction/angles/intensity mapping, and that the directional one is
+    ignored with a warning that names it.
 - **Lights seen in the air (participating media, maybe particles).** A light with nothing
   opaque near it (a flare or tracer in the air, a flash over water or a cliff edge) shows
   nothing today: only surfaces and particles take light. Let a scene define a medium (haze,
