@@ -660,6 +660,17 @@ fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>) {
     }
 }
 
+/// `--lights N`: N fixed test lights around the camera's target (placed
+/// first), in a capture and in the window alike.
+fn scatter_lights(app: TerrainApp, n: u32) -> TerrainApp {
+    if n == 0 {
+        return app;
+    }
+    let target = app.view().lock().unwrap().camera.target;
+    let source = app.source().clone();
+    app.with_lights(ae_render::lights::scatter(n, target, 400.0, 4.0, 7, &|p| source.height_at(p)))
+}
+
 fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, path: &str) -> Result<ExitCode> {
     use ae_render::device::{GpuDevice, GpuInstance};
     use ae_render::executor::ExecutorConfig;
@@ -735,11 +746,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         app = app.with_units(units_setup(&s, feed)?);
     }
     place_camera(&app, o.camera);
-    if o.lights > 0 {
-        let target = app.view().lock().unwrap().camera.target;
-        let source = app.source().clone();
-        app = app.with_lights(ae_render::lights::scatter(o.lights, target, 400.0, 4.0, 7, &|p| source.height_at(p)));
-    }
+    app = scatter_lights(app, o.lights);
     if let Some(feed) = &effects_feed {
         let target = app.view().lock().unwrap().camera.target;
         let seen = explode_around(feed, target, o.explode, 1);
@@ -830,6 +837,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 module = Some((watch::ModuleWatch::start(name.clone(), wasm, app.module_reload()), app.module_status()));
             }
             place_camera(&app, o.camera);
+            app = scatter_lights(app, o.lights);
             terrain = Some((app.view(), app.stats()));
             GpuRenderThread::start(&window, app, config)?
         }
