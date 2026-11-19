@@ -278,7 +278,10 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         let last = (TICKS - 1) / 6 * 6;
         let at = target(last, UNITS as u32);
         let (mut looked, mut worst) = (0, 0.0f32);
-        for (((e, a), (_, b)), ((_, f), (_, wp))) in r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons)) {
+        ensure!([r.bodies.len(), r.facings.len(), r.weapons.len()] == [r.anims.len(); 3]);
+        for (((e, a), (eb, b)), ((ef, f), (ew, wp))) in r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons)) {
+            ensure!([eb, ef, ew] == [e; 3], "rows out of step: {e} {eb} {ef} {ew}");
+            ensure!((wp.aim_from[0], wp.fire_from[0]) == (head, head), "unit {e}: the script did not name its aim-from and fire-from bones: {wp:?}");
             if wp.asked[0] == 0 || wp.aimed[0] != wp.asked[0] {
                 continue;
             }

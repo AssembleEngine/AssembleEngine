@@ -13,7 +13,7 @@
 //! With [`AIM`], units stand instead (no clips: the rest pose), each
 //! facing its own way, every third one tilted; a weapon system (`aimer`)
 //! asks weapon 0 to point at a target circling the grid, measured from the
-//! head ([`Anim::bone_world`]), every [`AIM_EVERY`] ticks, and posts
+//! head (`Anim::bone_world`), every [`AIM_EVERY`] ticks, and posts
 //! `AIM`. The script turns the head there (`to_unit`, `dir_in`,
 //! `turn_toward`; a new request cuts a turn short) and answers; `check`
 //! measures how far the head's forward is from the direction it answered.
@@ -34,7 +34,8 @@
 //! * `check` ([`AIM`]): answered aims measured.
 //! * `churn`: the despawns of [`CHURN`].
 
-use ae_sdk::anim::{self, Anim, Axis, Facing, Weapons, deg, model_id, rotation};
+use ae_sdk::aim::{Facing, Weapons, rotation};
+use ae_sdk::anim::{self, Anim, Axis, deg, model_id};
 use ae_sdk::nav::Body;
 use ae_sdk::script::{self, Callins, Either, Script, ScriptAlloc, Unit, callin, join, race};
 use ae_sdk::{Component, Run, Spawn, schedule, system};
@@ -228,10 +229,10 @@ fn aimer(run: &Run) {
         return;
     }
     let (bodies, anims, facings, weapons, posts) = (run.read::<Body>(), run.read::<Anim>(), run.read::<Facing>(), run.write::<Weapons>(), run.write::<Callins>());
-    let head = names().head;
     let t = target(run.tick(), run.param() as u32);
     for i in run.rows() {
-        let from = anims[i].bone_world(head, &bodies[i], &facings[i]).pos;
+        // From the bone the script named (the root before its first poll).
+        let from = anims[i].bone_world(weapons[i].aim_from[0], &bodies[i], &facings[i]).pos;
         weapons[i].ask(0, [t[0] - from[0], t[1] - from[1], t[2] - from[2]]);
         posts[i].post(callin::AIM);
     }
@@ -240,6 +241,11 @@ fn aimer(run: &Run) {
 /// [`AIM`]: point the head where weapon 0 is asked, answering each
 /// request once its turn is done (a newer request cuts a turn short).
 async fn aim(u: Unit, head: u16) {
+    // The head aims and "fires" (where the aim is measured from).
+    u.update(|w: &mut Weapons| {
+        w.aim_from[0] = head;
+        w.fire_from[0] = head;
+    });
     loop {
         u.callin(callin::AIM).await;
         while u.get::<Weapons>().wants_aim(0) {

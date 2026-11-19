@@ -20,7 +20,11 @@ nav = []
 catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`
 # service.
-anim = ["dep:libm", "nav"]
+anim = ["dep:libm"]
+# Aiming in the world (`ae_sdk::aim`, M14): a unit's synced facing, bones'
+# world positions, weapon aim requests. Opt-in like nav (its components
+# take entity ids in every module that compiles them).
+aim = ["anim", "nav"]
 # Unit coroutines (`ae_sdk::script`, M14): async scripts in host-owned
 # slots, resumed by a game system.
 script = []

@@ -40,6 +40,9 @@ pub mod catalog;
 #[cfg(feature = "anim")]
 pub mod anim;
 
+#[cfg(feature = "aim")]
+pub mod aim;
+
 #[cfg(feature = "script")]
 pub mod script;
 

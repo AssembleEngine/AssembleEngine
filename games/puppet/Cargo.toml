@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim", "script-checks"] }
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim", "aim", "script-checks"] }
 libm = "0.2.16"
 
 [profile.release]

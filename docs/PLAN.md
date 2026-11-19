@@ -2873,14 +2873,17 @@ Design:
       engine-side posts callins yet (nav could post the moves).
   - Step 5, part 2: facing and aiming — done (2026-11-19).
     - **A synced facing** (decided with the user, 2026-11-19: an engine component, synced and
-      saved; hybrid phase 4): `Facing { rot }` (`…0012`, `ae_sdk::anim`), a unit quaternion
+      saved; hybrid phase 4): `Facing { rot }` (`…0012`, `ae_sdk::aim`), a unit quaternion
       from the unit's frame (forward +x, up +y, right +z) to the world's (nav x, up, nav y:
       the renderer's frame, so the identity faces +x as the renderer's heading (1, 0) does).
       A quaternion, not heading and pitch (tilt allowed). `Facing::along(dx, dy)`, `then`
       (a further turn in the unit's frame), `to_unit`, `to_world`; `anim::rotation(axis,
       angle)`. Whoever places the unit writes it (the game; nav does not yet). The renderer
-      still draws the heading from the velocity (not yet from `Facing`: the client's capture
-      would need the column).
+      still draws the heading from the velocity, not from `Facing`: the client's capture is
+      one query over all its components, so `Facing` must be read apart and merged by
+      entity (as the `Anim` rows are), not added to it. **A prerequisite of step 6** (the
+      muzzle flash at the sim's fire-from position is off on a unit whose drawn heading is
+      its velocity's when the two differ).
     - `Anim::bone_world(bone, &Body, &Facing)` (query `anim:bone_world`;
       `Rig::bone_frame`): the bone's origin in the world, the model fitted to the unit's
       radius as the renderer draws it (`ae_model::footprint`, now shared with the renderer's
@@ -2888,11 +2891,13 @@ Design:
       it (`BoneWorld::dir(Axis::FORWARD)`: where it points). Heights are above the unit's
       ground point: the sim has no terrain height (my default, not yet confirmed; the aim
       between units at different heights is off by their height difference until it has).
-      Feature `anim` now includes `nav` (for `Body`).
+      Feature `aim` (`["anim", "nav"]`, module `ae_sdk::aim`): opt-in as `nav` is, since
+      every component compiled takes an entity id in the module (with them under `anim`,
+      `scripted` declared both, shifting its entities and the fox scenes).
     - `Weapons` (`…0013`): per weapon (4), the aim-from and fire-from bones (the script
       writes them), the asked direction and request count (`ask`, with the `AIM` callin) and
       the request the script answered (`set_aimed`; `is_aimed`: it may fire). The weapons
-      system stays the game's. `Unit::to_unit(dir)`.
+      system stays the game's. `Unit::to_unit(dir)`. GPU tests (27) pass with the shared fit.
     - Test (`scripts.rs`, puppet's `AIM` mode): 1500 standing Foxes, each facing its own
       way, a third tilted, asked every 6 ticks to point the head at a target circling the
       grid (from the head's `bone_world`); the script aims (`to_unit`, `dir_in`,
