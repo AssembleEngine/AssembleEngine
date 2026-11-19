@@ -2403,6 +2403,42 @@ that in.
 - Open: shadows for lights (none at first; the sun's cascades stay the only shadows), and how the
   sun and sky light share units with the cluster lights.
 
+Decided with the user (2026-11-19): M12 now (after M14 step 5; the rest of M14 is in TODO).
+Scope: lights, lights with speculars, a bloom buffer that holds only light sources (it can be
+smaller than the screen), and the HDR scene target. References: `~/particles` (its clustered
+lights, `src/lighting.rs` and `shaders/particle_light*`; and its blend mode 8, the fastest it
+has) and `~/RedAlert-graphics` (speculars, the glow target and `bloom.comp`, the ACES tonemap
+in `post.frag`).
+
+My defaults, not yet confirmed:
+- The first light sources are the client's: the particles' emissive effects (flash, fire,
+  sparks) give lights from their bursts, and glTF `KHR_lights_punctual` (today dropped by
+  `ae_gltf` with a warning). Effect lights from the sim come with effects at joints (M14 TODO).
+- Light kinds as in `~/particles`: point, cone, beam (a capsule along a segment), its falloffs
+  (`(1 − d²/r²)² / (1 + d²)`, a cone's smoothstep between two cosines).
+- Not its grid: a 24×28×24 world grid with a 32-bit mask per cell caps a scene at 32 lights.
+  Lists per cluster (an index list per view cluster or tile), measured clustered against
+  Forward+ at hundreds and thousands of lights, as above.
+- Particles are lit once per particle in compute (as `~/particles` does), not per pixel.
+- The glow target is a second colour attachment of the scene's passes at full size (one render
+  area per pass): every pipeline that draws into the scene writes it (light sources their light,
+  everything else black, or covering it by its alpha). The bloom reads it at a quarter of the
+  size: the brightest of four 2×2 means, then an 11-tap Gaussian along x and along y
+  (RA3-graphics' three passes), added before the tonemap.
+
+Steps (commit and stop for compaction after each):
+1. HDR scene target and a tonemap pass: the scene drawn into a float target (RGBA16F against
+   B10G11R11F, measured), the tonemap and grade writing the output. In the native graph and the
+   default and post modules (the scene format apart from the output's, through the render ABI).
+   First with a curve that leaves today's frames as they are (the GPU goldens), then exposure
+   and the curve.
+2. Lights: the light list, the clusters, diffuse light on the terrain, units and water, the
+   particles lit per particle; the first sources (particle bursts, glTF lights).
+3. Speculars: the sun's and the lights' on units, terrain and water.
+4. The glow target and the bloom.
+5. The particles' blend mode 8 from `~/particles` (tile bins walked in packets of pixels),
+   measured against the sorted default.
+
 ### M13 — HDR output on a supporting display (priority: lower)
 
 - After M12 (needs the HDR scene target).
