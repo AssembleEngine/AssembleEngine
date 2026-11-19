@@ -2937,6 +2937,31 @@ From the M14 coroutine spike (2026-11-19):
   `Awake` tag through commands, the resume system querying `(Script, Awake)`; it costs tag
   churn every tick and is not needed while the scan is cheap.
 
+From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
+
+- **The renderer drawing `Facing`.** The client still draws each unit's heading from its
+  velocity. The client reads unit data with one query that requires every component it lists,
+  so adding `Facing` to it would drop units that have none. `Facing` needs its own read, merged
+  by entity, the way animation data is already read. Step 6 can't start without this: the muzzle
+  flash would be drawn in the wrong place on any unit whose facing differs from its movement.
+- **Queries of other units.** A script needs to read a component of another entity, such as a
+  target's position or `Facing`, that its own system doesn't list. This needs a new host import,
+  and aiming at another unit depends on it.
+- **Effects at joints.** The sim would emit an event at a bone's world position, such as a
+  muzzle flash or particles. The sim side can be done now; drawing it fits with step 6.
+- Optional: **nav writing `Facing` and posting the start/stop moving callins.** Right now the
+  game does both itself.
+- **Step 6: the death sequence and the test unit.**
+  - Death: a killed unit stays in the sim, can't be targeted and doesn't collide, until its
+    `Killed` script ends (with a time cap). Then it's removed or leaves a corpse.
+  - Test unit, in a GPU test: it walks, stops and aims in several steps while running (an
+    upper-body clip on top of the running clip, plus script-driven turns on bones the clips
+    don't move); it fires with a flash at the muzzle; it dies holding the last frame.
+  - Checks: digests equal at 1, 2, 4 and 8 workers, and `army-fox` with scripts measured against
+    the M11 numbers.
+  - The save → load → continue check with scripts suspended has to wait for M9, since saving
+    doesn't exist yet.
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
