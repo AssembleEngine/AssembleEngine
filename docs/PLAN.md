@@ -2860,6 +2860,14 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
   `army-fox`'s, about half of the others'); `pass/water`'s two modes (3–4 vs about 180 µs)
   not investigated.
 
+From the M14 coroutine spike (2026-11-19):
+
+- **A global wake queue for unit scripts.** `ae_sdk::script::resume` visits every `Script`
+  row for its wake tick. Visiting only the woken units needs a run over rows across tables
+  (an ABI change). A cheap version: a host-side ordered set of (due tick, entity) that adds an
+  `Awake` tag through commands, the resume system querying `(Script, Awake)`; it costs tag
+  churn every tick and is not needed while the scan is cheap.
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
