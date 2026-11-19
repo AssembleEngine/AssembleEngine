@@ -77,14 +77,17 @@ pub struct Script {
     /// `size_of` its future (bytes of its slot in use).
     pub size: u32,
     /// Polls on another instance than the poll before (a diagnostic: which
-    /// instance runs a range is not sim state).
-    #[field(unhashed)]
+    /// instance runs a range is not sim state, so neither hashed, synced
+    /// nor saved).
+    #[field(unhashed, unsynced, unsaved)]
     pub moved: u32,
     /// The instance of the last poll ([`instance_tag`]).
-    #[field(unhashed)]
+    #[field(unhashed, unsynced, unsaved)]
     pub last: u32,
     pub reserved: u32,
 }
+
+const _: () = assert!(<Script as Component>::ID == crate::abi::engine::SCRIPT);
 
 /// [`Script::state`] values.
 pub mod state {

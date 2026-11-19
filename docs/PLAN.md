@@ -2822,8 +2822,8 @@ Design:
       `async fn` tick by tick, uses the heap inside a poll, spawns from a resumed poll, keeps
       locals across awaits. Digests equal at 8/1/2/4 workers, and so is the whole slot arena's
       hash at two ticks mid-run (the suspended futures' bytes, what a save would store: no
-      stray padding seen); 60–70% of polls at 2–8 workers ran on another instance than the poll
-      before; a future is 152 bytes. A `Vec` kept across an `await` reads back as poison, and
+      stray padding seen); of the polls, about 40% at 2 workers, 60% at 4 and 70% at 8 ran on
+      another instance than the poll before; a future is 152 bytes. A `Vec` kept across an `await` reads back as poison, and
       dropping it traps.
     - Not done, for step 5: the global wake queue (every `Script` row is visited for its wake
       tick; visiting only woken units needs runs over rows across tables, an ABI change, or
@@ -2833,6 +2833,12 @@ Design:
       the slot size checked at run time, not from the future's type; a unit despawned
       mid-script leaves its future in the slot (overwritten, never dropped, when the index is
       reused: harmless while futures own no heap); save→load of the arena waits for M9.
+    - Slot = entity index makes the arena as large as the highest index times the slot size,
+      counting entities with no script (sparks here, projectiles later): 100k entities at 512
+      bytes are about 51 MB. A slot allocator (serial, or at the command apply) fixes it.
+    - The slot arena's equal hashes are observed, not guaranteed: a new future is copied into
+      its slot with whatever its padding held on the making instance's stack. If they ever
+      differ, look there first, not at the sim's determinism.
 
 ## TODO (open, not a priority now)
 
