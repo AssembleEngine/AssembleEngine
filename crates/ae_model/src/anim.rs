@@ -286,6 +286,8 @@ pub struct Rig {
     masks: Vec<Mask>,
     /// The mesh's distinct skinned positions, for [`Rig::bounds`].
     skin: Vec<SkinVertex>,
+    /// [`crate::footprint`] of the model's bounds.
+    footprint: f32,
 }
 
 /// A vertex as skinning sees it: position, joints, unorm16 weights.
@@ -309,6 +311,7 @@ impl Rig {
             masks: Vec::new(),
             rest_frame: Vec::new(),
             skin: skin_vertices(model),
+            footprint: crate::footprint(&model.bounds),
             rest,
         };
         rig.clips = (0..model.clips.len()).map(|c| bake(model, &rig.rest, c)).collect();
@@ -678,6 +681,41 @@ impl Rig {
         if self.skin.is_empty() { Bounds::default() } else { Bounds { min, max } }
     }
 
+    /// The model's footprint radius ([`crate::footprint`]): a unit of
+    /// radius `r` draws it scaled by `r / footprint`.
+    pub fn footprint(&self) -> f32 {
+        self.footprint
+    }
+
+    /// Where `bone` is as `ch` poses it (as [`Rig::pose`] has it: pending
+    /// entries not applied), in the model's space: its origin, and the
+    /// rotation taking a direction it carried at rest (in the model's
+    /// frame: where it pointed then) to where that direction points now.
+    /// At rest the rotation is the identity, so the bone's "forward" is
+    /// the model's at rest. Rotations only along the chain (scales do not
+    /// turn directions here, as in [`Rig::dir_in`]).
+    pub fn bone_frame(&self, ch: &Channels, bone: u16) -> ([f32; 3], [f32; 4]) {
+        let mut pose = self.rest_pose();
+        self.pose(ch, &mut pose);
+        let mut globals = vec![IDENTITY; self.bones()];
+        self.globals(&pose, &mut globals);
+        let b = bone as usize;
+        // The chain's rotations, root first.
+        let mut chain = Vec::new();
+        let mut k = bone as u32;
+        while k != u32::MAX {
+            chain.push(k as usize);
+            k = self.parents[k as usize];
+        }
+        let mut q = [0.0, 0.0, 0.0, 1.0];
+        for &c in chain.iter().rev() {
+            let r = if pose.posed[c] { pose.local[c].r } else { self.rest[c].r };
+            q = qnorm(qmul(q, r));
+        }
+        let g = &globals[b];
+        ([g[3], g[7], g[11]], qnorm(qmul(q, qconj(self.rest_frame[b]))))
+    }
+
     /// Model-space bone matrices (parents come first).
     pub fn globals(&self, pose: &Pose, out: &mut [Affine]) {
         for b in 0..self.bones() {
@@ -820,12 +858,12 @@ fn norm3(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// `v` rotated by `q`.
-fn qrot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub fn qrot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     let r = qmul(qmul(q, [v[0], v[1], v[2], 0.0]), qconj(q));
     [r[0], r[1], r[2]]
 }
 
-fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+pub fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let [ax, ay, az, aw] = a;
     let [bx, by, bz, bw] = b;
     [
@@ -836,7 +874,7 @@ fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn qconj(q: [f32; 4]) -> [f32; 4] {
+pub fn qconj(q: [f32; 4]) -> [f32; 4] {
     [-q[0], -q[1], -q[2], q[3]]
 }
 
@@ -844,7 +882,7 @@ fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 }
 
-fn qnorm(q: [f32; 4]) -> [f32; 4] {
+pub fn qnorm(q: [f32; 4]) -> [f32; 4] {
     let len = libm::sqrtf(dot4(q, q));
     if len > 0.0 { [q[0] / len, q[1] / len, q[2] / len, q[3] / len] } else { [0.0, 0.0, 0.0, 1.0] }
 }

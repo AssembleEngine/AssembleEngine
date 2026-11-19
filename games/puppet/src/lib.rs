@@ -10,21 +10,31 @@
 //! turns its head back and gives it back to the clips, unless it stops
 //! first. What happened goes to its `Log`.
 //!
+//! With [`AIM`], units stand instead (no clips: the rest pose), each
+//! facing its own way, every third one tilted; a weapon system (`aimer`)
+//! asks weapon 0 to point at a target circling the grid, measured from the
+//! head ([`Anim::bone_world`]), every [`AIM_EVERY`] ticks, and posts
+//! `AIM`. The script turns the head there (`to_unit`, `dir_in`,
+//! `turn_toward`; a new request cuts a turn short) and answers; `check`
+//! measures how far the head's forward is from the direction it answered.
+//!
 //! Game parameter: bits 0..32 the unit count; bit 32 [`CHURN`]: at tick
 //! [`CHURN_AT`] every fourth unit is despawned mid-script, and as many new
 //! ones spawned the tick after (their entity indices, so their script
-//! slots, reused).
+//! slots, reused); bit 33 [`AIM`].
 //!
 //! Systems, in schedule order:
 //! * `start`: the units in a grid (tick 0, and the replacements).
 //! * `steer`: a unit walks for [`WALK_TICKS`], then stands for
 //!   [`STAND_TICKS`] (staggered by entity), turning back each time; it
 //!   posts `STARTED_MOVING` / `STOPPED_MOVING`.
+//! * `aimer` ([`AIM`]): the aim requests.
 //! * `scripts`: `ae_sdk::script::resume`.
 //! * `host(anim)`: the engine advances the channels.
+//! * `check` ([`AIM`]): answered aims measured.
 //! * `churn`: the despawns of [`CHURN`].
 
-use ae_sdk::anim::{self, Anim, Axis, deg, model_id};
+use ae_sdk::anim::{self, Anim, Axis, Facing, Weapons, deg, model_id, rotation};
 use ae_sdk::nav::Body;
 use ae_sdk::script::{self, Callins, Either, Script, ScriptAlloc, Unit, callin, join, race};
 use ae_sdk::{Component, Run, Spawn, schedule, system};
@@ -43,6 +53,14 @@ pub const WALK_SPEED: f32 = 1.5;
 pub const WALK_PER_METRE: f32 = 0.6;
 pub const CHURN: u64 = 1 << 32;
 pub const CHURN_AT: u64 = 100;
+pub const AIM: u64 = 1 << 33;
+/// Ticks between aim requests.
+pub const AIM_EVERY: u64 = 6;
+/// The aim target: circling the grid's centre at this radius and height
+/// (metres), at this rate (radians a tick).
+pub const TARGET_RADIUS: f32 = 30.0;
+pub const TARGET_HEIGHT: f32 = 3.0;
+pub const TARGET_RATE: f32 = 0.01;
 /// Grid step, metres.
 pub const STEP: f32 = 4.0;
 /// How far a standing unit looks to each side.
@@ -67,10 +85,16 @@ pub struct Log {
     pub slept: u32,
     /// The fewest ticks a head turn was waited for (`u32::MAX`: none).
     pub turn_min: u32,
+    /// [`AIM`]: answered requests measured, the last one measured, and the
+    /// largest angle (degrees) between the head's forward and an answered
+    /// direction.
+    pub aims: u32,
+    pub checked: u32,
+    pub aim_err: f32,
 }
 
 impl Log {
-    pub const NEW: Log = Log { starts: 0, stops: 0, looks: 0, cut: 0, backs: 0, backs_cut: 0, slept: 0, turn_min: u32::MAX };
+    pub const NEW: Log = Log { starts: 0, stops: 0, looks: 0, cut: 0, backs: 0, backs_cut: 0, slept: 0, turn_min: u32::MAX, aims: 0, checked: 0, aim_err: 0.0 };
 }
 
 #[repr(C)]
@@ -91,11 +115,26 @@ pub fn pause_ms(index: u32) -> u32 {
     100 + (index % 8) * 150
 }
 
-fn spawn(i: u32) {
+fn spawn(i: u32, aim: bool) {
     let (x, y) = ((i % 100) as f32 * STEP, (i / 100) as f32 * STEP);
+    let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+    let facing = if aim {
+        // Its own way round, every third one tilted forward or back.
+        let way = deg((i * 37 % 360) as f32);
+        let f = Facing::along(libm::cosf(way), libm::sinf(way));
+        match i % 3 {
+            0 => f.then(rotation(Axis::RIGHT.v, deg(15.0))),
+            1 => f.then(rotation(Axis::FORWARD.v, deg(-10.0))),
+            _ => f,
+        }
+    } else {
+        Facing::along(dir, 0.0)
+    };
     Spawn::new()
         .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: STEP / 4.0 })
-        .with(&Walker { dir: if i % 2 == 0 { 1.0 } else { -1.0 }, reserved: 0 })
+        .with(&Walker { dir, reserved: 0 })
+        .with(&facing)
+        .with(&Weapons::default())
         .with(&Anim::new(model_id(MODEL)))
         .with(&Script::default())
         .with(&Callins::default())
@@ -106,21 +145,26 @@ fn spawn(i: u32) {
 #[system()]
 fn start(run: &Run) {
     let n = run.param() as u32;
+    let aim = run.param() & AIM != 0;
     match run.tick() {
-        0 => (0..n).for_each(spawn),
-        t if t == CHURN_AT + 1 && run.param() & CHURN != 0 => (0..n.div_ceil(4)).for_each(|i| spawn(n + i)),
+        0 => (0..n).for_each(|i| spawn(i, aim)),
+        t if t == CHURN_AT + 1 && run.param() & CHURN != 0 => (0..n.div_ceil(4)).for_each(|i| spawn(n + i, aim)),
         _ => {}
     }
 }
 
-#[system(write(Body, Walker, Callins))]
+#[system(write(Body, Walker, Facing, Callins))]
 fn steer(run: &Run) {
-    let (bodies, walkers, posts, ids) = (run.write::<Body>(), run.write::<Walker>(), run.write::<Callins>(), run.entities());
+    if run.param() & AIM != 0 {
+        return;
+    }
+    let (bodies, walkers, facings, posts, ids) = (run.write::<Body>(), run.write::<Walker>(), run.write::<Facing>(), run.write::<Callins>(), run.entities());
     for i in run.rows() {
         let (b, w) = (&mut bodies[i], &mut walkers[i]);
         let walking = cycle(run.tick(), ids[i]) < WALK_TICKS;
         if walking && b.vx == 0.0 {
             b.vx = w.dir * WALK_SPEED * b.radius;
+            facings[i] = Facing::along(w.dir, 0.0);
             posts[i].post(callin::STARTED_MOVING);
         } else if !walking && b.vx != 0.0 {
             w.dir = -w.dir;
@@ -170,9 +214,54 @@ async fn look_around(u: Unit, head: u16) {
     }
 }
 
+/// Where the aim target is at `tick`, in the world (nav x, up, nav y),
+/// for `units` in the grid.
+pub fn target(tick: u64, units: u32) -> [f32; 3] {
+    let (cx, cy) = (50.0 * STEP, (units / 100) as f32 * STEP * 0.5);
+    let a = tick as f32 * TARGET_RATE;
+    [cx + TARGET_RADIUS * libm::cosf(a), TARGET_HEIGHT, cy + TARGET_RADIUS * libm::sinf(a)]
+}
+
+#[system(read(Body, Anim, Facing), write(Weapons, Callins))]
+fn aimer(run: &Run) {
+    if run.param() & AIM == 0 || run.tick() % AIM_EVERY != 0 {
+        return;
+    }
+    let (bodies, anims, facings, weapons, posts) = (run.read::<Body>(), run.read::<Anim>(), run.read::<Facing>(), run.write::<Weapons>(), run.write::<Callins>());
+    let head = names().head;
+    let t = target(run.tick(), run.param() as u32);
+    for i in run.rows() {
+        let from = anims[i].bone_world(head, &bodies[i], &facings[i]).pos;
+        weapons[i].ask(0, [t[0] - from[0], t[1] - from[1], t[2] - from[2]]);
+        posts[i].post(callin::AIM);
+    }
+}
+
+/// [`AIM`]: point the head where weapon 0 is asked, answering each
+/// request once its turn is done (a newer request cuts a turn short).
+async fn aim(u: Unit, head: u16) {
+    loop {
+        u.callin(callin::AIM).await;
+        while u.get::<Weapons>().wants_aim(0) {
+            let w = u.get::<Weapons>();
+            let (request, dir) = (w.asked[0], w.dir(0));
+            let d = u.get::<Anim>().dir_in(head, u.to_unit(dir));
+            u.update(|a: &mut Anim| {
+                a.turn_toward(head, Axis::FORWARD, d, 3.0).ramp(12.0);
+            });
+            if let Either::Left(()) = race(u.turned(head), u.callin(callin::AIM)).await {
+                u.update(|w: &mut Weapons| w.set_aimed(0, request));
+            }
+        }
+    }
+}
+
 /// A unit's script.
 async fn unit(u: Unit) {
     let n = names();
+    if u.param() & AIM != 0 {
+        return aim(u, n.head).await;
+    }
     u.update(|a: &mut Anim| {
         a.play(0, n.survey);
     });
@@ -218,9 +307,33 @@ async fn unit(u: Unit) {
     }
 }
 
-#[system(read(Body), write(Script, Callins, Anim, Log))]
+#[system(read(Body, Facing), write(Script, Callins, Anim, Weapons, Log))]
 fn scripts(run: &Run) {
     script::resume(run, unit);
+}
+
+#[system(read(Body, Anim, Facing, Weapons), write(Log))]
+fn check(run: &Run) {
+    if run.param() & AIM == 0 {
+        return;
+    }
+    let (bodies, anims, facings, weapons, logs) = (run.read::<Body>(), run.read::<Anim>(), run.read::<Facing>(), run.read::<Weapons>(), run.write::<Log>());
+    let head = names().head;
+    for i in run.rows() {
+        let (w, l) = (&weapons[i], &mut logs[i]);
+        if !w.is_aimed(0) || l.checked == w.aimed[0] {
+            continue;
+        }
+        let f = anims[i].bone_world(head, &bodies[i], &facings[i]).dir(Axis::FORWARD);
+        let d = w.dir(0);
+        // The angle between them by atan2 (acos is coarse near 0).
+        let cos = f[0] * d[0] + f[1] * d[1] + f[2] * d[2];
+        let c = [f[1] * d[2] - f[2] * d[1], f[2] * d[0] - f[0] * d[2], f[0] * d[1] - f[1] * d[0]];
+        let sin = libm::sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        l.aim_err = l.aim_err.max(libm::atan2f(sin, cos).to_degrees());
+        l.aims += 1;
+        l.checked = w.aimed[0];
+    }
 }
 
 #[system(read(Body))]
@@ -235,4 +348,4 @@ fn churn(run: &Run) {
     }
 }
 
-schedule!(start, steer, scripts, host(anim), churn);
+schedule!(start, steer, aimer, scripts, host(anim), check, churn);

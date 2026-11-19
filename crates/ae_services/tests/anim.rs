@@ -152,7 +152,7 @@ fn aiming_helpers() -> Result<()> {
     }
     let op = ae_abi::name_id(ae_abi::query::ANIM_DIR_IN);
     let bounds_op = ae_abi::name_id(ae_abi::query::ANIM_BOUNDS);
-    ensure!(plugin.queries() == vec![op, bounds_op]);
+    ensure!(plugin.queries() == vec![op, bounds_op, ae_abi::name_id(ae_abi::query::ANIM_BONE_WORLD)]);
     // anim:bounds: the rig's box as min then max; zeros for an unknown model.
     let mut out = [0u8; 24];
     ensure!(plugin.query(bounds_op, &input[..size_of::<Anim>()], &mut out)? == 24);

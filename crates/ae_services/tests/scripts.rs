@@ -18,6 +18,13 @@
 //! the new scripts start clean in the old slots, the same at any worker
 //! count.
 //!
+//! Then aiming (`AIM`): standing units, each facing its own way (a third
+//! tilted), asked every few ticks to point their head at a moving target
+//! (from the head's world position, `anim:bone_world`); the script turns
+//! it there (`to_unit`, `dir_in`, `turn_toward`) and answers. Every unit
+//! answered many requests, and each answered direction is where the head's
+//! forward points in the world, to a small fraction of a degree.
+//!
 //! One runtime at a time: the column arena is process-wide.
 
 use ae_model::anim::Rig;
@@ -32,9 +39,38 @@ const UNITS: u64 = 1500;
 const TICKS: u64 = 320;
 const CHURN: u64 = 1 << 32;
 const CHURN_AT: u64 = 100;
+const AIM: u64 = 1 << 33;
 const WALK_TICKS: u64 = 90;
 const CYCLE: u64 = 150;
 const HZ: u32 = 30;
+
+/// `puppet::target`: the aim target at `tick` for `units`.
+fn target(tick: u64, units: u32) -> glam::Vec3 {
+    let (cx, cy) = (50.0 * 4.0, (units / 100) as f32 * 4.0 * 0.5);
+    let a = tick as f32 * 0.01;
+    glam::Vec3::new(cx + 30.0 * a.cos(), 3.0, cy + 30.0 * a.sin())
+}
+
+/// Where the head is in the world and where its rest forward points, by
+/// the model's bone matrices (`Rig::globals`, not `bone_frame`'s chain),
+/// the unit's facing and fit, in glam.
+fn head_in_world(rig: &Rig, head: u16, a: &Anim, b: &ae_sdk::nav::Body, facing: [f32; 4]) -> (glam::Vec3, glam::Vec3) {
+    let affine = |ch: Option<&Anim>| {
+        let mut pose = rig.rest_pose();
+        if let Some(a) = ch {
+            rig.pose(&ae_services::anim::channels(a), &mut pose);
+        }
+        let mut g = vec![ae_model::anim::IDENTITY; rig.bones()];
+        rig.globals(&pose, &mut g);
+        let m = g[head as usize];
+        (glam::Mat3::from_cols_array(&[m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]]), glam::Vec3::new(m[3], m[7], m[11]))
+    };
+    let ((now, at), (rest, _)) = (affine(Some(a)), affine(None));
+    let carried = (now * rest.inverse() * glam::Vec3::X).normalize();
+    let q = glam::Quat::from_array(facing);
+    let pos = glam::Vec3::new(b.x, 0.0, b.y) + q * (at * (b.radius / rig.footprint()));
+    (pos, q * carried)
+}
 
 fn fox() -> Rig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb");
@@ -58,6 +94,9 @@ struct Log {
     backs_cut: u32,
     slept: u32,
     turn_min: u32,
+    aims: u32,
+    checked: u32,
+    aim_err: f32,
 }
 
 /// `ae_sdk::script::Script`.
@@ -73,8 +112,22 @@ struct Script {
     waits: u32,
 }
 
+/// `ae_sdk::anim::Weapons`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Weapons {
+    aim_from: [u16; 4],
+    fire_from: [u16; 4],
+    dir: [f32; 12],
+    asked: [u32; 4],
+    aimed: [u32; 4],
+}
+
 struct Outcome {
     digest: u128,
+    bodies: Vec<(u64, ae_sdk::nav::Body)>,
+    facings: Vec<(u64, [f32; 4])>,
+    weapons: Vec<(u64, Weapons)>,
     logs: Vec<(u64, Log)>,
     scripts: Vec<(u64, Script)>,
     anims: Vec<(u64, Anim)>,
@@ -88,6 +141,9 @@ fn run(rt: &mut Runtime, workers: usize, param: u64) -> Result<Outcome> {
     let rows = |name| -> Result<Vec<(u64, Vec<u8>)>> { rt.rows(&world, name) };
     Ok(Outcome {
         digest: rt.digest(&world)?.total,
+        bodies: rows("Body")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
+        facings: rows("Facing")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
+        weapons: rows("Weapons")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         logs: rows("Log")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         scripts: rows("Script")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         anims: rows("Anim")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
@@ -201,6 +257,44 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         match churned {
             None => churned = Some(r.digest),
             Some(d) => ensure!(r.digest == d, "churn: {w} workers' digest differs"),
+        }
+    }
+
+    // Aiming.
+    let mut aimed: Option<u128> = None;
+    for &w in &[max, 1] {
+        let r = run(&mut rt, w, UNITS | AIM)?;
+        let aims: u64 = r.logs.iter().map(|(_, l)| l.aims as u64).sum();
+        let fewest = r.logs.iter().map(|(_, l)| l.aims).min().unwrap_or(0);
+        let worst = r.logs.iter().map(|(_, l)| l.aim_err).fold(0.0f32, f32::max);
+        eprintln!("aim, {w} worker(s): digest {:016x}; {aims} answered aims measured (fewest {fewest} a unit), worst {worst:.5}°", r.digest as u64);
+        ensure!(fewest >= 10, "{w} workers: a unit answered only {fewest} aims");
+        ensure!(worst < 0.01, "{w} workers: an answered aim is {worst}° off the head's forward");
+        for (e, a) in &r.anims {
+            ensure!(a.is_manual(head), "unit {e}: the head not turned: {a:?}");
+        }
+        // Checked on their own: units that answered the last request look
+        // at where the target was then, from where their head is.
+        let last = (TICKS - 1) / 6 * 6;
+        let at = target(last, UNITS as u32);
+        let (mut looked, mut worst) = (0, 0.0f32);
+        for (((e, a), (_, b)), ((_, f), (_, wp))) in r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons)) {
+            if wp.asked[0] == 0 || wp.aimed[0] != wp.asked[0] {
+                continue;
+            }
+            let (pos, fwd) = head_in_world(&rig, head, a, b, *f);
+            let want = (at - pos).normalize();
+            let angle = fwd.angle_between(want).to_degrees();
+            ensure!(angle < 0.05, "unit {e}: the head looks {angle}° off the target");
+            looked += 1;
+            worst = worst.max(angle);
+        }
+        eprintln!("aim, {w} worker(s): {looked} units looking at the target, worst {worst:.5}° (glam)");
+        // The last request is a tick before the end: those whose turn was short.
+        ensure!(looked > UNITS as usize / 5, "{w} workers: only {looked} units answered the last request");
+        match aimed {
+            None => aimed = Some(r.digest),
+            Some(d) => ensure!(r.digest == d, "aim: {w} workers' digest differs"),
         }
     }
     Ok(())

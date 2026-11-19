@@ -352,6 +352,14 @@ pub mod engine {
     /// `Callins { pending: u32, reserved: u32 }`: callins posted to a unit's
     /// script, not yet seen (M14; `ae_sdk::script::Callins`).
     pub const CALLINS: u64 = 0xAE00_0000_0000_0011;
+    /// `Facing { rot: [f32; 4] }`: a unit's orientation, a unit quaternion
+    /// (x, y, z, w) from its frame (forward +x, up +y, right +z) to the
+    /// world's (nav x, up, nav y) (M14; `ae_sdk::anim::Facing`).
+    pub const FACING: u64 = 0xAE00_0000_0000_0012;
+    /// `Weapons { ... }`: a unit's weapons as aiming sees them: aim-from and
+    /// fire-from bones, aim requests and answers (M14;
+    /// `ae_sdk::anim::Weapons`).
+    pub const WEAPONS: u64 = 0xAE00_0000_0000_0013;
 }
 
 /// The sim's own names (`ae_lookup` scope [`SCOPE`](sim::SCOPE)), the same
@@ -411,4 +419,11 @@ pub mod query {
     /// output: the box's min then max (6 × `f32`), all zeros for a model
     /// the plugin does not have.
     pub const ANIM_BOUNDS: &str = "anim:bounds";
+    /// `ae_model::anim::Rig::bone_frame` placed in the world. Input: the
+    /// unit's `Anim` value, then the bone (`u32`), the unit's ground point
+    /// and radius (x, y, radius: 3 × `f32`, as `Body` has them) and its
+    /// facing (4 × `f32`); output: the bone's origin in the world (3 ×
+    /// `f32`; height above the unit's ground point) and its rotation from
+    /// the unit's frame at rest to the world (4 × `f32`).
+    pub const ANIM_BONE_WORLD: &str = "anim:bone_world";
 }

@@ -20,7 +20,7 @@ nav = []
 catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`
 # service.
-anim = ["dep:libm"]
+anim = ["dep:libm", "nav"]
 # Unit coroutines (`ae_sdk::script`, M14): async scripts in host-owned
 # slots, resumed by a game system.
 script = []

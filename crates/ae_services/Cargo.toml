@@ -21,5 +21,6 @@ ae-sdk = { workspace = true, features = ["nav", "catalog", "anim"] }
 anyhow.workspace = true
 
 [dev-dependencies]
+glam = "0.30"
 ae_bot.workspace = true
 ae_gltf.workspace = true

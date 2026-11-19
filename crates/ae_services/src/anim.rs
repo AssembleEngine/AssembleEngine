@@ -110,7 +110,7 @@ impl HostPlugin for AnimPlugin {
     }
 
     fn queries(&self) -> Vec<u64> {
-        vec![name_id(query::ANIM_DIR_IN), name_id(query::ANIM_BOUNDS)]
+        vec![name_id(query::ANIM_DIR_IN), name_id(query::ANIM_BOUNDS), name_id(query::ANIM_BONE_WORLD)]
     }
 
     fn query(&self, op: u64, input: &[u8], out: &mut [u8]) -> Result<usize> {
@@ -123,6 +123,21 @@ impl HostPlugin for AnimPlugin {
                 out[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
             }
             return Ok(24);
+        }
+        if op == name_id(query::ANIM_BONE_WORLD) {
+            ensure!(input.len() == n + 32 && out.len() >= 28, "bone_world: {} bytes in, {} out", input.len(), out.len());
+            let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
+            let word = |k: usize| u32::from_le_bytes(input[n + 4 * k..n + 4 * k + 4].try_into().unwrap());
+            let f = |k: usize| f32::from_bits(word(k));
+            let (bone, x, y, radius, facing) = (word(0), f(1), f(2), f(3), [f(4), f(5), f(6), f(7)]);
+            let rig = self.rigs.get(&a.model).map(|(_, r)| r).with_context(|| format!("bone_world: no model {:#x}", a.model))?;
+            ensure!((bone as usize) < rig.bones(), "bone_world: no bone {bone}");
+            let (p, q) = rig.bone_frame(&channels(&a), bone as u16);
+            let (pos, rot) = place(facing, [x, y, radius / rig.footprint()], p, q);
+            for (k, v) in pos.iter().chain(&rot).enumerate() {
+                out[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            return Ok(28);
         }
         ensure!(op == name_id(query::ANIM_DIR_IN), "query {op:#x} is not the animation plugin's");
         ensure!(input.len() == n + 16 && out.len() >= 12, "dir_in: {} bytes in, {} out", input.len(), out.len());
@@ -264,4 +279,14 @@ mod tests {
         assert_eq!(ae_sdk::anim::mode::ONCE as u32, ae_model::pose::PlayMode::Once as u32);
         assert_eq!(ae_sdk::anim::mode::PING_PONG as u32, ae_model::pose::PlayMode::PingPong as u32);
     }
+}
+
+/// A model-space point `p` and rotation `q` of a unit at ground point
+/// `(x, y)` (nav), drawn at `scale` world units a model unit, facing
+/// `facing`: in the world (nav x, height above the ground point, nav y).
+/// Strict scalar f32, the same everywhere.
+pub fn place(facing: [f32; 4], [x, y, scale]: [f32; 3], p: [f32; 3], q: [f32; 4]) -> ([f32; 3], [f32; 4]) {
+    use ae_model::anim::{qmul, qrot};
+    let v = qrot(facing, [p[0] * scale, p[1] * scale, p[2] * scale]);
+    ([x + v[0], v[1], y + v[2]], qmul(facing, q))
 }

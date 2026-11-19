@@ -215,8 +215,7 @@ fn sampler_info(s: &Sampler) -> vk::SamplerCreateInfo<'static> {
 /// rest, in model units.
 pub fn fit(model: &Model) -> (f32, [f32; 4]) {
     let (min, max) = (glam::Vec3::from(model.bounds.min), glam::Vec3::from(model.bounds.max));
-    let footprint = [min.x, max.x, min.z, max.z].iter().fold(0.0f32, |a, v| a.max(v.abs()));
-    let footprint = if footprint > 1e-6 { footprint } else { (max - min).length().max(1e-3) };
+    let footprint = ae_model::footprint(&model.bounds);
     let centre = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     (footprint, [centre.x, centre.y, centre.z, radius])

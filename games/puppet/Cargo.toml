@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim", "script-checks"] }
+libm = "0.2.16"
 
 [profile.release]
 panic = "abort"

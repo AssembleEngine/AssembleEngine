@@ -346,6 +346,13 @@ impl Unit {
 
 #[cfg(feature = "anim")]
 impl Unit {
+    /// A world direction in its frame, by its `Facing` (a term of the
+    /// resuming system): what an aim request gives, as `Anim::dir_in`
+    /// takes it.
+    pub fn to_unit(&self, dir: [f32; 3]) -> [f32; 3] {
+        self.get::<crate::anim::Facing>().to_unit(dir)
+    }
+
     /// Wait for `bone`'s turn (or spin up) to finish (`Anim::turned`; the
     /// resuming system reads `Anim`). A turn set this poll has not started.
     pub fn turned(&self, bone: u16) -> Until<impl FnMut() -> bool> {

@@ -2869,10 +2869,40 @@ Design:
       `sleep(ms)` exact; no turn over in its poll; about 27% of unit-ticks polled; digests
       equal at 8/1/2/4 workers; units despawned mid-script and new ones on their indices
       (254 reused), equal at 8 and 1. Coro's digest changed (the `Script` and slot layouts).
-    - Not done: the aim callin's direction, `to_unit` and the aim-from / fire-from bones'
-      world positions (they need a synced facing: hybrid phase 4, a schema change, not
-      decided); queries of other units; effects at joints; nothing engine-side posts
-      callins yet (nav could post the moves).
+    - Not done then: aiming (below); queries of other units; effects at joints; nothing
+      engine-side posts callins yet (nav could post the moves).
+  - Step 5, part 2: facing and aiming — done (2026-11-19).
+    - **A synced facing** (decided with the user, 2026-11-19: an engine component, synced and
+      saved; hybrid phase 4): `Facing { rot }` (`…0012`, `ae_sdk::anim`), a unit quaternion
+      from the unit's frame (forward +x, up +y, right +z) to the world's (nav x, up, nav y:
+      the renderer's frame, so the identity faces +x as the renderer's heading (1, 0) does).
+      A quaternion, not heading and pitch (tilt allowed). `Facing::along(dx, dy)`, `then`
+      (a further turn in the unit's frame), `to_unit`, `to_world`; `anim::rotation(axis,
+      angle)`. Whoever places the unit writes it (the game; nav does not yet). The renderer
+      still draws the heading from the velocity (not yet from `Facing`: the client's capture
+      would need the column).
+    - `Anim::bone_world(bone, &Body, &Facing)` (query `anim:bone_world`;
+      `Rig::bone_frame`): the bone's origin in the world, the model fitted to the unit's
+      radius as the renderer draws it (`ae_model::footprint`, now shared with the renderer's
+      fit), and the rotation from the unit's frame at rest to the world as the bone carries
+      it (`BoneWorld::dir(Axis::FORWARD)`: where it points). Heights are above the unit's
+      ground point: the sim has no terrain height (my default, not yet confirmed; the aim
+      between units at different heights is off by their height difference until it has).
+      Feature `anim` now includes `nav` (for `Body`).
+    - `Weapons` (`…0013`): per weapon (4), the aim-from and fire-from bones (the script
+      writes them), the asked direction and request count (`ask`, with the `AIM` callin) and
+      the request the script answered (`set_aimed`; `is_aimed`: it may fire). The weapons
+      system stays the game's. `Unit::to_unit(dir)`.
+    - Test (`scripts.rs`, puppet's `AIM` mode): 1500 standing Foxes, each facing its own
+      way, a third tilted, asked every 6 ticks to point the head at a target circling the
+      grid (from the head's `bone_world`); the script aims (`to_unit`, `dir_in`,
+      `turn_toward`, a newer request cutting the turn short) and answers; 72 929 answers,
+      each within 0.00004° of the head's world forward (in game); independently (glam on
+      `Rig::globals`, the facing, the fit), units that answered the last request look at the
+      target from their head to 1e-5°; digests equal at 8 and 1 workers. Ignoring the facing
+      in `bone_world` fails it (180° off).
+    - Not done: queries of other units; effects at joints; the renderer drawing `Facing`;
+      nav writing `Facing` and posting the move callins.
 
 ## TODO (open, not a priority now)
 

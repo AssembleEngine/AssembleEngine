@@ -308,6 +308,7 @@ dependencies = [
  "ae_vfs",
  "ae_view",
  "anyhow",
+ "glam",
 ]
 
 [[package]]

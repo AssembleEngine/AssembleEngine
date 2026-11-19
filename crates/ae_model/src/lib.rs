@@ -290,6 +290,20 @@ pub struct Clip {
     pub channels: Vec<Channel>,
 }
 
+/// A model's footprint radius: how far its rest box reaches across the
+/// ground plane (x, z) from the origin. A unit of radius `r` draws its
+/// model scaled by `r / footprint` (the renderer's fit, the sim's
+/// `anim:bone_world`).
+pub fn footprint(b: &Bounds) -> f32 {
+    let f = [b.min[0], b.max[0], b.min[2], b.max[2]].iter().fold(0.0f32, |a, v| a.max(v.abs()));
+    if f > 1e-6 {
+        f
+    } else {
+        let d = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3)
+    }
+}
+
 /// Axis-aligned box in model space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
