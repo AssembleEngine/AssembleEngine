@@ -235,7 +235,8 @@ The bloom is three quarter-size passes (`bloom.downsample`,
 of four 2×2 means per 4×4 block, then an 11-tap Gaussian (sigma 2
 quarter-size texels, ±5 is the 4% tail) along x and y. The result is added
 to the scene before the tone curve, scaled by `ToneParams::bloom` (0.3,
-RA3's `kBloomStrength`), so ACES rolls it off with the rest. The buffer is
+RA3's `kBloomStrength`; 0 turns it off, and the client's `Z` toggles it
+without changing the graph), so ACES rolls it off with the rest. The buffer is
 `RGBA16F` like the scene; a graph without a glow (and its three bloom
 passes) binds the scene to the second tonemap sampler and switches bloom
 off. The glow input is clamped at 4.0 exposed radiance (`BLOOM_CLAMP`), as
@@ -348,7 +349,8 @@ cached models of older versions are converted again.
   appends a default.
 - GPU `bloom_spreads_a_glow_but_not_lit_ground`: a glowing decal lifts the
   ground in a ring 12–28 px around it by 7.5 luma when the bloom is on, while
-  sunlit ground 80 px away changes by 0.0 (no lit surface enters the glow).
+  sunlit ground 80 px away changes by 0.0 (no lit surface enters the glow);
+  the view's bloom switch (the client's `Z`) draws exactly strength 0.
 - GPU `half_resolution_fire_in_front_of_smoke_blooms`: a fire in front of
   smoke (half-resolution sorted particles, the default) lifts a ring
   10–30 px around it by 10.7 luma with the bloom on; the full-resolution

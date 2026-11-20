@@ -695,7 +695,7 @@ the frame graph:
   RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` sim speed, doubling with no
   upper limit (compute-bound), Pause pauses the sim and every animation clock, `[`/`]` detail,
   T wireframe, L LOD colours, G fog, C freeze LOD, P print camera, V v-sync, N render module
-  flag); `--capture FILE.ppm` renders
+  flag, Z bloom); `--capture FILE.ppm` renders
   1280x720 offscreen without a
   window and prints GPU time per pass. The SDL window now reports wheel, drag, toggle keys and held
   movement keys (ecs_sim's F "full frame" key is gone).
