@@ -450,6 +450,44 @@ pub fn read_tga(bytes: &[u8]) -> Result<Image, String> {
     Ok(Image { width, height, texels: bgra })
 }
 
+/// Whether a tangent normal map's green points up the image (OpenGL/glTF
+/// style), from the curl of its red and green channels over the texels of
+/// `colour` whose alpha is at least 0.3. A positive curl means green down
+/// the rows (DirectX style), a negative one green up. A map with too little
+/// signal (flat, or two images of different sizes) is taken as green up,
+/// glTF's convention.
+pub fn normal_green_up(colour: &Image, normals: &Image) -> bool {
+    let (w, h) = (normals.width as usize, normals.height as usize);
+    if colour.width as usize != w || colour.height as usize != h || w < 3 || h < 3 {
+        return true;
+    }
+    let normal = |x: usize, y: usize| {
+        let t = normals.texels[y * w + x];
+        (t[0] as f64 / 127.5 - 1.0, t[1] as f64 / 127.5 - 1.0)
+    };
+    let (mut sum, mut nx2, mut ny2) = (0.0f64, 0.0f64, 0.0f64);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            if colour.texels[y * w + x][3] < 76 {
+                continue;
+            }
+            let (nx0, _) = normal(x, y - 1);
+            let (nx1, _) = normal(x, y + 1);
+            let (_, ny0) = normal(x - 1, y);
+            let (_, ny1) = normal(x + 1, y);
+            let dx = nx1 - nx0;
+            let dy = ny1 - ny0;
+            sum += dx * dy;
+            nx2 += dx * dx;
+            ny2 += dy * dy;
+        }
+    }
+    if nx2 * ny2 <= 1e-12 {
+        return true;
+    }
+    sum / (nx2 * ny2).sqrt() < 0.0
+}
+
 /// A square layer of `from`² texels at `to`²: box-filtered when shrinking
 /// by a whole factor, bilinear otherwise; `normals` renormalizes xyz.
 pub fn resample(texels: &[[f32; 4]], from: u32, to: u32, normals: bool) -> Vec<[f32; 4]> {
@@ -1061,23 +1099,55 @@ mod tests {
         }
     }
 
-    /// Recoil's scars (`assets/decals/scars`): scar1's normal map has
-    /// green down the image, scar2's up; loaded as the client loads them,
-    /// both take the atlas's convention.
+    /// The handedness detector: a DirectX-style (green down) normal map and
+    /// an OpenGL-style (green up) one are told apart; a flat map defaults
+    /// to green up.
+    #[test]
+    fn normal_maps_report_their_green_handedness() {
+        let size = 8u32;
+        let colour = Image { width: size, height: size, texels: vec![[0, 0, 0, 255]; (size * size) as usize] };
+        let map = |up: bool| -> Image {
+            let texels = (0..size * size)
+                .map(|i| {
+                    let (x, y) = ((i % size) as f32 - 3.5, (i / size) as f32 - 3.5);
+                    let nx = y * 0.05;
+                    let ny = x * 0.05 * if up { -1.0 } else { 1.0 };
+                    let enc = |v: f32| ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+                    [enc(nx), enc(ny), 128, 255]
+                })
+                .collect();
+            Image { width: size, height: size, texels }
+        };
+        assert!(!normal_green_up(&colour, &map(false)), "green down is DirectX style");
+        assert!(normal_green_up(&colour, &map(true)), "green up is OpenGL style");
+        let flat = Image { width: size, height: size, texels: vec![[128, 128, 255, 255]; (size * size) as usize] };
+        assert!(normal_green_up(&colour, &flat), "a flat map defaults to green up");
+    }
+
     #[test]
     fn recoil_scars_load_into_one_convention() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
         let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
-        let (c1, n1, c2, n2) = (read("scar1.tga"), read("scar1_normal.tga"), read("scar2.tga"), read("scar2_normal.tga"));
-        assert_eq!((c1.width, n1.width, c2.width, n2.width), (1024, 1024, 512, 512));
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tga") && !n.ends_with("_normal.tga"))
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "no bundled scars");
         let mut atlas = default_atlas().resized(256);
-        let l1 = atlas.add_layer(&c1, Some((&n1, false))).unwrap() as usize;
-        let l2 = atlas.add_layer(&c2, Some((&n2, true))).unwrap() as usize;
+        for name in names {
+            let stem = name.strip_suffix(".tga").unwrap();
+            let (colour, normal) = (read(&name), read(&format!("{stem}_normal.tga")));
+            let up = normal_green_up(&colour, &normal);
+            let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap() as usize;
+            let size = atlas.size as usize;
+            let sign = curl_sign(&atlas.normals[layer], size, &atlas.layers[layer]);
+            println!("{name}: green up {up}, curl {sign:.2}");
+            assert!(sign > 0.3, "{name}: {sign}");
+        }
         atlas.validate().unwrap();
-        let size = atlas.size as usize;
-        let (s1, s2) = (curl_sign(&atlas.normals[l1], size, &atlas.layers[l1]), curl_sign(&atlas.normals[l2], size, &atlas.layers[l2]));
-        println!("curl after loading: scar1 {s1:.2}, scar2 {s2:.2}");
-        assert!(s1 > 0.3 && s2 > 0.3, "scar1 {s1}, scar2 {s2}");
     }
 
     /// `cargo test --release -p ae_render --lib decal_encode_time -- --ignored --nocapture`

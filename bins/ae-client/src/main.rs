@@ -515,19 +515,35 @@ fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects
 /// Recoil's scars, in the repository (`assets/decals/scars`).
 const BUNDLED_SCARS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/decals/scars");
 
-/// The generated atlas at 512² with Recoil's two scars added (scar1's
-/// normal map has green down the image, scar2's up), and the scars'
-/// layers, blended as Recoil blends explosion scars (modulate).
+/// The generated atlas at 512² with the scars in `dir` added, and the
+/// scars' layers, blended as Recoil blends explosion scars (modulate).
+/// Every `NAME.tga` with a matching `NAME_normal.tga` is one scar; the
+/// normal map's green handedness is detected (`normal_green_up`), so both
+/// DirectX-style and OpenGL-style maps load.
 fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas, Vec<(u32, ae_render::decals::Blend)>)> {
-    use ae_render::decals::{Blend, default_atlas, read_tga};
+    use ae_render::decals::{Blend, default_atlas, normal_green_up, read_tga};
     let read = |name: &str| -> Result<ae_render::decals::Image> {
         let path = dir.join(name);
         read_tga(&std::fs::read(&path).with_context(|| path.display().to_string())?).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
     };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tga") && !n.ends_with("_normal.tga"))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        bail!("no scar colour maps (*.tga with a matching *_normal.tga) in {}", dir.display());
+    }
     let mut atlas = default_atlas().resized(512);
     let mut scars = Vec::new();
-    for (name, green_up) in [("scar1", false), ("scar2", true)] {
-        let layer = atlas.add_layer(&read(&format!("{name}.tga"))?, Some((&read(&format!("{name}_normal.tga"))?, green_up))).map_err(anyhow::Error::msg)?;
+    for name in &names {
+        let stem = name.strip_suffix(".tga").unwrap_or(name);
+        let colour = read(name)?;
+        let normal = read(&format!("{stem}_normal.tga"))?;
+        let up = normal_green_up(&colour, &normal);
+        let layer = atlas.add_layer(&colour, Some((&normal, up))).map_err(anyhow::Error::msg)?;
         scars.push((layer, Blend::Modulate));
     }
     Ok((atlas, scars))
