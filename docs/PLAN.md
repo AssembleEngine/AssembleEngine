@@ -2049,7 +2049,7 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
 
 M7 goal (after decals, before the stretch goal): decals that look like Recoil's scars.
 - **Textures.** Recoil's scars, `~/RecoilEngine/cont/base/bitmaps/bitmaps/scars/`:
-  - `scar1.tga` (1024²) and `scar2.tga` (512², RLE), each with a `_normal` map;
+  - `scarN.tga`, each with a `scarN_normal.tga` (the bundled set is now one 512² scar);
   - RGBA, 8-bit alpha. In the normal maps, rgb is the tangent-space normal and alpha is the glow
     (heat) mask (`normVal.w`).
   - Load them into the decal atlas, replacing or joining the generated scorch and crater. The
@@ -2095,21 +2095,23 @@ M7 goal (after decals, before the stretch goal): decals that look like Recoil's 
 
 Recoil's scars (results):
 - **Licence.** Recoil is GPL; the scars' rights holder (this repository's owner) allowed their
-  use, so they are in `assets/decals/scars` (scar1 re-encoded run-length, the same pixels) and
-  the client uses them by default (`--scars DIR` for another set, `--scars generated` for the
-  engine's). The generated scorch and crater gained their own normal maps (from generated
-  heights) and, for the scorch, a glow mask.
+  use, so they are in `assets/decals/scars` (one scar, the old `scar2`; the client discovers
+  every `NAME.tga` with a matching `NAME_normal.tga`) and the client uses them by default
+  (`--scars DIR` for another set, `--scars generated` for the engine's). The generated scorch
+  and crater gained their own normal maps (from generated heights) and, for the scorch, a glow
+  mask.
 - **Textures.**
   - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
   - `DecalAtlas::add_layer` resamples to the atlas's size (box when shrinking, bilinear when
     growing). The client's atlas with scars is 512² (the generated layers grown).
   - The atlas gained `normals` (empty: flat), a second array (binding 19, UNORM; mips average
     and renormalize the normal, average the mask).
-  - The two scars disagree: scar1's normal map has green down the image, scar2's up (its own
-    curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x downsample).
-    `add_layer` takes the convention per file and flips to the atlas's (green toward the
-    decal's +z, down the rows). A unit test loads both when they are present: after loading,
-    both curls are positive (0.83 and 0.73), as the generated layers'.
+  - Handedness differs per file: the old scar1's normal map had green down the image, the old
+    scar2's up (its own curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x
+    downsample). `normal_green_up` measures it and `add_layer` flips to the atlas's convention
+    (green toward the decal's +z, down the rows). A unit test loads every bundled scar pair:
+    after loading, its curl is positive (0.73 for the current single scar), as the generated
+    layers'.
 - **Record**: 16 words, adding glow, glow end, 1 / glow life and the blend.
 - **Shading** (`terrain_decals.glsl`; `applyDecals` returns albedo, normal and glow):
   - **Relit by its normal map.** Each projection's tangents are the world gradients of its u
