@@ -122,10 +122,10 @@ pub struct Draw {
 struct GpuModelLight {
     /// rgb: the linear tint; w: the range (metres; 0: none).
     color: [f32; 4],
-    /// x, y: a spot's inner and outer cosines; z: the source radius; w: the
-    /// joint in the low 16 bits, the kind (1 point, 2 spot) above it
-    /// (`f32` bits).
-    params: [f32; 4],
+    /// x, y: a spot's inner and outer cosines; z: the source radius.
+    params: [f32; 3],
+    /// The joint (low 16 bits) and the kind (1 point, 2 spot) above it.
+    meta: u32,
     /// x: the intensity (candela); y, z, w: 0.
     energy: [f32; 4],
 }
@@ -510,8 +510,8 @@ impl ModelSet {
                         if l.kind == ae_model::LightKind::Spot { l.inner_angle.cos() } else { 1.0 },
                         if l.kind == ae_model::LightKind::Spot { l.outer_angle.cos() } else { 1.0 },
                         l.size.max(1e-3),
-                        f32::from_bits(l.joint | ((if l.kind == ae_model::LightKind::Spot { 2 } else { 1 }) << 16)),
                     ],
+                    meta: l.joint | ((if l.kind == ae_model::LightKind::Spot { 2 } else { 1 }) << 16),
                     energy: [l.intensity, 0.0, 0.0, 0.0],
                 })
                 .collect();
@@ -682,5 +682,20 @@ impl ModelSet {
         ] {
             b.destroy(gpu);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_lights_match_the_shader_layout() {
+        // std430 in units_lights.glsl: vec4, vec3 + uint, vec4.
+        assert_eq!(std::mem::size_of::<GpuModelLight>(), 48);
+        assert_eq!(std::mem::offset_of!(GpuModelLight, color), 0);
+        assert_eq!(std::mem::offset_of!(GpuModelLight, params), 16);
+        assert_eq!(std::mem::offset_of!(GpuModelLight, meta), 28);
+        assert_eq!(std::mem::offset_of!(GpuModelLight, energy), 32);
     }
 }

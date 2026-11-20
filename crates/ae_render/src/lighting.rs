@@ -61,11 +61,6 @@ pub fn exposure(ev100: f32) -> f32 {
     1.0 / (1.2 * 2f32.powf(ev100))
 }
 
-/// The reference exposure of the migration bridge (EV14).
-pub fn reference_exposure() -> f32 {
-    exposure(DEFAULT_EV100)
-}
-
 /// The sky's radiance (cd/m²) as a uniform hemisphere: the illuminance over
 /// pi, tinted and normalised to unit luminance. The scene's clear colour,
 /// the distance fog and the water's reflection use it.

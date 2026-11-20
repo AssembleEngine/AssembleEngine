@@ -473,7 +473,7 @@ struct FrameUbo {
     fog: [f32; 4],
     shadow: crate::shadow::CascadeUniforms,
     effects: [[[f32; 4]; 6]; MAX_EFFECTS],
-    /// x: exposure, y: legacy emission scale, z: sun lux, w: sky lux.
+    /// x: exposure, y: unused, z: sun lux, w: sky lux.
     photometry: [f32; 4],
 }
 

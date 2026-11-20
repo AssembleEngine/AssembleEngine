@@ -49,7 +49,9 @@ void main() {
     // A medium in view is lit by the clustered lights once a frame, here
     // (the puff reads it); an emissive particle lights itself.
     if (physics.z < 0.5) {
-        particles[i].info.w = visible && lightsOn() ? packParticleLight(lightsAround(lightClusterAt(u.viewProj, p.posAge.xyz), p.posAge.xyz)) : 0u;
+        // Illuminance times exposure: what the scene stores (the 10-bit
+        // packing has its precision where the display does).
+        particles[i].info.w = visible && lightsOn() ? packParticleLight(lightsAround(lightClusterAt(u.viewProj, p.posAge.xyz), p.posAge.xyz) * u.photometry.x) : 0u;
     }
     if (visible) {
         float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);

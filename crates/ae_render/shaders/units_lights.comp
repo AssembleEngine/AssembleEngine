@@ -36,17 +36,17 @@ void main() {
             return;
         }
         ModelLight ml = modelLights[range.x + k];
-        uint bits = floatBitsToUint(ml.params.w);
-        uint kind = bits >> 16u;
-        mat3x4 m = palette[pbase + (bits & 0xffffu)];
+        uint kind = ml.meta >> 16u;
+        mat3x4 m = palette[pbase + (ml.meta & 0xffffu)];
         vec3 modelPos = vec4(0.0, 0.0, 0.0, 1.0) * m;
-        // glTF ignores node scale for a light's orientation: take the
-        // rotation alone (each axis of the affine part, normalised).
-        mat3 linear = mat3(m);
-        vec3 ax = normalize(linear[0]);
-        vec3 ay = normalize(linear[1]);
-        vec3 az = normalize(linear[2]);
-        vec3 modelDir = vec3(0.0, 0.0, -1.0) * mat3(ax, ay, az);
+        // glTF ignores node scale for a light's orientation. The palette
+        // stores the transform's rows as `m`'s columns, so its columns (the
+        // images of the local axes) are one component across them; each
+        // normalised, they are the rotation alone.
+        vec3 ex = normalize(vec3(m[0].x, m[1].x, m[2].x));
+        vec3 ey = normalize(vec3(m[0].y, m[1].y, m[2].y));
+        vec3 ez = normalize(vec3(m[0].z, m[1].z, m[2].z));
+        vec3 modelDir = mat3(ex, ey, ez) * vec3(0.0, 0.0, -1.0);
         Light l;
         l.position = place(unit, modelPos * fit);
         l.range = ml.color.w;

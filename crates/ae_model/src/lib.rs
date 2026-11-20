@@ -125,7 +125,8 @@ pub struct ModelLight {
     /// and its direction (the node's local -Z, glTF's convention).
     pub joint: u32,
     pub kind: LightKind,
-    /// The linear tint (unit luminance); [`Self::intensity`] scales it.
+    /// The linear tint (as glTF authored it; not renormalised to unit
+    /// luminance); [`Self::intensity`] scales it.
     pub color: [f32; 3],
     /// Luminous intensity in candela (glTF's `intensity`).
     pub intensity: f32,

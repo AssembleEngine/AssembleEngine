@@ -73,7 +73,11 @@ bridge left in the shaders.
   cd/m² over its life (FLASH about 87 000 at birth, FIRE about 20 000,
   SPARKS about 74 000). Media (smoke, dust) carry albedo instead; their
   lighting is `(sunE * sunAt + skyE * 0.5) / pi` plus the clustered lights
-  over pi. The frozen test effects use 19 661 cd/m² per old unit.
+  over pi. The clustered illuminance is packed per particle as illuminance
+  × exposure in 10 bits per channel (`x/(1+x)`, up to about 1 022 after
+  exposure), so a bright light keeps its value instead of clipping at the
+  old 1 022 lx ceiling. The frozen test effects use 19 661 cd/m² per old
+  unit.
 - **Burst lights**: `EffectLight` has a tint and a luminous intensity at
   birth in candela (FLASH 32.5 million, FIRE 3.17 million, from the old
   brightness at a quarter of their range): tuning targets, not measured
@@ -129,7 +133,10 @@ cached models of older versions are converted again.
   100 000 cd light adds a quarter at 4 m of what it adds at 2 m (inverse
   square, read through the clamp curve); a source radius larger than the
   range clamps the near field without extinguishing the light.
-- The 30 GPU tests pass with validation. A generated-map capture with eight
+- GPU `particles_light_by_illuminance`: an opaque smoke puff lit 10 m away
+  by 1 000 000 cd and by 4 000 000 cd adds 4:1 the light (at 10 000 and
+  40 000 lx, both past the old packing's 1 022 lx ceiling).
+- The 31 GPU tests pass with validation. A generated-map capture with eight
   explosions: under `Clamp` the calibrated EV14 output differs from the old
   build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
   explosion lights); the ACES default shifts it by a mean 24/255; the

@@ -70,6 +70,8 @@ pub struct Light {
     /// The authored cutoff (metres); 0: none (infinite in glTF's sense).
     pub range: f32,
     /// The linear tint (unitless); [`Self::intensity`] carries the scale.
+    /// The constructors normalise it to unit luminance; imported model
+    /// lights keep glTF's tint instead (see `docs/lighting.md`).
     pub color: [f32; 3],
     pub kind: u32,
     /// A cone's axis, a beam's segment (unit).

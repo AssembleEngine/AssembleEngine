@@ -2707,6 +2707,70 @@ fn particles_sort_blend_and_soften() {
     assert_clean(&gpu);
 }
 
+/// A medium's light from the clustered lights arrives as illuminance: at
+/// the same distance, four times the intensity adds four times the light,
+/// well past the old 10-bit ceiling (1022) that saturated every light over
+/// about 1 000 lx.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn particles_light_by_illuminance() {
+    use ae_render::lights::Light;
+    use ae_render::particles::{Burst, ParticleBlend};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::{Vec2, Vec3};
+
+    let gpu = gpu();
+    let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let puff = Vec3::new(128.0, 40.0, 128.0);
+    let clip = view_proj * puff.extend(1.0);
+    let at = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as u32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as u32);
+    let index = (at.1 * extent.width + at.0) as usize * 4;
+
+    // Opaque smoke, so the pixel is the puff's radiance alone; the sun is
+    // off and Clamp decodes the stored values linearly.
+    let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
+    let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
+    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0 };
+    // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
+    let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
+    let render = |lights: &[Light]| {
+        render_particles_lit(
+            &gpu,
+            &source,
+            camera,
+            extent,
+            Some((&[burst], vec![effect.clone()], 1, ParticleBlend::Sorted)),
+            lights,
+            tone,
+        )
+    };
+    let dark = render(&[]);
+    let dim = render(&[light(1.0e6)]);
+    let bright = render(&[light(4.0e6)]);
+    let decode = |p: &[u8], c: usize| {
+        let v = p[index + c] as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let add = |p: &[u8]| (0..3).map(|c| decode(p, c) - decode(&dark, c)).sum::<f32>() / 3.0;
+    let (dim, bright) = (add(&dim), add(&bright));
+    println!("clustered light on a puff: {dim:.4}, 4x: {bright:.4} (ratio {:.2})", bright / dim);
+    assert!(dim > 0.02, "the light lights the puff: {dim}");
+    assert!((bright / dim - 4.0).abs() < 0.2, "the puff sees illuminance, not a clipped coefficient: {bright:.4} / {dim:.4}");
+    assert_clean(&gpu);
+}
+
 /// A frame of the flat test terrain seen by `camera`; with Some, a particle
 /// renderer (`downscale`, `blend`) whose bursts are emitted before the
 /// first frame, still for the 8 frames rendered.
@@ -2717,10 +2781,26 @@ fn render_particles(
     extent: vk::Extent2D,
     particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
 ) -> Vec<u8> {
+    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams::default())
+}
+
+/// [`render_particles`] with the host's lights and a tone setting (for the
+/// tests that light the particles).
+fn render_particles_lit(
+    gpu: &Arc<GpuDevice>,
+    source: &Arc<ae_render::terrain::app::TerrainSource>,
+    camera: ae_render::terrain::camera::Camera,
+    extent: vk::Extent2D,
+    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+    lights: &[ae_render::lights::Light],
+    tone: ae_render::tonemap::ToneParams,
+) -> Vec<u8> {
     use ae_render::particles::{ParticleFeed, ParticlesSetup};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput};
     use ae_render::thread::{Headless, TargetInfo};
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .with_lights(lights.to_vec())
+        .with_tone(tone);
     if let Some((bursts, effects, downscale, blend)) = particles {
         let feed = Arc::new(ParticleFeed::default());
         feed.emit_all(bursts);

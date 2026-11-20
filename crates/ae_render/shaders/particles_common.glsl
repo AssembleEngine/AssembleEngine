@@ -27,7 +27,7 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     // speed max, up, spread), (gravity, drag, emissive, fade in), and
     // (emission birth, emission death) in cd/m² for emissive effects.
     vec4 effects[MAX_EFFECTS * 6];
-    vec4 photometry;  // x: exposure, y: legacy emission scale, z: sun lux, w: sky lux
+    vec4 photometry;  // x: exposure, y: unused, z: sun lux, w: sky lux
 } u;
 
 // One particle: position and age; velocity and life (dead when age >=
@@ -68,7 +68,9 @@ layout(std430, set = 0, binding = 6) buffer Histograms { uint histograms[]; };
 #endif
 
 // A particle's light from the clustered lights (particles_sim.comp, in
-// Particle.info.w): per channel x / (1 + x) in 10 bits.
+// Particle.info.w): the illuminance times the frame exposure (the value the
+// scene stores, so the 10-bit x / (1 + x) range covers the displayed one),
+// per channel in 10 bits.
 uint packParticleLight(vec3 c) {
     uvec3 q = uvec3(round(clamp(c / (1.0 + c), 0.0, 1.0) * 1023.0));
     return q.r | (q.g << 10) | (q.b << 20);

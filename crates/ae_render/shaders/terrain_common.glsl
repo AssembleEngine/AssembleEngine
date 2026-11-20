@@ -43,7 +43,7 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 unitShadowOrigin[3]; // per cascade: centre x, y, depth origin; w: world texel size
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     vec4 effects;        // x: effect time (s): the sim time drawn, so decals follow the sim's speed
-    vec4 photometry;     // x: exposure, y: legacy emission scale, z: sun lux, w: sky lux
+    vec4 photometry;     // x: exposure, y: unused, z: sun lux, w: sky lux
 } u;
 
 layout(std430, set = 0, binding = 1) BUF_QUAL buffer TreeBuf { uint tree[]; };    // sum tree (depth 0..T)

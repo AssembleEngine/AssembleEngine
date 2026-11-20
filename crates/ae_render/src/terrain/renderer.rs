@@ -151,8 +151,8 @@ pub struct FrameParams {
     /// Shade by the units' shadow map with these cascades (the graph
     /// draws and samples it this frame).
     pub unit_shadows: Option<Cascades>,
-    /// Photometric lighting: exposure, the legacy emission bridge, and the
-    /// sun's and sky's illuminances in lux.
+    /// Photometric lighting: exposure and the sun's and sky's illuminances
+    /// in lux (y unused).
     pub photometry: [f32; 4],
 }
 

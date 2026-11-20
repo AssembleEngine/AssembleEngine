@@ -54,7 +54,8 @@ Puff puffOf(uint slot) {
         vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * 0.5);
         vec3 light = (sunE + skyE) / AE_PI;
         if (p.info.w != 0u) {
-            light += unpackParticleLight(p.info.w) / AE_PI;
+            // Packed as illuminance times exposure: back to lux.
+            light += unpackParticleLight(p.info.w) / max(u.photometry.x, 1e-9) / AE_PI;
         }
         vec3 lit = mix(color.rgb * light, u.fog.rgb, fog);
         f.color = vec4(lit * color.a, color.a);

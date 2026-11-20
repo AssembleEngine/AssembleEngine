@@ -2610,12 +2610,17 @@ Steps (commit and stop for compaction after each):
     at 19 660.8 per unit; decal glow at 19 660.8; water's sky reflection is physical sky
     radiance, its glint scales with the sun, its foam is lit over π, its deep/shallow body
     radiances are 786/3 146 etc. cd/m²; fog and the scene clear colour are the sky's radiance
-    (exposed when stored). No reference-exposure factor remains in the shaders.
+    (exposed when stored). No reference-exposure factor remains in the shaders. The media's
+    clustered light is packed as illuminance × exposure (10-bit `x/(1+x)` per channel), so a
+    bright light is not clipped at the old 1 022 lx ceiling; a spot's direction takes the
+    node's scale-free columns (glTF's ignore-scale rule), correct for non-uniform scale.
   - **Verification**: `lighting` and `lights::bounds` unit tests; `ae_gltf` candela
     passthrough/omitted range/direction/warning; GPU
     `photometric_sun_exposure_and_inverse_square` (sun scales with illuminance; one EV doubles
     the *stored* scene, so exposure is before storage; 100 000 cd adds 4:1 at 2 m vs 4 m; a
-    source radius larger than the range does not extinguish the light). All 30 GPU tests pass
+    source radius larger than the range does not extinguish the light) and
+    `particles_light_by_illuminance` (1e6 and 4e6 cd at 10 m add 4:1 to a smoke puff, above
+    the old packing's ceiling). All 31 GPU tests pass
     with validation; the image tests needed no re-baselining — a generated-map capture with 8
     explosions differs from the old build by a mean 1.8/255 (0.4% of pixels above 8, the
     burst lights' retuning). `ae-client --bench battle` is unchanged within the run spread.

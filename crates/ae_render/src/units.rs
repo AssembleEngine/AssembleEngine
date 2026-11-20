@@ -387,7 +387,7 @@ struct FrameUbo {
     /// past it (`f32` bits; poses are drawn there), z: animation table
     /// writes this frame.
     anim: [u32; 4],
-    /// x: exposure, y: the legacy emission scale, z: sun lux, w: sky lux.
+    /// x: exposure, y: unused, z: sun lux, w: sky lux.
     photometry: [f32; 4],
 }
 

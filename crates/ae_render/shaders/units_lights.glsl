@@ -15,7 +15,8 @@
 // / joint and kind, and the intensity in candela.
 struct ModelLight {
     vec4 color;   // rgb: linear tint; w: the authored range (0: none)
-    vec4 params;  // x, y: a spot's inner and outer cosines; z: source radius; w: joint | kind << 16 (bits)
+    vec3 params;  // x, y: a spot's inner and outer cosines; z: source radius
+    uint meta;    // joint (low 16 bits) | kind << 16
     vec4 energy;  // x: intensity (cd)
 };
 
