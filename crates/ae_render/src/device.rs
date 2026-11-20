@@ -263,6 +263,7 @@ impl GpuDevice {
             let base = features.features;
             if features13.dynamic_rendering == vk::FALSE
                 || base.shader_clip_distance == vk::FALSE
+                || base.independent_blend == vk::FALSE
                 || features13.synchronization2 == vk::FALSE
                 || features13.shader_demote_to_helper_invocation == vk::FALSE
                 || features12.timeline_semaphore == vk::FALSE
@@ -334,6 +335,7 @@ impl GpuDevice {
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
         let base_features = vk::PhysicalDeviceFeatures::default()
             .shader_clip_distance(true)
+            .independent_blend(true)
             .fill_mode_non_solid(fill_mode_non_solid)
             .fragment_stores_and_atomics(fragment_stores)
             .texture_compression_bc(texture_compression_bc)

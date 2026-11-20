@@ -33,6 +33,12 @@
 //! and samples the depth buffer (it tests depth itself, fading where a
 //! particle meets the scene), so it takes the depth as
 //! `Sampled(Fragment)` rather than as an attachment.
+//!
+//! The glow (`glow`, [`ae_render_abi::module::GLOW_NAME`]) is the graph's
+//! choice the same way: a graph that declares it has every scene draw write
+//! it as a second colour attachment (the light sources only; the rest
+//! black) and the three `post.bloom` passes read it at a quarter of the
+//! size. A graph without it draws the same scene with no bloom.
 
 use ae_framegraph::{BufferDesc, FrameGraph, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage};
 use ash::vk;
@@ -160,8 +166,18 @@ pub enum LibraryPass {
     LightsCluster,
     /// The HDR scene image (sampled in the fragment stage, of the scene's
     /// format) to the output (one colour attachment of the target's
-    /// format): the tone curve (the scene is stored exposed).
+    /// format): the tone curve (the scene is stored exposed), plus the
+    /// bloom's light when the graph has a `glow` and `post.bloom` passes.
     Tonemap,
+    /// The glow target's brightest mean per 4×4 block, at a quarter of the
+    /// size: `bloom.downsample` (the glow `Sampled(Fragment)`, the first
+    /// bloom image a colour attachment).
+    BloomDownsample,
+    /// The 11-tap Gaussian along x, then along y: `bloom.blur_x` and
+    /// `bloom.blur_y` (one bloom image sampled, the other a colour
+    /// attachment).
+    BloomBlurX,
+    BloomBlurY,
     /// Copy an image to [`LibraryResource::ReadbackBuffer`].
     ReadbackCopy,
     /// Records nothing: the pass that declares host reads.
@@ -174,6 +190,9 @@ pub enum LibraryPass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attachments {
     pub color: usize,
+    /// The second colour attachment is the graph's `glow` image (when it
+    /// declares one): every scene draw writes it.
+    pub glow: bool,
     pub depth: DepthUse,
 }
 
@@ -189,7 +208,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 17] = [
+    pub const ALL: [LibraryPass; 20] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -204,6 +223,9 @@ impl LibraryPass {
         Self::ParticlesDraw,
         Self::LightsCluster,
         Self::Tonemap,
+        Self::BloomDownsample,
+        Self::BloomBlurX,
+        Self::BloomBlurY,
         Self::ReadbackCopy,
         Self::HostRead,
         Self::Present,
@@ -225,6 +247,9 @@ impl LibraryPass {
             Self::ParticlesDraw => "particles.draw",
             Self::LightsCluster => "lights.cluster",
             Self::Tonemap => "post.tonemap",
+            Self::BloomDownsample => "bloom.downsample",
+            Self::BloomBlurX => "bloom.blur_x",
+            Self::BloomBlurY => "bloom.blur_y",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
             Self::Present => "present",
@@ -238,7 +263,7 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim | Self::LightsCluster => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap => PassKind::Graphics,
+            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -289,7 +314,7 @@ impl LibraryPass {
             ],
             Self::LightsCluster => &[(R::LightList, Role::StorageBufferWrite(ShaderStage::Compute)), (R::LightClusters, Role::StorageBufferWrite(ShaderStage::Compute))],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
-            Self::WaterDraw | Self::Tonemap | Self::HostRead | Self::Present => &[],
+            Self::WaterDraw | Self::Tonemap | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY | Self::HostRead | Self::Present => &[],
         }
     }
 
@@ -297,9 +322,9 @@ impl LibraryPass {
     /// buffer, whose formats the host checks).
     pub fn attachments(self) -> Option<Attachments> {
         match self {
-            Self::TerrainDraw | Self::UnitsDraw => Some(Attachments { color: 1, depth: DepthUse::Write }),
-            Self::WaterDraw => Some(Attachments { color: 1, depth: DepthUse::Read }),
-            Self::ParticlesDraw => Some(Attachments { color: 1, depth: DepthUse::Sampled }),
+            Self::TerrainDraw | Self::UnitsDraw => Some(Attachments { color: 1, glow: true, depth: DepthUse::Write }),
+            Self::WaterDraw => Some(Attachments { color: 1, glow: true, depth: DepthUse::Read }),
+            Self::ParticlesDraw => Some(Attachments { color: 1, glow: true, depth: DepthUse::Sampled }),
             _ => None,
         }
     }
@@ -482,7 +507,12 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     if lib == LibraryPass::Tonemap {
         return check_tonemap(graph, pass, env);
     }
-    let (mut color, mut depth) = (0, 0);
+    if matches!(lib, LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY) {
+        return check_bloom(graph, pass, lib, env);
+    }
+    let glow = glow_resource(graph).is_some();
+    let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+    let (mut scene, mut glow_color, mut depth) = (0, 0, 0);
     for intent in &p.intents {
         let r = resource(intent.resource);
         if lib.requires().iter().chain(&receives).any(|&(needed, role)| map[intent.resource.index()] == Some(needed) && intent.role == role) {
@@ -490,11 +520,24 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
         }
         match (lib, intent.role) {
             (_, Role::ColorAttachment(_)) if lib.attachments().is_some() => {
-                color += 1;
-                if let ResourceDesc::Image(image) = r.desc
-                    && image.format != env.scene_format
-                {
+                let ResourceDesc::Image(image) = r.desc else {
+                    return Err(error(format!("pass `{name}` draws `{}`, which is not an image", r.name)));
+                };
+                let is_scene = r.name == ae_render_abi::module::SCENE_NAME || (image.format == env.scene_format && image.format != glow_format);
+                if is_scene && image.format != env.scene_format {
                     return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target the scene's {:?}", r.name, image.format, env.scene_format)));
+                } else if is_scene {
+                    scene += 1;
+                    if (image.width, image.height) != (env.extent.width, env.extent.height) {
+                        return Err(error(format!("pass `{name}` draws into `{}` at {}x{}; the scene is {}x{}", r.name, image.width, image.height, env.extent.width, env.extent.height)));
+                    }
+                } else if image.format == glow_format && lib.attachments().is_some_and(|a| a.glow) {
+                    glow_color += 1;
+                    if (image.width, image.height) != (env.extent.width, env.extent.height) {
+                        return Err(error(format!("pass `{name}` writes the glow `{}` at {}x{}; it is {}x{}", r.name, image.width, image.height, env.extent.width, env.extent.height)));
+                    }
+                } else {
+                    return Err(error(format!("pass `{name}` draws into `{}` ({:?}); the library's pipelines target the scene's {:?} and its glow {:?}", r.name, image.format, env.scene_format, glow_format)));
                 }
             }
             (_, Role::DepthAttachment(_)) | (_, Role::DepthRead) | (_, Role::Sampled(ShaderStage::Fragment))
@@ -517,15 +560,21 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
             _ => return Err(error(format!("pass `{name}` ({}) does not use `{}` as {:?}", lib.name(), r.name, intent.role))),
         }
     }
-    if let Some(a) = lib.attachments()
-        && (color != a.color || depth != 1)
-    {
-        let role = match a.depth {
-            DepthUse::Write => "a depth attachment",
-            DepthUse::Read => "a read-only depth attachment (depth_read)",
-            DepthUse::Sampled => "the depth buffer sampled in the fragment stage (sampled:fragment)",
-        };
-        return Err(error(format!("pass `{name}` ({}) needs {} colour attachment(s) and {role}; it has {color} and {depth}", lib.name(), a.color)));
+    if let Some(a) = lib.attachments() {
+        let need_glow = a.glow && glow;
+        if scene != a.color || glow_color != usize::from(need_glow) || depth != 1 {
+            let role = match a.depth {
+                DepthUse::Write => "a depth attachment",
+                DepthUse::Read => "a read-only depth attachment (depth_read)",
+                DepthUse::Sampled => "the depth buffer sampled in the fragment stage (sampled:fragment)",
+            };
+            let glow_text = if need_glow { ", the glow as a second colour attachment," } else { "" };
+            return Err(error(format!(
+                "pass `{name}` ({}) needs {} colour attachment(s){glow_text} and {role}; it has {scene} scene, {glow_color} glow and {depth} depth",
+                lib.name(),
+                a.color
+            )));
+        }
     }
     if lib == LibraryPass::ReadbackCopy && p.intents.iter().filter(|i| i.role == Role::TransferSrc).count() != 1 {
         return Err(error(format!("pass `{name}` (readback.copy) copies one image")));
@@ -536,27 +585,99 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     Ok(())
 }
 
-/// `post.tonemap`: one image of the scene's format sampled in the fragment
-/// stage and one colour attachment of the output's, nothing else.
+/// The graph's `glow` image, if it declares one (by name: any image may
+/// use the name, but it must be of [`ae_render_abi::module::GLOW_FORMAT`]).
+pub fn glow_resource<R>(graph: &FrameGraph<R>) -> Option<ResourceId> {
+    graph.resources.iter().position(|r| r.name == ae_render_abi::module::GLOW_NAME).map(|i| ResourceId(i as u32))
+}
+
+/// `post.tonemap`: the scene `sampled:fragment` (and the bloom, a quarter
+/// of its size, when the graph declares a glow) and one colour attachment
+/// of the output's, nothing else.
 fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Result<(), LibraryError> {
     let p = &graph.passes[pass];
     let name = &p.name;
-    let (mut scene, mut color) = (0, 0);
+    let bloom_format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
+    let (bw, bh) = ae_render_abi::module::bloom_size(env.extent.width, env.extent.height);
+    let (mut scene, mut bloom, mut color) = (0, 0, 0);
+    let mut sampled = 0;
     for intent in &p.intents {
         let r = &graph.resources[intent.resource.index()];
         let ResourceDesc::Image(image) = r.desc else {
             return Err(error(format!("pass `{name}` (post.tonemap) does not use buffer `{}`", r.name)));
         };
         match intent.role {
-            Role::Sampled(ShaderStage::Fragment) if image.format == env.scene_format => scene += 1,
-            Role::Sampled(ShaderStage::Fragment) => return Err(error(format!("pass `{name}` (post.tonemap) samples `{}` ({:?}); the scene is {:?}", r.name, image.format, env.scene_format))),
+            Role::Sampled(ShaderStage::Fragment) if sampled == 0 => {
+                if image.format != env.scene_format || (image.width, image.height) != (env.extent.width, env.extent.height) {
+                    return Err(error(format!(
+                        "pass `{name}` (post.tonemap) samples `{}` ({:?} {}x{}) first; the scene is {:?} {}x{}",
+                        r.name, image.format, image.width, image.height, env.scene_format, env.extent.width, env.extent.height
+                    )));
+                }
+                scene += 1;
+                sampled += 1;
+            }
+            Role::Sampled(ShaderStage::Fragment) => {
+                if image.format != bloom_format || (image.width, image.height) != (bw, bh) {
+                    return Err(error(format!(
+                        "pass `{name}` (post.tonemap) samples `{}` ({:?} {}x{}); the bloom is {:?} {bw}x{bh}",
+                        r.name, image.format, image.width, image.height, bloom_format
+                    )));
+                }
+                bloom += 1;
+                sampled += 1;
+            }
             Role::ColorAttachment(_) if image.format == env.color_format => color += 1,
             Role::ColorAttachment(_) => return Err(error(format!("pass `{name}` (post.tonemap) writes `{}` ({:?}); the output is {:?}", r.name, image.format, env.color_format))),
             role => return Err(error(format!("pass `{name}` (post.tonemap) does not use `{}` as {role:?}", r.name))),
         }
     }
-    if scene != 1 || color != 1 {
-        return Err(error(format!("pass `{name}` (post.tonemap) samples one scene image and writes one colour attachment; it has {scene} and {color}")));
+    let need_bloom = glow_resource(graph).is_some();
+    if scene != 1 || color != 1 || bloom != usize::from(need_bloom) {
+        return Err(error(format!(
+            "pass `{name}` (post.tonemap) samples one scene image{}and writes one colour attachment; it has {scene}, {bloom} and {color}",
+            if need_bloom { " and the bloom " } else { " " }
+        )));
+    }
+    Ok(())
+}
+
+/// The bloom's passes: `bloom.downsample` reads the full-size glow and
+/// writes the first quarter-size bloom image; the two blurs read one and
+/// write the other. One sampled input and one colour attachment, no depth.
+fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &LibraryEnv) -> Result<(), LibraryError> {
+    let p = &graph.passes[pass];
+    let name = &p.name;
+    let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+    let bloom_format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
+    let (bw, bh) = ae_render_abi::module::bloom_size(env.extent.width, env.extent.height);
+    let (want_in, want_size) = if lib == LibraryPass::BloomDownsample { (glow_format, (env.extent.width, env.extent.height)) } else { (bloom_format, (bw, bh)) };
+    let (mut input, mut output) = (0, 0);
+    for intent in &p.intents {
+        let r = &graph.resources[intent.resource.index()];
+        let ResourceDesc::Image(image) = r.desc else {
+            return Err(error(format!("pass `{name}` ({}) does not use buffer `{}`", lib.name(), r.name)));
+        };
+        match intent.role {
+            Role::Sampled(ShaderStage::Fragment) if image.format == want_in && (image.width, image.height) == want_size => input += 1,
+            Role::ColorAttachment(_) if image.format == bloom_format && (image.width, image.height) == (bw, bh) => output += 1,
+            Role::Sampled(ShaderStage::Fragment) => {
+                return Err(error(format!(
+                    "pass `{name}` ({}) samples `{}` ({:?} {}x{}); it reads {:?} {}x{}",
+                    lib.name(), r.name, image.format, image.width, image.height, want_in, want_size.0, want_size.1
+                )));
+            }
+            Role::ColorAttachment(_) => {
+                return Err(error(format!(
+                    "pass `{name}` ({}) writes `{}` ({:?} {}x{}); it writes the bloom {:?} {bw}x{bh}",
+                    lib.name(), r.name, image.format, image.width, image.height, bloom_format
+                )));
+            }
+            role => return Err(error(format!("pass `{name}` ({}) does not use `{}` as {role:?}", lib.name(), r.name))),
+        }
+    }
+    if input != 1 || output != 1 || p.intents.len() != 2 {
+        return Err(error(format!("pass `{name}` ({}) samples one image and writes one colour attachment; it has {input} and {output} ({} intents)", lib.name(), p.intents.len())));
     }
     Ok(())
 }
@@ -597,6 +718,28 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
         {
             return Err(error("the graph clusters the lights before `units.pose`; the pass appends the units' model lights from the palettes it writes".into()));
         }
+    }
+    // The glow (the bloom's input) and the bloom's three passes go
+    // together: a graph either declares the glow image and all of them, or
+    // neither.
+    if let Some(glow) = glow_resource(graph) {
+        let r = &graph.resources[glow.index()];
+        let want = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+        match r.desc {
+            ResourceDesc::Image(image) if image.format == want => {}
+            ResourceDesc::Image(image) => return Err(error(format!("`{}` is {:?}; the glow is {want:?} (glow_spec)", r.name, image.format))),
+            ResourceDesc::Buffer(_) => return Err(error(format!("`{}` is a buffer; the glow is an image", r.name))),
+        }
+        let missing: Vec<&str> = [LibraryPass::BloomDownsample, LibraryPass::BloomBlurX, LibraryPass::BloomBlurY]
+            .into_iter()
+            .filter(|lib| !written(*lib))
+            .map(LibraryPass::name)
+            .collect();
+        if !missing.is_empty() {
+            return Err(error(format!("the graph declares `{}` but no `{}` pass (the bloom reads it)", r.name, missing.join("` or `"))));
+        }
+    } else if written(LibraryPass::BloomDownsample) || written(LibraryPass::BloomBlurX) || written(LibraryPass::BloomBlurY) {
+        return Err(error("the graph has `post.bloom` passes but no `glow` image (bloom reads the light sources' glow)".into()));
     }
     Ok(())
 }

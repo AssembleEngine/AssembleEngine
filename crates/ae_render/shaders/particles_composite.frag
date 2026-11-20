@@ -12,6 +12,7 @@ layout(set = 1, binding = 1) uniform sampler2D halfDepth;
 layout(set = 1, binding = 2) uniform sampler2D depthTex;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outGlow;
 
 // View depth (infinite reverse-Z), the sky far but finite.
 float viewDepth(float d) {
@@ -50,4 +51,7 @@ void main() {
     }
     // The target holds physical radiance; the scene is exposed radiance.
     outColor.rgb *= u.photometry.x;
+    // The bloom's light sources: only emissive particles (alpha 0). Smoke
+    // writes black with its coverage, so it hides the glints behind it.
+    outGlow = vec4(outColor.a > (0.5 / 255.0) ? vec3(0.0) : outColor.rgb, outColor.a);
 }

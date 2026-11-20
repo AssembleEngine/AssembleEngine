@@ -30,6 +30,7 @@
 
 layout(location = 0) in vec3 inWorld;
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outGlow;
 
 const int TRAINS = 8;
 // Wavelength (m), direction (radians), steepness (amplitude × wavenumber:
@@ -124,6 +125,13 @@ void main() {
         spec += lightsSpecular(lightClusterFrag(gl_FragCoord), P, N, E, s);
     }
     vec3 glint = spec * WATER_SPECULAR_GAIN;
+    // The bloom's light sources on the water: only the crisp glints (RA3's
+    // `glint * (1 - soft)`). Unresolved waves widen the lobe into a sheen:
+    // many glints averaged over a pixel are not points of light, and
+    // blooming that sheen lit a whole sun path as one white blob from afar.
+    // Foam, the waterline fade and the fog take the glints, as RA3 takes
+    // them; the bloom shader clamps what is left.
+    vec3 surfaceGlow = glint * (1.0 - rough);
 
     // Premultiplied: alpha is how much of what lies under the surface it
     // hides; the glints are added light.
@@ -150,13 +158,19 @@ void main() {
     // The soft waterline: nothing where the ground reaches the surface.
     rgb *= waterline;
     alpha *= waterline;
+    surfaceGlow *= (1.0 - foam) * waterline;
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         rgb = applyVision(rgb, P.xz);
+        surfaceGlow = applyVision(surfaceGlow, P.xz);
     }
     // Distance fog over the surface's share (what lies under it is fogged
     // already): the blend then gives mix(surface over ground, fog, f).
-    rgb = mix(rgb, u.fog.rgb * alpha, fogAmount(dist));
+    float fogged = fogAmount(dist);
+    rgb = mix(rgb, u.fog.rgb * alpha, fogged);
+    surfaceGlow *= 1.0 - fogged;
     // Stored exposed, like the rest of the scene.
     outColor = vec4(rgb * u.photometry.x, alpha);
+    // The water replaces the glow under it: its glints are its own light.
+    outGlow = vec4(surfaceGlow * u.photometry.x, 1.0);
 }

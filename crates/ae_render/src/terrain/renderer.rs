@@ -579,11 +579,14 @@ impl TerrainRenderer {
                         vertex: spirv!("water.vert"),
                         fragment: spirv!("water.frag"),
                         layout: pipeline_layout,
-                        color_formats: &[color_format],
+                        color_formats: &[color_format, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)],
                         // Reverse-Z; tested against the terrain and units, never written.
                         depth: Some(pipeline::DepthState { format: depth_format, write: false, compare: vk::CompareOp::GREATER_OR_EQUAL }),
                         topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                         blend: pipeline::Blend::Premultiplied,
+                        // The water's glints replace what lies behind them in
+                        // the glow target (their own light, not the bed's).
+                        glow_blend: pipeline::Blend::Off,
                     },
                 )
                 .context("water pipeline")?,
@@ -997,11 +1000,17 @@ fn graphics_pipeline(
         .depth_test_enable(true)
         .depth_write_enable(!wire)
         .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL);
-    let blend = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+    // The glow target (the bloom's input) is the second attachment; the
+    // scene's pipelines are built for it so a graph may declare it or not
+    // (the fragment shader always writes location 1).
+    let formats = [color_format, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)];
+    let blend = [
+        vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA),
+        vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA),
+    ];
     let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
-    let formats = [color_format];
     let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats).depth_attachment_format(depth_format);
     if ae_framegraph::has_stencil(depth_format) {
         rendering = rendering.stencil_attachment_format(depth_format);

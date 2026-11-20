@@ -17,6 +17,7 @@ layout(location = 4) in vec4 inColor;
 layout(location = 5) flat in uint inMaterial;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outGlow;
 
 // Texture k of the material (0 base colour, 1 normal, 2 occlusion,
 // 3 emissive) at its UV set, through its KHR_texture_transform.
@@ -87,11 +88,15 @@ void main() {
     color += brdfDiffuse(s, n, v) * skyE + brdfAmbient(s, n, v) * (skyR * ao);
     // glTF's emissive factor x strength is dimensionless; the engine reads
     // it as luminance in cd/m² at this scale (documented in lighting.md).
-    color += emissive * 19660.8;
+    vec3 emitted = emissive * 19660.8;
+    color += emitted;
     if (lightsOn()) {
         color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, n, v, s);
     }
     float dist = distance(inWorld, u.camPos.xyz);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
     outColor = vec4(mix(color, u.fog.rgb, fog) * u.photometry.x, 1.0);
+    // The bloom's light sources: the material's emission, after the same
+    // fog the scene sees (a fogged model's emission is not a light source).
+    outGlow = vec4(emitted * (1.0 - fog) * u.photometry.x, 1.0);
 }

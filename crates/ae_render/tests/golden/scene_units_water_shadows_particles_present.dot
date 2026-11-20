@@ -15,8 +15,11 @@ digraph frame_graph {
   p8 [label="11: units\nGraphics", fillcolor="#cfe2ff"];
   p11 [label="12: water\nGraphics", fillcolor="#cfe2ff"];
   p13 [label="13: particles\nGraphics", fillcolor="#cfe2ff"];
-  p14 [label="14: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p15 [label="15: present\nPresent", fillcolor="#e2e3e5"];
+  p14 [label="14: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p15 [label="15: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p16 [label="16: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p17 [label="17: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p18 [label="18: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p7 [label="terrain.leaves"];
   p0 -> p7 [label="terrain.indirect"];
   p1 -> p5 [label="units.palette"];
@@ -43,19 +46,31 @@ digraph frame_graph {
   p6 -> p11 [label="shadows.color"];
   p7 -> p8 [label="depth"];
   p7 -> p8 [label="scene"];
+  p7 -> p8 [label="glow"];
   p8 -> p11 [label="depth"];
   p8 -> p11 [label="scene"];
+  p8 -> p11 [label="glow"];
   p8 -> p13 [label="depth"];
   p9 -> p10 [label="units.counts"];
   p11 -> p13 [label="scene"];
+  p11 -> p13 [label="glow"];
   p12 -> p6 [label="particles.state"];
   p12 -> p6 [label="particles.keys"];
   p12 -> p6 [label="particles.indirect"];
   p12 -> p13 [label="particles.state"];
   p12 -> p13 [label="particles.keys"];
   p12 -> p13 [label="particles.indirect"];
-  p13 -> p14 [label="scene"];
-  p14 -> p15 [label="target"];
+  p13 -> p14 [label="glow"];
+  p13 -> p17 [label="scene"];
+  p14 -> p15 [label="bloom.0"];
+  p14 -> p16 [label="bloom.0"];
+  p15 -> p16 [label="bloom.0"];
+  p15 -> p16 [label="bloom.1"];
+  p16 -> p17 [label="bloom.0"];
+  p17 -> p18 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
+  // physical 2 Transient: glow
+  // physical 3 Transient: bloom.0
+  // physical 4 Transient: bloom.1
 }

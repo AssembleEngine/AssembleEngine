@@ -16,7 +16,7 @@
 //! ae_render_sdk::render_module!(Scene);
 //! ```
 
-pub use ae_render_abi::module::{FrameInput, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME, particle_shadow_spec, scene_spec, shadow_map_spec};
+pub use ae_render_abi::module::{BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME, bloom_size, bloom_spec, glow_spec, particle_shadow_spec, scene_spec, shadow_map_spec};
 pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 pub use ae_render_abi as abi;
 
@@ -69,6 +69,8 @@ pub struct DeclareEnv {
     /// as an indirect buffer) and sampled
     /// (`sampled:fragment`) by every pass that samples `shadows.map`.
     pub particles: bool,
+    // The glow and bloom are not flags: a graph declares the `glow` image
+    // (`glow_spec`) and the three `post.bloom` passes itself, or neither.
 }
 
 pub struct Declaration {

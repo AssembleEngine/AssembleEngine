@@ -452,7 +452,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
     let vertex = include_bytes!(concat!(env!("OUT_DIR"), "/test_rect.vert.spv"));
     let make = |fragment: &[u8], formats: &[vk::Format], write| {
         let depth = Some(DepthState { format: depth_format, write, compare: vk::CompareOp::LESS });
-        let desc = GraphicsDesc { vertex, fragment, layout, color_formats: formats, depth, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend: Blend::Off };
+        let desc = GraphicsDesc { vertex, fragment, layout, color_formats: formats, depth, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend: Blend::Off, glow_blend: Blend::Off };
         pipeline::graphics_pipeline(device, &desc).unwrap()
     };
     let mrt = make(include_bytes!(concat!(env!("OUT_DIR"), "/test_mrt.frag.spv")), &[FORMAT, FORMAT], true);
@@ -816,7 +816,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun });
+            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0 });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -1694,6 +1694,7 @@ fn parallel_recording_matches_serial() {
             depth: None,
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
             blend: Blend::Off,
+            glow_blend: Blend::Off,
         };
         let pipe = pipeline::graphics_pipeline(device, &desc).unwrap();
         let color = ImageDesc::color_2d(FORMAT, SIZE, SIZE, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
@@ -2423,7 +2424,8 @@ fn particles_cast_coloured_shadows() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() })
+            .with_tone(ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() });
         if shadows {
             app = app.with_shadows();
         }
@@ -2742,7 +2744,7 @@ fn particles_light_by_illuminance() {
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
     let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0 };
+    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0 };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {
@@ -2781,7 +2783,7 @@ fn render_particles(
     extent: vk::Extent2D,
     particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
 ) -> Vec<u8> {
-    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams::default())
+    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() })
 }
 
 /// [`render_particles`] with the host's lights and a tone setting (for the
@@ -3670,6 +3672,89 @@ fn decals_carry_their_roughness_and_metallic() {
     println!("decal material peak: smooth dielectric {:.1}, rough dielectric {:.1}, smooth metal {:.1}", peak(&smooth), peak(&rough), peak(&metal));
     assert!(peak(&smooth) > peak(&rough) + 20.0, "a rough decal keeps the ground glossy: {:.1} vs {:.1}", peak(&smooth), peak(&rough));
     assert!(peak(&metal) > peak(&smooth) + 10.0, "the metallic decal's F0 does not reach the BRDF: {:.1} vs {:.1}", peak(&metal), peak(&smooth));
+    assert_clean(&gpu);
+}
+
+/// The bloom (M12 step 4): a glowing decal's light spreads to the ground
+/// around it when the bloom is on, while sunlit ground far from any light
+/// source does not change (the glow holds only light sources, not lit
+/// surfaces). The bloom is compared on and off with the same scene.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn bloom_spreads_a_glow_but_not_lit_ground() {
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    let n = 65;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(128.0, 128.0), ground: 10.0, distance: 120.0, yaw: 0.0, pitch: 0.7, fov_y: 0.8 };
+
+    // One grey layer whose normal's alpha is a full glow mask.
+    let size = 16u32;
+    let texels = (size * size) as usize;
+    let atlas = Arc::new(DecalAtlas {
+        size,
+        layers: vec![vec![[0.3, 0.3, 0.3, 1.0]; texels]],
+        normals: vec![vec![[0.0, 0.0, 1.0, 0.9]; texels]],
+        roughness: Vec::new(),
+        materials: Vec::new(),
+    });
+    let decal = Decal { glow: 1.0, glow_life: 100.0, ..Decal::permanent([128.0, 128.0], [4.0, 4.0], 0.0, 0) };
+
+    let render = |bloom: f32| -> Vec<u8> {
+        let feed = Arc::new(DecalFeed::default());
+        feed.place_all(&[decal]);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_decals(DecalsSetup { feed, capacity: 4, atlas: Some(atlas.clone()) })
+            .with_tone(ToneParams { bloom, ..Default::default() });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let off = render(0.0);
+    let on = render(ae_render::tonemap::BLOOM_STRENGTH);
+
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(128.0, 10.0, 128.0, 1.0);
+    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    let (cu, cv) = (cu as i32, cv as i32);
+    let luma = |p: &[u8], x: i32, y: i32| -> f32 {
+        let i = ((y * extent.width as i32 + x) * 4) as usize;
+        0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32
+    };
+    let mut spread = 0.0f32;
+    for y in (cv - 28)..=(cv + 28) {
+        for x in (cu - 28)..=(cu + 28) {
+            let d = ((x - cu).pow(2) + (y - cv).pow(2)) as f32;
+            if ((12.0 * 12.0)..=(28.0 * 28.0)).contains(&d) {
+                spread = spread.max(luma(&on, x, y) - luma(&off, x, y));
+            }
+        }
+    }
+    let far = luma(&on, cu + 80, cv) - luma(&off, cu + 80, cv);
+    println!("bloom: ring spread {spread:.1} luma; sunlit ground 80 px away changes {far:.1}");
+    assert!(spread > 3.0, "the glow does not bloom: {spread:.1}");
+    assert!(far.abs() < 1.01, "lit ground blooms: {far:.1}");
     assert_clean(&gpu);
 }
 

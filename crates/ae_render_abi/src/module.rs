@@ -114,6 +114,40 @@ pub fn scene_spec(width: u32, height: u32) -> crate::ImageSpec {
     crate::ImageSpec::color_2d(SCENE_FORMAT, width, height, 0x4 | 0x10)
 }
 
+/// The scene's glow image: the second colour attachment of every scene
+/// draw, holding only light sources (a glowing decal, a water glint, an
+/// emissive model or particle) and black everywhere else. A graph that
+/// declares [`GLOW_NAME`] has every `terrain.draw`, `units.draw`,
+/// `water.draw` and `particles.draw` write it and its `post.bloom` passes
+/// read it; everything that is not a light source writes black (covering
+/// what is behind it). The bloom reads it at a quarter of the size.
+/// `B10G11R11` as RA3-graphics' glow target: it has no alpha, so its
+/// attachment write mask is RGB.
+pub const GLOW_FORMAT: u32 = 122; // VK_FORMAT_B10G11R11_UFLOAT_PACK32
+pub const GLOW_NAME: &str = "glow";
+pub fn glow_spec(width: u32, height: u32) -> crate::ImageSpec {
+    // Usage: sampled (0x4) | colour attachment (0x10).
+    crate::ImageSpec::color_2d(GLOW_FORMAT, width, height, 0x4 | 0x10)
+}
+
+/// A bloom buffer (`bloom.downsample`, `bloom.blur_x`, `bloom.blur_y`):
+/// the glow at a quarter of the target's size, blurred with an 11-tap
+/// Gaussian (RA3-graphics' three passes) and added to the scene before the
+/// tonemap. `RGBA16F`, like the scene, so the blur does not band.
+pub const BLOOM_FORMAT: u32 = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
+pub const BLOOM_NAME: &str = "bloom.0";
+pub const BLOOM_SCRATCH_NAME: &str = "bloom.1";
+/// The bloom images' size for a target `width` × `height` (a quarter, at
+/// least 1).
+pub fn bloom_size(width: u32, height: u32) -> (u32, u32) {
+    (((width as f32 * 0.25).round() as u32).max(1), ((height as f32 * 0.25).round() as u32).max(1))
+}
+pub fn bloom_spec(width: u32, height: u32) -> crate::ImageSpec {
+    let (w, h) = bloom_size(width, height);
+    // Usage: sampled (0x4) | colour attachment (0x10).
+    crate::ImageSpec::color_2d(BLOOM_FORMAT, w, h, 0x4 | 0x10)
+}
+
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
 pub const PROGRAM_VERSION: u32 = 1;
 const PROGRAM_HEADER_WORDS: usize = 4;

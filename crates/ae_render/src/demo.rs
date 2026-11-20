@@ -263,6 +263,7 @@ mod gpu {
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
+                    glow_blend: Blend::Off,
                 },
             )?;
             let filter = pipeline::compute_pipeline(device, spirv!("demo_filter.comp"), compute_layout)?;
@@ -276,6 +277,7 @@ mod gpu {
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
+                    glow_blend: Blend::Off,
                 },
             )?;
             let sets_needed = (frames_in_flight * 5) as u32;

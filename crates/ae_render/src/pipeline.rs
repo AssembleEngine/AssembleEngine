@@ -36,8 +36,13 @@ pub struct GraphicsDesc<'a> {
     pub color_formats: &'a [vk::Format],
     pub depth: Option<DepthState>,
     pub topology: vk::PrimitiveTopology,
-    /// Blending on every colour attachment.
+    /// Blending on the first colour attachment.
     pub blend: Blend,
+    /// Blending on the second colour attachment, the glow (ignored with
+    /// one attachment). Water replaces it (its glints are its own), units
+    /// and the terrain overwrite it, particles leave the light behind them
+    /// through by their coverage.
+    pub glow_blend: Blend,
 }
 
 /// How a pipeline's output blends with the attachment.
@@ -83,16 +88,19 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let attachment = vec![vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(desc.blend != Blend::Off)
-        .src_color_blend_factor(if matches!(desc.blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
-        .dst_color_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-        .color_blend_op(if desc.blend == Blend::Max { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
-        .src_alpha_blend_factor(vk::BlendFactor::ONE)
-        .dst_alpha_blend_factor(if matches!(desc.blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-        .alpha_blend_op(if matches!(desc.blend, Blend::AdditiveMaxAlpha | Blend::Max) { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
-        .color_write_mask(vk::ColorComponentFlags::RGBA);
-        desc.color_formats.len()];
+    let state = |blend: Blend| {
+        vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(blend != Blend::Off)
+            .src_color_blend_factor(if matches!(blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
+            .dst_color_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
+            .color_blend_op(if blend == Blend::Max { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
+            .alpha_blend_op(if matches!(blend, Blend::AdditiveMaxAlpha | Blend::Max) { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+    };
+    let glow_slot = desc.color_formats.get(1) == Some(&vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32));
+    let attachment: Vec<_> = desc.color_formats.iter().enumerate().map(|(i, _)| state(if i == 1 && glow_slot { desc.glow_blend } else { desc.blend })).collect();
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);

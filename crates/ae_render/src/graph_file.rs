@@ -244,11 +244,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// Vulkan format by name (the ones render graphs use), `target` (the
-/// output's) or `scene` (the HDR scene's, [`ae_render_abi::module::SCENE_FORMAT`]).
+/// output's), `scene` (the HDR scene's, [`ae_render_abi::module::SCENE_FORMAT`]),
+/// `glow` or `bloom`.
 fn format(name: &str, target: u32) -> Result<u32> {
     Ok(match name {
         "target" => target,
         "scene" => ae_render_abi::module::SCENE_FORMAT,
+        "glow" => ae_render_abi::module::GLOW_FORMAT,
+        "bloom" => ae_render_abi::module::BLOOM_FORMAT,
         "R8G8B8A8_UNORM" => 37,
         "R8G8B8A8_SRGB" => 43,
         "B8G8R8A8_UNORM" => 44,

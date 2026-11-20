@@ -274,6 +274,7 @@ impl FullscreenProgram {
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Straight,
+                    glow_blend: Blend::Off,
                 },
             )
             .with_context(|| format!("program `{label}` pipeline"))?;

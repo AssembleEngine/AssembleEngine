@@ -15,6 +15,7 @@
 layout(location = 0) in vec3 inWorld;
 layout(location = 1) flat in uint inDepth;
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outGlow;
 
 vec3 hue(float h) {
     return clamp(abs(fract(h + vec3(0.0, 2.0, 1.0) / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
@@ -300,6 +301,9 @@ Surface tileset(vec2 cell, vec3 P, vec3 dx, vec3 dy, vec3 n) {
 }
 
 void main() {
+    // No light of its own until a glowing decal says otherwise; every
+    // return path below leaves the glow black.
+    outGlow = vec4(0.0);
     // In uniform control flow: the tileset samples with explicit gradients.
     vec3 dPdx = dFdx(inWorld), dPdy = dFdy(inWorld);
     float cs = u.map.w;
@@ -438,16 +442,22 @@ void main() {
     // glows, the fog of war dims the glow as it dims the scar under it.
     // A scar's glow, as luminance: the decal shader's black-body glow
     // (0..~1 at full heat) times its peak (cd/m²).
-    color += glow * 19660.8;
+    vec3 emitted = glow * 19660.8;
+    color += emitted;
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         color = applyVision(color, inWorld.xz);
+        emitted = applyVision(emitted, inWorld.xz);
     }
 
     float dist = distance(inWorld, u.camPos.xyz);
-    color = mix(color, u.fog.rgb, fogAmount(dist));
+    float fogged = fogAmount(dist);
+    color = mix(color, u.fog.rgb, fogged);
     // The scene buffer holds exposed radiance (the tonemap only curves).
     color *= u.photometry.x;
+    // The bloom's light sources: only the emission, after the same fog and
+    // vision the scene sees (fog is not a light source).
+    outGlow = vec4(emitted * (1.0 - fogged) * u.photometry.x, 1.0);
 
 #ifdef BARY
     // Wireframe overlay. Sub-mesh triangles are emitted as (v0, apex, v2), so the

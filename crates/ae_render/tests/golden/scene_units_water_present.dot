@@ -11,8 +11,11 @@ digraph frame_graph {
   p5 [label="7: terrain\nGraphics", fillcolor="#cfe2ff"];
   p6 [label="8: units\nGraphics", fillcolor="#cfe2ff"];
   p9 [label="9: water\nGraphics", fillcolor="#cfe2ff"];
-  p10 [label="10: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p11 [label="11: present\nPresent", fillcolor="#e2e3e5"];
+  p10 [label="10: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p11 [label="11: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p12 [label="12: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p13 [label="13: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p14 [label="14: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p5 [label="terrain.leaves"];
   p0 -> p5 [label="terrain.indirect"];
   p1 -> p6 [label="units.palette"];
@@ -28,11 +31,22 @@ digraph frame_graph {
   p4 -> p9 [label="lights.clusters"];
   p5 -> p6 [label="depth"];
   p5 -> p6 [label="scene"];
+  p5 -> p6 [label="glow"];
   p6 -> p9 [label="depth"];
   p6 -> p9 [label="scene"];
+  p6 -> p9 [label="glow"];
   p7 -> p8 [label="units.counts"];
-  p9 -> p10 [label="scene"];
-  p10 -> p11 [label="target"];
+  p9 -> p10 [label="glow"];
+  p9 -> p13 [label="scene"];
+  p10 -> p11 [label="bloom.0"];
+  p10 -> p12 [label="bloom.0"];
+  p11 -> p12 [label="bloom.0"];
+  p11 -> p12 [label="bloom.1"];
+  p12 -> p13 [label="bloom.0"];
+  p13 -> p14 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
+  // physical 2 Transient: glow
+  // physical 3 Transient: bloom.0
+  // physical 4 Transient: bloom.1
 }

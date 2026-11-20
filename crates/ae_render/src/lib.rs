@@ -13,6 +13,7 @@
 //!
 //! Shaders in `shaders/` are compiled to SPIR-V by `build.rs` with `glslc`.
 
+pub mod bloom;
 pub mod decals;
 pub mod demo;
 pub mod device;

@@ -681,7 +681,7 @@ impl UnitRenderer {
         };
         let cull_code: &[u8] = if model_set.is_some() { spirv!("units_models_cull.comp") } else { spirv!("units_cull.comp") };
         let cull = pipeline::compute_pipeline(device, cull_code, pipeline_layout).context("unit cull pipeline")?;
-        let color_formats = [color_format];
+        let color_formats = [color_format, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)];
         let graphics = |vertex: &[u8], fragment: &[u8], color: bool| {
             pipeline::graphics_pipeline(
                 device,
@@ -696,6 +696,7 @@ impl UnitRenderer {
                     }),
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
+                    glow_blend: Blend::Off,
                 },
             )
         };

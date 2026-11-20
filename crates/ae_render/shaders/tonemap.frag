@@ -7,9 +7,10 @@
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Tonemap {
-    vec4 params; // x: unused (exposure is in the scene); y: curve
+    vec4 params; // x: bloom strength, y: curve, z: 1 when the graph has a bloom
 } t;
 layout(set = 0, binding = 1) uniform sampler2D scene;
+layout(set = 0, binding = 2) uniform sampler2D bloom;
 
 vec3 aces(vec3 x) {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
@@ -17,6 +18,11 @@ vec3 aces(vec3 x) {
 
 void main() {
     vec3 c = max(texelFetch(scene, ivec2(gl_FragCoord.xy), 0).rgb, vec3(0.0));
+    // The bloom joins the scene's light before the curve (RA3's post.frag),
+    // so ACES rolls it off instead of it piling up into white.
+    if (t.params.z > 0.5) {
+        c += texture(bloom, uv).rgb * t.params.x;
+    }
     c = t.params.y > 0.5 ? aces(c) : min(c, vec3(1.0));
     color = vec4(c, 1.0);
 }

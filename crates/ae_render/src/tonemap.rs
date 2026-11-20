@@ -29,6 +29,9 @@ pub struct ToneParams {
     /// The sun's direct-normal illuminance (lux): a capture override for
     /// [`crate::lighting::SUN_ILLUMINANCE`].
     pub sun_illuminance: f32,
+    /// How much of the graph's bloom joins the scene before the curve
+    /// (RA3's 0.3; 0 turns it off without changing the graph).
+    pub bloom: f32,
 }
 
 impl ToneParams {
@@ -40,7 +43,7 @@ impl ToneParams {
 
 impl Default for ToneParams {
     fn default() -> Self {
-        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Aces, sun_illuminance: crate::lighting::SUN_ILLUMINANCE }
+        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Aces, sun_illuminance: crate::lighting::SUN_ILLUMINANCE, bloom: BLOOM_STRENGTH }
     }
 }
 
@@ -48,23 +51,31 @@ pub struct Tonemap {
     program: FullscreenProgram,
 }
 
+/// How much of the bloom's blurred light joins the scene (RA3's
+/// `kBloomStrength`).
+pub const BLOOM_STRENGTH: f32 = 0.3;
+
 impl Tonemap {
     /// For an output of `format`.
     pub fn new(gpu: &GpuDevice, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
-        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), 16, 1, &[format], frames_in_flight)? })
+        // Two samplers: the scene and the bloom. A graph without a bloom
+        // binds the scene to the second and the uniform switches it off.
+        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), 16, 2, &[format], frames_in_flight)? })
     }
 
     /// Frame slot `slot`'s parameters (before it records).
-    pub fn write(&mut self, slot: usize, params: ToneParams) {
+    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool) {
         // Exposure was applied before the scene was stored; only the curve
         // is left here.
-        let words: [f32; 4] = [1.0, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, 0.0, 0.0];
+        let words: [f32; 4] = [params.bloom, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, if bloom { 1.0 } else { 0.0 }, 0.0];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.program.write_uniforms(slot, &bytes);
     }
 
-    pub fn record(&self, ctx: &PassContext<'_>, scene: ImageBinding, sampler: vk::Sampler) -> Result<()> {
-        self.program.record(ctx, &[scene], sampler)
+    /// The scene, plus the bloom's blurred light when the graph has one
+    /// (the scene stands in for it otherwise, unread).
+    pub fn record(&self, ctx: &PassContext<'_>, scene: ImageBinding, bloom: Option<ImageBinding>, sampler: vk::Sampler) -> Result<()> {
+        self.program.record(ctx, &[scene, bloom.unwrap_or(scene)], sampler)
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

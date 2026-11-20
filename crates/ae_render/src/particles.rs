@@ -683,27 +683,44 @@ impl ParticleRenderer {
         let sim = compute(spirv!("particles_sim.comp"), "sim")?;
         let histogram = compute(spirv!("particles_sort_histogram.comp"), "sort histogram")?;
         let scatter = compute(spirv!("particles_sort_scatter.comp"), "sort scatter")?;
+        let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+        let draw_formats: Vec<vk::Format> = if setup.downscale > 1 { vec![HALF_COLOR] } else { vec![color_format, glow_format] };
         let draw = pipeline::graphics_pipeline(
             device,
             &GraphicsDesc {
                 vertex: spirv!("particles.vert"),
-                fragment: spirv!("particles.frag"),
+                fragment: if setup.downscale > 1 { spirv!("particles.frag") } else { spirv!("particles_scene.frag") },
                 layout: pipeline_layout,
-                color_formats: &[if setup.downscale > 1 { HALF_COLOR } else { color_format }],
+                color_formats: &draw_formats,
                 // Depth is sampled: the shader tests (and fades) by itself.
                 depth: None,
                 topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                 blend: Blend::Premultiplied,
+                glow_blend: Blend::Premultiplied,
             },
         )
         .context("particle pipeline")?;
         let fullscreen = |fragment: &[u8], layout, format, blend| {
-            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("fullscreen.vert"), fragment, layout, color_formats: &[format], depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend })
+            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("fullscreen.vert"), fragment, layout, color_formats: &[format], depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend, glow_blend: Blend::Off })
         };
         let depth_down = fullscreen(spirv!("particles_depth_down.frag"), pipeline_layout, HALF_DEPTH, Blend::Off).context("particle depth downsample pipeline")?;
-        let composite = fullscreen(spirv!("particles_composite.frag"), composite_pipeline_layout, color_format, Blend::Premultiplied).context("particle composite pipeline")?;
+        let composite_formats = [color_format, glow_format];
+        let composite = pipeline::graphics_pipeline(
+            device,
+            &GraphicsDesc {
+                vertex: spirv!("fullscreen.vert"),
+                fragment: spirv!("particles_composite.frag"),
+                layout: composite_pipeline_layout,
+                color_formats: &composite_formats,
+                depth: None,
+                topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                blend: Blend::Premultiplied,
+                glow_blend: Blend::Premultiplied,
+            },
+        )
+        .context("particle composite pipeline")?;
         let particle_pipeline = |fragment: &[u8], formats: &[vk::Format], blend| {
-            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("particles.vert"), fragment, layout: pipeline_layout, color_formats: formats, depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend })
+            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("particles.vert"), fragment, layout: pipeline_layout, color_formats: formats, depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend, glow_blend: Blend::Off })
         };
         let oit = match setup.blend {
             ParticleBlend::Sorted => Vec::new(),
@@ -743,6 +760,7 @@ impl ParticleRenderer {
                 depth: None,
                 topology: vk::PrimitiveTopology::TRIANGLE_STRIP,
                 blend: Blend::AdditiveMaxAlpha,
+                glow_blend: Blend::Off,
             },
         )
         .context("particle shadow pipeline")?;
@@ -1089,15 +1107,16 @@ impl ParticleRenderer {
     /// with one colour attachment that reads [`Self::state`] and
     /// [`Self::keys`] in the vertex stage, [`Self::indirect`] as an
     /// indirect buffer and samples `depth` in the fragment stage; `color`
-    /// is that colour attachment (in `COLOR_ATTACHMENT_OPTIMAL`).
+    /// and `glow` are the pass's colour attachments (in
+    /// `COLOR_ATTACHMENT_OPTIMAL`).
     ///
     /// At half resolution the work happens inside the pass, outside the
     /// graph: it ends the pass's rendering scope, renders the depth
     /// downsample and the particles into the slot's own targets (with its
-    /// own barriers), then begins a scope on `color` again (load, store)
-    /// for the composite, which the graph ends. The pass's contract stays
-    /// the same at either resolution.
-    pub fn record_draw(&self, ctx: &PassContext<'_>, color: ImageBinding, depth: ImageBinding) -> Result<()> {
+    /// own barriers), then begins a scope on `color` and `glow` again
+    /// (load, store) for the composite, which the graph ends. The pass's
+    /// contract stays the same at either resolution.
+    pub fn record_draw(&self, ctx: &PassContext<'_>, color: ImageBinding, depth: ImageBinding, glow: ImageBinding) -> Result<()> {
         if !self.active[ctx.slot] {
             return Ok(());
         }
@@ -1281,17 +1300,19 @@ impl ParticleRenderer {
             }
             // Over the scene.
             // (and the scene's colour: written before the scope was ended).
-            let scene = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image(color.image)
-                .subresource_range(color.range);
-            barrier(&[to_sampled(half.color.image), scene]);
-            begin(&[color.view], color.extent, vk::AttachmentLoadOp::LOAD);
+            let scene = |image: vk::Image, range: vk::ImageSubresourceRange| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image(image)
+                    .subresource_range(range)
+            };
+            barrier(&[to_sampled(half.color.image), scene(color.image, color.range), scene(glow.image, glow.range)]);
+            begin(&[color.view, glow.view], color.extent, vk::AttachmentLoadOp::LOAD);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.composite_sets[slot]], &[]);
             device.cmd_draw(cmd, 3, 1, 0, 0);

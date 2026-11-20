@@ -4,14 +4,26 @@ digraph frame_graph {
   p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
   p1 [label="1: lights\nCompute", fillcolor="#d1e7dd"];
   p2 [label="2: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p3 [label="3: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p4 [label="4: present\nPresent", fillcolor="#e2e3e5"];
+  p3 [label="3: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p4 [label="4: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p5 [label="5: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p6 [label="6: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p7 [label="7: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p2 [label="terrain.leaves"];
   p0 -> p2 [label="terrain.indirect"];
   p1 -> p2 [label="lights.list"];
   p1 -> p2 [label="lights.clusters"];
-  p2 -> p3 [label="scene"];
-  p3 -> p4 [label="target"];
+  p2 -> p3 [label="glow"];
+  p2 -> p6 [label="scene"];
+  p3 -> p4 [label="bloom.0"];
+  p3 -> p5 [label="bloom.0"];
+  p4 -> p5 [label="bloom.0"];
+  p4 -> p5 [label="bloom.1"];
+  p5 -> p6 [label="bloom.0"];
+  p6 -> p7 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
+  // physical 2 Transient: glow
+  // physical 3 Transient: bloom.0
+  // physical 4 Transient: bloom.1
 }

@@ -6,7 +6,7 @@
 //! conditional pass the module disables otherwise). Then present or
 //! readback, as in the default module.
 
-use ae_render_sdk::{Class, Declaration, DeclareEnv, FrameInput, FrameOutput, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, Declaration, DeclareEnv, FrameInput, FrameOutput, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 const GRADE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grade.frag.spv"));
 const VIGNETTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vignette.frag.spv"));
@@ -39,6 +39,10 @@ impl RenderModule for Post {
         let indirect = library(&mut g, "terrain.indirect");
         let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
         let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
+        // The glow (the bloom's input) and the quarter-size bloom buffers.
+        let glow = g.image(GLOW_NAME, glow_spec(w, h), Class::Transient);
+        let bloom0 = g.image(BLOOM_NAME, bloom_spec(w, h), Class::Transient);
+        let bloom1 = g.image(BLOOM_SCRATCH_NAME, bloom_spec(w, h), Class::Transient);
         let ldr = g.image("ldr", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
         let target = if env.readback {
             g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
@@ -109,6 +113,7 @@ impl RenderModule for Post {
                 .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(indirect, Role::IndirectBuffer)
                 .color(scene, LoadOp::Clear)
+                .color(glow, LoadOp::Clear)
                 .depth(depth, LoadOp::Clear),
             maps,
             lights,
@@ -123,6 +128,7 @@ impl RenderModule for Post {
                     .access(draws, Role::IndirectBuffer)
                     .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
                     .color(scene, LoadOp::Load)
+                    .color(glow, LoadOp::Load)
                     .depth(depth, LoadOp::Load),
                 maps,
                 lights,
@@ -135,7 +141,7 @@ impl RenderModule for Post {
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).depth_read(depth), maps, lights).id();
+            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).color(glow, LoadOp::Load).depth_read(depth), maps, lights).id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
@@ -147,11 +153,18 @@ impl RenderModule for Post {
                 .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
                 .color(scene, LoadOp::Load)
+                .color(glow, LoadOp::Load)
                 .sampled(depth, ShaderStage::Fragment)
                 .id();
         }
+        let downsample = p.library("bloom.downsample");
+        g.pass("bloom downsample", PassKind::Graphics, downsample).sampled(glow, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        let blur_x = p.library("bloom.blur_x");
+        g.pass("bloom blur x", PassKind::Graphics, blur_x).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
+        let blur_y = p.library("bloom.blur_y");
+        g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
         let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
         g.pass("grade", PassKind::Graphics, grade).sampled(ldr, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });

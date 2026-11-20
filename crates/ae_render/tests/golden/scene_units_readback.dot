@@ -10,9 +10,12 @@ digraph frame_graph {
   p4 [label="6: lights\nCompute", fillcolor="#d1e7dd"];
   p5 [label="7: terrain\nGraphics", fillcolor="#cfe2ff"];
   p6 [label="8: units\nGraphics", fillcolor="#cfe2ff"];
-  p9 [label="9: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p10 [label="10: copy\nTransfer", fillcolor="#fff3cd"];
-  p11 [label="11: host read\nTransfer", fillcolor="#fff3cd"];
+  p9 [label="9: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p10 [label="10: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p11 [label="11: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p12 [label="12: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p13 [label="13: copy\nTransfer", fillcolor="#fff3cd"];
+  p14 [label="14: host read\nTransfer", fillcolor="#fff3cd"];
   p0 -> p5 [label="terrain.leaves"];
   p0 -> p5 [label="terrain.indirect"];
   p1 -> p6 [label="units.palette"];
@@ -26,10 +29,20 @@ digraph frame_graph {
   p4 -> p6 [label="lights.clusters"];
   p5 -> p6 [label="depth"];
   p5 -> p6 [label="scene"];
-  p6 -> p9 [label="scene"];
+  p5 -> p6 [label="glow"];
+  p6 -> p9 [label="glow"];
+  p6 -> p12 [label="scene"];
   p7 -> p8 [label="units.counts"];
-  p9 -> p10 [label="readback.target"];
-  p10 -> p11 [label="readback.buffer"];
+  p9 -> p10 [label="bloom.0"];
+  p9 -> p11 [label="bloom.0"];
+  p10 -> p11 [label="bloom.0"];
+  p10 -> p11 [label="bloom.1"];
+  p11 -> p12 [label="bloom.0"];
+  p12 -> p13 [label="readback.target"];
+  p13 -> p14 [label="readback.buffer"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
+  // physical 2 Transient: glow
+  // physical 3 Transient: bloom.0
+  // physical 4 Transient: bloom.1
 }
