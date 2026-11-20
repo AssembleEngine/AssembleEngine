@@ -693,11 +693,17 @@ the frame graph:
   assumption a scout's limit is a 59° step, a heavy's 50°. To settle when units get real scale.
 - `ae-client` shows it: `--map water|land|generated|demo`, `--map-cells`, `--relief`, `--camera`,
   RTS controls (WASD/arrows, wheel, right-drag, Q/E, R/F, `+`/`-` sim speed, doubling with no
-  upper limit (compute-bound), `[`/`]` detail, T wireframe, L LOD colours, G fog, C freeze LOD,
-  P print camera, V v-sync, N render module flag); `--capture FILE.ppm` renders
+  upper limit (compute-bound), Pause pauses the sim and every animation clock, `[`/`]` detail,
+  T wireframe, L LOD colours, G fog, C freeze LOD, P print camera, V v-sync, N render module
+  flag); `--capture FILE.ppm` renders
   1280x720 offscreen without a
   window and prints GPU time per pass. The SDL window now reports wheel, drag, toggle keys and held
   movement keys (ecs_sim's F "full frame" key is gone).
+- Pause (2026-11-20): the Pause key stops the sim thread and freezes the renderer's animation
+  clocks: water time, decals and particles (`effect_time`), unit interpolation and the render
+  module's time. The paused interval is skipped on resume (and readback holds its frame index),
+  so nothing jumps or replays. GPU `pause_holds_the_water_clock`: 30 frames while paused are
+  byte-identical to the pause frame, while an unpaused run of the same length has moved.
 - Captures are `R8G8B8A8_SRGB` like the swapchain, so they show what the window shows; the
   prototype's fog and lighting make the 20 km overview look pale (G toggles fog), left as is until the
   tilesets redo the look. `ae-client` prints "validation off" instead of zero counts when the layer is
@@ -2730,7 +2736,7 @@ Steps (commit and stop for compaction after each):
     ring 12–28 px out by 7.5 luma with the bloom on; sunlit ground 80 px away changes by 0.0),
     and GPU `half_resolution_fire_in_front_of_smoke_blooms` (a fire in front of smoke lifts a
     ring by 10.7 luma at half resolution and 12.5 at full; smoke in front takes its share, 4.1;
-    the first composite gives 0.0 at half). 37 GPU tests pass with validation; `cargo test
+    the first composite gives 0.0 at half). 38 GPU tests pass with validation; `cargo test
     --workspace` green.
   - **Cost** (`m12-before-bloom` against `m12-bloom-2`): battle 1 057 → 1 078 µs (+2.0%; bloom
     13.3 µs, tonemap unchanged), cliffs 862 → 851 µs and army-fox 8 168 → 8 265 µs (+1.2%, within
@@ -3415,11 +3421,10 @@ From M12 (2026-11-19):
   a frame, so past 6x at 60 fps they lag the sim), decals fade and cool by it (`u.effects.x`);
   water and the render module stay on wall time; readback keeps the deterministic time. Seen
   in the client under validation, not yet checked by eye at other speeds.
-  - Particles step by wall-clock frame time (`particles.rs`: `dt` from `frame.time`), so at 2x
-    or 0.5x sim speed, or with the sim paused or late, smoke and sparks run at their own pace.
-  - Drive particle, decal fade/glow and other effect timers by the interpolated sim time
-    (`(tick + alpha) × tick seconds`, as clips now are), so they speed up, slow down and stop with
-    the sim. Purely visual time (water ripples, UI) may stay on wall time; choose per effect.
+  - Particles step by `effect_time` (`particles.rs`: `dt` from `frame.time`), and decals fade,
+    cool and expire by the same time, so both speed up, slow down and stop with the sim.
+  - Water ripples and the render module stay on wall time at other sim speeds; the Pause key
+    holds their clocks too (and skips the paused interval on resume).
 - **Pie in the sky, some time: look-at / IK for unit scripts** (TODO, not planned in detail;
   after M14). Aiming a joint chain at a point, feet on uneven ground.
 - **Pie in the sky, some time: revisit the froxels** (`ParticleBlend::Froxels`, M7 stretch goal).

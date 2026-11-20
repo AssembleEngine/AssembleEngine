@@ -355,7 +355,7 @@ cached models of older versions are converted again.
   path gives 12.5, and smoke in front of the fire takes its share (4.1).
   Classifying the accumulated half colour by its alpha (the first version
   of the composite) gives 0.0 at half resolution.
-- The 37 GPU tests pass with validation. A generated-map capture with eight
+- The 38 GPU tests pass with validation. A generated-map capture with eight
   explosions: under `Clamp` the calibrated EV14 output differs from the old
   build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
   explosion lights); the ACES default shifts it by a mean 24/255; the
