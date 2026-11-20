@@ -29,7 +29,12 @@
 //! half-resolution RGBA16F target, and a composite puts it over the scene,
 //! bilinear where the four nearest texels' depths match the pixel's and
 //! the nearest-depth texel across an edge (no smoke bleeding onto a unit or
-//! a cliff in front of it). All of it records inside the `particles` pass.
+//! a cliff in front of it). The sorted draw also writes a half-resolution
+//! `B10G11R11` glow target, per particle in the same order: emissive puffs
+//! add their light, media write black and mask the light behind them. The
+//! composite upsamples that into the scene's glow, so a fire in front of
+//! smoke keeps its bloom and smoke still hides the glints behind it. All of
+//! it records inside the `particles` pass.
 //!
 //! With the units' shadow map, the particles also cast coloured shadows
 //! ([`crate::shadow`]): the `shadows.particles` pass draws every live
@@ -391,6 +396,9 @@ struct HalfTargets {
     extent: vk::Extent2D,
     /// Premultiplied particles (RGBA16F: emissive colours exceed 1).
     color: OwnedImage,
+    /// The particles' light for the bloom (`B10G11R11`, like the scene's
+    /// glow), blended per particle in sorted order.
+    glow: OwnedImage,
     /// The farthest scene depth of each 2x2 block (R32F, reverse-Z).
     depth: OwnedImage,
     /// [`ParticleBlend::Slices`]: the range (RG16F), the slices
@@ -407,6 +415,7 @@ struct HalfTargets {
 impl HalfTargets {
     fn destroy(mut self, gpu: &GpuDevice) {
         self.color.destroy(gpu);
+        self.glow.destroy(gpu);
         self.depth.destroy(gpu);
         for image in &mut self.moments {
             image.destroy(gpu);
@@ -634,13 +643,13 @@ impl ParticleRenderer {
             // clustered lights (the simulation lights each particle).
             let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout, lights.set_layout()], 8, vk::ShaderStageFlags::COMPUTE)?;
             let fragment = vk::ShaderStageFlags::FRAGMENT;
-            let composite_layout = pipeline::set_layout(device, &[(image, fragment), (image, fragment), (image, fragment)])?;
+            let composite_layout = pipeline::set_layout(device, &[(image, fragment), (image, fragment), (image, fragment), (image, fragment)])?;
             let composite_pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, composite_layout], 0, vk::ShaderStageFlags::FRAGMENT)?;
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
                 vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 12 * n },
-                vk::DescriptorPoolSize { ty: image, descriptor_count: 20 * n },
+                vk::DescriptorPoolSize { ty: image, descriptor_count: 21 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(4 * n).pool_sizes(&sizes), None)?;
             let allocate = |layout: vk::DescriptorSetLayout| {
@@ -684,12 +693,26 @@ impl ParticleRenderer {
         let histogram = compute(spirv!("particles_sort_histogram.comp"), "sort histogram")?;
         let scatter = compute(spirv!("particles_sort_scatter.comp"), "sort scatter")?;
         let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
-        let draw_formats: Vec<vk::Format> = if setup.downscale > 1 { vec![HALF_COLOR] } else { vec![color_format, glow_format] };
+        // The sorted half-resolution draw writes the colour and its glow
+        // together, per particle (the composite only upsamples). The
+        // test-only OIT blends have no per-particle glow: they write the
+        // colour alone and the composite clears their glow.
+        let sorted = setup.blend == ParticleBlend::Sorted;
+        let draw_formats: Vec<vk::Format> = if setup.downscale > 1 {
+            if sorted { vec![HALF_COLOR, glow_format] } else { vec![HALF_COLOR] }
+        } else {
+            vec![color_format, glow_format]
+        };
+        let draw_fragment: &[u8] = if setup.downscale > 1 {
+            if sorted { spirv!("particles_half.frag") } else { spirv!("particles.frag") }
+        } else {
+            spirv!("particles_scene.frag")
+        };
         let draw = pipeline::graphics_pipeline(
             device,
             &GraphicsDesc {
                 vertex: spirv!("particles.vert"),
-                fragment: if setup.downscale > 1 { spirv!("particles.frag") } else { spirv!("particles_scene.frag") },
+                fragment: draw_fragment,
                 layout: pipeline_layout,
                 color_formats: &draw_formats,
                 // Depth is sampled: the shader tests (and fades) by itself.
@@ -828,8 +851,14 @@ impl ParticleRenderer {
         }
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
         let image = |format, name: &str| OwnedImage::new(gpu, ImageDesc::color_2d(format, half.width, half.height, usage), name);
+        // The glow is a colour attachment for the sorted draw and is
+        // cleared by transfer for the test-only blends that do not write
+        // it.
+        let glow_usage = usage | vk::ImageUsageFlags::TRANSFER_DST;
+        let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+        let glow = OwnedImage::new(gpu, ImageDesc::color_2d(glow_format, half.width, half.height, glow_usage), "particles glow (half resolution)")?;
         // Built up so that a failure part way frees what was made.
-        let mut targets = HalfTargets { extent: half, color: image(HALF_COLOR, "particles (half resolution)")?, depth: image(HALF_DEPTH, "particle depth (half resolution)")?, moments: Vec::new(), reference: Vec::new() };
+        let mut targets = HalfTargets { extent: half, color: image(HALF_COLOR, "particles (half resolution)")?, glow, depth: image(HALF_DEPTH, "particle depth (half resolution)")?, moments: Vec::new(), reference: Vec::new() };
         let made = (|| -> Result<()> {
             if self.blend == ParticleBlend::Moments {
                 for (format, name) in MOMENT_FORMATS.iter().zip(["particle moment b0", "particle moments", "particle media", "particle emissive"]) {
@@ -862,7 +891,7 @@ impl ParticleRenderer {
             return Err(err);
         }
         let info = |view| [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-        let (color_info, depth_info) = (info(targets.color.view), info(targets.depth.view));
+        let (color_info, depth_info, glow_info) = (info(targets.color.view), info(targets.depth.view), info(targets.glow.view));
         let moment_infos: Vec<_> = targets.moments.iter().map(|m| info(m.view)).collect();
         let buffer_infos: Vec<_> = targets.reference.iter().map(|b| [vk::DescriptorBufferInfo { buffer: b.buffer, offset: 0, range: vk::WHOLE_SIZE }]).collect();
         let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
@@ -870,6 +899,7 @@ impl ParticleRenderer {
             vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&depth_info),
             vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&color_info),
             vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(1).descriptor_type(image).image_info(&depth_info),
+            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(3).descriptor_type(image).image_info(&glow_info),
         ];
         for (i, info) in moment_infos.iter().enumerate() {
             writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(2 + i as u32).descriptor_type(image).image_info(info));
@@ -1140,6 +1170,9 @@ impl ParticleRenderer {
             return Ok(());
         }
         let half = self.half[slot].as_ref().context("particle targets not made (write_frame)")?;
+        // Only the sorted draw writes the per-particle glow; the OIT test
+        // blends leave it black (and the composite then adds no emission).
+        let sorted = self.blend == ParticleBlend::Sorted;
         let color_range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
         let to_attachment = |image: vk::Image| {
             vk::ImageMemoryBarrier2::default()
@@ -1159,6 +1192,30 @@ impl ParticleRenderer {
                 .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(image)
+                .subresource_range(color_range)
+        };
+        // The half glow of the test-only blends that do not write it:
+        // cleared by transfer, then sampled by the composite.
+        let to_transfer = |image: vk::Image| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                .src_access_mask(vk::AccessFlags2::NONE)
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(color_range)
+        };
+        let to_sampled_transfer = |image: vk::Image| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image(image)
                 .subresource_range(color_range)
@@ -1207,8 +1264,14 @@ impl ParticleRenderer {
             if self.blend == ParticleBlend::Froxels {
                 device.cmd_fill_buffer(cmd, half.reference[1].buffer, 0, vk::WHOLE_SIZE, 0);
             }
-            // The scene depth's farthest per 2x2 block.
-            barrier(&[to_attachment(half.depth.image), to_attachment(half.color.image)]);
+            // The scene depth's farthest per 2x2 block; the glow joins the
+            // sorted draw as its second attachment (or is cleared black for
+            // the test-only blends that do not write it).
+            barrier(&[to_attachment(half.depth.image), to_attachment(half.color.image), if sorted { to_attachment(half.glow.image) } else { to_transfer(half.glow.image) }]);
+            if !sorted {
+                let black = vk::ClearColorValue { float32: [0.0; 4] };
+                device.cmd_clear_color_image(cmd, half.glow.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[color_range]);
+            }
             begin(&[half.depth.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.depth_down);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[slot], depth_set], &[]);
@@ -1216,9 +1279,10 @@ impl ParticleRenderer {
             device.cmd_end_rendering(cmd);
             match self.blend {
                 ParticleBlend::Sorted => {
-                    // The particles, softened against it, into a cleared target.
+                    // The particles, softened against it, into cleared
+                    // targets: the colour and their per-particle glow.
                     barrier(&[to_sampled(half.depth.image)]);
-                    begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::CLEAR);
+                    begin(&[half.color.view, half.glow.view], half.extent, vk::AttachmentLoadOp::CLEAR);
                     draw_particles(self.draw);
                     device.cmd_end_rendering(cmd);
                 }
@@ -1311,7 +1375,7 @@ impl ParticleRenderer {
                     .image(image)
                     .subresource_range(range)
             };
-            barrier(&[to_sampled(half.color.image), scene(color.image, color.range), scene(glow.image, glow.range)]);
+            barrier(&[to_sampled(half.color.image), if sorted { to_sampled(half.glow.image) } else { to_sampled_transfer(half.glow.image) }, scene(color.image, color.range), scene(glow.image, glow.range)]);
             begin(&[color.view, glow.view], color.extent, vk::AttachmentLoadOp::LOAD);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite);
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.composite_sets[slot]], &[]);

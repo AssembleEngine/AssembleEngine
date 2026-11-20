@@ -5,11 +5,22 @@
 // pixel's, bilinear; across a depth edge, the texel whose depth is
 // nearest this pixel's, so smoke behind a silhouette does not bleed onto
 // it.
+//
+// The particles' light is a separate half-resolution target
+// (particles_half.frag): it was blended per particle in sorted order, so
+// smoke in front of a fire has already taken out its share and smoke
+// behind it has not. This pass only upsamples it; the accumulated alpha
+// (the particles' coverage) masks the scene's glow behind them. Deciding
+// the glow from the accumulated colour here would lose the emission
+// wherever smoke shared the pixel.
 #include "particles_common.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2D halfColor;
 layout(set = 1, binding = 1) uniform sampler2D halfDepth;
 layout(set = 1, binding = 2) uniform sampler2D depthTex;
+// The particles' glow (B10G11R11), sorted and premultiplied like the
+// colour. The test-only OIT blends leave it black.
+layout(set = 1, binding = 3) uniform sampler2D halfGlow;
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outGlow;
@@ -30,28 +41,36 @@ void main() {
     // Relative: a slope seen at a grazing angle changes depth fast.
     float tolerance = 0.03 * z;
     vec4 bilinear = vec4(0.0);
+    vec3 bilinearGlow = vec3(0.0);
     float worst = 0.0;
     float best = 1e38;
     vec4 nearest = vec4(0.0);
+    vec3 nearestGlow = vec3(0.0);
     for (int k = 0; k < 4; ++k) {
         ivec2 t = clamp(i0 + offsets[k], ivec2(0), size);
         vec4 c = texelFetch(halfColor, t, 0);
+        vec3 g = texelFetch(halfGlow, t, 0).rgb;
         float gap = abs(viewDepth(texelFetch(halfDepth, t, 0).r) - z);
         bilinear += c * weights[k];
+        bilinearGlow += g * weights[k];
         worst = max(worst, gap);
         if (gap < best) {
             best = gap;
             nearest = c;
+            nearestGlow = g;
         }
     }
     outColor = worst <= tolerance ? bilinear : nearest;
+    vec3 particleGlow = worst <= tolerance ? bilinearGlow : nearestGlow;
     // Untouched pixels stay exactly as they were (no blend round trip).
     if (outColor == vec4(0.0)) {
         discard;
     }
     // The target holds physical radiance; the scene is exposed radiance.
     outColor.rgb *= u.photometry.x;
-    // The bloom's light sources: only emissive particles (alpha 0). Smoke
-    // writes black with its coverage, so it hides the glints behind it.
-    outGlow = vec4(outColor.a > (0.5 / 255.0) ? vec3(0.0) : outColor.rgb, outColor.a);
+    // The particles' light joins the scene's glow (the water's glints, a
+    // decal's glow), masked where the particles cover it. The rgb is
+    // already the sorted per-particle result; the alpha must not be
+    // applied to it again, only to what lies behind.
+    outGlow = vec4(particleGlow * u.photometry.x, outColor.a);
 }

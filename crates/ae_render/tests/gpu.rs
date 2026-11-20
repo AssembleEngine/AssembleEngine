@@ -3758,6 +3758,98 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
     assert_clean(&gpu);
 }
 
+/// The half-resolution sorted particles keep their glow per particle: a
+/// fire in front of smoke still blooms (the smoke behind it must not mask
+/// it). The composite adds a separate half-resolution glow target instead
+/// of classifying the accumulated colour by its alpha, which lost the
+/// fire's emission wherever smoke shared the half texel.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn half_resolution_fire_in_front_of_smoke_blooms() {
+    use ae_render::particles::{Burst, ParticleBlend};
+    use ae_render::terrain::app::{TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::tonemap::{BLOOM_STRENGTH, ToneParams};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let (n, scale, ground) = (65usize, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 120.0, yaw: 0.0, pitch: 0.7, fov_y: 0.8 };
+
+    // The fire in front of the smoke, and the smoke in front of it (the
+    // offset along the view ray flips the sort order). Both hold still:
+    // this is about the sorted glow, not the simulation.
+    let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
+    let fire = Vec3::new(128.0, ground + 3.0, 128.0);
+    let back = (fire - eye).normalize();
+    let mut fire_effect = still_effect([1.0, 0.6, 0.2, 1.0], 6.0, true);
+    fire_effect.emission = [40_000.0; 2];
+    let smoke_effect = still_effect([0.09, 0.085, 0.08, 0.8], 16.0, false);
+    let effects = vec![fire_effect, smoke_effect];
+    let bursts = |toward_eye: f32| -> [Burst; 2] {
+        let smoke = Vec3::new(fire.x + back.x * 3.0 * toward_eye, ground + 3.0, fire.z + back.z * 3.0 * toward_eye);
+        [
+            Burst { pos: fire.to_array(), ground: true, effect: 0, count: 1, scale: 1.0, seed: 1 },
+            Burst { pos: smoke.to_array(), ground: true, effect: 1, count: 1, scale: 1.0, seed: 2 },
+        ]
+    };
+    let behind = bursts(1.0);
+    let front = bursts(-1.0);
+
+    let render = |bursts: &[Burst], bloom: f32, downscale: u32| -> Vec<u8> {
+        render_particles_lit(
+            &gpu,
+            &source,
+            camera,
+            extent,
+            Some((bursts, effects.clone(), downscale, ParticleBlend::Sorted)),
+            &[],
+            ToneParams { bloom, ..Default::default() },
+        )
+    };
+    let ring = |on: &[u8], off: &[u8]| -> f32 {
+        let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(fire.x, fire.y, fire.z, 1.0);
+        let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        let (cu, cv) = (cu as i32, cv as i32);
+        let luma = |p: &[u8], x: i32, y: i32| -> f32 {
+            let i = ((y * extent.width as i32 + x) * 4) as usize;
+            0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32
+        };
+        let mut spread = 0.0f32;
+        for y in (cv - 30)..=(cv + 30) {
+            for x in (cu - 30)..=(cu + 30) {
+                let d = ((x - cu).pow(2) + (y - cv).pow(2)) as f32;
+                if ((10.0 * 10.0)..=(30.0 * 30.0)).contains(&d) {
+                    spread = spread.max(luma(on, x, y) - luma(off, x, y));
+                }
+            }
+        }
+        spread
+    };
+    let half_off = render(&behind, 0.0, 2);
+    let half_on = render(&behind, BLOOM_STRENGTH, 2);
+    let full_off = render(&behind, 0.0, 1);
+    let full_on = render(&behind, BLOOM_STRENGTH, 1);
+    let front_off = render(&front, 0.0, 2);
+    let front_on = render(&front, BLOOM_STRENGTH, 2);
+    let half = ring(&half_on, &half_off);
+    let full = ring(&full_on, &full_off);
+    let occluded = ring(&front_on, &front_off);
+    println!("particle glow: half-resolution spread {half:.1} luma; full-resolution {full:.1}; smoke in front {occluded:.1}");
+    assert!(half > 2.0, "the fire's glow is lost behind the smoke at half resolution: {half:.1}");
+    assert!(full > 2.0, "the full-resolution fire's glow is missing: {full:.1}");
+    assert!(occluded > 0.5, "smoke in front removed all of the fire's glow: {occluded:.1}");
+    assert!(occluded < half * 0.9, "smoke in front did not take its share: {occluded:.1} of {half:.1}");
+    assert_clean(&gpu);
+}
+
 /// A box of `color` (alpha in w) from `min` to `max` on joint 0: 24
 /// vertices with face normals, 36 indices (appended to `m`, one primitive
 /// of material `material`).
