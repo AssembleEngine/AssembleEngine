@@ -194,6 +194,52 @@ bridge left in the shaders.
   multiplied by the frame exposure when stored): the horizon matches the
   sky by construction.
 
+## Glow and bloom
+
+The bloom is fed by a glow image, never by the scene: a lit white sail or
+sunlit sand does not bloom however bright it is. Every scene draw writes the
+glow as a second colour attachment (the graph's `glow` image,
+`B10G11R11`), and the bloom reads it at a quarter of the size.
+
+| Source | What it writes to the glow |
+|---|---|
+| terrain | a decal's black-body glow only (after vision and fog) |
+| units | a model material's emission only; darts write 0 |
+| water | the sun's and the clustered lights' **crisp** glints only |
+| particles | the emission of emissive particles only; smoke writes 0 and its coverage hides the light behind it |
+
+Everything else writes black. The sky, terrain, units and water cover what
+is behind them (blend off), the water replaces the glow under it, and the
+particles use premultiplied coverage so a puff hides a glint behind it.
+
+The bloom is three quarter-size passes (`bloom.downsample`,
+`bloom.blur_x`, `bloom.blur_y`, RA3-graphics' `bloom.comp`): the brightest
+of four 2×2 means per 4×4 block, then an 11-tap Gaussian (sigma 2
+quarter-size texels, ±5 is the 4% tail) along x and y. The result is added
+to the scene before the tone curve, scaled by `ToneParams::bloom` (0.3,
+RA3's `kBloomStrength`), so ACES rolls it off with the rest. The buffer is
+`RGBA16F` like the scene; a graph without a glow (and its three bloom
+passes) binds the scene to the second tonemap sampler and switches bloom
+off. The glow input is clamped at 4.0 exposed radiance (`BLOOM_CLAMP`), as
+RA3 clamps it: a sun glint many times the display's white would otherwise
+bloom into a large blob.
+
+**Water's excessive glow, and how RA3 avoids it.** RA3-graphics only sends
+the crisp glints to the bloom: `glint * (1 - soft)`, where `soft` is the
+unresolved-wave roughness (`shaders/ocean.frag`, "Only the crisp ones"). A
+rough or distant water pixel is many glints averaged together, a sheen
+rather than points of light; blooming it lit the whole sun path as one
+white blob. Our water uses the same gate (`surfaceGlow = glint * (1 -
+rough)`), and also removes foam, the waterline fade and fog from the glow,
+as RA3 does. The gain (`WATER_SPECULAR_GAIN`) still sets the on-screen
+brightness; the gate is only about whether the light is a point source for
+the bloom.
+
+The bloom buffer holds exposed radiance, like the scene; its clamp is
+therefore exposure-relative (scene-referred before exposure, fixed in
+display terms after it). Auto-exposure will have to meter the scene before
+the bloom and state whether the clamp follows the exposure.
+
 ## glTF
 
 `KHR_lights_punctual` point and spot intensities are candela, passed through
@@ -275,7 +321,10 @@ cached models of older versions are converted again.
   CPU: the surface packs normal xy, roughness and glow; layer materials
   default to matte, are range-checked, survive `resized`, and `add_layer`
   appends a default.
-- The 35 GPU tests pass with validation. A generated-map capture with eight
+- GPU `bloom_spreads_a_glow_but_not_lit_ground`: a glowing decal lifts the
+  ground in a ring 12–28 px around it by 7.5 luma when the bloom is on, while
+  sunlit ground 80 px away changes by 0.0 (no lit surface enters the glow).
+- The 36 GPU tests pass with validation. A generated-map capture with eight
   explosions: under `Clamp` the calibrated EV14 output differs from the old
   build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
   explosion lights); the ACES default shifts it by a mean 24/255; the
@@ -301,6 +350,14 @@ cached models of older versions are converted again.
   125% (265 → 594 µs). Five multiplies cut it to +4.3% (289 µs). The
   near-fox terrain median has a 100% spread between runs, so its delta is
   not read as a regression; `gpu_total` there moves within 1%.
+- Cost of the bloom (`m12-before-bloom` against `m12-bloom-2`, the same
+  four scenes): battle 1 057 → 1 078 µs (+2.0%; the three bloom passes are
+  13.3 µs and the tonemap stays 16.4), cliffs 862 → 851 µs and army-fox
+  8 168 → 8 265 µs (+1.2%, within the run spread), lights-1000 917 → 947 µs
+  (+3.3%; its terrain median varies by more than the bloom's 14 µs). The
+  scene draws pay a second colour attachment; the particles' composite
+  writes their glow from the half-resolution colour it already has, so no
+  extra particle target or pass.
 
 Open: auto-exposure after the bloom; an environment map if the metals' sky
 term is not enough. Two known limitations are tracked in `PLAN.md`: the sky

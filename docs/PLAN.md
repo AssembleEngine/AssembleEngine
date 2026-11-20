@@ -2633,7 +2633,7 @@ Steps (commit and stop for compaction after each):
     radiance times exposure. Five GPU tests with absolute thresholds were re-baselined for
     the curve (the generated-map capture with eight explosions shifts by a mean 24/255; blur
     and pop measures that read display bytes now see roughly 70% of the clamp values).
-  - Not done: auto-exposure after the bloom; authored sources have no glTF radius (the
+  - Not done: auto-exposure (the bloom now precedes the tonemap); authored sources have no glTF radius (the
     range-derived size is a convention); the ACES/sky/fog calibration is a look decision
     (capture numbers in lighting.md).
 - Step 3, speculars — done (2026-11-20). Full write-up in [lighting.md](lighting.md)
@@ -2691,6 +2691,44 @@ Steps (commit and stop for compaction after each):
     terrain pays the sun and ambient BRDF on every pixel and one lobe per clustered light.
   - Not done: no environment map/IBL; no multi-scatter energy compensation; the water's gain
     is an art calibration, not a measurement; blended glTF materials are still a mask at 0.5.
+- Step 4, the glow target and the bloom — done (2026-11-20). Write-up in
+  [lighting.md](lighting.md) ("Glow and bloom").
+  - **The glow** (`GLOW_NAME`, `B10G11R11`, the scene's second colour attachment): every
+    `terrain.draw`, `units.draw`, `water.draw` and `particles.draw` writes it. The terrain writes
+    a decal's black-body glow after vision and fog; a model material writes its emissive; the
+    water writes only its crisp glints; a particle writes its emission (alpha 0) and smoke
+    writes black with its coverage, so it hides the light behind it. Darts, the sky and every
+    lit surface write 0. The buffer is exposed radiance, like the scene.
+  - **The bloom** (`bloom.downsample`, `bloom.blur_x`, `bloom.blur_y`; `ae_render::bloom`,
+    `shaders/bloom_*.frag`): quarter-size `RGBA16F` buffers; the brightest of four 2×2 means per
+    4×4 block, then an 11-tap Gaussian along x and y (RA3-graphics' three passes, sigma 2).
+    `post.tonemap` samples the scene and the result and adds it by `ToneParams::bloom` (0.3,
+    RA3's `kBloomStrength`) before the curve. The glow is clamped at 4.0 exposed radiance
+    (`BLOOM_CLAMP`). A graph without a glow binds the scene to the second sampler and switches
+    the bloom off, so old module graphs still run.
+  - **Water's excessive glow, as RA3 avoids it**: only the crisp glints are bloom light,
+    `glint * (1 - rough)` (RA3's `glint * (1 - soft)` in `ocean.frag`). A rough or distant water
+    pixel is many glints averaged into a sheen; blooming it lit the whole sun path as one white
+    blob. Foam, the waterline fade and fog also remove the glints from the glow. The on-screen
+    gain is unchanged; the gate only decides whether the light is a point source.
+  - **Graphs**: the native graph, both modules and both `.graph.json` files declare `glow`,
+    `bloom.0` and `bloom.1` and the three passes; the tonemap samples the scene and `bloom.0`.
+    The goldens were regenerated for the added passes and resources. The particles' half-res
+    path needs no separate glow target: the composite writes its emission from the half colour
+    it already reads.
+  - **Other changes**: `GraphicsDesc` blends the second attachment separately (the water
+    replaces the glow while blending its colour), which needs `independentBlend` (now a device
+    requirement); `ToneParams::bloom` turns the bloom off for comparisons without changing the
+    graph.
+  - **Verification**: GPU `bloom_spreads_a_glow_but_not_lit_ground` (a glowing decal lifts a
+    ring 12–28 px out by 7.5 luma with the bloom on; sunlit ground 80 px away changes by 0.0).
+    36 GPU tests pass with validation; `cargo test --workspace` green.
+  - **Cost** (`m12-before-bloom` against `m12-bloom-2`): battle 1 057 → 1 078 µs (+2.0%; bloom
+    13.3 µs, tonemap unchanged), cliffs 862 → 851 µs and army-fox 8 168 → 8 265 µs (+1.2%, within
+    the run spread), lights-1000 917 → 947 µs (+3.3%; its terrain spread exceeds the bloom). The
+    scene draws pay a second colour attachment.
+  - Not done: auto-exposure (after step 5); the sky has no sun disc, so the sun itself does
+    not bloom; bloom is a two-pass separable Gaussian, not a multi-scale pyramid.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
@@ -3257,9 +3295,9 @@ From M12 (2026-11-19):
   scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
   brightest few percent; the exposure eases toward the target key over time (faster when the
   scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
-  from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4); until then
-  the exposure is fixed (`--ev100`). Meter the image before the bloom and define when a new
-  EV takes effect; say whether the bloom threshold is scene-referred or exposure-relative.
+  from a small buffer, with no CPU readback. The bloom (M12 step 4) now precedes the tonemap;
+  meter the scene before it and define when a new EV takes effect; say whether the bloom's
+  clamp (4 exposed) is scene-referred or exposure-relative.
 - **Roughness-aware sky specular.** `brdfAmbient` is Schlick Fresnel times a hemisphere
   factor, independent of roughness; at a low camera pitch the ground's ambient specular
   approaches the sky's colour (Fresnel rises at grazing) where a roughness-aware directional
