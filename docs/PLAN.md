@@ -1950,7 +1950,9 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     `DecalsSetup::capacity` (the oldest goes first) across renderer re-creation.
   - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
   - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
-    colour); `default_atlas` generates a scorch mark and a crater.
+    colour); `default_atlas` generates a scorch mark and a crater. Each layer also carries its
+    `LayerMaterial` (GGX roughness, metallic; M12 step 3), blended into the ground by the
+    decal's coverage.
   - Specialization constant 1 (`DECALS`): the terrain pipeline with decals is built only with
     `with_decals`. Each frame it is used only while some decal's box (its square in plan, the map's
     height range) meets the view frustum. Decals never expire, so without this gate the first death
@@ -2658,11 +2660,25 @@ Steps (commit and stop for compaction after each):
     the glint follows the sun's elevation (a lake capture before/after differs by a mean
     0.14/255). A first version of the shared BRDF itself multiplied the specular by the
     cosine twice (the terrain test found it).
+  - **Decals paint a material, not only a colour**: the channel allocation is albedo RGBA (RGB
+    colour, A coverage) and surface RGBA (R normal x, G normal y, B roughness, A glow); normal
+    z is reconstructed in the shader and metallic stays a per-layer factor. Each `DecalAtlas`
+    layer carries a `LayerMaterial` (roughness and metallic factors; one `vec4` per layer,
+    binding 21), and roughness is factor × texture as in glTF, blended into the ground by the
+    decal's coverage. The default scorch is 0.95/0 (soot is a matte dielectric, so it takes the
+    gloss off rock and wet ground), the crater 0.9/0; the default atlas generates a per-texel
+    roughness map, custom atlas layers write 1 and use their factor. Custom layers default to
+    0.9/0 until `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
+    `mix(0.04, albedo, metallic)`, so a painted metal decal works. GPU
+    `decals_carry_their_roughness_and_metallic`: three identical grey layers under a light at
+    the view's mirror read 199 (final roughness 0.15), 136 (0.95) and 249 (metallic 0.15); the
+    albedo and normals are the same, so only the layer's material can explain the difference.
+    CPU tests cover the surface packing, the defaults, the range checks and `resized`.
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth
-    does not), `lights_glint_on_water` (181 to 252 luma) and `lights_specular_on_the_ground`
-    (163 sky to 232 diffuse, 250 at the mirror). 34 GPU tests pass with validation;
+    does not), `lights_glint_on_water` (181 to 254 luma) and `lights_specular_on_the_ground`
+    (163 sky to 232 diffuse, 250 at the mirror). 35 GPU tests pass with validation;
     `cargo test --workspace` green. The decals' modulate threshold was re-baselined (a
     quarter-grey decal leaves 0.63 of the ground instead of 0.51: the specular's ambient does
     not scale with the albedo).

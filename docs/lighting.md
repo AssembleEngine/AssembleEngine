@@ -95,11 +95,21 @@ Materials:
   metal (no diffuse, only the sky's and the lights' specular), which is what
   the spec asks for and a visible change for content authored before this
   step.
-- **Terrain**: a dielectric at `F0 = 0.04`. `LayerSettings::roughness` gives
-  each tileset layer its specular response (grass and scrub 0.92-0.95, sand
-  0.75-0.78, rock 0.50-0.52, wet beds and mud 0.45-0.48, gravel 0.82), blended
-  with the same weights as the albedo. The palette path (no tileset) uses
-  0.85. Decals change the albedo and the normal, not the roughness.
+- **Terrain**: the ground is a dielectric at `F0 = 0.04` by default.
+  `LayerSettings::roughness` gives each tileset layer its specular response
+  (grass and scrub 0.92-0.95, sand 0.75-0.78, rock 0.50-0.52, wet beds and
+  mud 0.45-0.48, gravel 0.82), blended with the same weights as the albedo.
+  The palette path (no tileset) uses 0.85. Decals paint their own material:
+  each atlas layer has a `LayerMaterial` (roughness, metallic; default
+  0.9/0), blended into the ground by the decal's coverage, so soot (the
+  default scorch is 0.95) takes the gloss off whatever it lands on and a
+  custom layer can be glossier or metallic
+  (`DecalAtlas::set_layer_material`). The layer's surface texture is RGBA8:
+  normal x and y, roughness, glow (normal z is reconstructed in the shader);
+  the material's roughness factor multiplies that texture, as glTF's
+  metallic-roughness does. The default atlas generates a per-texel
+  roughness map (charred centre rougher than the burnt ring); custom layers
+  write 1 and let their factor set it.
 - **Darts**: 0.04 and roughness 0.7, so the flat blocks keep a slight sheen.
 - **Water**: `F0 = 0.06` (raised from water's 0.02, as before) and roughness
   0.22 to 0.43 from the unresolved wave slope — the old hand-tuned Phong
@@ -111,6 +121,23 @@ Materials:
   the mirror, so the reference-angle glint keeps its brightness and other sun
   elevations now follow `N·L`. The sky reflection and its Fresnel term are
   unchanged.
+
+### Decal channels
+
+Decals are forward blends inside the terrain's shader, so their two texture
+arrays are packed for the surface they paint:
+
+| Texture | Format | R | G | B | A |
+|---|---|---|---|---|---|
+| `decalAtlas` | `R8G8B8A8_SRGB` | albedo.r | albedo.g | albedo.b | coverage |
+| `decalSurface` | `R8G8B8A8_UNORM` | normal.x | normal.y | roughness | glow |
+
+Normal z is `sqrt(1 - x² - y²)` (it points out of the ground). Per layer,
+`LayerMaterial` supplies the roughness and metallic factors in a storage
+buffer (one `vec4`: x roughness, y metallic, z specular scale reserved).
+Roughness is factor × texture, as glTF's metallic-roughness; metallic stays a
+factor because it is uniform per material. A third array would be needed for
+per-texel metallic.
 
 ## Culling
 
@@ -232,7 +259,7 @@ cached models of older versions are converted again.
   (same distance and elevation) does not, while the rough metal and the
   dielectric get no highlight.
 - GPU `lights_glint_on_water` and `lights_specular_on_the_ground`: the
-  water's glint peak rises from 181 to 252 with a 2 000 000 000 cd light at
+  water's glint peak rises from 181 to 254 with a 2 000 000 000 cd light at
   its mirror; a grazing terrain pixel goes from 163 (sky only) to 232 (the
   light's diffuse) and 250 with the light at the mirror. (The waves put a
   glint wherever a normal meets a light's half vector, so the water test
@@ -240,7 +267,15 @@ cached models of older versions are converted again.
 - The decals' modulate threshold was re-baselined: a quarter-grey decal now
   leaves 0.63 of the ground instead of 0.51, because the specular's ambient
   floor does not scale with the albedo.
-- The 34 GPU tests pass with validation. A generated-map capture with eight
+- GPU `decals_carry_their_roughness_and_metallic`: three identical grey
+  decal layers under a light at the view's mirror — final roughness
+  0.15 (factor 0.5 x texture 0.3) reads 199 luma, 0.95 (1.0 x 0.95) 136,
+  and a metallic 0.15 layer (F0 = its colour) 249. The frames differ only
+  in the layer's material, so the albedo and normals cannot explain it.
+  CPU: the surface packs normal xy, roughness and glow; layer materials
+  default to matte, are range-checked, survive `resized`, and `add_layer`
+  appends a default.
+- The 35 GPU tests pass with validation. A generated-map capture with eight
   explosions: under `Clamp` the calibrated EV14 output differs from the old
   build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
   explosion lights); the ACES default shifts it by a mean 24/255; the
