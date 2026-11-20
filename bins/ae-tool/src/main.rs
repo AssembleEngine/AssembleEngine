@@ -114,7 +114,10 @@ fn model_info(file: &str) -> Result<()> {
         m.lights.len()
     );
     for (i, l) in m.lights.iter().enumerate() {
-        println!("  light {i} {:?} ({}): joint {}, range {} m, colour {:?}, angles {:.3}..{:.3} rad", l.kind, l.name, l.joint, l.range, l.color, l.inner_angle, l.outer_angle);
+        println!(
+            "  light {i} {:?} ({}): joint {}, {:.0} cd, range {} m, colour {:?}, angles {:.3}..{:.3} rad, source {:.2} m",
+            l.kind, l.name, l.joint, l.intensity, l.range, l.color, l.inner_angle, l.outer_angle, l.size
+        );
     }
     println!("  bounds {:?} .. {:?}", m.bounds.min, m.bounds.max);
     let gpu_bytes: usize = m.primitives.iter().map(|p| p.vertex_count as usize * p.layout.words() * 4).sum();
