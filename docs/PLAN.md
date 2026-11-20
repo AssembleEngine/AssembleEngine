@@ -2652,8 +2652,12 @@ Steps (commit and stop for compaction after each):
     placeholder that silently differs.
   - **Water**: the sun's glint is the shared GGX lobe (F0 0.06, roughness 0.22..0.43 from the
     unresolved wave slope, the old Phong exponents 900..60) and the clustered lights get the
-    same lobe; `WATER_SPECULAR_GAIN = 0.062` keeps the old tuned peak at EV14. A first version
-    multiplied the specular by the cosine twice (the terrain test found it).
+    same lobe. The water's first code was the one caller that skipped the receiver cosine; it
+    now applies it, and `WATER_SPECULAR_GAIN` went from 0.062 to 0.0926 (= 0.062 / sin 42°, the
+    reference sun's cosine at the mirror) so the reference-angle brightness is unchanged and
+    the glint follows the sun's elevation (a lake capture before/after differs by a mean
+    0.14/255). A first version of the shared BRDF itself multiplied the specular by the
+    cosine twice (the terrain test found it).
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth
@@ -3238,6 +3242,16 @@ From M12 (2026-11-19):
   from a small buffer, with no CPU readback. Comes after the bloom (M12 step 4); until then
   the exposure is fixed (`--ev100`). Meter the image before the bloom and define when a new
   EV takes effect; say whether the bloom threshold is scene-referred or exposure-relative.
+- **Roughness-aware sky specular.** `brdfAmbient` is Schlick Fresnel times a hemisphere
+  factor, independent of roughness; at a low camera pitch the ground's ambient specular
+  approaches the sky's colour (Fresnel rises at grazing) where a roughness-aware directional
+  albedo would leave most of it diffuse. Fine at the usual RTS pitch (Fresnel about 0.07);
+  fix with the split-sum environment term or an analytic roughness factor when low cameras
+  matter.
+- **glTF's default metallic 1.0.** A material that omits its pbr block renders as a fully
+  rough metal (no diffuse, only the sky's and the lights' specular), as the spec says; content
+  authored before M12 step 3 looked different. Decide whether the importer should warn on
+  omitted pbr data, or whether generated materials get metallic 0 by convention.
 - **glTF `KHR_lights_punctual` conformance** — decided and done with M12 step 2's second part
   (2026-11-20). What the importer does, and where it deliberately differs:
   - Types: point and spot map to our point and cone; **directional** lights are ignored with a

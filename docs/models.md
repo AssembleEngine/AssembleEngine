@@ -168,8 +168,10 @@ per-unit transform ranges, multi-draw) without its per-vertex quaternion interpo
   right). The model's footprint radius (its rest bounds' largest extent from the origin along x or
   z) is drawn at the unit's drawn size, so the minimum pixel size applies as for darts.
 - **Materials**: base colour (factor × vertex colour × texture), alpha mask, normal map, occlusion,
-  emissive, double-sided; lit like the darts (sun past the hills, units and particles, sky, fog).
-  Not yet: metallic-roughness, blending (blended materials are drawn as masks at 0.5).
+  emissive, double-sided, metallic-roughness (factors and texture) for the GGX speculars; lit like
+  the darts (sun past the hills, units and particles, sky, fog). glTF's default metallic 1 and
+  roughness 1 stand: a material with no pbr block is a rough metal. Blending is still drawn as a
+  mask at 0.5.
   Implemented but not yet covered by a GPU test: normal maps, occlusion, emissive, the UV
   transform, non-default samplers, BC7 textures on the GPU.
 - **Device**: needs `multiDrawIndirect`, `shaderDrawParameters` and

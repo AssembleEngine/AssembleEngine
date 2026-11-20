@@ -90,7 +90,11 @@ Materials:
   and the metallic-roughness texture (roughness in G, metallic in B) are in
   the material table (`models.rs`, 288 bytes); the texture keeps its own UV
   set and `KHR_texture_transform` and is sampled as linear data. Blended
-  materials are still drawn as masks at 0.5.
+  materials are still drawn as masks at 0.5. glTF's defaults are metallic 1
+  and roughness 1: a material that omits its pbr block is a fully rough
+  metal (no diffuse, only the sky's and the lights' specular), which is what
+  the spec asks for and a visible change for content authored before this
+  step.
 - **Terrain**: a dielectric at `F0 = 0.04`. `LayerSettings::roughness` gives
   each tileset layer its specular response (grass and scrub 0.92-0.95, sand
   0.75-0.78, rock 0.50-0.52, wet beds and mud 0.45-0.48, gravel 0.82), blended
@@ -99,10 +103,14 @@ Materials:
 - **Darts**: 0.04 and roughness 0.7, so the flat blocks keep a slight sheen.
 - **Water**: `F0 = 0.06` (raised from water's 0.02, as before) and roughness
   0.22 to 0.43 from the unresolved wave slope — the old hand-tuned Phong
-  exponents 900..60 at the same lobe widths. The old sun glint is now the
-  shared GGX lobe times `WATER_SPECULAR_GAIN = 0.062`, calibrated to keep its
-  peak at the reference exposure; the clustered lights get the same lobe and
-  gain. The sky reflection and its Fresnel term are unchanged.
+  exponents 900..60 at the same lobe widths. The sun glint is the shared GGX
+  lobe with the receiver cosine, and the clustered lights get the same lobe
+  and cosine. `WATER_SPECULAR_GAIN = 0.0926` is the art calibration: it is
+  `0.062` (the brightness of the step's reference captures, tuned before the
+  cosine was in) divided by `sin(42°) = 0.669`, the reference sun's cosine at
+  the mirror, so the reference-angle glint keeps its brightness and other sun
+  elevations now follow `N·L`. The sky reflection and its Fresnel term are
+  unchanged.
 
 ## Culling
 
@@ -260,4 +268,8 @@ cached models of older versions are converted again.
   not read as a regression; `gpu_total` there moves within 1%.
 
 Open: auto-exposure after the bloom; an environment map if the metals' sky
-term is not enough.
+term is not enough. Two known limitations are tracked in `PLAN.md`: the sky
+specular ignores roughness (a low camera at grazing incidence gets a strong
+sky reflection on the ground, where a roughness-aware directional albedo
+would dim it), and glTF's default metallic 1 makes content without pbr data
+a rough metal.
