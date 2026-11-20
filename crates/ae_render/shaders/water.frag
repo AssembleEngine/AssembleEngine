@@ -41,12 +41,12 @@ const float STEEP[TRAINS] = float[](0.05, 0.06, 0.07, 0.08, 0.08, 0.07, 0.06, 0.
 // The surface's speculars (sun and clustered lights) use the shared GGX
 // BRDF at the water's F0 (0.06, raised from water's 0.02 so the ripples
 // read from above). This gain keeps the highlight's brightness where the
-// old tuned Phong lobe (exponent 900..60) put it at the reference
-// exposure: the GGX lobe at the same width is about 16x brighter, and a
-// physical peak would clip the glint's core to white over a wide band.
-// The lights use the same response, so a source's glint does not depend on
-// whether it is the sun.
-const float WATER_SPECULAR_GAIN = 0.062;
+// step's reference captures put it: 0.062 was tuned without the receiver
+// cosine, and the reference sun (42 degrees up) has N.L = sin(42) = 0.669
+// at the mirror, so applying the cosine needs 0.062 / 0.669. The gain is an
+// art calibration; the lights use the same response, so a source's glint
+// does not depend on whether it is the sun.
+const float WATER_SPECULAR_GAIN = 0.0926;
 
 // Slope (d height / dx, d height / dz) of the waves at p, with trains finer
 // than about three pixels faded out (`pix`: world units per pixel); `lost`
@@ -117,7 +117,9 @@ void main() {
     float units = unitSunAt(P, vec3(0.0, 1.0, 0.0), tint);
     vec3 sunE = aeUnitTint(AE_SUN_TINT) * u.photometry.z * min(sunAt(P.xz, P.y), units) * tint;
     SurfaceBRDF s = SurfaceBRDF(vec3(0.0), vec3(0.06), max(roughness, 0.04), 0.0);
-    vec3 spec = brdfSpecular(s, N, E, L) * sunE;
+    // `brdfSpecular` is before the receiver cosine; the lights below apply
+    // theirs in `lightsSpecular`.
+    vec3 spec = brdfSpecular(s, N, E, L) * (max(dot(N, L), 0.0) * sunE);
     if (lightsOn()) {
         spec += lightsSpecular(lightClusterFrag(gl_FragCoord), P, N, E, s);
     }

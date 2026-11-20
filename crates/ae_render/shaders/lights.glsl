@@ -253,7 +253,10 @@ vec3 brdfLight(SurfaceBRDF s, vec3 N, vec3 V, vec3 L, vec3 E) {
 
 // The sky's specular, per unit sky radiance: a uniform hemisphere, so the
 // lobe sees the half of it above the reflection direction (the same
-// hemispherical approximation the diffuse sky uses).
+// hemispherical approximation the diffuse sky uses). Known limitation: this
+// is Schlick Fresnel times that hemisphere factor, independent of
+// roughness, so a low camera's grazing view gets a strong sky reflection
+// where a roughness-aware directional albedo would dim it (TODO in PLAN).
 vec3 brdfAmbient(SurfaceBRDF s, vec3 N, vec3 V) {
     float NdotV = max(dot(N, V), 1e-4);
     vec3 R = reflect(-V, N);
