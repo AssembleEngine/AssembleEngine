@@ -54,12 +54,12 @@
 //!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
 //! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
-//! with no upper limit; the sim becomes compute-bound), `[`/`]` more or less
-//! terrain detail, T wireframe, L colour by LOD depth, G fog, C freeze the
-//! LOD, P print the camera, V v-sync (on by default; `--mailbox` starts
-//! it off), N toggle render module flag bit 0,
-//! M tileset, B blend weights, O water surface, H shadows, X explosion,
-//! Esc quits.
+//! with no upper limit; the sim becomes compute-bound), Pause pauses and
+//! resumes the sim and every animation clock (water, decals, particles),
+//! `[`/`]` more or less terrain detail, T wireframe, L colour by LOD depth,
+//! G fog, C freeze the LOD, P print the camera, V v-sync (on by default;
+//! `--mailbox` starts it off), N toggle render module flag bit 0, M tileset,
+//! B blend weights, O water surface, H shadows, X explosion, Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -874,6 +874,13 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut module_errors = 0;
     loop {
         let events = window.pump();
+        if events.pressed & keys::PAUSE != 0 {
+            let paused = sim_speed.toggle_pause();
+            if let Some((view, _)) = &terrain {
+                view.lock().unwrap_or_else(|p| p.into_inner()).paused = paused;
+            }
+            println!("simulation {}", if paused { "paused" } else { "running" });
+        }
         if events.pressed & keys::V != 0 {
             vsync = !vsync;
             thread.set_present(if vsync { PresentPolicy::Fifo } else { PresentPolicy::Mailbox });
@@ -904,7 +911,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
             }
             // The exercise keeps particles alive through its resizes.
-            if let Some(feed) = effects_feed.as_ref().filter(|_| o.exercise && last_boom.elapsed().as_secs_f32() >= 1.0) {
+            if let Some(feed) = effects_feed.as_ref().filter(|_| o.exercise && !sim_speed.paused() && last_boom.elapsed().as_secs_f32() >= 1.0) {
                 explode_around(feed, view.camera.target, 3, started.elapsed().as_nanos() as u32);
                 last_boom = Instant::now();
             }
@@ -952,6 +959,7 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
                 None => detail,
             };
+            let detail = detail + if sim_speed.paused() { " | paused" } else { "" };
             let detail = detail + if render.present_mode == "FIFO" { " | vsync on" } else { " | vsync off" };
             window.set_title(&format!("AssembleEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);

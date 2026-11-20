@@ -1993,6 +1993,72 @@ fn water_covers_the_low_ground_only() {
     assert_clean(&gpu);
 }
 
+/// Pausing holds the renderer's clocks: the water after a pause is exactly
+/// the water at the frame the pause began, however many frames are drawn
+/// while paused, while an unpaused run of the same length has moved on.
+/// (Decals and the particles read the same frame time; the unit stream is
+/// stopped by the sim thread's pause.)
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn pause_holds_the_water_clock() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{Headless, RenderApp, TargetInfo};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let (n, cell, scale, water) = (65usize, 16.0f32, 100.0f32, 60.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.4; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, Some(water));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+
+    let render = |pause_at: Option<usize>, frames: usize| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water();
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.distance = 700.0;
+            view.camera.pitch = 0.8;
+            view.fog = false;
+            view.vision = false;
+            view.water = true;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let mut headless = Headless::new(&gpu, &mut app, target, config).unwrap();
+        match pause_at {
+            Some(at) => {
+                headless.frames(&mut app, at).unwrap();
+                app.view().lock().unwrap().paused = true;
+                headless.frames(&mut app, frames - at).unwrap();
+            }
+            None => headless.frames(&mut app, frames).unwrap(),
+        }
+        headless.finish().unwrap();
+        let pixels = app.readback().unwrap();
+        RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+
+    // 12 frames end with frame time 11/60; the 13th draws at 12/60, where
+    // the pause begins. The paused run draws 30 more frames at that time.
+    let base = render(None, 13);
+    let paused = render(Some(12), 42);
+    let moved = render(None, 42);
+    let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(a, b)| a != b).count();
+    let still = differing(&base, &paused);
+    let waves = differing(&base, &moved);
+    println!("pause: {still} bytes differ from the pause frame; unpaused, {waves}");
+    assert_eq!(still, 0, "the water moved while paused");
+    assert!(waves > 100, "the water did not move when unpaused: {waves}");
+    assert_clean(&gpu);
+}
+
 /// The hills' shadows (`TerrainApp::with_shadows`): on a flat map with two
 /// towers, one in view and one whose footprint is off screen, the ground
 /// the CPU heightfield ([`ae_render::terrain::sun`]) puts in shadow darkens,

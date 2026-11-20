@@ -83,6 +83,7 @@ pub mod keys {
     pub const O: u32 = 1 << 13;
     pub const H: u32 = 1 << 14;
     pub const X: u32 = 1 << 15;
+    pub const PAUSE: u32 = 1 << 16;
 }
 
 /// Movement keys currently held (WASD or arrows pan, Q/E orbit, R/F tilt,
@@ -237,6 +238,7 @@ impl SdlWindow {
                         sdl::SDLK_O => keys::O,
                         sdl::SDLK_H => keys::H,
                         sdl::SDLK_X => keys::X,
+                        sdl::SDLK_PAUSE => keys::PAUSE,
                         sdl::SDLK_EQUALS | sdl::SDLK_PLUS | sdl::SDLK_KP_PLUS => keys::PLUS,
                         sdl::SDLK_MINUS | sdl::SDLK_KP_MINUS => keys::MINUS,
                         sdl::SDLK_LEFTBRACKET => keys::LBRACKET,

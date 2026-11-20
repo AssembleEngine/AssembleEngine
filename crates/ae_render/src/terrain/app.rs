@@ -49,7 +49,7 @@ use ash::vk;
 use glam::Vec2;
 use gpu_allocator::MemoryLocation;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// The HDR scene's format ([`ae_render_abi::module::SCENE_FORMAT`]).
@@ -123,6 +123,10 @@ pub struct TerrainView {
     pub time: Option<f32>,
     /// Shade by the hills' shadows, if the app has them ([`TerrainApp::with_shadows`]).
     pub shadows: bool,
+    /// Hold every animation clock: water, decals, particles and (with the
+    /// sim thread stopped) unit animation. The app freezes the clocks at
+    /// the frame the pause begins and skips the paused interval on resume.
+    pub paused: bool,
 }
 
 /// One observer's vision for the terrain: line of sight now and cells ever
@@ -302,14 +306,19 @@ pub struct TerrainApp {
     water_on: bool,
     /// Shadows (opt-in): the hills' ([`super::sun`]).
     shadows: bool,
-    /// Frames prepared, and when the app was made (animation time).
+    /// The readback animation's frame index (held while paused), and when
+    /// the app was made (the presenting wall clock).
     frames: u64,
     started: Instant,
+    /// When the view was paused, and how long it has been paused before
+    /// this pause (skipped by the wall clock on resume).
+    paused_at: Option<Instant>,
+    paused_for: Duration,
 }
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true, paused: false };
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -355,6 +364,8 @@ impl TerrainApp {
             shadows: false,
             frames: 0,
             started: Instant::now(),
+            paused_at: None,
+            paused_for: Duration::ZERO,
         }
     }
 
@@ -540,11 +551,15 @@ impl TerrainApp {
         offscreen.buffer.mapped().map(|data| data[..bytes].to_vec())
     }
 
-    /// The camera matrices of `view` for the current target.
-    fn params(&self, view: &TerrainView) -> FrameParams {
+    /// The camera matrices of `view` for the current target, at `now` (the
+    /// frame the pause froze, when paused).
+    fn params(&self, view: &TerrainView, now: Instant) -> FrameParams {
         let time = view.time.unwrap_or_else(|| match self.output {
             TerrainOutput::Readback => self.frames as f32 / 60.0,
-            TerrainOutput::Present => self.started.elapsed().as_secs_f32(),
+            TerrainOutput::Present => now
+                .saturating_duration_since(self.started)
+                .saturating_sub(self.paused_for)
+                .as_secs_f32(),
         });
         // Effects follow the sim when presenting a live unit stream
         // (readback keeps `time`: deterministic captures and tests).
@@ -552,7 +567,7 @@ impl TerrainApp {
             (TerrainOutput::Present, None) => self.units.as_ref().and_then(|u| u.feed.latest()),
             _ => None,
         };
-        let effect_time = stream.map_or(time, |s| s.sim_time(s.alpha(Instant::now())) as f32);
+        let effect_time = stream.map_or(time, |s| s.sim_time(s.alpha(now)) as f32);
         let aspect = self.extent.width as f32 / self.extent.height.max(1) as f32;
         let mut camera = view.camera;
         camera.ground = self.source.height_at(camera.target);
@@ -739,11 +754,24 @@ impl RenderApp for TerrainApp {
     fn prepare(&mut self, slot: usize) -> Result<()> {
         self.apply_edits()?;
         let view = *self.view.lock().unwrap_or_else(|p| p.into_inner());
-        let params = self.params(&view);
+        // Freeze the clocks at the frame the pause begins; afterwards the
+        // wall clock skips the paused interval, so resuming neither jumps
+        // nor replays it.
+        let wall_now = Instant::now();
+        if view.paused {
+            self.paused_at.get_or_insert(wall_now);
+        } else if let Some(at) = self.paused_at.take() {
+            self.paused_for += wall_now.saturating_duration_since(at);
+        }
+        let frame_now = self.paused_at.unwrap_or(wall_now);
+        let params = self.params(&view, frame_now);
         self.update_lod = params.update_lod;
         self.wireframe = params.wireframe;
         self.water_on = params.water;
-        self.frames += 1;
+        // The readback clock is frame-based: hold it with the rest.
+        if !view.paused {
+            self.frames += 1;
+        }
         if let Some(tonemap) = &mut self.tonemap {
             tonemap.write(slot, self.tone, self.wiring.as_ref().is_some_and(|w| w.glow.is_some()));
         }
@@ -800,7 +828,7 @@ impl RenderApp for TerrainApp {
                 unit_shadows: params.unit_shadows,
                 photometry: params.photometry,
             };
-            units.write_frame(slot, &frame, &setup.feed, Instant::now());
+            units.write_frame(slot, &frame, &setup.feed, frame_now);
         }
         let mut camera = view.camera;
         camera.ground = self.source.height_at(camera.target);
@@ -863,7 +891,10 @@ impl RenderApp for TerrainApp {
                 height: self.extent.height,
                 frame: state.frames,
                 units: self.unit_renderer.as_ref().map_or(0, |u| u.rows(slot)),
-                time: state.module.loaded().elapsed().as_secs_f32(),
+                time: frame_now
+                    .saturating_duration_since(state.module.loaded())
+                    .saturating_sub(self.paused_for)
+                    .as_secs_f32(),
                 flags: view.module_flags,
                 view_proj: params.view_proj.to_cols_array(),
                 ..FrameInput::default()

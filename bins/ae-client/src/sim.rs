@@ -98,24 +98,39 @@ pub type UiQueue = Arc<Mutex<Vec<UiInput>>>;
 pub const MIN_SPEED: f32 = 0.25;
 
 /// The sim's tick-rate multiplier, shared by the window (which changes it)
-/// and the sim thread (which schedules ticks by it).
+/// and the sim thread (which schedules ticks by it), and whether it is
+/// paused.
 #[derive(Clone, Debug)]
-pub struct SimSpeed(Arc<AtomicU32>);
+pub struct SimSpeed {
+    speed: Arc<AtomicU32>,
+    paused: Arc<AtomicBool>,
+}
 
 impl Default for SimSpeed {
     fn default() -> Self {
-        Self(Arc::new(AtomicU32::new(1.0f32.to_bits())))
+        Self { speed: Arc::new(AtomicU32::new(1.0f32.to_bits())), paused: Arc::new(AtomicBool::new(false)) }
     }
 }
 
 impl SimSpeed {
     pub fn current(&self) -> f32 {
-        f32::from_bits(self.0.load(Ordering::Relaxed))
+        f32::from_bits(self.speed.load(Ordering::Relaxed))
     }
 
     fn set(&self, speed: f32) -> f32 {
-        self.0.store(speed.to_bits(), Ordering::Relaxed);
+        self.speed.store(speed.to_bits(), Ordering::Relaxed);
         speed
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Pause if running, resume if paused; returns the new state.
+    pub fn toggle_pause(&self) -> bool {
+        let paused = !self.paused();
+        self.paused.store(paused, Ordering::Relaxed);
+        paused
     }
 
     /// Twice as fast, with no upper limit (the sim becomes compute-bound).
@@ -826,6 +841,15 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Opti
     let mut report_started = Instant::now();
     let mut late = 0;
     while !stop.load(Ordering::Relaxed) {
+        if speed.paused() {
+            // No ticks while paused; on resume, schedule from now and do
+            // not let the idle time count against the measured tick rate.
+            next = Instant::now();
+            report_started = Instant::now();
+            (tick_sum, capture_sum, count) = (0.0, 0.0, 0);
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
         let new_rate = speed.current();
         if new_rate != rate {
             // Schedule from now: the old period no longer applies.
@@ -1062,5 +1086,21 @@ mod tests {
         }
         assert_eq!(speed.current(), MIN_SPEED, "clamped at the bottom");
         assert_eq!(speed.slower(), MIN_SPEED);
+    }
+
+    /// Pausing holds the rate (speed changes still apply on resume) and
+    /// reports the new state, so the window can mirror it on the renderer.
+    #[test]
+    fn pause_toggles_without_changing_the_rate() {
+        let speed = SimSpeed::default();
+        assert!(!speed.paused());
+        assert!(speed.toggle_pause());
+        assert!(speed.paused());
+        assert_eq!(speed.current(), 1.0);
+        assert_eq!(speed.faster(), 2.0);
+        assert!(speed.paused(), "a speed change does not resume");
+        assert!(!speed.toggle_pause());
+        assert!(!speed.paused());
+        assert_eq!(speed.current(), 2.0);
     }
 }
