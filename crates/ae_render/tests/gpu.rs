@@ -3744,7 +3744,9 @@ fn decals_carry_their_roughness_and_metallic() {
 /// The bloom (M12 step 4): a glowing decal's light spreads to the ground
 /// around it when the bloom is on, while sunlit ground far from any light
 /// source does not change (the glow holds only light sources, not lit
-/// surfaces). The bloom is compared on and off with the same scene.
+/// surfaces). The bloom is compared on and off with the same scene, and
+/// the view's off switch (the `Z` hotkey) draws exactly the tone-mapped
+/// zero.
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn bloom_spreads_a_glow_but_not_lit_ground() {
@@ -3778,7 +3780,7 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
     });
     let decal = Decal { glow: 1.0, glow_life: 100.0, ..Decal::permanent([128.0, 128.0], [4.0, 4.0], 0.0, 0) };
 
-    let render = |bloom: f32| -> Vec<u8> {
+    let render = |bloom: f32, view_bloom: bool| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
         feed.place_all(&[decal]);
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
@@ -3789,6 +3791,7 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
             let mut view = view.lock().unwrap();
             view.camera = camera;
             view.fog = false;
+            view.bloom = view_bloom;
         }
         app.create_offscreen(&gpu, extent).unwrap();
         let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
@@ -3798,8 +3801,10 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let off = render(0.0);
-    let on = render(ae_render::tonemap::BLOOM_STRENGTH);
+    let off = render(0.0, true);
+    let on = render(ae_render::tonemap::BLOOM_STRENGTH, true);
+    let hotkey_off = render(ae_render::tonemap::BLOOM_STRENGTH, false);
+    assert_eq!(hotkey_off, off, "the view's bloom switch does not match strength 0");
 
     let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(128.0, 10.0, 128.0, 1.0);
     let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);

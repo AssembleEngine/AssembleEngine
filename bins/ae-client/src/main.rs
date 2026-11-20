@@ -59,7 +59,8 @@
 //! `[`/`]` more or less terrain detail, T wireframe, L colour by LOD depth,
 //! G fog, C freeze the LOD, P print the camera, V v-sync (on by default;
 //! `--mailbox` starts it off), N toggle render module flag bit 0, M tileset,
-//! B blend weights, O water surface, H shadows, X explosion, Esc quits.
+//! B blend weights, O water surface, H shadows, Z bloom, X explosion,
+//! Esc quits.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
@@ -658,6 +659,10 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     }
     if events.pressed & keys::H != 0 {
         view.shadows = !view.shadows;
+    }
+    if events.pressed & keys::Z != 0 {
+        view.bloom = !view.bloom;
+        println!("bloom {}", if view.bloom { "on" } else { "off" });
     }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;

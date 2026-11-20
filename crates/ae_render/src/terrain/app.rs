@@ -127,6 +127,9 @@ pub struct TerrainView {
     /// sim thread stopped) unit animation. The app freezes the clocks at
     /// the frame the pause begins and skips the paused interval on resume.
     pub paused: bool,
+    /// Add the bloom to the scene before the tone curve (the app's
+    /// [`ToneParams::bloom`] when on; 0 when off).
+    pub bloom: bool,
 }
 
 /// One observer's vision for the terrain: line of sight now and cells ever
@@ -268,6 +271,9 @@ pub struct TerrainApp {
     /// glow.
     bloom: Option<Bloom>,
     tone: ToneParams,
+    /// The configured bloom strength, kept while [`TerrainView::bloom`] is
+    /// switched off.
+    tone_bloom: f32,
     /// The clustered lights (made before the renderers that read them).
     lights: Option<LightRenderer>,
     /// Lights the app was given (`with_lights`), listed every frame.
@@ -318,7 +324,8 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true, paused: false };
+        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true, paused: false, bloom: true };
+        let tone = ToneParams::default();
         Self {
             source,
             view: Arc::new(Mutex::new(view)),
@@ -335,7 +342,8 @@ impl TerrainApp {
             particle_renderer: None,
             tonemap: None,
             bloom: None,
-            tone: ToneParams::default(),
+            tone_bloom: tone.bloom,
+            tone,
             lights: None,
             fixed_lights: Vec::new(),
             frame_lights: Vec::new(),
@@ -402,6 +410,7 @@ impl TerrainApp {
     /// The camera exposure (EV100) and tone curve (by default EV14, clamped).
     pub fn with_tone(mut self, tone: ToneParams) -> Self {
         self.tone = tone;
+        self.tone_bloom = tone.bloom;
         self
     }
 
@@ -772,6 +781,9 @@ impl RenderApp for TerrainApp {
         if !view.paused {
             self.frames += 1;
         }
+        // The view's switch keeps the configured strength for resuming,
+        // and turns the bloom off without changing the graph.
+        self.tone.bloom = if view.bloom { self.tone_bloom } else { 0.0 };
         if let Some(tonemap) = &mut self.tonemap {
             tonemap.write(slot, self.tone, self.wiring.as_ref().is_some_and(|w| w.glow.is_some()));
         }
