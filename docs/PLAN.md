@@ -2441,7 +2441,8 @@ Steps (commit and stop for compaction after each):
 3. Speculars: the sun's and the lights' on units, terrain and water.
 4. The glow target and the bloom.
 5. The particles' blend mode 8 from `~/particles` (tile bins walked in packets of pixels),
-   measured against the sorted default.
+   measured against the sorted default. With Mode 8, decide whether the particles stay at half
+   resolution or go to full resolution (TODO below).
 
 - Step 1, the HDR scene target and the tonemap — done (2026-11-19).
   - The terrain, units, water and particles draw into `scene`
@@ -3305,6 +3306,12 @@ From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
 
 From M12 (2026-11-19):
 
+- **Particle half resolution with blend mode 8.** Take care of the half-resolution sorted
+  particle draw as we switch to Mode 8 of the particle renderer: decide whether to stay at
+  half resolution or go to full resolution. Mode 8's tile bins walk pixels in packets, so its
+  cost balance differs from the sorted draw's; measure both at the scenes' fill rates before
+  choosing. The half-resolution path also carries the extra per-particle glow target and the
+  depth-aware composite (M12 step 4), which full resolution would not need.
 - **Automatic exposure (eye adaptation), as AAA games do.** A compute pass reduces the HDR
   scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
   brightest few percent; the exposure eases toward the target key over time (faster when the
