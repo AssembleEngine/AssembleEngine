@@ -2713,22 +2713,36 @@ Steps (commit and stop for compaction after each):
     gain is unchanged; the gate only decides whether the light is a point source.
   - **Graphs**: the native graph, both modules and both `.graph.json` files declare `glow`,
     `bloom.0` and `bloom.1` and the three passes; the tonemap samples the scene and `bloom.0`.
-    The goldens were regenerated for the added passes and resources. The particles' half-res
-    path needs no separate glow target: the composite writes its emission from the half colour
-    it already reads.
+    The goldens were regenerated for the added passes and resources. The sorted half-res
+    particle draw writes a separate half-resolution `B10G11R11` glow target, per particle in
+    sorted order; the composite upsamples it with the same depth-aware weights as the colour,
+    and only the accumulated coverage masks the scene's glow. This is the fix for the first
+    version of the composite, which classified the accumulated colour by its alpha and lost a
+    fire's glow wherever smoke shared the half texel (a fire in front of smoke is the normal
+    explosion: `explosion()` emits both). The test-only OIT blends leave the per-particle glow
+    black.
   - **Other changes**: `GraphicsDesc` blends the second attachment separately (the water
     replaces the glow while blending its colour), which needs `independentBlend` (now a device
     requirement); `ToneParams::bloom` turns the bloom off for comparisons without changing the
     graph.
   - **Verification**: GPU `bloom_spreads_a_glow_but_not_lit_ground` (a glowing decal lifts a
-    ring 12–28 px out by 7.5 luma with the bloom on; sunlit ground 80 px away changes by 0.0).
-    36 GPU tests pass with validation; `cargo test --workspace` green.
+    ring 12–28 px out by 7.5 luma with the bloom on; sunlit ground 80 px away changes by 0.0),
+    and GPU `half_resolution_fire_in_front_of_smoke_blooms` (a fire in front of smoke lifts a
+    ring by 10.7 luma at half resolution and 12.5 at full; smoke in front takes its share, 4.1;
+    the first composite gives 0.0 at half). 37 GPU tests pass with validation; `cargo test
+    --workspace` green.
   - **Cost** (`m12-before-bloom` against `m12-bloom-2`): battle 1 057 → 1 078 µs (+2.0%; bloom
     13.3 µs, tonemap unchanged), cliffs 862 → 851 µs and army-fox 8 168 → 8 265 µs (+1.2%, within
     the run spread), lights-1000 917 → 947 µs (+3.3%; its terrain spread exceeds the bloom). The
-    scene draws pay a second colour attachment.
+    scene draws pay a second colour attachment. The half-res particle glow adds a second
+    half-resolution attachment: battle's `pass/particles` 85.0 → 151.6 µs and the frame
+    1 078 → 1 143 µs (+6.0%); the other scenes have no particles there and stay within their
+    spread.
   - Not done: auto-exposure (after step 5); the sky has no sun disc, so the sun itself does
-    not bloom; bloom is a two-pass separable Gaussian, not a multi-scale pyramid.
+    not bloom; bloom is a two-pass separable Gaussian, not a multi-scale pyramid; water replaces
+    the glow under its whole surface, so a glowing decal under shallow, nearly transparent water
+    loses its bloom (RA3 does the same; TODO); the test-only OIT particle blends do not feed the
+    bloom.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 

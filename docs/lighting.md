@@ -212,6 +212,24 @@ Everything else writes black. The sky, terrain, units and water cover what
 is behind them (blend off), the water replaces the glow under it, and the
 particles use premultiplied coverage so a puff hides a glint behind it.
 
+**Half-resolution particles.** The default particle draw is at half
+resolution, so its glow cannot be recovered from the composited colour:
+that buffer holds every particle's premultiplied RGBA at once, and its
+alpha is the accumulated smoke coverage, not a label for “emission”. The
+sorted draw therefore writes a second half-resolution `B10G11R11` target
+in the same sorted order: an emissive puff (alpha 0) adds its light, a
+medium writes black and masks the light behind it by its coverage. The
+composite upsamples that target with the same depth-aware weights as the
+colour into the graph's glow; only the accumulated coverage masks the
+scene's glow behind the particles. A fire in front of smoke keeps its
+bloom, smoke in front of a fire takes its share, and smoke behind a fire
+does not. Every particle is either emissive or a medium
+(`EffectDef::emissive`), so “alpha 0” is a type, not a fade; the 0.5/255
+test is that classifier. The test-only OIT blends (`Moments`, `Slices`,
+`Reference`, `Volume`, `Froxels`) do not write the per-particle glow; the
+composite clears it and adds no emission (their tests run with the bloom
+off).
+
 The bloom is three quarter-size passes (`bloom.downsample`,
 `bloom.blur_x`, `bloom.blur_y`, RA3-graphics' `bloom.comp`): the brightest
 of four 2×2 means per 4×4 block, then an 11-tap Gaussian (sigma 2
@@ -234,6 +252,13 @@ rough)`), and also removes foam, the waterline fade and fog from the glow,
 as RA3 does. The gain (`WATER_SPECULAR_GAIN`) still sets the on-screen
 brightness; the gate is only about whether the light is a point source for
 the bloom.
+
+Water replaces the glow under its whole surface, so a glowing decal under
+water loses its bloom even where the water's colour is nearly transparent
+(low fresnel). The terrain already fades a decal's glow over the first
+metre of depth, and RA3-graphics' ocean replaces the glow the same way
+(`outGlow` alpha 1.0 with `GlowMode::Follow`); the asymmetry with the
+alpha-blended colour remains. Tracked as a TODO.
 
 The bloom buffer holds exposed radiance, like the scene; its clamp is
 therefore exposure-relative (scene-referred before exposure, fixed in
@@ -324,7 +349,13 @@ cached models of older versions are converted again.
 - GPU `bloom_spreads_a_glow_but_not_lit_ground`: a glowing decal lifts the
   ground in a ring 12–28 px around it by 7.5 luma when the bloom is on, while
   sunlit ground 80 px away changes by 0.0 (no lit surface enters the glow).
-- The 36 GPU tests pass with validation. A generated-map capture with eight
+- GPU `half_resolution_fire_in_front_of_smoke_blooms`: a fire in front of
+  smoke (half-resolution sorted particles, the default) lifts a ring
+  10–30 px around it by 10.7 luma with the bloom on; the full-resolution
+  path gives 12.5, and smoke in front of the fire takes its share (4.1).
+  Classifying the accumulated half colour by its alpha (the first version
+  of the composite) gives 0.0 at half resolution.
+- The 37 GPU tests pass with validation. A generated-map capture with eight
   explosions: under `Clamp` the calibrated EV14 output differs from the old
   build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
   explosion lights); the ACES default shifts it by a mean 24/255; the
@@ -355,9 +386,13 @@ cached models of older versions are converted again.
   13.3 µs and the tonemap stays 16.4), cliffs 862 → 851 µs and army-fox
   8 168 → 8 265 µs (+1.2%, within the run spread), lights-1000 917 → 947 µs
   (+3.3%; its terrain median varies by more than the bloom's 14 µs). The
-  scene draws pay a second colour attachment; the particles' composite
-  writes their glow from the half-resolution colour it already has, so no
-  extra particle target or pass.
+  scene draws pay a second colour attachment.
+- Cost of the half-resolution particle glow (`m12-bloom-2` against
+  `m12-particle-glow`): battle's `pass/particles` 85.0 → 151.6 µs and the
+  frame 1 078 → 1 143 µs (+6.0%), the draw now writing a second
+  half-resolution attachment; cliffs (853 µs), lights-1000 (954 µs) and
+  army-fox (8 167 µs) have no particles in these scenes and stay within
+  their run spread. The test-only OIT blends skip the second attachment.
 
 Open: auto-exposure after the bloom; an environment map if the metals' sky
 term is not enough. Two known limitations are tracked in `PLAN.md`: the sky
