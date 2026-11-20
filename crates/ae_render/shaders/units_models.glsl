@@ -13,10 +13,14 @@ layout(std430, set = 1, binding = 0) readonly buffer Geometry { uint vwords[]; }
 struct Material {
     vec4 baseColor;
     vec4 emissive;  // rgb; w: alpha cutoff (negative: opaque)
-    vec4 params;    // normal scale, occlusion strength, double-sided
+    vec4 params;    // normal scale, occlusion strength, double-sided, unused
+    vec4 pbr;       // x: metallic factor, y: roughness factor
     uvec4 tex;      // texture slots: base colour, normal, occlusion, emissive (0: none)
     uvec4 uvSet;
+    uvec4 tex2;     // x: metallic-roughness (0: none)
+    uvec4 uvSet2;   // x: its UV set
     vec4 xform[8];  // per texture: 2x2 matrix (columns), offset
+    vec4 xform2[2]; // the metallic-roughness texture's
 };
 layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
 // Skinning matrices, 3x4: each column holds a row of the affine transform

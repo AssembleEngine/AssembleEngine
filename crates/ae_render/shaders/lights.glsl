@@ -12,10 +12,14 @@
 // a segment). A light gives illuminance in lux (src/lighting.rs): intensity
 // (profile.w, candela) times the glTF quartic range window over the squared
 // distance, the near field regularised by the source radius (profile.z).
-// The receiver masks it by its cosine once and multiplies by albedo/pi.
+// The receiver masks it by its cosine once and applies its BRDF: the
+// Lambertian albedo/pi or the GGX specular (below).
 
 #ifndef LIGHTS_GLSL
 #define LIGHTS_GLSL
+
+// AE_PI and the sky's tint (the ambient specular).
+#include "photometry.glsl"
 
 #define LIGHT_POINT 1u
 #define LIGHT_CONE 2u
@@ -173,6 +177,89 @@ uvec2 lightRange(uint cluster, out bool unculled) {
     return unculled ? uvec2(0u, lightCount) : clusterRange[cluster];
 }
 
+// ---------------------------------------------------------------------------
+// Surfaces (M12 step 3): GGX/Smith/Schlick, the glTF metallic-roughness
+// split. `albedo` is the linear base colour, `f0` the reflectance at normal
+// incidence (0.04 for dielectrics, the base colour for metals), `metallic`
+// 0..1. The BRDFs are per unit illuminance; `brdfLight` includes the
+// receiver cosine, `brdfDiffuse` does not (the sky's irradiance carries
+// it).
+// ---------------------------------------------------------------------------
+
+struct SurfaceBRDF {
+    vec3 albedo;
+    vec3 f0;
+    float roughness;
+    float metallic;
+};
+
+// Trowbridge-Reitz (GGX) normal distribution.
+float brdfD(float NdotH, float a) {
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (AE_PI * d * d);
+}
+
+// Smith's height-correlated visibility, G / (4 NdotV NdotL).
+float brdfVisibility(float NdotV, float NdotL, float a) {
+    float a2 = a * a;
+    float gv = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
+    float gl = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    return 0.5 / max(gv + gl, 1e-7);
+}
+
+vec3 brdfFresnel(float c, vec3 f0) {
+    // (1 - c)^5 by multiplication: `pow` per light is the expensive part.
+    float f = clamp(1.0 - c, 0.0, 1.0);
+    float f2 = f * f;
+    return f0 + (vec3(1.0) - f0) * (f2 * f2 * f);
+}
+
+// D * G * F / (4 NdotV NdotL), per unit illuminance before the receiver
+// cosine: a direct light of illuminance E along L adds this times
+// `NdotL * E` (the caller applies the cosine once).
+vec3 brdfSpecular(SurfaceBRDF s, vec3 N, vec3 V, vec3 L) {
+    float NdotL = dot(N, L);
+    if (NdotL <= 0.0) {
+        return vec3(0.0);
+    }
+    vec3 H = V + L;
+    float h2 = dot(H, H);
+    if (h2 < 1e-10) {
+        return vec3(0.0);
+    }
+    H *= inversesqrt(h2);
+    float NdotV = max(dot(N, V), 1e-4);
+    float NdotH = max(dot(N, H), 0.0);
+    float a = max(s.roughness * s.roughness, 1e-4);
+    return brdfD(NdotH, a) * brdfVisibility(NdotV, NdotL, a) * brdfFresnel(max(dot(V, H), 0.0), s.f0);
+}
+
+// The diffuse BRDF, per unit irradiance: albedo/pi times the energy the
+// specular does not reflect and the metal part has none of.
+vec3 brdfDiffuse(SurfaceBRDF s, vec3 N, vec3 V) {
+    float NdotV = max(dot(N, V), 1e-4);
+    return s.albedo * ((1.0 - s.metallic) * (vec3(1.0) - brdfFresnel(NdotV, s.f0))) / AE_PI;
+}
+
+// Radiance (cd/m²) from a direct light of illuminance E (lux) along L.
+vec3 brdfLight(SurfaceBRDF s, vec3 N, vec3 V, vec3 L, vec3 E) {
+    float NdotL = dot(N, L);
+    if (NdotL <= 0.0) {
+        return vec3(0.0);
+    }
+    return (brdfDiffuse(s, N, V) + brdfSpecular(s, N, V, L)) * (NdotL * E);
+}
+
+// The sky's specular, per unit sky radiance: a uniform hemisphere, so the
+// lobe sees the half of it above the reflection direction (the same
+// hemispherical approximation the diffuse sky uses).
+vec3 brdfAmbient(SurfaceBRDF s, vec3 N, vec3 V) {
+    float NdotV = max(dot(N, V), 1e-4);
+    vec3 R = reflect(-V, N);
+    return brdfFresnel(NdotV, s.f0) * (0.5 + 0.5 * R.y);
+}
+
 // The illuminance at p (lux) from the lights that reach it, times the
 // receiver cosine: what a Lambertian surface multiplies by albedo/pi.
 vec3 lightsDiffuse(uint cluster, vec3 p, vec3 n) {
@@ -187,6 +274,46 @@ vec3 lightsDiffuse(uint cluster, vec3 p, vec3 n) {
         vec3 L;
         vec3 E = lightIlluminance(l, p, L);
         sum += E * max(dot(n, L), 0.0);
+    }
+    return sum;
+}
+
+// The radiance (cd/m²) the cluster's lights add to a surface at p seen
+// from direction v (toward the eye): diffuse and specular in one walk of
+// the list. `s.albedo` is the base colour; lights with no cosine to give
+// contribute nothing.
+vec3 lightsSurface(uint cluster, vec3 p, vec3 n, vec3 v, SurfaceBRDF s) {
+    if (!lightsOn()) {
+        return vec3(0.0);
+    }
+    bool unculled;
+    uvec2 range = lightRange(cluster, unculled);
+    vec3 diffuse = brdfDiffuse(s, n, v);
+    vec3 sum = vec3(0.0);
+    for (uint k = 0u; k < range.y; ++k) {
+        Light l = lights[unculled ? k : lightIndex[range.x + k]];
+        vec3 L;
+        vec3 E = lightIlluminance(l, p, L);
+        float NdotL = max(dot(n, L), 0.0);
+        sum += (diffuse + brdfSpecular(s, n, v, L)) * (NdotL * E);
+    }
+    return sum;
+}
+
+// Only the specular the cluster's lights add (the water surface: its
+// diffuse is the foam, and its sky reflection is its ambient term).
+vec3 lightsSpecular(uint cluster, vec3 p, vec3 n, vec3 v, SurfaceBRDF s) {
+    if (!lightsOn()) {
+        return vec3(0.0);
+    }
+    bool unculled;
+    uvec2 range = lightRange(cluster, unculled);
+    vec3 sum = vec3(0.0);
+    for (uint k = 0u; k < range.y; ++k) {
+        Light l = lights[unculled ? k : lightIndex[range.x + k]];
+        vec3 L;
+        vec3 E = lightIlluminance(l, p, L);
+        sum += brdfSpecular(s, n, v, L) * (max(dot(n, L), 0.0) * E);
     }
     return sum;
 }

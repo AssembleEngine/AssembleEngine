@@ -31,6 +31,7 @@ layout(set = 0, binding = 12) uniform TilesetUBO {
     vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
                         // triplanar, bit 1 anti-tiling rotates), w anti-tiling (0 off)
     vec4 means[8];      // per layer: mean albedo (linear) and height
+    vec4 roughness[8];  // per layer: x GGX roughness
     vec4 params;        // x, y cliff slope start/end, z blend depth, w detail tilt
     vec4 warp;          // x boundary warp (cells), y 1 / its feature size (world units),
                         // z macro variation, w 1 / its feature size
@@ -217,7 +218,7 @@ const vec3 LAYER_COLORS[8] = vec3[](
     vec3(0.10, 0.75, 0.10), vec3(0.05, 0.35, 0.10), vec3(0.95, 0.85, 0.25), vec3(0.55, 0.55, 0.60),
     vec3(0.15, 0.35, 0.95), vec3(0.90, 0.45, 0.10), vec3(0.45, 0.25, 0.10), vec3(0.95, 0.10, 0.85));
 
-struct Surface { vec3 albedo; vec3 normal; vec3 weights; };
+struct Surface { vec3 albedo; vec3 normal; vec3 weights; float roughness; };
 
 // Two-level blending. Broad masks: the material cells around the pixel
 // (bilinear between cell centres) and the cliff mask from the slope,
@@ -277,13 +278,14 @@ Surface tileset(vec2 cell, vec3 P, vec3 dx, vec3 dy, vec3 n) {
         if (w[i] > 0.0) top = max(top, taps[i].albedo.a + w[i]);
     }
     float floorH = top - tiles.params.z;
-    Surface s = Surface(vec3(0.0), vec3(0.0), vec3(0.0));
+    Surface s = Surface(vec3(0.0), vec3(0.0), vec3(0.0), 0.0);
     float total = 0.0;
     for (int i = 0; i < 5; i++) {
         float b = w[i] > 0.0 ? max(taps[i].albedo.a + w[i] - floorH, 0.0) : 0.0;
         s.albedo += b * taps[i].albedo.rgb;
         s.normal += b * taps[i].normal;
         s.weights += b * LAYER_COLORS[layer[i] & 7u];
+        s.roughness += b * tiles.roughness[layer[i]].x;
         total += b;
     }
     // Anti-tiling: a broad brightness variation over every layer.
@@ -292,6 +294,7 @@ Surface tileset(vec2 cell, vec3 P, vec3 dx, vec3 dy, vec3 n) {
     s.albedo /= total;
     s.albedo *= 1.0 + (macroNoise - 0.5) * 2.0 * tiles.warp.z;
     s.weights /= total;
+    s.roughness /= total;
     s.normal = normalize(s.normal);
     return s;
 }
@@ -320,6 +323,9 @@ void main() {
     float snowLine = 0.55 + 0.1 * sin(inWorld.x * 0.0013) * cos(inWorld.z * 0.0011);
     albedo = mix(albedo, snow, smoothstep(snowLine, snowLine + 0.05, t) * (1.0 - smoothstep(0.35, 0.6, slope)));
 
+    // Specular roughness: the tileset's per-layer value when one is bound,
+    // else a matte dielectric (ground, mud, grass) for the palette path.
+    float roughness = 0.85;
     if ((u.cfg.z & FLAG_MATERIALS) != 0u) {
         // Per-cell gameplay materials (AssembleEngine addition), blended
         // bilinearly between cell centres; slopes still turn to rock.
@@ -354,6 +360,7 @@ void main() {
         }
         albedo = ts.albedo;
         n = ts.normal;
+        roughness = ts.roughness;
     }
 
     // The shading normal under the decals (shadows keep the ground's).
@@ -371,6 +378,7 @@ void main() {
     }
 
     vec3 L = normalize(u.sun.xyz);
+    vec3 V = normalize(u.camPos.xyz - inWorld);
     // On the ground, against the ground as the heights texture has it (the
     // mesh's LOD error would read as shadow on convex slopes).
     // Both shadows at the bilinear ground under the pixel (what the hills'
@@ -379,15 +387,18 @@ void main() {
     vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
     vec3 tint;
     float units = unitSunAt(ground, n, tint);
-    // Direct sun and sky as illuminance (lux) before the Lambertian 1/pi;
-    // the sky is the hemispherical approximation (half on verticals).
-    vec3 diff = max(dot(shadeN, L), 0.0) * min(sunAt(ground.xz, ground.y), units) * tint;
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
+    // Direct sun and sky as illuminance (lux), before the receiver cosine;
+    // the sky is the hemispherical approximation (half on verticals). The
+    // terrain is a rough dielectric: F0 0.04, the tileset's roughness.
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(ground.xz, ground.y), units)) * tint;
     vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
-    vec3 color = albedo * (sunE + skyE) / AE_PI;
+    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    SurfaceBRDF s = SurfaceBRDF(albedo, vec3(0.04), max(roughness, 0.04), 0.0);
+    vec3 color = brdfLight(s, shadeN, V, L, sunE);
+    color += brdfDiffuse(s, shadeN, V) * skyE + brdfAmbient(s, shadeN, V) * skyR;
     // The clustered lights (no shadows).
     if (lightsOn()) {
-        color += albedo * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, shadeN) / AE_PI;
+        color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, shadeN, V, s);
     }
 
     // Ground under water (AssembleEngine addition): tint by the depth of the
@@ -405,7 +416,7 @@ void main() {
             float r0 = 1.0 - abs(valueNoise(q + vec2(t * 0.11, t * 0.07)) * 2.0 - 1.0);
             float r1 = 1.0 - abs(valueNoise(q * 1.37 + vec2(-t * 0.09, t * 0.12) + 5.3) * 2.0 - 1.0);
             float caustic = pow(r0 * r1, 6.0) * exp(-depth * 0.18) * smoothstep(0.0, 0.5, depth);
-            color += albedo * aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff) * caustic * 0.9 / AE_PI;
+            color += brdfDiffuse(s, shadeN, V) * sunE * max(dot(shadeN, L), 0.0) * caustic * 0.9;
         }
         // The water body's in-scattered radiance (cd/m²), deep and shallow.
         vec3 deep = vec3(786.0, 3146.0, 4719.0);

@@ -912,7 +912,7 @@ fn model_lights_light_the_ground() {
             bones: vec![bone("root", None, 0.0), bone("lamp", Some(0), 1.0)],
             joints: vec![Joint { bone: 0, inverse_bind: identity }, Joint { bone: 1, inverse_bind: identity }],
             lights: vec![light],
-            materials: vec![Material { name: "m".into(), base_color: [0.5, 0.5, 0.5, 1.0], ..Default::default() }],
+            materials: vec![Material { name: "m".into(), base_color: [0.5, 0.5, 0.5, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() }],
             ..Default::default()
         };
         model_box(&mut m, [-1.0, 0.0, -1.0], [1.0, 1.0, 1.0], 0);
@@ -3543,7 +3543,10 @@ fn decals_relit_modulated_and_glowing() {
     let quarter_ratio = median(lumas(&quarter, &points).iter().zip(&ground).map(|(m, g)| m / g).collect());
     println!("modulate: sRGB 0.5 leaves {mid_ratio:.3} of the ground, 0.25 leaves {quarter_ratio:.3}");
     assert!((mid_ratio - 1.0).abs() < 0.04, "mid grey changes the ground: {mid_ratio}");
-    assert!((0.42..0.6).contains(&quarter_ratio), "quarter grey: {quarter_ratio}");
+    // The specular's ambient floor does not scale with the albedo (M12
+    // step 3): the quarter grey ground lands higher than the diffuse-only
+    // 0.51 the first version pinned.
+    assert!((0.42..0.68).contains(&quarter_ratio), "quarter grey: {quarter_ratio}");
 
     // Glow in the hill's shadow.
     let dark = render(&[glowing(0.0, 0.0)], east);
@@ -3628,7 +3631,7 @@ fn units_draw_models() {
         joints: vec![Joint { bone: 0, inverse_bind: identity }],
         ..Default::default()
     };
-    let material = |name: &str, base_color: [f32; 4], alpha: AlphaMode| Material { name: name.into(), base_color, alpha, ..Default::default() };
+    let material = |name: &str, base_color: [f32; 4], alpha: AlphaMode| Material { name: name.into(), base_color, alpha, metallic: 0.0, roughness: 0.8, ..Default::default() };
     blocks.materials = vec![
         material("red", [1.0, 0.02, 0.02, 1.0], AlphaMode::Opaque),
         material("blue", [0.02, 0.02, 1.0, 1.0], AlphaMode::Mask { cutoff: 0.5 }),
@@ -3779,7 +3782,7 @@ fn units_model_shadows_culled() {
     let mut pillar = Model {
         bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
         joints: vec![Joint { bone: 0, inverse_bind: identity }],
-        materials: vec![Material { name: "grey".into(), base_color: [0.5, 0.5, 0.5, 1.0], ..Default::default() }],
+        materials: vec![Material { name: "grey".into(), base_color: [0.5, 0.5, 0.5, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() }],
         ..Default::default()
     };
     model_box(&mut pillar, [-0.2, 0.0, -0.2], [0.2, 1.6, 0.2], 0);
@@ -3920,8 +3923,8 @@ fn units_pose_models() {
         bones: vec![bone("root", None), bone("base", Some(0)), bone("arm", Some(1))],
         joints: vec![Joint { bone: 1, inverse_bind: identity }, Joint { bone: 2, inverse_bind: identity }],
         materials: vec![
-            Material { name: "red".into(), base_color: [1.0, 0.02, 0.02, 1.0], ..Default::default() },
-            Material { name: "blue".into(), base_color: [0.02, 0.02, 1.0, 1.0], ..Default::default() },
+            Material { name: "red".into(), base_color: [1.0, 0.02, 0.02, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() },
+            Material { name: "blue".into(), base_color: [0.02, 0.02, 1.0, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() },
         ],
         ..Default::default()
     };
@@ -4238,6 +4241,282 @@ fn units_pose_models() {
         assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))), "played once, held at full reach (looping it would be half way)");
         assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "and not half way");
     }
+    assert_clean(&gpu);
+}
+
+/// Speculars (M12 step 3): glTF metallic-roughness on a model's flat top
+/// at the sun's mirror point. A smooth metal (F0 = base colour) has a wide
+/// white highlight, a rough metal (roughness 0.9) none, and a dielectric
+/// (F0 0.04) a small one: the highlight's area follows F0 and roughness.
+/// With the sun off, a clustered light at the same mirror adds its own
+/// highlight to the smooth metal, and the same light at the opposite
+/// azimuth (same distance and elevation, so the same diffuse) adds none;
+/// the rough metal and the dielectric get no highlight either.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn speculars_follow_material_and_lights() {
+    use ae_model::{Bone, Joint, Material, Model};
+    use ae_render::lights::Light;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let n = 129;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let model = |metallic: f32, roughness: f32| -> Arc<Model> {
+        let mut m = Model {
+            bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
+            joints: vec![Joint { bone: 0, inverse_bind: identity }],
+            materials: vec![Material { name: "m".into(), base_color: [0.8, 0.8, 0.8, 1.0], metallic, roughness, ..Default::default() }],
+            ..Default::default()
+        };
+        model_box(&mut m, [-1.0, 0.0, -1.0], [1.0, 1.0, 1.0], 0);
+        m.bounds = ae_model::Bounds { min: [-1.0, 0.0, -1.0], max: [1.0, 1.0, 1.0] };
+        m.merge_primitives();
+        m.validate().unwrap();
+        Arc::new(m)
+    };
+
+    // Ground 50, box fitted to radius 40 (its footprint is 1): its top is
+    // at 90. The camera looks from the sun's mirror direction (42 degrees
+    // up, the sun's elevation, on the opposite side), so the mirror point
+    // is the top's centre.
+    let top = Vec3::new(512.0, 90.0, 512.0);
+    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 400.0, yaw: 2.183, pitch: 0.835, fov_y: 0.8 };
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
+    let v = (eye - top).normalize();
+    let mirror = Vec3::new(-v.x, v.y, -v.z); // reflect(-v, up)
+    let opposite = Vec3::new(-mirror.x, mirror.y, -mirror.z);
+    let light = |dir: Vec3| Light::point(top + dir * 60.0, Vec3::ONE, 500_000.0, 120.0, 2.0);
+
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for (a, word) in [512.0f32.to_bits(), 512.0f32.to_bits(), 512.0f32.to_bits(), 512.0f32.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 40.0f32.to_bits(), 0u32].into_iter().enumerate() {
+        columns[a].push(word);
+    }
+    let render = |model: Arc<Model>, light: Option<Light>, sun: f32| -> Vec<u8> {
+        let feed = Arc::new(UnitFeed::default());
+        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
+        let setup = UnitsSetup { feed, capacity: 4, classes: vec![UnitClass { color: [0.5; 3], floats: false }], min_pixels: 8.0, models: vec![Some(model)], rigs: Vec::new() };
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup).with_tone(ToneParams { sun_illuminance: sun, ..Default::default() });
+        if let Some(l) = light {
+            app = app.with_lights(vec![l]);
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+
+    let clip = view_proj * Vec4::new(top.x, top.y, top.z, 1.0);
+    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    assert!(cu > 30.0 && cv > 30.0 && cu < extent.width as f32 - 30.0 && cv < extent.height as f32 - 30.0, "the box top projects into the view at ({cu}, {cv})");
+    let (cu, cv) = (cu as i32, cv as i32);
+    let luma = |p: &[u8], x: i32, y: i32| -> f32 {
+        let i = ((y * extent.width as i32 + x) * 4) as usize;
+        0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32
+    };
+    let peak = |p: &[u8]| -> f32 {
+        let mut best = 0.0f32;
+        for y in (cv - 10)..(cv + 10) {
+            for x in (cu - 10)..(cu + 10) {
+                best = best.max(luma(p, x, y));
+            }
+        }
+        best
+    };
+
+    // The sun's specular alone, at a lowered sun so the highlight does not
+    // clip (the sky's ambient does not depend on it).
+    let sun = 1_000.0;
+    let smooth_metal = render(model(1.0, 0.15), None, sun);
+    let rough_metal = render(model(1.0, 0.90), None, sun);
+    let dielectric = render(model(0.0, 0.15), None, sun);
+    let at = |p: &[u8], dx: i32, dy: i32| -> f32 { luma(p, cu + dx, cv + dy) };
+    let (m, r, d) = (at(&smooth_metal, 0, 0), at(&rough_metal, 0, 0), at(&dielectric, 0, 0));
+    let (m2, r2, d2) = (at(&smooth_metal, 0, 24), at(&rough_metal, 0, 24), at(&dielectric, 0, 24));
+    println!("sun specular luma at the mirror: metal {m:.0}, rough {r:.0}, dielectric {d:.0}; 24 px up: {m2:.0}, {r2:.0}, {d2:.0}");
+    assert!(m > r + 30.0, "a metal's F0 beats a rough metal's: {m:.1} vs {r:.1}");
+    assert!(m > d + 30.0, "and a dielectric's F0 0.04 (20x lower): {m:.1} vs {d:.1}");
+    assert!(m2 > r2 + 10.0 && m2 > d2 + 10.0, "the highlight reaches past its centre: {m2:.1} vs {r2:.1}, {d2:.1}");
+
+    // With the sun off, the ambient sky keeps all three visible; a light at
+    // the view's mirror adds a highlight, and the same light at the
+    // opposite azimuth (same distance and elevation, so the same diffuse)
+    // does not. Only the smooth metal has the F0 for it.
+    let on = render(model(1.0, 0.15), Some(light(mirror)), 0.0);
+    let off = render(model(1.0, 0.15), Some(light(opposite)), 0.0);
+    let rough_on = render(model(1.0, 0.90), Some(light(mirror)), 0.0);
+    let diel_on = render(model(0.0, 0.15), Some(light(mirror)), 0.0);
+    println!("clustered light peak: metal {:.0}, off {:.0}, rough {:.0}, dielectric {:.0}", peak(&on), peak(&off), peak(&rough_on), peak(&diel_on));
+    assert!(peak(&on) > peak(&off) + 60.0, "the mirror light's highlight: {:.1} vs {:.1}", peak(&on), peak(&off));
+    assert!(peak(&rough_on) < peak(&on) - 40.0, "a rough metal has no highlight: {:.1}", peak(&rough_on));
+    assert!(peak(&diel_on) < peak(&on) - 40.0, "a dielectric's F0 is 20x lower: {:.1}", peak(&diel_on));
+    assert_clean(&gpu);
+}
+
+/// A clustered light's glint on the water (M12 step 3): on a still, deep
+/// map the surface is the sky's reflection plus the light's GGX lobe. A
+/// point light at the view's mirror brightens the water's glint region; the
+/// same light at the opposite azimuth (same distance and elevation) leaves
+/// it at the sky's reflection, and so does no light at all.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn lights_glint_on_water() {
+    use ae_render::lights::Light;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let n = 129;
+    // All water: 40 m under a surface at 60.
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.2; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 700.0, yaw: 0.0, pitch: 0.4, fov_y: 0.8 };
+    let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
+    let water = Vec3::new(512.0, 60.0, 512.0);
+    let v = (eye - water).normalize();
+    let mirror = Vec3::new(-v.x, v.y, -v.z); // reflect(-v, up)
+    let light = |dir: Vec3| Light::point(water + dir * 60.0, Vec3::ONE, 2_000_000_000.0, 100.0, 3.0);
+
+    let render = |light: Option<Light>| -> Vec<u8> {
+        // The sun off: the sky's reflection and the light are all there is.
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water().with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() });
+        if let Some(l) = light {
+            app = app.with_lights(vec![l]);
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+            view.water = true;
+            view.time = Some(1.0);
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let on = render(Some(light(mirror)));
+    // The waves put a glint wherever a normal meets the light's half
+    // vector, so an opposite-azimuth light also glints somewhere: the
+    // mirror geometry is pinned by the models' flat top (the test above).
+    let none = render(None);
+
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(water.x, water.y, water.z, 1.0);
+    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    assert!(cu > 70.0 && cv > 70.0 && cu < extent.width as f32 - 70.0 && cv < extent.height as f32 - 70.0, "the water point projects into the view at ({cu}, {cv})");
+    let (cu, cv) = (cu as i32, cv as i32);
+    // The waves tilt the normal, so the glint can sit tens of pixels from
+    // the flat mirror point.
+    let peak = |p: &[u8]| -> f32 {
+        let mut best = 0.0f32;
+        for y in (cv - 70)..(cv + 70) {
+            for x in (cu - 70)..(cu + 70) {
+                let i = ((y * extent.width as i32 + x) * 4) as usize;
+                best = best.max(0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32);
+            }
+        }
+        best
+    };
+    println!("water glint peak: light {:.1}, none {:.1}", peak(&on), peak(&none));
+    assert!(peak(&on) > peak(&none) + 40.0, "the light's glint: {:.1} vs {:.1}", peak(&on), peak(&none));
+    assert!(peak(&on) > 230.0, "a bright glint: {:.1}", peak(&on));
+    assert_clean(&gpu);
+}
+
+/// A clustered light's specular on the terrain (M12 step 3): a grazing
+/// view raises the dielectric's Fresnel, so a light at the view's mirror
+/// brightens the ground's specular and the same light at the opposite
+/// azimuth (same distance and elevation, so the same diffuse) does not.
+/// The sun is off, so the only difference is the specular.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn lights_specular_on_the_ground() {
+    use ae_render::lights::Light;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let n = 129;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.8; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 200.0, yaw: 0.0, pitch: 0.15, fov_y: 0.8 };
+    let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
+    let ground = Vec3::new(512.0, 80.0, 512.0);
+    let v = (eye - ground).normalize();
+    let mirror = Vec3::new(-v.x, v.y, -v.z);
+
+    let render = |dir: Vec3| -> Vec<u8> {
+        let l = Light::point(ground + dir * 60.0, Vec3::ONE, 2_000_000_000.0, 100.0, 3.0);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() }).with_lights(vec![l]);
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let on = render(mirror);
+    let off = render(Vec3::new(-mirror.x, mirror.y, -mirror.z));
+
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(ground.x, ground.y, ground.z, 1.0);
+    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    assert!(cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0, "the ground point projects into the view at ({cu}, {cv})");
+    let luma = |p: &[u8]| -> f32 {
+        let i = ((cv as i32 * extent.width as i32 + cu as i32) * 4) as usize;
+        0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32
+    };
+    println!("ground specular: mirror {:.1}, opposite {:.1}", luma(&on), luma(&off));
+    assert!(luma(&on) > luma(&off) + 10.0, "the mirror light's ground specular: {:.1} vs {:.1}", luma(&on), luma(&off));
     assert_clean(&gpu);
 }
 

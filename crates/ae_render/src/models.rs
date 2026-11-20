@@ -32,8 +32,9 @@
 //!
 //! Materials (step 2 of M11): base colour (factor × vertex colour ×
 //! texture), alpha mask, normal map, occlusion and emissive; the units'
-//! lighting (sun, sky, shadows, fog). Metallic-roughness is not used yet;
-//! blended materials are drawn as masks at 0.5.
+//! lighting (sun, sky, shadows, fog). glTF's metallic-roughness factors and
+//! texture feed the speculars (M12 step 3); blended materials are drawn as
+//! masks at 0.5.
 
 use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -68,12 +69,20 @@ struct GpuMaterial {
     emissive: [f32; 4],
     /// Normal scale, occlusion strength, double-sided, unused.
     params: [f32; 4],
+    /// Metallic factor, roughness factor.
+    pbr: [f32; 4],
     /// Texture slots: base colour, normal, occlusion, emissive (0: none).
     tex: [u32; 4],
     /// UV set of each.
     uv: [u32; 4],
+    /// x: the metallic-roughness texture (0: none).
+    tex2: [u32; 4],
+    /// x: its UV set.
+    uv2: [u32; 4],
     /// Per texture two vec4: the 2x2 matrix (columns), the offset.
     xform: [[f32; 4]; 8],
+    /// The same for the metallic-roughness texture.
+    xform2: [[f32; 4]; 2],
 }
 
 #[repr(C)]
@@ -382,9 +391,13 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         base_color: mat.base_color,
         emissive: [mat.emissive[0], mat.emissive[1], mat.emissive[2], -1.0],
         params: [mat.normal_scale, mat.occlusion_strength, mat.double_sided as u32 as f32, 0.0],
+        pbr: [mat.metallic, mat.roughness, 0.0, 0.0],
         tex: [0; 4],
         uv: [0; 4],
+        tex2: [0; 4],
+        uv2: [0; 4],
         xform: [[0.0; 4]; 8],
+        xform2: [[0.0; 4]; 2],
     };
     let refs = [&mat.base_color_texture, &mat.normal_texture, &mat.occlusion_texture, &mat.emissive_texture];
     for (k, r) in refs.into_iter().enumerate() {
@@ -394,6 +407,10 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         g.xform[2 * k] = x[0];
         g.xform[2 * k + 1] = x[1];
     }
+    let (slot, uv, x) = tex.slot(model, m, &mat.metallic_roughness_texture)?;
+    g.tex2[0] = slot;
+    g.uv2[0] = uv;
+    g.xform2 = x;
     match mat.alpha {
         AlphaMode::Opaque => {}
         AlphaMode::Mask { cutoff } => g.emissive[3] = cutoff,
@@ -697,5 +714,21 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuModelLight, params), 16);
         assert_eq!(std::mem::offset_of!(GpuModelLight, meta), 28);
         assert_eq!(std::mem::offset_of!(GpuModelLight, energy), 32);
+    }
+
+    #[test]
+    fn materials_match_the_shader_layout() {
+        // std430 in units_models.glsl: six vec4s, then the arrays.
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 288);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, base_color), 0);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, emissive), 16);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, params), 32);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, pbr), 48);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, tex), 64);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, uv), 80);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, tex2), 96);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, uv2), 112);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, xform), 128);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, xform2), 256);
     }
 }

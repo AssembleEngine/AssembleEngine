@@ -38,6 +38,8 @@ pub struct LayerSettings {
     pub tile_size: f32,
     /// Scale of the detail normal (0: flat, 1: as generated).
     pub normal_strength: f32,
+    /// GGX roughness of the layer's speculars (0 mirror, 1 fully rough).
+    pub roughness: f32,
     pub projection: Projection,
     pub anti_tiling: AntiTiling,
 }
@@ -136,6 +138,8 @@ pub struct TilesetUbo {
     /// Per layer: the mean albedo (linear) and height, which the
     /// anti-tiling blend keeps its contrast around.
     pub means: [[f32; 4]; MAX_LAYERS],
+    /// Per layer: x = GGX roughness.
+    pub roughness: [[f32; 4]; MAX_LAYERS],
     /// x, y: cliff slope start and end; z: blend depth; w: detail tilt.
     pub params: [f32; 4],
     /// x: boundary warp (cells); y: 1 / its feature size (world units);
@@ -143,7 +147,7 @@ pub struct TilesetUbo {
     pub warp: [f32; 4],
 }
 
-pub const TILESET_UBO_BYTES: usize = 416;
+pub const TILESET_UBO_BYTES: usize = 544;
 const _: () = assert!(size_of::<TilesetUbo>() == TILESET_UBO_BYTES);
 
 /// Finite and above zero (NaN is not).
@@ -172,8 +176,8 @@ impl Tileset {
                     return Err(format!("layer `{}`: mip {m} has the wrong size", s.name));
                 }
             }
-            if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) || !matches!(s.anti_tiling, AntiTiling::Off) && !(s.anti_tiling.amount() > 0.0 && s.anti_tiling.amount() <= 16.0) {
-                return Err(format!("layer `{}`: tile size {}, normal strength {} or anti-tiling {:?} out of range", s.name, s.tile_size, s.normal_strength, s.anti_tiling));
+            if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) || !(0.0..=1.0).contains(&s.roughness) || !matches!(s.anti_tiling, AntiTiling::Off) && !(s.anti_tiling.amount() > 0.0 && s.anti_tiling.amount() <= 16.0) {
+                return Err(format!("layer `{}`: tile size {}, normal strength {}, roughness {} or anti-tiling {:?} out of range", s.name, s.tile_size, s.normal_strength, s.roughness, s.anti_tiling));
             }
         }
         for (id, m) in self.materials.iter().enumerate() {
@@ -221,6 +225,9 @@ impl Tileset {
         }
         for (slot, l) in u.means.iter_mut().zip(&self.layers) {
             *slot = l.mean();
+        }
+        for (slot, l) in u.roughness.iter_mut().zip(&self.layers) {
+            *slot = [l.settings.roughness, 0.0, 0.0, 0.0];
         }
         u.params = [self.cliff_slope.0, self.cliff_slope.1, self.blend_depth, self.detail_tilt];
         u.warp = [self.warp.0, 1.0 / self.warp.1, self.macro_variation.0, 1.0 / self.macro_variation.1];
@@ -556,7 +563,19 @@ fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump:
         (a, n) = downsample(&a, &n, side);
         side /= 2;
     }
-    Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, projection, anti_tiling }, albedo, normal }
+    Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, roughness: 0.85, projection, anti_tiling }, albedo, normal }
+}
+
+/// The per-layer roughness of a tileset, in its layer order (the sets below
+/// give each surface a plausible specular response: grass and scrub matte,
+/// sand a little sheen, rock smoother, wet beds and mud glossy).
+fn roughness(mut t: Tileset, values: &[f32]) -> Tileset {
+    assert_eq!(values.len(), t.layers.len(), "one roughness per layer");
+    for (l, &r) in t.layers.iter_mut().zip(values) {
+        l.settings.roughness = r;
+    }
+    debug_assert_eq!(t.validate(), Ok(()));
+    t
 }
 
 fn build(name: &str, size: u32, specs: Vec<(&str, Recipe, f32, f32, Projection, AntiTiling)>, materials: [MaterialLayers; MATERIAL_SLOTS]) -> Tileset {
@@ -588,7 +607,8 @@ pub fn temperate(size: u32) -> Tileset {
         ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(8.0)),
         ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation, Rotated(8.0)),
     ];
-    build("temperate", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
+    // grass, forest floor, sand, rock, river bed, gravel, mud
+    roughness(build("temperate", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)]), &[0.92, 0.95, 0.75, 0.52, 0.45, 0.82, 0.48])
 }
 
 /// Dry scrub, dark scrub, dune sand, red rock (triplanar), cracked clay
@@ -604,7 +624,8 @@ pub fn desert(size: u32) -> Tileset {
         ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation, Rotated(8.0)),
         ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation, Rotated(8.0)),
     ];
-    build("desert", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)])
+    // dry scrub, dark scrub, dune sand, red rock, cracked clay, gravel, salt
+    roughness(build("desert", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)]), &[0.92, 0.95, 0.78, 0.50, 0.68, 0.82, 0.62])
 }
 
 #[cfg(test)]
@@ -691,10 +712,15 @@ mod tests {
         let mut t = temperate(16);
         t.cliff_slope = (0.5, 0.2);
         assert!(t.validate().is_err());
+        let mut t = temperate(16);
+        t.layers[0].settings.roughness = 1.5;
+        assert!(t.validate().unwrap_err().contains("roughness"));
         let u = temperate(16).ubo();
         assert_eq!(u.materials[4], [4, 3, 0, 0]);
         assert_eq!(u.layers[0][0], 1.0 / 24.0);
+        assert_eq!(u.roughness[0][0], 0.92);
         assert_eq!(desert(16).ubo().layers[3][2], 1.0, "red rock is triplanar");
+        assert_eq!(desert(16).ubo().roughness[3][0], 0.50);
     }
 
     /// The table's anti-tiling: flags (bit 0 triplanar, bit 1 rotates),

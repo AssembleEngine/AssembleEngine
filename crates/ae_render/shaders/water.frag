@@ -38,10 +38,15 @@ const float LENGTH[TRAINS] = float[](48.0, 27.0, 15.0, 8.3, 4.6, 2.5, 1.4, 0.75)
 const float ANGLE[TRAINS] = float[](0.55, 1.15, 0.2, 0.9, -0.1, 0.65, 1.4, 0.35);
 const float STEEP[TRAINS] = float[](0.05, 0.06, 0.07, 0.08, 0.08, 0.07, 0.06, 0.05);
 
-// The sun's glint: a lobe whose strength is calibrated to read as the old
-// arbitrary-unit highlight at the reference exposure, now scaled by the
-// sun's illuminance (it darkens and brightens with the sun and EV).
-const float SUN_GLINT = 0.143;
+// The surface's speculars (sun and clustered lights) use the shared GGX
+// BRDF at the water's F0 (0.06, raised from water's 0.02 so the ripples
+// read from above). This gain keeps the highlight's brightness where the
+// old tuned Phong lobe (exponent 900..60) put it at the reference
+// exposure: the GGX lobe at the same width is about 16x brighter, and a
+// physical peak would clip the glint's core to white over a wide band.
+// The lights use the same response, so a source's glint does not depend on
+// whether it is the sun.
+const float WATER_SPECULAR_GAIN = 0.062;
 
 // Slope (d height / dx, d height / dz) of the waves at p, with trains finer
 // than about three pixels faded out (`pix`: world units per pixel); `lost`
@@ -91,23 +96,32 @@ void main() {
     slope *= mix(0.35, 1.0, smoothstep(0.0, 4.0, depth));
     vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
     float rough = clamp(sqrt(lost) * 4.0, 0.0, 1.0);
+    // A narrow lobe on smooth water, wider where the unresolved waves make
+    // the surface rough (the old Phong exponents 900..60 at the same lobe
+    // widths).
+    float roughness = mix(0.22, 0.43, rough);
 
     // Fresnel: Schlick with F0 0.06, raised from water's 0.02 so the
     // ripples still read from straight above (0 A.D. and RA3 floor theirs).
     float cosE = max(dot(E, N), 0.0);
-    float fresnel = 0.06 + 0.94 * pow(1.0 - cosE, 5.0);
+    float f = clamp(1.0 - cosE, 0.0, 1.0);
+    float f2 = f * f;
+    float fresnel = 0.06 + 0.94 * (f2 * f2 * f);
 
     vec3 R = reflect(-E, N);
     vec3 L = normalize(u.sun.xyz);
     vec3 reflection = skyRadiance(R);
-    // The sun's glints: a narrow lobe on smooth water, wider where the
-    // unresolved waves make the surface rough (energy kept roughly level).
-    float specPow = mix(900.0, 60.0, rough);
-    float spec = pow(max(dot(R, L), 0.0), specPow) * (specPow / 300.0);
+    // The glints: the sun's and the clustered lights', through the shared
+    // GGX lobe (specular only: the water's diffuse is the foam).
     vec3 tint;
     float units = unitSunAt(P, vec3(0.0, 1.0, 0.0), tint);
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * u.photometry.z;
-    vec3 glint = sunE * spec * SUN_GLINT * (0.25 + fresnel) * min(sunAt(P.xz, P.y), units) * tint;
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * u.photometry.z * min(sunAt(P.xz, P.y), units) * tint;
+    SurfaceBRDF s = SurfaceBRDF(vec3(0.0), vec3(0.06), max(roughness, 0.04), 0.0);
+    vec3 spec = brdfSpecular(s, N, E, L) * sunE;
+    if (lightsOn()) {
+        spec += lightsSpecular(lightClusterFrag(gl_FragCoord), P, N, E, s);
+    }
+    vec3 glint = spec * WATER_SPECULAR_GAIN;
 
     // Premultiplied: alpha is how much of what lies under the surface it
     // hides; the glints are added light.

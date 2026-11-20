@@ -1,7 +1,7 @@
 // A model's material (src/models.rs) lit like the darts (units.frag): sun
-// past the hills, the units and the particles, sky, fog. Base colour,
-// alpha mask (the masked pipeline, MASKED defined), normal map, occlusion
-// and emissive; no metallic-roughness yet.
+// past the hills, the units and the particles, sky, fog. glTF's
+// metallic-roughness: base colour, metallic and roughness (factors and
+// texture), normal map, occlusion and emissive.
 #define MODELS
 #include "photometry.glsl"
 #include "units_common.glsl"
@@ -25,6 +25,15 @@ vec4 sampleTex(Material m, uint k) {
     vec4 a = m.xform[2u * k];
     uv = mat2(a.xy, a.zw) * uv + m.xform[2u * k + 1u].xy;
     return texture(textures[m.tex[k]], uv);
+}
+
+// The metallic-roughness texture (roughness in G, metallic in B), through
+// its own UV set and transform.
+vec4 sampleMetallicRoughness(Material m) {
+    vec2 uv = m.uvSet2.x == 0u ? inUv.xy : inUv.zw;
+    vec4 a = m.xform2[0u];
+    uv = mat2(a.xy, a.zw) * uv + m.xform2[1u].xy;
+    return texture(textures[m.tex2.x], uv);
 }
 
 void main() {
@@ -56,17 +65,31 @@ void main() {
     if (m.tex.w != 0u) {
         emissive *= sampleTex(m, 3u).rgb;
     }
+    float metallic = clamp(m.pbr.x, 0.0, 1.0);
+    float roughness = clamp(m.pbr.y, 0.0, 1.0);
+    if (m.tex2.x != 0u) {
+        vec4 mr = sampleMetallicRoughness(m);
+        roughness *= mr.g;
+        metallic *= mr.b;
+    }
+    roughness = max(roughness, 0.04);
+
+    vec3 v = normalize(u.camPos.xyz - inWorld);
     vec3 tint;
     float units = unitSunAt(inWorld, n, tint);
-    vec3 diff = max(dot(n, normalize(u.sun.xyz)), 0.0) * min(sunAt(inWorld), units) * tint;
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
+    // Illuminance (lux) before the cosine; the particles' tint colours the
+    // sunlight they shade.
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
     vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
-    vec3 color = base.rgb * (sunE + skyE) / AE_PI;
+    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    SurfaceBRDF s = SurfaceBRDF(base.rgb, mix(vec3(0.04), base.rgb, metallic), roughness, metallic);
+    vec3 color = brdfLight(s, n, v, normalize(u.sun.xyz), sunE);
+    color += brdfDiffuse(s, n, v) * skyE + brdfAmbient(s, n, v) * (skyR * ao);
     // glTF's emissive factor x strength is dimensionless; the engine reads
     // it as luminance in cd/m² at this scale (documented in lighting.md).
     color += emissive * 19660.8;
     if (lightsOn()) {
-        color += base.rgb * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n) / AE_PI;
+        color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, n, v, s);
     }
     float dist = distance(inWorld, u.camPos.xyz);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
