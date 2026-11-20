@@ -49,7 +49,7 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 | Normal array | `R8G8_UNORM` 2D array with the same shape. Tangent-space normal x and y (z is reconstructed); x runs along the texture's u axis, y along v. |
 | Size | Square, a power of two (`--tileset-size`, default 512). |
 | Material table | Per gameplay material id (8 slots): a **ground** layer for flat ground and a **cliff** layer for steep slopes. |
-| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. `anti_tiling`: `Off`, `Shifted(amount)` or `Rotated(amount)` (see "Anti-tiling" below). |
+| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `roughness`: the layer's GGX specular response (0 mirror, 1 matte; the procedural sets use 0.45 for wet beds and mud to 0.95 for forest floor). `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. `anti_tiling`: `Off`, `Shifted(amount)` or `Rotated(amount)` (see "Anti-tiling" below). |
 | Per-tileset settings | `cliff_slope`: the slope range over which ground turns to cliff, as 1 − n.y; default 0.18..0.42, about 35°..55°. `blend_depth`: the sharpness of the height blend, default 0.22. `detail_tilt`: how much detail normals move the cliff mask, default 0.35. `warp`: boundary meander, default 2 cells with 40 m features. `macro_variation`: anti-tiling brightness, default ±22 % with 150 m features. |
 
 **Memory.** One 512² layer is 512² × (4 + 2) bytes × 4/3 for mips = 2.0 MB. A 7-layer set is

@@ -2632,6 +2632,43 @@ Steps (commit and stop for compaction after each):
   - Not done: auto-exposure after the bloom; authored sources have no glTF radius (the
     range-derived size is a convention); the ACES/sky/fog calibration is a look decision
     (capture numbers in lighting.md).
+- Step 3, speculars — done (2026-11-20). Full write-up in [lighting.md](lighting.md)
+  ("Speculars" and "Colour"), the per-layer setting in [tilesets.md](tilesets.md).
+  - **One BRDF** (`shaders/lights.glsl`): GGX D, height-correlated Smith visibility,
+    Schlick F; `kD = (1 - F) * (1 - metallic)`; the receiver cosine applied once. The sun and
+    the clustered list use the same functions (`brdfLight`, `lightsSurface`,
+    `lightsSpecular`); the sun carries the hills'/units' shadows and the particles' tint, the
+    lights none.
+  - **Materials**: glTF's metallic and roughness factors and the metallic-roughness texture
+    (linear, its own UV set and `KHR_texture_transform`) in the model material table (288
+    bytes, the std430 offsets pinned by a unit test); `F0 = mix(0.04, base, metallic)`. The
+    terrain is a dielectric (`F0` 0.04) with a per-tileset-layer roughness in the UBO (grass
+    and scrub 0.92-0.95, sand 0.75-0.78, rock 0.50-0.52, wet beds and mud 0.45-0.48; the
+    palette path 0.85). Darts 0.04/0.7.
+  - **Ambient**: the sky is a uniform hemisphere, so its specular has a closed form,
+    `F(N.V) * skyRadiance * (0.5 + 0.5 R.y) * ao`. There is no IBL, split-sum LUT,
+    multi-scatter compensation, area light or per-light shadow; a metal's diffuse is 0, so
+    this term keeps it visible away from a highlight. That boundary is documented, not a
+    placeholder that silently differs.
+  - **Water**: the sun's glint is the shared GGX lobe (F0 0.06, roughness 0.22..0.43 from the
+    unresolved wave slope, the old Phong exponents 900..60) and the clustered lights get the
+    same lobe; `WATER_SPECULAR_GAIN = 0.062` keeps the old tuned peak at EV14. A first version
+    multiplied the specular by the cosine twice (the terrain test found it).
+  - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
+    highlight is wider than a dielectric's and a rough metal has none; with the sun off a
+    clustered light at the mirror lights the metal and the same light at the opposite azimuth
+    does not), `lights_glint_on_water` (181 to 252 luma) and `lights_specular_on_the_ground`
+    (163 sky to 232 diffuse, 250 at the mirror). 34 GPU tests pass with validation;
+    `cargo test --workspace` green. The decals' modulate threshold was re-baselined (a
+    quarter-grey decal leaves 0.63 of the ground instead of 0.51: the specular's ambient does
+    not scale with the albedo).
+  - **Cost** (`--bench`, `m12-speculars-before` against `m12-speculars-2`): battle's total
+    988 to 1 059 µs (+7.2%; terrain +14%, units +34%), cliffs +9.3%, lights-1000 +13.1%,
+    army-fox +2.0%. The first version used `pow` for Schlick's fifth power and cost
+    lights-200's terrain +125% (265 to 594 µs); five multiplies give +4.3% (289 µs). The
+    terrain pays the sun and ambient BRDF on every pixel and one lobe per clustered light.
+  - Not done: no environment map/IBL; no multi-scatter energy compensation; the water's gain
+    is an art calibration, not a measurement; blended glTF materials are still a mask at 0.5.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
