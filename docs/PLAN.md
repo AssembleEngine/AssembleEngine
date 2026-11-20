@@ -2583,7 +2583,7 @@ Steps (commit and stop for compaction after each):
     light cannot become the sun (each model would carry one); assets with gaps in the model
     light table (only per class), and no light shadows.
 - Step 2.5: photometric lighting — done (2026-11-20). Full write-up with units, formulas,
-  calibration, the temporary bridge and verification: [lighting.md](lighting.md).
+  calibration, the emitters/water/fog migration and verification: [lighting.md](lighting.md).
   - **Units and constants** (`ae_render::lighting`): world units are metres; point/spot
     intensity is candela, the sun is lux, emission is cd/m²; Lambertian radiance is
     `albedo/pi * E`. Sun 100 000 lx and sky 20 000 lx on an upward surface, with unit-luminance
@@ -2603,11 +2603,14 @@ Steps (commit and stop for compaction after each):
     `sqrt(max channel(tint * intensity) / (0.002 / exposure))` when it has no authored range
     (about 5 m for 1 000 cd at EV14, 797 m for a 25 000 000 cd flash), capping at the authored
     range; the shading window never sees the cull radius.
-  - **Migration bridge** (removed with the emitters): emission and the old water/fog/glow
-    values scale by the fixed EV14 reference exposure (≈19 661); particle burst lights are
-    matched to the old attenuation at a quarter of their range (so they keep their look at
-    that receiver, not at the source); water/fog/emissive/decals are still authored in the old
-    units.
+  - **Emitters, water and fog re-authored** (same step, 2026-11-20): particles carry a tint
+    and emission in cd/m² (FLASH ≈87 000, FIRE ≈20 000, SPARKS ≈74 000 at birth; media carry
+    albedo and are lit by physical sun/sky over π and the clustered lights over π); burst
+    lights store tint and candela (FLASH 32.5M, FIRE 3.17M); glTF emissive is read as cd/m²
+    at 19 660.8 per unit; decal glow at 19 660.8; water's sky reflection is physical sky
+    radiance, its glint scales with the sun, its foam is lit over π, its deep/shallow body
+    radiances are 786/3 146 etc. cd/m²; fog and the scene clear colour are the sky's radiance
+    (exposed when stored). No reference-exposure factor remains in the shaders.
   - **Verification**: `lighting` and `lights::bounds` unit tests; `ae_gltf` candela
     passthrough/omitted range/direction/warning; GPU
     `photometric_sun_exposure_and_inverse_square` (sun scales with illuminance; one EV doubles
@@ -2617,13 +2620,13 @@ Steps (commit and stop for compaction after each):
     explosions differs from the old build by a mean 1.8/255 (0.4% of pixels above 8, the
     burst lights' retuning). `ae-client --bench battle` is unchanged within the run spread.
   - **ACES default** (its own commit, 2026-11-20): `ToneParams::default` is now
-    `Curve::Aces`; `Clamp` stays for migration captures. The scene clear colour is the bridge's
-    sky radiance times exposure. Five GPU tests with absolute thresholds were re-baselined for
+    `Curve::Aces`; `Clamp` stays for migration captures. The scene clear colour is the sky's
+    radiance times exposure. Five GPU tests with absolute thresholds were re-baselined for
     the curve (the generated-map capture with eight explosions shifts by a mean 24/255; blur
     and pop measures that read display bytes now see roughly 70% of the clamp values).
-  - Not done (next commit of this step): re-authoring particles, decals, water and fog in
-    physical units and removing the bridge; auto-exposure after the bloom; authored sources have
-    no glTF radius (the range-derived size is a convention).
+  - Not done: auto-exposure after the bloom; authored sources have no glTF radius (the
+    range-derived size is a convention); the ACES/sky/fog calibration is a look decision
+    (capture numbers in lighting.md).
 
 ### M13 — HDR output on a supporting display (priority: lower)
 

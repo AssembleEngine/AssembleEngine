@@ -46,8 +46,8 @@ half-angles.
 The sun's input is `sunTint * sunIlluminance` (one unit-luminance tint); the
 shared path applies the cosine and the shadow. Sky diffuse is
 `skyTint * skyIlluminance * (0.5 + 0.5 * N.y)` — the hemispherical
-approximation — with no shadow. Water reflection and fog are still bridged
-(see below).
+approximation — with no shadow. Water reflection and fog are the sky's
+radiance (below).
 
 ## Culling
 
@@ -64,24 +64,40 @@ light reaches ≈ 5 m at EV14, a 25 000 000 cd flash ≈ 797 m (or its authored
 70 m). The bound is not clamped to the map: an unbounded, very bright light
 must reach every cluster it can illuminate.
 
-## Migration bridge (temporary)
+## Emitters, water and fog
 
-Everything still authored in the old arbitrary units is converted at the
-fixed EV14 reference exposure, not the frame's:
+Everything is authored in physical units; there is no reference-exposure
+bridge left in the shaders.
 
-- additive emission (particles' emissive colours, decal glow, glTF
-  emissive, caustics' old constants): multiply by
-  `legacy_emission_scale = 1 / 5.086e-5 ≈ 19 661`;
-- old punctual lights (the particle bursts): matched through the old
-  attenuation at a quarter of the light's range, so the receiver there keeps
-  its old brightness (`legacy_light_scale = pi / 5.086e-5`);
-- water and its fog colour: the surface is still authored in the old units
-  and its final radiance is scaled by `reference exposure` before the
-  frame's exposure;
-- distance fog: the old fog colour as physical radiance.
-
-These go away when the emitters, water and fog are re-authored in cd/m² and
-radiance (the next commit of the M12 photometric step).
+- **Particles**: an `EffectDef` has a linear tint plus an emission in
+  cd/m² over its life (FLASH about 87 000 at birth, FIRE about 20 000,
+  SPARKS about 74 000). Media (smoke, dust) carry albedo instead; their
+  lighting is `(sunE * sunAt + skyE * 0.5) / pi` plus the clustered lights
+  over pi. The frozen test effects use 19 661 cd/m² per old unit.
+- **Burst lights**: `EffectLight` has a tint and a luminous intensity at
+  birth in candela (FLASH 32.5 million, FIRE 3.17 million, from the old
+  brightness at a quarter of their range): tuning targets, not measured
+  equivalents.
+- **glTF emissive**: the linear product of the emissive texture/factor and
+  `KHR_materials_emissive_strength` is dimensionless; the engine reads it
+  as luminance in cd/m² at `19660.8` per unit (a convention documented for
+  content authors).
+- **Decals**: the scar's black-body glow (about 0..1 at full heat) is
+  multiplied by 19 660.8 cd/m².
+- **Water**:
+  - the sky reflection is physical radiance for a uniform hemisphere,
+    `skyTint * skyIlluminance / pi`, with a slightly darker zenith; the
+    horizon is the fog colour;
+  - the sun's glint is scaled by the sun's illuminance (its strength is
+    calibrated to read like the old arbitrary-unit highlight at the
+    reference exposure);
+  - foam is lit physically: sun over pi, the sky, and the clustered lights
+    over pi;
+  - the water body's deep and shallow in-scattered radiances are 786 and
+    3 146 cd/m² (red), 3 146 and 7 471 (green), 4 719 and 8 258 (blue).
+- **Fog** is the sky's radiance, and so is the scene's clear colour (both
+  multiplied by the frame exposure when stored): the horizon matches the
+  sky by construction.
 
 ## glTF
 
@@ -113,14 +129,18 @@ cached models of older versions are converted again.
   100 000 cd light adds a quarter at 4 m of what it adds at 2 m (inverse
   square, read through the clamp curve); a source radius larger than the
   range clamps the near field without extinguishing the light.
-- The 30 GPU tests pass with validation. Under `Clamp`, the calibrated EV14
-  output matches the old frames closely (a generated-map capture with eight
-  explosions differs by a mean 1.8/255, 0.4% of pixels above 8, from the
-  explosion lights' retuning). The ACES default changes the look (the same
-  capture: mean 24/255 absolute difference from the clamp frame); five GPU
-  tests with absolute thresholds were re-baselined for it.
+- The 30 GPU tests pass with validation. A generated-map capture with eight
+  explosions: under `Clamp` the calibrated EV14 output differs from the old
+  build by a mean 1.8/255 (0.4% of pixels above 8, from the retuned
+  explosion lights); the ACES default shifts it by a mean 24/255; the
+  physical sky, fog and water (step 3) darken the mean from 177 to 139
+  under ACES while bringing it closer to the old frame (mean absolute
+  difference 13.7 instead of 25.8). Thresholds in the GPU image tests that
+  read display values were re-baselined for both changes; none lost its
+  property (the water's vision dimming now checks the water's luma rather
+  than the old bridge's larger surface share).
 - `ae-client --bench battle`: unchanged pass structure and timings within
   run-to-run spread; the new bench label is `m12-photometric`.
 
-Open: speculars (M12 step 3) consume the same `E`; re-authoring the
-emitters/water/fog and removing the bridge; auto-exposure after the bloom.
+Open: speculars (M12 step 3) consume the same `E`; auto-exposure after the
+bloom.

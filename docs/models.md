@@ -312,6 +312,8 @@ Decisions taken with the user (docs/PLAN.md, M11):
   - **Falloff** is physical inverse square with the spec's quartic window; the source radius
     regularises only the near field (glTF has no source radius).
   - **Spot angles** are clamped to [0, π/2] and inner ≤ outer.
+  - **Emissive** factors are dimensionless; the engine reads the product as luminance at
+    19 660.8 cd/m² per unit (see [lighting.md](lighting.md)).
   - **Beams** (a capsule along a segment) are engine-only and not expressible in the extension, so
     no glTF asset produces one.
 
