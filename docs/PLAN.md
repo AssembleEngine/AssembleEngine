@@ -3363,6 +3363,22 @@ From M12 (2026-11-19):
   integral of its falloff along the view ray, cheap but without occlusion), or emitting
   particles (dust or sparks) for a light to light. Bloom (M12 step 4) covers only the sources
   themselves.
+- **Glow for lights with a visible representation (volumetric or textured).** The glow is
+  emitter-only, so a clustered light with no geometry (the `--lights` scenes, a glTF
+  `KHR_lights_punctual` on a bone) writes nothing, and its ground pool — a lit surface — is
+  deliberately not bloomed. Revisit this with "Lights seen in the air" and any textured light
+  representation (a billboard or sprite for a lamp, flare, muzzle flash or light shaft):
+  - a medium's in-scattered radiance: decide whether it writes the glow, in what units
+    (exposed, like the scene) and under which clamp, and how geometry occludes it;
+  - an emissive texture/billboard: write it like a model's emissive, depth-tested against the
+    scene, with its fade/LOD and camera-facing size, so it cannot bloom through walls;
+  - keep lit surfaces out (the contract "a visible source, not a lit surface"); re-check that
+    sunlit snow and white sails stay unbloomed;
+  - cost at `lights-*` (1 000–4 000 lights): whether many small sources need a sparse or
+    quarter-size glow pass, and whether a light's representation blooms through water (the
+    water replaces the glow today);
+  - test: a lamp billboard or in-scattering adds a halo with bloom on and none with it off,
+    while the ground it lights changes by 0.0; plus an occlusion case.
 
 ## Later improvements
 
