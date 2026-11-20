@@ -22,10 +22,11 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 shadowAxes[3];
     vec4 shadowOrigin[3];
     vec4 shadowScale[3];
-    // Per effect, five vec4s (EffectDef::words): colour at birth, colour at
+    // Per effect, six vec4s (EffectDef::words): colour at birth, colour at
     // death, (size birth, size death, life min, life max), (speed min,
-    // speed max, up, spread), (gravity, drag, emissive, fade in).
-    vec4 effects[MAX_EFFECTS * 5];
+    // speed max, up, spread), (gravity, drag, emissive, fade in), and
+    // (emission birth, emission death) in cd/m² for emissive effects.
+    vec4 effects[MAX_EFFECTS * 6];
     vec4 photometry;  // x: exposure, y: legacy emission scale, z: sun lux, w: sky lux
 } u;
 

@@ -407,10 +407,9 @@ void main() {
             float caustic = pow(r0 * r1, 6.0) * exp(-depth * 0.18) * smoothstep(0.0, 0.5, depth);
             color += albedo * aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff) * caustic * 0.9 / AE_PI;
         }
-        // The bridge: the water's deep and shallow tints are still old
-        // linear values (re-authored with the water).
-        vec3 deep = vec3(0.04, 0.16, 0.24) * u.photometry.y;
-        vec3 shallow = vec3(0.16, 0.38, 0.42) * u.photometry.y;
+        // The water body's in-scattered radiance (cd/m²), deep and shallow.
+        vec3 deep = vec3(786.0, 3146.0, 4719.0);
+        vec3 shallow = vec3(3146.0, 7471.0, 8258.0);
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
         color = mix(color * vec3(0.6, 0.8, 0.85), tint, 1.0 - exp(-depth * u.water.z));
         // Water puts a glow out within a metre.
@@ -420,9 +419,9 @@ void main() {
     // Emissive: after the light and the shadows. Explosions go off only in
     // sight (the client's rule); if the spot falls out of sight while it
     // glows, the fog of war dims the glow as it dims the scar under it.
-    // The bridge: the scar's glow is still authored in the old linear
-    // units (re-authored in cd/m^2 with the emitters).
-    color += glow * u.photometry.y;
+    // A scar's glow, as luminance: the decal shader's black-body glow
+    // (0..~1 at full heat) times its peak (cd/m²).
+    color += glow * 19660.8;
 
     if ((u.cfg.z & FLAG_VISION) != 0u) {
         color = applyVision(color, inWorld.xz);

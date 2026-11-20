@@ -23,7 +23,7 @@ void main() {
         return;
     }
     float dt = u.step.x;
-    uint e = p.info.x * 5u;
+    uint e = p.info.x * 6u;
     vec4 physics = u.effects[e + 4u];
     p.posAge.w += dt;
     vec3 vel = p.velLife.xyz;

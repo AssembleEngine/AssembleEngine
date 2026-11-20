@@ -37,7 +37,7 @@ void main() {
         }
     }
     Spawn s = spawns[lo];
-    uint e = (s.info.x & 0xffffu) * 5u;
+    uint e = (s.info.x & 0xffffu) * 6u;
     vec3 origin = s.posScale.xyz;
     if ((s.info.x & 0x10000u) != 0u) {
         float h = textureLod(heightTex, (origin.xz / u.map.x + 0.5) * u.map.yz, 0.0).r * u.height.x + u.height.y;

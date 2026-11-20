@@ -38,9 +38,10 @@ const float LENGTH[TRAINS] = float[](48.0, 27.0, 15.0, 8.3, 4.6, 2.5, 1.4, 0.75)
 const float ANGLE[TRAINS] = float[](0.55, 1.15, 0.2, 0.9, -0.1, 0.65, 1.4, 0.35);
 const float STEEP[TRAINS] = float[](0.05, 0.06, 0.07, 0.08, 0.08, 0.07, 0.06, 0.05);
 
-const vec3 SUN_COLOR = vec3(1.0, 0.95, 0.85) * 1.6;
-const vec3 ZENITH = vec3(0.30, 0.45, 0.66);
-const float SUN_GLINT = 0.5;
+// The sun's glint: a lobe whose strength is calibrated to read as the old
+// arbitrary-unit highlight at the reference exposure, now scaled by the
+// sun's illuminance (it darkens and brightens with the sun and EV).
+const float SUN_GLINT = 0.143;
 
 // Slope (d height / dx, d height / dz) of the waves at p, with trains finer
 // than about three pixels faded out (`pix`: world units per pixel); `lost`
@@ -60,10 +61,11 @@ vec2 waveSlope(vec2 p, float t, float pix, out float lost) {
     return slope;
 }
 
-vec3 skyColor(vec3 dir) {
-    // The horizon is the fog colour; both are still authored in the old
-    // units (the surface is re-authored with the emitters).
-    return mix(u.fog.rgb * u.photometry.x, ZENITH, sqrt(clamp(dir.y, 0.0, 1.0)));
+vec3 skyRadiance(vec3 dir) {
+    // A uniform hemisphere at the sky's radiance; the zenith a little
+    // darker than the horizon (the fog colour is the horizon).
+    vec3 zenith = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI) * 0.6;
+    return mix(u.fog.rgb, zenith, sqrt(clamp(dir.y, 0.0, 1.0)));
 }
 
 void main() {
@@ -97,14 +99,15 @@ void main() {
 
     vec3 R = reflect(-E, N);
     vec3 L = normalize(u.sun.xyz);
-    vec3 reflection = skyColor(R);
+    vec3 reflection = skyRadiance(R);
     // The sun's glints: a narrow lobe on smooth water, wider where the
     // unresolved waves make the surface rough (energy kept roughly level).
     float specPow = mix(900.0, 60.0, rough);
     float spec = pow(max(dot(R, L), 0.0), specPow) * (specPow / 300.0);
     vec3 tint;
     float units = unitSunAt(P, vec3(0.0, 1.0, 0.0), tint);
-    vec3 glint = SUN_COLOR * spec * SUN_GLINT * (0.25 + fresnel) * min(sunAt(P.xz, P.y), units) * tint;
+    vec3 sunE = aeUnitTint(AE_SUN_TINT) * u.photometry.z;
+    vec3 glint = sunE * spec * SUN_GLINT * (0.25 + fresnel) * min(sunAt(P.xz, P.y), units) * tint;
 
     // Premultiplied: alpha is how much of what lies under the surface it
     // hides; the glints are added light.
@@ -118,14 +121,12 @@ void main() {
     float edge = 1.0 - smoothstep(0.05, 0.45, depth);
     float texture_ = valueNoise(P.xz * 0.45 + vec2(t * 0.05, -t * 0.03)) * 0.6 + valueNoise(P.xz * 1.1 + vec2(-t * 0.07, t * 0.04) + 7.1) * 0.4;
     float foam = clamp((crest * 0.8 + edge * 0.75) * smoothstep(0.3, 0.7, texture_ + 0.2 * edge), 0.0, 0.9);
-    vec3 foamColor = vec3(0.86, 0.90, 0.90) * (SUN_COLOR * max(L.y, 0.0) * 0.45 + vec3(0.17, 0.20, 0.22));
+    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    vec3 foamColor = vec3(0.86, 0.90, 0.90) * (sunE * max(L.y, 0.0) * 0.45 / AE_PI + skyR * 0.7);
     // The clustered lights on the foam (their glints on the water come
     // with the speculars).
     if (lightsOn()) {
-        // Into the bridge's units: E / legacy_light_scale, with
-        // legacy_light_scale = pi / reference exposure and
-        // photometry.y = 1 / reference exposure.
-        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N) / (u.photometry.y * AE_PI);
+        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N) / AE_PI;
     }
     rgb = rgb * (1.0 - foam) + foamColor * foam;
     alpha = alpha * (1.0 - foam) + foam;
@@ -139,9 +140,7 @@ void main() {
     }
     // Distance fog over the surface's share (what lies under it is fogged
     // already): the blend then gives mix(surface over ground, fog, f).
-    // The fog colour is physical radiance; the water is still authored in
-    // the bridge's units until the surface is re-authored.
-    rgb = mix(rgb, u.fog.rgb * u.photometry.x * alpha, fogAmount(dist));
-    // The bridge: old linear water radiance to exposed physical radiance.
-    outColor = vec4(rgb * u.photometry.y * u.photometry.x, alpha);
+    rgb = mix(rgb, u.fog.rgb * alpha, fogAmount(dist));
+    // Stored exposed, like the rest of the scene.
+    outColor = vec4(rgb * u.photometry.x, alpha);
 }

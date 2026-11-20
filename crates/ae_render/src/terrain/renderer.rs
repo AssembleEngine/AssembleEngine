@@ -72,8 +72,8 @@ struct FrameUbo {
     unit_shadow: crate::shadow::CascadeUniforms,
     /// x: effect time (decals).
     effects: [f32; 4],
-    /// x: exposure, y: the legacy emission scale (bridge), z: the sun's
-    /// illuminance (lux), w: the sky's (lux).
+    /// x: exposure, y: unused, z: the sun's illuminance (lux), w: the
+    /// sky's (lux).
     photometry: [f32; 4],
 }
 
@@ -732,12 +732,10 @@ impl TerrainRenderer {
                     | if self.has_shadows && p.shadows { 256 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
-            // The old fog colour as physical radiance (the bridge until the
-            // fog is re-authored as sky radiance).
+            // Distance fog: the sky's radiance.
             fog: {
-                let c = [0.62, 0.70, 0.80];
-                let s = crate::lighting::legacy_emission_scale();
-                [c[0] * s, c[1] * s, c[2] * s, if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }]
+                let c = crate::lighting::sky_radiance();
+                [c[0], c[1], c[2], if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }]
             },
             water: match i.water_level {
                 Some(level) => [level, 1.0, 0.08, p.time],

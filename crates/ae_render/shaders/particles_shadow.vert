@@ -17,7 +17,7 @@ const vec2 CORNERS[4] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(-1, 1), vec2(1, 1
 
 void main() {
     Particle p = particles[keys[u.pool.x + gl_InstanceIndex]];
-    uint e = p.info.x * 5u;
+    uint e = p.info.x * 6u;
     vec4 physics = u.effects[e + 4u];
     float t = clamp(p.posAge.w / max(p.velLife.w, 1e-6), 0.0, 1.0);
     vec4 shape = u.effects[e + 2u];

@@ -27,10 +27,11 @@ struct Puff {
 
 Puff puffOf(uint slot) {
     Particle p = particles[slot];
-    uint e = p.info.x * 5u;
+    uint e = p.info.x * 6u;
     float t = clamp(p.posAge.w / max(p.velLife.w, 1e-6), 0.0, 1.0);
     vec4 shape = u.effects[e + 2u];
     vec4 physics = u.effects[e + 4u];
+    vec4 emission = u.effects[e + 5u];
     Puff f;
     f.centre = p.posAge.xyz;
     f.radius = 0.5 * mix(shape.x, shape.y, t) * uintBitsToFloat(p.info.z);
@@ -41,20 +42,21 @@ Puff puffOf(uint slot) {
     color.rgb *= 0.8 + 0.4 * float((p.info.y >> 16) & 0xffu) / 255.0;
     float dist = distance(p.posAge.xyz, u.camPos.xyz);
     float fog = u.fog.w > 0.0 ? 1.0 - exp(-pow(dist * u.fog.w, 1.5)) : 0.0;
+    float emis = mix(emission.x, emission.y, t);
     if (physics.z > 0.5) {
-        // The bridge: old additive linear value to exposed physical
-        // radiance of a unit luminance? No: emission is radiance directly.
-        f.color = vec4(color.rgb * color.a * (1.0 - fog) * u.photometry.y, 0.0);
+        // Emissive: colour is the tint, emission its luminance (cd/m²).
+        f.color = vec4(color.rgb * color.a * emis * (1.0 - fog), 0.0);
     } else {
-        // The media's lighting is still the old expression (re-authored with
-        // the emitters): its sun/sky coefficients through the bridge, the
-        // clustered lights (physical illuminance) back into those units.
-        vec3 sky = vec3(0.45, 0.55, 0.7);
-        vec3 light = vec3(1.0, 0.95, 0.85) * 1.1 * sunAt(p.posAge.xyz) + sky * 0.55;
+        // Media: albedo times the illuminance it scatters, as radiance; the
+        // sun past the hills, half the sky (a volume has no normal), and the
+        // clustered lights.
+        vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * sunAt(p.posAge.xyz));
+        vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * 0.5);
+        vec3 light = (sunE + skyE) / AE_PI;
         if (p.info.w != 0u) {
             light += unpackParticleLight(p.info.w) / AE_PI;
         }
-        vec3 lit = mix(color.rgb * light * u.photometry.y, u.fog.rgb, fog);
+        vec3 lit = mix(color.rgb * light, u.fog.rgb, fog);
         f.color = vec4(lit * color.a, color.a);
     }
     return f;

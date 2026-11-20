@@ -365,8 +365,8 @@ pub struct UnitFrame {
     /// Draw and shade by the units' shadow map with these cascades (the
     /// graph has it this frame).
     pub unit_shadows: Option<crate::shadow::Cascades>,
-    /// Photometric lighting: exposure, the legacy emission bridge, and the
-    /// sun's and sky's illuminances in lux.
+    /// Photometric lighting: exposure and the sun's and sky's illuminances
+    /// in lux (y unused).
     pub photometry: [f32; 4],
 }
 

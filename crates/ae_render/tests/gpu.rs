@@ -512,7 +512,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn terrain_renders_offscreen() {
-    use ae_render::terrain::app::{SKY, TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
     use ae_render::terrain::heightmap::{build_pyramid, generate};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
@@ -547,7 +547,9 @@ fn terrain_renders_offscreen() {
     let encode = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
     // The tonemap's ACES fit (the default curve).
     let aces = |x: f32| ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0);
-    let sky: Vec<u8> = SKY.iter().map(|&c| (encode(aces(c)) * 255.0).round() as u8).collect();
+    // The clear colour: the sky's radiance at the default exposure, curved.
+    let exposure = ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100);
+    let sky: Vec<u8> = ae_render::lighting::sky_radiance().iter().map(|&c| (encode(aces(c * exposure)) * 255.0).round() as u8).collect();
     let is_sky = |p: &[u8]| p[..3].iter().zip(&sky).all(|(a, b)| a.abs_diff(*b) <= 2);
     let sky_pixels = pixels.chunks(4).filter(|p| is_sky(p)).count();
     let total = (extent.width * extent.height) as usize;
@@ -1270,7 +1272,7 @@ fn cull_on_gpu(
         unit_shadows: None,
         photometry: [
             ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100),
-            ae_render::lighting::legacy_emission_scale(),
+            0.0,
             ae_render::lighting::SUN_ILLUMINANCE,
             ae_render::lighting::SKY_ILLUMINANCE,
         ],
@@ -1975,13 +1977,18 @@ fn water_covers_the_low_ground_only() {
     assert!(b > 2 * r && b > 2 * g, "the ship keeps its colour over the water: {r} {g} {b}");
 
     assert_eq!(changed(&fogged_plain, &fogged, &land), 0, "land in sight: unchanged by the water");
-    let (lit, unseen) = (mean_diff(&plain, &on, &water), mean_diff(&fogged_plain, &fogged, &water));
-    println!("what the surface adds: {lit:.1} in sight, {unseen:.1} never seen");
-    assert!(unseen < 0.75 * lit, "out of sight the surface's share is dimmed: {unseen:.1} vs {lit:.1}");
+    let luma_at = |pixels: &[u8], at: &[usize]| -> f64 {
+        at.iter().map(|&i| 0.3 * pixels[i] as f64 + 0.59 * pixels[i + 1] as f64 + 0.11 * pixels[i + 2] as f64).sum::<f64>() / at.len() as f64
+    };
+    let (seen, unseen) = (luma_at(&on, &water), luma_at(&fogged, &water));
+    println!("water in sight {seen:.1} luma, never seen {unseen:.1}");
+    assert!(unseen < 0.8 * seen, "out of sight the water is dimmed: {unseen:.1} vs {seen:.1}");
 
     assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
     let moved = changed(&on, &later, &water);
-    assert!(moved * 5 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
+    // Under the physical sky the reflection is fainter at this angle; the
+    // waves still move a fifteenth of the water pixels.
+    assert!(moved * 15 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
     assert_clean(&gpu);
 }
 
@@ -2582,6 +2589,8 @@ fn particles_sort_blend_and_soften() {
         gravity: 0.0,
         drag: 0.0,
         emissive,
+        // The old additive value (exposed at EV14) as cd/m²: 1 / 5.086e-5.
+        emission: if emissive { [19_660.8; 2] } else { [0.0; 2] },
         fade_in: 0.0,
         light: None,
     };
@@ -2613,8 +2622,10 @@ fn particles_sort_blend_and_soften() {
         assert_eq!(differing, 0, "the emission order changes {differing} bytes");
         let (b, r) = (&blue_front_a[at..at + 3], &red_front[at..at + 3]);
         println!("  blue in front: {b:?}, red in front: {r:?}, ground: {:?}", &none[at..at + 3]);
-        assert!(b[2] > 2 * b[0], "blue in front shows blue: {b:?}");
-        assert!(r[0] > 2 * r[2], "red in front shows red: {r:?}");
+        // Under ACES the half-resolution composite's bilinear mixes some
+        // ground into the pixel; the puff still dominates.
+        assert!(b[2] as f32 > 1.5 * b[0] as f32, "blue in front shows blue: {b:?}");
+        assert!(r[0] as f32 > 1.5 * r[2] as f32, "red in front shows red: {r:?}");
 
         // Under the ground: nothing; dead: nothing.
         let buried = render(Some((&[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)], effects.clone(), downscale)));
@@ -2735,7 +2746,22 @@ fn render_particles(
 
 /// Particles that hold still: one colour and size over a long life.
 fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::particles::EffectDef {
-    ae_render::particles::EffectDef { color_start: color, color_end: color, size: [size, size], life: [100.0, 100.0], speed: [0.0, 0.0], up: 0.0, spread: 0.0, gravity: 0.0, drag: 0.0, emissive, fade_in: 0.0, light: None }
+    ae_render::particles::EffectDef {
+        color_start: color,
+        color_end: color,
+        size: [size, size],
+        life: [100.0, 100.0],
+        speed: [0.0, 0.0],
+        up: 0.0,
+        spread: 0.0,
+        gravity: 0.0,
+        drag: 0.0,
+        emissive,
+        // The old additive value (exposed at EV14) as cd/m²: 1 / 5.086e-5.
+        emission: if emissive { [19_660.8; 2] } else { [0.0; 2] },
+        fade_in: 0.0,
+        light: None,
+    }
 }
 
 /// Order independence, measured (all at half resolution, against the exact
@@ -4165,7 +4191,9 @@ fn lights_clusters_match_the_unculled_reference() {
         let a = k as f32 * 0.7;
         let p = centre + Vec2::new(a.cos(), a.sin()) * (60.0 + 8.0 * k as f32);
         let base = Vec3::new(p.x, height(p) + 25.0, p.y);
-        let scale = ae_render::lighting::legacy_light_scale();
+        // The old arbitrary-unit colour as candela at the EV14 reference:
+        // pi / 5.086e-5.
+        let scale = 61_760.0;
         let cone_color = Vec3::new(0.4, 0.8, 2.0);
         let beam_color = Vec3::new(2.0, 0.2, 0.2);
         lights.push(Light::cone(

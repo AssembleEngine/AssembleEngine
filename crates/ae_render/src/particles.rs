@@ -97,8 +97,12 @@ pub struct EffectDef {
     /// Velocity lost per second (exponential).
     pub drag: f32,
     /// Adds light (alpha 0) instead of covering. Emissive effects cast no
-    /// coloured shadow; the others (smoke, dust) do.
+    /// coloured shadow; the others (smoke, dust) do. An emissive effect's
+    /// `color_*` is a tint; [`Self::emission`] is its luminance in cd/m².
     pub emissive: bool,
+    /// The emissive radiance at birth and at death (cd/m²); 0 for media,
+    /// whose colour is albedo.
+    pub emission: [f32; 2],
     /// Fades in over this fraction of the life (0: born at full opacity).
     pub fade_in: f32,
     /// The light a burst of it gives (one per burst, client-side:
@@ -110,8 +114,10 @@ pub struct EffectDef {
 /// life. Lengths are multiplied by the burst's scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EffectLight {
-    /// Linear colour at birth (the intensity included; may exceed 1).
+    /// The linear tint (unit luminance).
     pub color: [f32; 3],
+    /// The luminous intensity at birth (candela).
+    pub intensity: f32,
     /// Nothing past it (metres).
     pub range: f32,
     /// The source size the falloff is measured in (`crate::lights`).
@@ -125,13 +131,14 @@ pub struct EffectLight {
 }
 
 impl EffectDef {
-    fn words(&self) -> [[f32; 4]; 5] {
+    fn words(&self) -> [[f32; 4]; 6] {
         [
             self.color_start,
             self.color_end,
             [self.size[0], self.size[1], self.life[0], self.life[1].max(self.life[0])],
             [self.speed[0], self.speed[1], self.up, self.spread],
             [self.gravity, self.drag, self.emissive as u32 as f32, self.fade_in],
+            [self.emission[0], self.emission[1], 0.0, 0.0],
         ]
     }
 
@@ -154,8 +161,10 @@ pub fn default_effects() -> Vec<EffectDef> {
     vec![
         // FLASH: a short bright ball.
         EffectDef {
-            color_start: [6.0, 4.2, 2.2, 1.0],
-            color_end: [1.2, 0.5, 0.15, 0.0],
+            // Tints (unit-less) and emission in cd/m² at birth and death: a
+            // full flash about 87 000 cd/m², a fire about 20 000.
+            color_start: [1.352, 0.946, 0.496, 1.0],
+            color_end: [1.881, 0.784, 0.235, 0.0],
             size: [14.0, 26.0],
             life: [0.12, 0.2],
             speed: [0.0, 1.0],
@@ -164,13 +173,16 @@ pub fn default_effects() -> Vec<EffectDef> {
             gravity: 0.0,
             drag: 0.0,
             emissive: true,
+            emission: [87_268.0, 12_543.0],
             fade_in: 0.0,
-            light: Some(EffectLight { color: [6.0, 4.0, 2.0], range: 70.0, size: 16.0, height: 6.0, life: 0.3, flicker: 0.0 }),
+            // About 32.5 million candela: the flash's old brightness at a
+            // quarter of its range. Tuning targets, not measurements.
+            light: Some(EffectLight { color: [1.402, 0.935, 0.467], intensity: 32_500_000.0, range: 70.0, size: 16.0, height: 6.0, life: 0.3, flicker: 0.0 }),
         },
         // FIRE: rising flames that cool from yellow to dark red.
         EffectDef {
-            color_start: [1.9, 0.85, 0.22, 0.9],
-            color_end: [0.5, 0.08, 0.02, 0.0],
+            color_start: [1.849, 0.827, 0.214, 0.9],
+            color_end: [3.030, 0.485, 0.121, 0.0],
             size: [5.0, 11.0],
             life: [0.35, 0.9],
             speed: [3.0, 14.0],
@@ -179,13 +191,14 @@ pub fn default_effects() -> Vec<EffectDef> {
             gravity: -9.0,
             drag: 2.0,
             emissive: true,
+            emission: [20_205.0, 3_244.0],
             fade_in: 0.08,
-            light: Some(EffectLight { color: [2.2, 0.95, 0.28], range: 40.0, size: 10.0, height: 4.0, life: 1.2, flicker: 0.35 }),
+            light: Some(EffectLight { color: [1.885, 0.814, 0.240], intensity: 3_170_000.0, range: 40.0, size: 10.0, height: 4.0, life: 1.2, flicker: 0.35 }),
         },
         // SPARKS: small, fast, falling.
         EffectDef {
-            color_start: [5.0, 3.6, 1.6, 1.0],
-            color_end: [1.6, 0.4, 0.05, 0.0],
+            color_start: [1.332, 0.959, 0.426, 1.0],
+            color_end: [2.540, 0.635, 0.079, 0.0],
             size: [0.9, 0.5],
             life: [0.5, 1.3],
             speed: [25.0, 60.0],
@@ -194,6 +207,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             gravity: 22.0,
             drag: 0.6,
             emissive: true,
+            emission: [73_800.0, 12_386.0],
             fade_in: 0.0,
             light: None,
         },
@@ -209,6 +223,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             gravity: -2.5,
             drag: 0.7,
             emissive: false,
+            emission: [0.0, 0.0],
             fade_in: 0.1,
             light: None,
         },
@@ -224,6 +239,7 @@ pub fn default_effects() -> Vec<EffectDef> {
             gravity: -0.4,
             drag: 1.2,
             emissive: false,
+            emission: [0.0, 0.0],
             fade_in: 0.05,
             light: None,
         },
@@ -429,8 +445,8 @@ pub struct ParticleFrame {
     /// The units' shadow cascades when the graph draws the particles'
     /// coloured shadows this frame (else the pass draws nothing).
     pub unit_shadows: Option<crate::shadow::Cascades>,
-    /// Photometric lighting: exposure, the legacy emission bridge, and the
-    /// sun's and sky's illuminances in lux.
+    /// Photometric lighting: exposure and the sun's and sky's illuminances
+    /// in lux (y unused).
     pub photometry: [f32; 4],
 }
 
@@ -456,7 +472,7 @@ struct FrameUbo {
     sun: [f32; 4],
     fog: [f32; 4],
     shadow: crate::shadow::CascadeUniforms,
-    effects: [[[f32; 4]; 5]; MAX_EFFECTS],
+    effects: [[[f32; 4]; 6]; MAX_EFFECTS],
     /// x: exposure, y: legacy emission scale, z: sun lux, w: sky lux.
     photometry: [f32; 4],
 }
@@ -883,22 +899,11 @@ impl ParticleRenderer {
                 pos.y += water.map_or(h, |w| h.max(w));
             }
             pos.y += l.height * scale;
-            // The bridge: the old arbitrary-unit light, matched to the old
-            // attenuation at a reference distance (a quarter of its range)
-            // through the new Lambertian response. Re-authored in candela
-            // with the emitters.
+            // The light's candela at birth, faded over its life; lengths by
+            // the burst's scale.
             let color = glam::Vec3::from(l.color);
-            let y = crate::lighting::luminance(color.to_array()) * fade;
-            let (range, size) = (l.range * scale, l.size * scale);
-            let d = (0.25 * range).max(1.0);
-            let old = {
-                let q = (d / range).min(1.0);
-                let edge = (1.0 - q * q).max(0.0);
-                edge * edge / (1.0 + d * d / (size * size).max(1e-6))
-            };
-            let window = (1.0 - (d / range).clamp(0.0, 1.0).powi(4)).max(0.0);
-            let intensity = y * old * crate::lighting::legacy_light_scale() * d * d / window.max(1e-6);
-            out.push(crate::lights::Light::point(pos, color, intensity, range, size));
+            let intensity = l.intensity * fade;
+            out.push(crate::lights::Light::point(pos, color, intensity, l.range * scale, l.size * scale));
         }
     }
 
@@ -969,7 +974,7 @@ impl ParticleRenderer {
         // so the last dead particles leave the list).
         self.active[slot] = total > 0 || self.sim_time <= self.alive_until + 0.2;
         let i = &self.info;
-        let mut effects = [[[0.0; 4]; 5]; MAX_EFFECTS];
+        let mut effects = [[[0.0; 4]; 6]; MAX_EFFECTS];
         for (slot, def) in effects.iter_mut().zip(&self.effects) {
             *slot = def.words();
         }

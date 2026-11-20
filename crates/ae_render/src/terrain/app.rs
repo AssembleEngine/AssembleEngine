@@ -54,7 +54,6 @@ pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// The HDR scene's format ([`ae_render_abi::module::SCENE_FORMAT`]).
 pub const SCENE_FORMAT: vk::Format = vk::Format::from_raw(ae_render_abi::module::SCENE_FORMAT as i32);
 /// Sky / fog colour (linear).
-pub const SKY: [f32; 4] = [0.62, 0.70, 0.80, 1.0];
 /// sRGB like the swapchain, so a capture shows what the window shows.
 const READBACK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
@@ -567,7 +566,7 @@ impl TerrainApp {
             time,
             effect_time,
             shadows: view.shadows && self.shadows,
-            photometry: [self.tone.exposure(), crate::lighting::legacy_emission_scale(), self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
+            photometry: [self.tone.exposure(), 0.0, self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
             // The units' shadows when the graph draws them.
             // (and the particles' coloured shadows when it draws those).
             unit_shadows: (view.shadows && self.shadows && self.graph_has(LibraryResource::ShadowMap)).then(|| crate::shadow::Cascades {
@@ -587,12 +586,11 @@ impl TerrainApp {
 
 /// The terrain's fog (colour and density) for other passes, as the terrain
 /// renderer sets it.
-/// Distance fog as physical radiance (the bridge until it becomes sky
-/// radiance) and its density.
+/// Distance fog as the sky's radiance and its density.
 fn fog(info: &TerrainInfo, on: bool) -> [f32; 4] {
     let density = if on { 1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2) } else { 0.0 };
-    let s = crate::lighting::legacy_emission_scale();
-    [0.62 * s, 0.70 * s, 0.80 * s, density]
+    let r = crate::lighting::sky_radiance();
+    [r[0], r[1], r[2], density]
 }
 
 /// The view a frozen LOD would keep (call on the main thread with the
@@ -981,11 +979,12 @@ impl Recorder<ScenePass> for TerrainApp {
         match pass.work {
             // No optical depth, no particle toward the sun.
             PassWork::Library(LibraryPass::ShadowsParticles) => [0.0; 4],
-            // The sky behind the terrain: the bridge's radiance times the
-            // frame exposure (it is stored exposed like the scene).
+            // The sky behind the terrain: its radiance, stored exposed like
+            // the scene.
             _ => {
-                let s = crate::lighting::legacy_emission_scale() * self.tone.exposure();
-                [SKY[0] * s, SKY[1] * s, SKY[2] * s, 1.0]
+                let r = crate::lighting::sky_radiance();
+                let e = self.tone.exposure();
+                [r[0] * e, r[1] * e, r[2] * e, 1.0]
             }
         }
     }

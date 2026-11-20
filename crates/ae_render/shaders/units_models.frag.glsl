@@ -62,9 +62,9 @@ void main() {
     vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * diff);
     vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
     vec3 color = base.rgb * (sunE + skyE) / AE_PI;
-    // The bridge: the material's emissive is still the old linear value
-    // (re-authored as cd/m² with the emitters).
-    color += emissive * u.photometry.y;
+    // glTF's emissive factor x strength is dimensionless; the engine reads
+    // it as luminance in cd/m² at this scale (documented in lighting.md).
+    color += emissive * 19660.8;
     if (lightsOn()) {
         color += base.rgb * lightsDiffuse(lightClusterFrag(gl_FragCoord), inWorld, n) / AE_PI;
     }

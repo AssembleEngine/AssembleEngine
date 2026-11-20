@@ -12,9 +12,8 @@
 //! The scene's sun and sky are fixed for now: 100 000 lx of direct normal
 //! sun and 20 000 lx of sky on an upward-facing surface, with tints
 //! normalised to unit luminance so the scalars are the illuminances. The
-//! transition from the old arbitrary units uses [`legacy_emission_scale`]
-//! and [`legacy_light_scale`] (the reference exposure); they go away when
-//! the emitters, water and fog are re-authored in these units.
+//! sky's radiance is [[`sky_radiance`]] (the clear colour, the fog and the
+//! water's reflection).
 
 /// One world unit is one metre (the renderer's terrain, units and lights).
 pub const WORLD_UNIT_METRES: f32 = 1.0;
@@ -67,17 +66,13 @@ pub fn reference_exposure() -> f32 {
     exposure(DEFAULT_EV100)
 }
 
-/// The old pipeline's additive linear value to physical radiance: divide
-/// by the fixed reference exposure (not the frame's).
-pub fn legacy_emission_scale() -> f32 {
-    1.0 / reference_exposure()
-}
-
-/// An old arbitrary-unit light colour to candela for the same receiver
-/// signal: the old shader added `albedo * colour * falloff * N·L`; the new
-/// one adds `albedo/pi * E * N·L` and multiplies by the exposure.
-pub fn legacy_light_scale() -> f32 {
-    std::f32::consts::PI / reference_exposure()
+/// The sky's radiance (cd/m²) as a uniform hemisphere: the illuminance over
+/// pi, tinted and normalised to unit luminance. The scene's clear colour,
+/// the distance fog and the water's reflection use it.
+pub fn sky_radiance() -> [f32; 3] {
+    let t = sky_tint();
+    let k = SKY_ILLUMINANCE / std::f32::consts::PI;
+    [t[0] * k, t[1] * k, t[2] * k]
 }
 
 /// The illuminance below which a light is not worth listing: one 8-bit code
@@ -101,8 +96,6 @@ mod tests {
         let e = exposure(DEFAULT_EV100);
         assert!((e - 1.0 / (1.2 * 16384.0)).abs() < 1e-12, "{e}");
         assert!((e * 1e5 / std::f32::consts::PI - 1.62).abs() < 0.01, "sunlit");
-        assert!((legacy_emission_scale() - 1.0 / e).abs() < 1e-3);
-        assert!((legacy_light_scale() - std::f32::consts::PI / e).abs() < 1e-2);
     }
 
     #[test]
