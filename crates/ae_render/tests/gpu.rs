@@ -3224,7 +3224,7 @@ fn decals_wrap_over_cliffs() {
     const STRIPES: f32 = 8.0;
     let size = 64u32;
     let stripes = (0..size * size).map(|i| if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] }).collect();
-    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes], normals: Vec::new() });
+    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() });
     let half = 12.0f32;
     let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
     // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32).
@@ -3467,7 +3467,7 @@ fn decals_relit_modulated_and_glowing() {
     let layers = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25)), grey(0.3)];
     let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
     let normals = vec![vec![[lean.sin(), 0.0, lean.cos(), 0.0]; texels], vec![[0.0, 0.0, 1.0, 0.6]; texels], flat.clone(), flat, vec![[0.0, lean.sin(), lean.cos(), 0.0]; texels]];
-    let atlas = Arc::new(DecalAtlas { size, layers, normals });
+    let atlas = Arc::new(DecalAtlas { size, layers, normals, roughness: Vec::new(), materials: Vec::new() });
     let half = 12.0f32;
     let edge = (42.0f32, 64.0f32);
     let at_edge = |layer: u32, angle: f32| Decal::permanent([edge.0, edge.1], [half, half], angle, layer);
@@ -3568,6 +3568,108 @@ fn decals_relit_modulated_and_glowing() {
     let f = luma(&fading_in, centre);
     println!("glow while fading in: centre {f:.0}");
     assert!(f > l - 12.0, "the fade-in dims the glow: {f} against {l}");
+    assert_clean(&gpu);
+}
+
+/// A decal paints its layer's material, not just its colour (M12): a
+/// clustered light at the view's mirror lights a smooth (roughness 0.15)
+/// decal much more than a rough (0.95) one with the same albedo, and a
+/// metallic decal's F0 (its colour) beats the dielectric's 0.04 at the
+/// same roughness. The roughness is the product of a per-layer factor and
+/// a per-texel texture (0.5 x 0.3, 1.0 x 0.95, 0.15 x 1.0), so the surface
+/// channel and the factors are both exercised. Without the material
+/// reaching the BRDF, the frames would be identical (the albedo and the
+/// normals are).
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn decals_carry_their_roughness_and_metallic() {
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, LayerMaterial};
+    use ae_render::lights::Light;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let n = 129;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    // Three layers of the same mid grey: a smooth dielectric, a rough
+    // dielectric, and a smooth metal. Their roughness is factor x texture:
+    // 0.5 x 0.3, 1.0 x 0.95 and 0.15 x 1.0.
+    let size = 16u32;
+    let texels = (size * size) as usize;
+    let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
+    let rough = |c: f32| vec![c; texels];
+    let atlas = Arc::new(DecalAtlas {
+        size,
+        layers: vec![grey(0.5), grey(0.5), grey(0.5)],
+        normals: Vec::new(),
+        roughness: vec![rough(0.3), rough(0.95), rough(1.0)],
+        materials: vec![
+            LayerMaterial { roughness: 0.5, metallic: 0.0 },
+            LayerMaterial { roughness: 1.0, metallic: 0.0 },
+            LayerMaterial { roughness: 0.15, metallic: 1.0 },
+        ],
+    });
+
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 50.0, distance: 150.0, yaw: 0.0, pitch: 0.6, fov_y: 0.8 };
+    let ground = Vec3::new(512.0, 50.0, 512.0);
+    let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
+    let v = (eye - ground).normalize();
+    let mirror = Vec3::new(-v.x, v.y, -v.z);
+    let light = Light::point(ground + mirror * 60.0, Vec3::ONE, 1_500_000.0, 100.0, 3.0);
+
+    let render = |layer: u32| -> Vec<u8> {
+        let feed = Arc::new(DecalFeed::default());
+        feed.place_all(&[Decal::permanent([512.0, 512.0], [12.0, 12.0], 0.0, layer)]);
+        // The sun off: the frames differ only in the light's specular (the
+        // decal's albedo and normal are the same layer texture).
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_decals(DecalsSetup { feed, capacity: 8, atlas: Some(atlas.clone()) })
+            .with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() })
+            .with_lights(vec![light]);
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let smooth = render(0);
+    let rough = render(1);
+    let metal = render(2);
+
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(ground.x, ground.y, ground.z, 1.0);
+    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    assert!(cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0, "the decal projects into the view at ({cu}, {cv})");
+    let (cu, cv) = (cu as i32, cv as i32);
+    let peak = |p: &[u8]| -> f32 {
+        let mut best = 0.0f32;
+        for y in (cv - 4)..(cv + 4) {
+            for x in (cu - 4)..(cu + 4) {
+                let i = ((y * extent.width as i32 + x) * 4) as usize;
+                best = best.max(0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32);
+            }
+        }
+        best
+    };
+    println!("decal material peak: smooth dielectric {:.1}, rough dielectric {:.1}, smooth metal {:.1}", peak(&smooth), peak(&rough), peak(&metal));
+    assert!(peak(&smooth) > peak(&rough) + 20.0, "a rough decal keeps the ground glossy: {:.1} vs {:.1}", peak(&smooth), peak(&rough));
+    assert!(peak(&metal) > peak(&smooth) + 10.0, "the metallic decal's F0 does not reach the BRDF: {:.1} vs {:.1}", peak(&metal), peak(&smooth));
     assert_clean(&gpu);
 }
 

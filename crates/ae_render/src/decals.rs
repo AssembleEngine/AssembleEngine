@@ -7,6 +7,13 @@
 //!   is the ground's there, read on the GPU, so it follows terrain edits),
 //!   half-sizes along its own axes, a rotation, a layer of the
 //!   [`DecalAtlas`], an opacity and a fade-in.
+//! * Its layer also carries a material ([`LayerMaterial`]: GGX roughness and
+//!   metallic), blended into the ground's by the decal's coverage, so soot
+//!   takes the gloss off whatever it lands on.
+//! * Channels: the albedo texture is RGB colour with coverage in alpha; the
+//!   surface texture is normal x/y, roughness (times the layer's factor, as
+//!   glTF's factor × texture) and the glow mask in alpha. Normal z is rebuilt
+//!   in the shader; metallic stays a per-layer factor.
 //! * It is projected three ways around its centre, weighted by the ground's
 //!   normal with constant-overlap triplanar weights. The side projections
 //!   take their second coordinate from the height relative to the centre,
@@ -150,6 +157,25 @@ impl DecalFeed {
     }
 }
 
+/// How a decal layer's surface responds to light: the GGX roughness and
+/// metallic of the material it paints (`docs/lighting.md`, "Speculars").
+/// A decal blends them into the ground's by its coverage, so soot (a rough
+/// dielectric) takes the gloss off whatever it lands on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerMaterial {
+    /// 0 mirror, 1 matte.
+    pub roughness: f32,
+    /// 0 dielectric, 1 metal (the layer's colour is then its F0).
+    pub metallic: f32,
+}
+
+impl Default for LayerMaterial {
+    /// A matte dielectric: the safe default for soot and disturbed earth.
+    fn default() -> Self {
+        Self { roughness: 0.9, metallic: 0.0 }
+    }
+}
+
 /// The decals' textures: square layers of `size`² texels, row-major, the
 /// first row at the decal's -z edge; mips are made from them.
 #[derive(Clone, Debug)]
@@ -161,6 +187,14 @@ pub struct DecalAtlas {
     /// y toward its +z, the first rows' side being -z; z out of the ground;
     /// each -1..1) and the glow mask (0..1). Empty: flat, no glow.
     pub normals: Vec<Vec<[f32; 4]>>,
+    /// Layer for layer, an optional roughness texture (0..1, one value per
+    /// texel): the shader multiplies it by the layer's
+    /// [`LayerMaterial::roughness`]. Empty: the texture value is 1, so the
+    /// factor alone sets the roughness.
+    pub roughness: Vec<Vec<f32>>,
+    /// Layer for layer, its surface material. Empty: every layer is
+    /// [`LayerMaterial::default`].
+    pub materials: Vec<LayerMaterial>,
 }
 
 impl DecalAtlas {
@@ -201,19 +235,25 @@ impl DecalAtlas {
             .collect()
     }
 
-    /// Each layer's normals and glow mask as RGBA8 UNORM mips (normal
-    /// `n * 0.5 + 0.5`): normals averaged and renormalized, the mask
-    /// averaged. Flat, no glow, when [`Self::normals`] is empty.
-    pub(crate) fn normal_mips(&self) -> Vec<Vec<Vec<u8>>> {
-        let flat = vec![[0.0, 0.0, 1.0, 0.0]; (self.size * self.size) as usize];
-        let encode = |c: f32| ((c.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+    /// Each layer's surface as RGBA8 UNORM mips: R, G the tangent normal
+    /// (`n * 0.5 + 0.5`; its z is reconstructed in the shader), B the
+    /// roughness texture (multiplied by the layer's factor), A the glow
+    /// mask. Normals are averaged in xyz and renormalised; roughness and
+    /// the mask are averaged. Flat, roughness 1, no glow, when [`Self::normals`]
+    /// is empty; roughness 1 where [`Self::roughness`] has no map.
+    pub(crate) fn surface_mips(&self) -> Vec<Vec<Vec<u8>>> {
+        let texels = (self.size * self.size) as usize;
+        let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
+        let unorm = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let normal = |c: f32| unorm(c * 0.5 + 0.5);
         (0..self.layers.len())
             .map(|i| {
                 let mut level = self.normals.get(i).unwrap_or(&flat).clone();
+                let mut rough = self.roughness.get(i).cloned().unwrap_or_else(|| vec![1.0; texels]);
                 let mut side = self.size as usize;
                 let mut mips = Vec::new();
                 loop {
-                    mips.push(level.iter().flat_map(|t| [encode(t[0]), encode(t[1]), encode(t[2]), (t[3].clamp(0.0, 1.0) * 255.0).round() as u8]).collect());
+                    mips.push(level.iter().zip(&rough).flat_map(|(t, r)| [normal(t[0]), normal(t[1]), unorm(*r), unorm(t[3])]).collect());
                     if side == 1 {
                         break;
                     }
@@ -229,6 +269,12 @@ impl DecalAtlas {
                             [n[0], n[1], n[2], sum(3) * 0.25]
                         })
                         .collect();
+                    rough = (0..half * half)
+                        .map(|i| {
+                            let (x, y) = (i % half * 2, i / half * 2);
+                            (rough[y * side + x] + rough[y * side + x + 1] + rough[(y + 1) * side + x] + rough[(y + 1) * side + x + 1]) * 0.25
+                        })
+                        .collect();
                     side = half;
                 }
                 mips
@@ -240,7 +286,40 @@ impl DecalAtlas {
     pub fn resized(&self, size: u32) -> Self {
         let from = self.size;
         let colour = |l: &Vec<[f32; 4]>| resample(l, from, size, false);
-        Self { size, layers: self.layers.iter().map(colour).collect(), normals: self.normals.iter().map(|l| resample(l, from, size, true)).collect() }
+        Self {
+            size,
+            layers: self.layers.iter().map(colour).collect(),
+            normals: self.normals.iter().map(|l| resample(l, from, size, true)).collect(),
+            roughness: self.roughness.iter().map(|m| resample_scalar(m, from, size)).collect(),
+            materials: self.materials.clone(),
+        }
+    }
+
+    /// Set layer `layer`'s surface material (roughness and metallic). Every
+    /// other layer keeps its own (or the default).
+    pub fn set_layer_material(&mut self, layer: u32, material: LayerMaterial) -> Result<(), String> {
+        let n = self.layers.len();
+        if layer as usize >= n {
+            return Err(format!("material for decal layer {layer}, but the atlas has {n}"));
+        }
+        if self.materials.is_empty() {
+            self.materials = vec![LayerMaterial::default(); n];
+        }
+        self.materials.resize(n, LayerMaterial::default());
+        self.materials[layer as usize] = material;
+        Ok(())
+    }
+
+    /// The per-layer materials, packed for the shader: x roughness factor,
+    /// y metallic factor, z specular scale (reserved, 1), w reserved. A
+    /// missing entry is [`LayerMaterial::default`].
+    pub(crate) fn gpu_materials(&self) -> Vec<[f32; 4]> {
+        (0..self.layers.len())
+            .map(|i| {
+                let m = self.materials.get(i).copied().unwrap_or_default();
+                [m.roughness.clamp(0.0, 1.0), m.metallic.clamp(0.0, 1.0), 1.0, 0.0]
+            })
+            .collect()
     }
 
     /// Add a layer from 8-bit images, rows top first (as [`read_tga`]
@@ -280,6 +359,12 @@ impl DecalAtlas {
         if !self.normals.is_empty() {
             self.normals.push(normal_layer.unwrap_or_else(flat));
         }
+        if !self.materials.is_empty() {
+            self.materials.push(LayerMaterial::default());
+        }
+        if !self.roughness.is_empty() {
+            self.roughness.push(vec![1.0; (self.size * self.size) as usize]);
+        }
         self.layers.push(resample(&texels, colour.width, self.size, false));
         Ok(layer)
     }
@@ -294,14 +379,26 @@ impl DecalAtlas {
         if !self.normals.is_empty() && self.normals.len() != self.layers.len() {
             return Err(format!("decal atlas has {} normal layers for {} colour layers", self.normals.len(), self.layers.len()));
         }
+        if !self.materials.is_empty() && self.materials.len() != self.layers.len() {
+            return Err(format!("decal atlas has {} material layers for {} colour layers", self.materials.len(), self.layers.len()));
+        }
+        if !self.roughness.is_empty() && self.roughness.len() != self.layers.len() {
+            return Err(format!("decal atlas has {} roughness layers for {} colour layers", self.roughness.len(), self.layers.len()));
+        }
+        if let Some((i, m)) = self.materials.iter().enumerate().find(|(_, m)| !(0.0..=1.0).contains(&m.roughness) || !(0.0..=1.0).contains(&m.metallic)) {
+            return Err(format!("decal atlas layer {i} material roughness {} or metallic {} out of range", m.roughness, m.metallic));
+        }
         let texels = (self.size * self.size) as usize;
         if let Some(i) = self.layers.iter().position(|l| l.len() != texels) {
             return Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.layers[i].len()));
         }
-        match self.normals.iter().position(|l| l.len() != texels) {
-            Some(i) => Err(format!("decal atlas normal layer {i} has {} texels, not {texels}", self.normals[i].len())),
-            None => Ok(()),
+        if let Some(i) = self.normals.iter().position(|l| l.len() != texels) {
+            return Err(format!("decal atlas normal layer {i} has {} texels, not {texels}", self.normals[i].len()));
         }
+        if let Some((i, m)) = self.roughness.iter().enumerate().find(|(_, m)| m.len() != texels || m.iter().any(|v| !(0.0..=1.0).contains(v))) {
+            return Err(format!("decal atlas roughness layer {i} has {} texels (not {texels}) or a value out of range", m.len()));
+        }
+        Ok(())
     }
 }
 
@@ -392,6 +489,12 @@ pub fn resample(texels: &[[f32; 4]], from: u32, to: u32, normals: bool) -> Vec<[
     out
 }
 
+/// [`resample`] for a one-channel map (roughness).
+fn resample_scalar(values: &[f32], from: u32, to: u32) -> Vec<f32> {
+    let packed: Vec<[f32; 4]> = values.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
+    resample(&packed, from, to, false).iter().map(|t| t[0]).collect()
+}
+
 /// The engine's decals ([`layer`]), 128² each: a scorch mark (charred
 /// centre, a burnt brown ring, a ragged edge; a shallow rough hollow whose
 /// centre can glow) and a crater (a dark pit, a pale rim of thrown-up
@@ -428,6 +531,15 @@ pub fn default_atlas() -> DecalAtlas {
     };
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
     let layer = |f: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]| -> Vec<[f32; 4]> {
+        (0..SIZE * SIZE)
+            .map(|i| {
+                let (u, v) = (((i % SIZE) as f32 + 0.5) / SIZE as f32, ((i / SIZE) as f32 + 0.5) / SIZE as f32);
+                let (x, y) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
+                f(u, v, x.hypot(y), y.atan2(x))
+            })
+            .collect()
+    };
+    let scalar = |f: &dyn Fn(f32, f32, f32, f32) -> f32| -> Vec<f32> {
         (0..SIZE * SIZE)
             .map(|i| {
                 let (u, v) = (((i % SIZE) as f32 + 0.5) / SIZE as f32, ((i / SIZE) as f32 + 0.5) / SIZE as f32);
@@ -481,7 +593,21 @@ pub fn default_atlas() -> DecalAtlas {
     };
     let scorch_glow = |u: f32, v: f32, r: f32| ((1.0 - smooth(0.05, 0.6, r)) * (0.35 + 0.8 * fbm(u * 1.5, v * 1.5, 11))).clamp(0.0, 0.85);
     let normals = vec![normals(&scorch_height, &scorch_glow), normals(&crater_height, &|_, _, _| 0.0)];
-    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals }
+    // Roughness textures (multipliers on the layer's factor): char and
+    // cinders are rougher than the burnt ring, the crater's pit than its
+    // rim. 8 bits is plenty for both.
+    let scorch_rough = scalar(&|u, v, r, a| {
+        let n = fbm(u, v, 0);
+        let edge = 0.78 + 0.03 * (a * 5.0).sin() + (n - 0.5) * 0.35;
+        1.0 - 0.1 * smooth(0.15, edge * 0.9, r + (n - 0.5) * 0.3)
+    });
+    let crater_rough = scalar(&|u, v, r, _| {
+        let n = fbm(u, v, 7);
+        1.0 - 0.1 * smooth(0.35, 0.6, r + (n - 0.5) * 0.18)
+    });
+    // Char and ash are matte dielectrics; the crater's loose earth less so.
+    let materials = vec![LayerMaterial { roughness: 0.95, metallic: 0.0 }, LayerMaterial { roughness: 0.9, metallic: 0.0 }];
+    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals, roughness: vec![scorch_rough, crater_rough], materials }
 }
 
 pub struct DecalsSetup {
@@ -790,11 +916,57 @@ mod tests {
     fn atlas_mips_reach_one_texel_and_ignore_transparent_colour() {
         let mut layer = vec![[1.0, 0.0, 0.0, 1.0]; 4];
         layer[3] = [0.0, 0.0, 1.0, 0.0];
-        let atlas = DecalAtlas { size: 2, layers: vec![layer], normals: Vec::new() };
+        let atlas = DecalAtlas { size: 2, layers: vec![layer], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
         let mips = atlas.mips();
         assert_eq!(mips[0].len(), 2);
         assert_eq!(mips[0][1], vec![255, 0, 0, 191]);
         assert!(default_atlas().validate().is_ok());
+    }
+
+    #[test]
+    fn layers_carry_their_material_and_default_to_matte() {
+        let plain = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]; 2], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
+        assert_eq!(plain.gpu_materials(), vec![[0.9, 0.0, 1.0, 0.0]; 2], "without materials: matte dielectric");
+        let mut atlas = default_atlas();
+        assert_eq!(atlas.materials.len(), atlas.layers.len());
+        assert_eq!(atlas.roughness.len(), atlas.layers.len(), "the default atlas has texture roughness");
+        let scorch = atlas.materials[layer::SCORCH as usize];
+        assert!((scorch.roughness - 0.95).abs() < 1e-6 && scorch.metallic == 0.0);
+        assert_eq!(atlas.materials[layer::CRATER as usize].metallic, 0.0);
+        // A new layer takes the default until it is told otherwise, and a
+        // 1.0 roughness texture while the atlas has roughness maps.
+        let grey = Image { width: 4, height: 4, texels: vec![[128; 4]; 16] };
+        let added = atlas.add_layer(&grey, None).unwrap();
+        assert_eq!(atlas.materials[added as usize], LayerMaterial::default());
+        assert_eq!(atlas.roughness[added as usize].len(), 128 * 128);
+        assert!(atlas.roughness[added as usize].iter().all(|&v| v == 1.0));
+        atlas.set_layer_material(added, LayerMaterial { roughness: 0.2, metallic: 1.0 }).unwrap();
+        assert_eq!(atlas.gpu_materials()[added as usize], [0.2, 1.0, 1.0, 0.0]);
+        assert!(atlas.set_layer_material(99, LayerMaterial::default()).is_err());
+        assert_eq!(atlas.resized(8).materials, atlas.materials);
+        atlas.materials[0].metallic = 1.5;
+        assert!(atlas.validate().unwrap_err().contains("out of range"));
+    }
+
+    #[test]
+    fn the_surface_packs_normal_xy_roughness_and_glow() {
+        // A flat normal, roughness 0.25 and glow 0.5: R G 128, B 64, A 128.
+        let normal = vec![[0.0, 0.0, 1.0, 0.5]; 4];
+        let atlas = DecalAtlas { size: 2, layers: vec![vec![[0.5; 4]; 4]], normals: vec![normal], roughness: vec![vec![0.25; 4]], materials: vec![LayerMaterial::default()] };
+        let mips = atlas.surface_mips();
+        assert_eq!(mips[0][0], vec![128, 128, 64, 128, 128, 128, 64, 128, 128, 128, 64, 128, 128, 128, 64, 128]);
+        // The mip chain reaches one texel (4 bytes).
+        assert_eq!(mips[0].len(), 2);
+        assert_eq!(mips[0][1], vec![128, 128, 64, 128]);
+        // A layer with no map writes texture roughness 1 (the factor then
+        // carries it).
+        let flat = DecalAtlas { size: 2, layers: vec![vec![[0.5; 4]; 4]], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
+        let flat = flat.surface_mips();
+        assert_eq!(&flat[0][0][..4], &[128, 128, 255, 0]);
+        assert_eq!(flat[0][0].len() / 4, 4);
+        let mut bad = atlas;
+        bad.roughness[0][0] = 1.5;
+        assert!(bad.validate().unwrap_err().contains("roughness"));
     }
 
     /// A 32-bit TGA of `texels` (rows top first), run-length encoded or
@@ -836,7 +1008,7 @@ mod tests {
 
     #[test]
     fn layers_are_resampled_and_normals_take_the_atlas_convention() {
-        let mut atlas = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: Vec::new() };
+        let mut atlas = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
         // 4x4 colour, mid grey: box-filtered to 2x2, linear.
         let grey = Image { width: 4, height: 4, texels: vec![[188, 188, 188, 255]; 16] };
         // A normal map leaning up the image (green 1, OpenGL style), glow 0.5.
@@ -856,7 +1028,7 @@ mod tests {
         let ramp: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
         let big = resample(&ramp, 2, 4, false);
         assert!(big[0][0] <= big[1][0] && big[1][0] <= big[2][0] && big[2][0] <= big[3][0] && big[3][0] > big[0][0]);
-        assert!(DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: vec![] }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
+        assert!(DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: vec![], roughness: Vec::new(), materials: Vec::new() }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
     }
 
     /// A normal map's handedness from its own curl: with y down the rows,

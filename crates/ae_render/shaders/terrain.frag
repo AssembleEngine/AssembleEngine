@@ -325,7 +325,9 @@ void main() {
 
     // Specular roughness: the tileset's per-layer value when one is bound,
     // else a matte dielectric (ground, mud, grass) for the palette path.
+    // The palette path is a dielectric; decals can make patches metallic.
     float roughness = 0.85;
+    float metallic = 0.0;
     if ((u.cfg.z & FLAG_MATERIALS) != 0u) {
         // Per-cell gameplay materials (AssembleEngine addition), blended
         // bilinearly between cell centres; slopes still turn to rock.
@@ -367,8 +369,10 @@ void main() {
     vec3 shadeN = n;
     vec3 glow = vec3(0.0);
     if (DECALS) {
-        Decals d = applyDecals(albedo, n, inWorld, dPdx, dPdy, heightNormal);
+        Decals d = applyDecals(albedo, roughness, metallic, n, inWorld, dPdx, dPdy, heightNormal);
         albedo = d.albedo;
+        roughness = d.roughness;
+        metallic = d.metallic;
         shadeN = d.normal;
         glow = d.glow;
     }
@@ -389,11 +393,13 @@ void main() {
     float units = unitSunAt(ground, n, tint);
     // Direct sun and sky as illuminance (lux), before the receiver cosine;
     // the sky is the hemispherical approximation (half on verticals). The
-    // terrain is a rough dielectric: F0 0.04, the tileset's roughness.
+    // terrain is a rough dielectric (F0 0.04, the tileset's roughness);
+    // a decal's material can raise the roughness or make the patch
+    // metallic (F0 = its colour).
     vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(ground.xz, ground.y), units)) * tint;
     vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
     vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
-    SurfaceBRDF s = SurfaceBRDF(albedo, vec3(0.04), max(roughness, 0.04), 0.0);
+    SurfaceBRDF s = SurfaceBRDF(albedo, mix(vec3(0.04), albedo, metallic), max(roughness, 0.04), metallic);
     vec3 color = brdfLight(s, shadeN, V, L, sunE);
     color += brdfDiffuse(s, shadeN, V) * skyE + brdfAmbient(s, shadeN, V) * skyR;
     // The clustered lights (no shadows).

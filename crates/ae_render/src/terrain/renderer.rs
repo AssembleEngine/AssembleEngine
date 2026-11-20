@@ -254,8 +254,12 @@ pub struct TerrainRenderer {
     decal_live: Vec<bool>,
     /// The decal atlas (1x1 without decals).
     decal_atlas: OwnedImage,
-    /// Its normals and glow mask, layer for layer.
-    decal_normals: OwnedImage,
+    /// Its surface: normal xy, roughness and the glow mask, layer for
+    /// layer.
+    decal_surface: OwnedImage,
+    /// Its material parameters (x roughness, y metallic), layer for layer
+    /// (one entry without decals).
+    decal_materials: OwnedBuffer,
     /// Per slot: line-of-sight and explored bit planes (host-visible;
     /// 16 bytes without a vision grid).
     vision_bufs: Vec<OwnedBuffer>,
@@ -358,22 +362,26 @@ impl TerrainRenderer {
         let decal_bufs = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: decal_bytes, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "terrain decals"))
             .collect::<Result<Vec<_>>>()?;
-        // The decal atlas: colour (sRGB) and, layer for layer, the
-        // tangent-space normal with the glow mask (UNORM).
-        let (decal_atlas, decal_normals) = match decals {
+        // The decal atlas: colour (sRGB) and, layer for layer, the surface
+        // (normal xy, roughness, glow mask; UNORM).
+        let (decal_atlas, decal_surface) = match decals {
             Some((atlas, _)) => {
                 atlas.validate().map_err(anyhow::Error::msg)?;
                 let upload = |mips: Vec<Vec<Vec<u8>>>, format, name| {
                     let layers: Vec<Vec<&[u8]>> = mips.iter().map(|l| l.iter().map(Vec::as_slice).collect()).collect();
                     upload::image_layers(gpu, format, atlas.size, atlas.size, &layers, vk::ImageViewType::TYPE_2D_ARRAY, name)
                 };
-                (upload(atlas.mips(), vk::Format::R8G8B8A8_SRGB, "decal atlas")?, upload(atlas.normal_mips(), vk::Format::R8G8B8A8_UNORM, "decal normals")?)
+                (upload(atlas.mips(), vk::Format::R8G8B8A8_SRGB, "decal atlas")?, upload(atlas.surface_mips(), vk::Format::R8G8B8A8_UNORM, "decal surface")?)
             }
             None => {
                 let one = |format, texel: [u8; 4], name| upload::image_layers(gpu, format, 1, 1, &[vec![&texel[..]]], vk::ImageViewType::TYPE_2D_ARRAY, name);
-                (one(vk::Format::R8G8B8A8_SRGB, [0; 4], "decal atlas")?, one(vk::Format::R8G8B8A8_UNORM, [128, 128, 255, 0], "decal normals")?)
+                (one(vk::Format::R8G8B8A8_SRGB, [0; 4], "decal atlas")?, one(vk::Format::R8G8B8A8_UNORM, [128, 128, 255, 0], "decal surface")?)
             }
         };
+        // The layers' material parameters (x roughness, y metallic); one
+        // matte dielectric entry without decals.
+        let material_texels = decals.map_or_else(|| vec![[0.9, 0.0, 0.0, 0.0]], |(atlas, _)| atlas.gpu_materials());
+        let decal_materials = upload::buffer(gpu, slice_bytes(&material_texels), storage, "decal materials")?;
         let stats = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: IND_WORDS * 4, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "terrain stats"))
             .collect::<Result<Vec<_>>>()?;
@@ -479,6 +487,7 @@ impl TerrainRenderer {
                 b(18, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(19, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(20, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                b(21, vk::DescriptorType::STORAGE_BUFFER),
             ];
             let set_layout = device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
             // Set 1: the clustered lights (the terrain and the water read them).
@@ -486,7 +495,7 @@ impl TerrainRenderer {
             let n = frames_in_flight as u32;
             let sizes = [
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 2 * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 7 * n },
+                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 8 * n },
                 vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 12 * n },
             ];
             let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes), None)?;
@@ -537,10 +546,12 @@ impl TerrainRenderer {
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(17).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&decal_list));
                 let atlas = image(samplers[2], decal_atlas.view);
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&atlas));
-                let normals = image(samplers[2], decal_normals.view);
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(19).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&normals));
+                let surface = image(samplers[2], decal_surface.view);
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(19).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&surface));
                 let noise = image(samplers[2], tile_noise.view);
                 writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(20).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&noise));
+                let material = [vk::DescriptorBufferInfo { buffer: decal_materials.buffer, offset: 0, range: vk::WHOLE_SIZE }];
+                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(21).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&material));
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, pipeline_layout, desc_pool, sets)
@@ -621,7 +632,8 @@ impl TerrainRenderer {
             decal_live: vec![false; frames_in_flight],
             decal_bufs,
             decal_atlas,
-            decal_normals,
+            decal_surface,
+            decal_materials,
             vision_bufs,
             vision,
             samplers,
@@ -928,7 +940,8 @@ impl TerrainRenderer {
         self.shadow_img.destroy(gpu);
         self.unit_shadow_map.destroy(gpu);
         self.decal_atlas.destroy(gpu);
-        self.decal_normals.destroy(gpu);
+        self.decal_surface.destroy(gpu);
+        self.decal_materials.destroy(gpu);
     }
 }
 

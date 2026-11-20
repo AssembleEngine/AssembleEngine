@@ -1,4 +1,5 @@
-// Decals (src/decals.rs), applied to the terrain's albedo before lighting.
+// Decals (src/decals.rs), applied to the terrain's albedo, normal and
+// surface material (roughness, metallic) before lighting.
 // Needs terrain_common.glsl (u, sampleHeight).
 //
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
@@ -15,28 +16,35 @@ layout(constant_id = 1) const bool DECALS = false;
 
 layout(std430, set = 0, binding = 17) readonly buffer DecalBuf { uint decalWords[]; };
 layout(set = 0, binding = 18) uniform sampler2DArray decalAtlas;
-// Layer for layer: the tangent-space normal (n * 0.5 + 0.5) and the glow mask.
-layout(set = 0, binding = 19) uniform sampler2DArray decalNormals;
+// Layer for layer: the tangent normal (xy, n * 0.5 + 0.5; z is
+// reconstructed), the roughness texture (times the layer's factor) and the
+// glow mask.
+layout(set = 0, binding = 19) uniform sampler2DArray decalSurface;
+// Layer for layer: x roughness factor, y metallic factor (src/decals.rs,
+// LayerMaterial).
+layout(std430, set = 0, binding = 21) readonly buffer DecalMaterialBuf { vec4 decalMaterials[]; };
 
 vec4 decalFloats(uint at) {
     return uintBitsToFloat(uvec4(decalWords[at], decalWords[at + 1u], decalWords[at + 2u], decalWords[at + 3u]));
 }
 
 // One projection: the atlas at `uv` (decal space, -1..1) with its
-// gradients, premultiplied, and the normal map's texel (`m`: the normal in
-// the frame T, B, N, the world directions of +u, +v and out of the ground;
-// w the glow mask). Explicit gradients: this runs in non-uniform control
-// flow.
-vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, out vec4 m) {
+// gradients, premultiplied; the surface's normal in the frame T, B, N (the
+// world directions of +u, +v and out of the ground; w the glow mask); and
+// the roughness texture. The normal's z is rebuilt (it points out of the
+// ground). Explicit gradients: this runs in non-uniform control flow.
+vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, out vec4 m, out float roughness) {
     vec3 at = vec3(uv * 0.5 + 0.5, layer);
     vec4 t = textureGrad(decalAtlas, at, gx * 0.5, gy * 0.5);
-    vec4 nm = textureGrad(decalNormals, at, gx * 0.5, gy * 0.5);
+    vec4 sm = textureGrad(decalSurface, at, gx * 0.5, gy * 0.5);
     // Gram-Schmidt against the ground's normal: T and B are the world
     // gradients of u and v, so the frame follows the projection.
     T = normalize(T - N * dot(T, N));
     B = normalize(B - N * dot(B, N) - T * dot(B, T));
-    vec3 tn = nm.xyz * 2.0 - 1.0;
-    m = vec4(tn.x * T + tn.y * B + tn.z * N, nm.w);
+    vec2 nxy = sm.xy * 2.0 - 1.0;
+    vec3 tn = vec3(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
+    m = vec4(tn.x * T + tn.y * B + tn.z * N, sm.w);
+    roughness = sm.z;
     return vec4(t.rgb * t.a, t.a);
 }
 
@@ -56,13 +64,14 @@ vec3 blackBody(float t) {
 // with the decal's colour sampled linear: 2^2.2.
 const float MODULATE = 4.594794;
 
-// What the decals leave: the albedo, the shading normal, and the glow
-// (linear, added after lighting).
-struct Decals { vec3 albedo; vec3 normal; vec3 glow; };
+// What the decals leave: the albedo, the shading normal, the surface
+// material (roughness, metallic) and the glow (linear, added after
+// lighting).
+struct Decals { vec3 albedo; vec3 normal; float roughness; float metallic; vec3 glow; };
 
 // The decals over world point P (derivatives dPdx, dPdy; heightmap normal
-// hn), oldest first so newer ones cover older, on `albedo` and the shading
-// normal `n`.
+// hn), oldest first so newer ones cover older, on `albedo`, the shading
+// normal `n` and the surface's roughness and metallic.
 //
 // Each decal is projected three ways around its centre (the ground's height
 // there), weighted by hn in the decal's frame with constant-overlap
@@ -77,8 +86,8 @@ struct Decals { vec3 albedo; vec3 normal; vec3 glow; };
 // glow (Recoil's scars): the glow mask lit as a black body, hotter with the
 // decal's glow, which fades linearly over its glow life, flickers near
 // full, and is held to the centre.
-Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
-    Decals o = Decals(albedo, n, vec3(0.0));
+Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
+    Decals o = Decals(albedo, n, roughness, metallic, vec3(0.0));
     uint mask = decalWords[0];
     float cellSize = uintBitsToFloat(decalWords[2]);
     ivec2 c = ivec2(floor(P.xz / cellSize));
@@ -101,6 +110,7 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
         vec2 qp = vec2(dot(dxz, ax), dot(dxz, az)) * inv;
         if (max(abs(qp.x), abs(qp.y)) >= 1.0 || b.z >= layers) continue;
         vec4 f = decalFloats(at + 8u);   // start, 1 / fade-in, end, 1 / fade-out
+        vec4 mat = decalMaterials[uint(b.z)];  // x roughness factor, y metallic factor
         vec4 g = decalFloats(at + 12u);  // glow, 0, 1 / glow life, blend
         float dy = P.y - sampleHeight(a.xy / u.map.w);
         // Rounded in the vertical, the height scaled by the smaller half.
@@ -117,20 +127,27 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
         // The world directions of the decal's +x and +z, and up.
         vec3 X = vec3(ax.x, 0.0, ax.y), Z = vec3(az.x, 0.0, az.y), Y = vec3(0.0, 1.0, 0.0);
         vec4 s = vec4(0.0), sn = vec4(0.0), m;
+        float sr = 0.0;
         if (w.y > 0.0) {
-            vec4 t = decalTap(q.xz, qx.xz, qy.xz, b.z, X, Z, hn, m);
+            float rt;
+            vec4 t = decalTap(q.xz, qx.xz, qy.xz, b.z, X, Z, hn, m, rt);
             s += w.y * t;
             sn += w.y * vec4(m.xyz * t.a, m.w);
+            sr += w.y * rt * t.a;
         }
         if (w.x > 0.0) {
-            vec4 t = decalTap(vec2(sx * q.y * inv.x, q.z), vec2(sx * qx.y * inv.x, qx.z), vec2(sx * qy.y * inv.x, qy.z), b.z, sx * Y, Z, hn, m);
+            float rt;
+            vec4 t = decalTap(vec2(sx * q.y * inv.x, q.z), vec2(sx * qx.y * inv.x, qx.z), vec2(sx * qy.y * inv.x, qy.z), b.z, sx * Y, Z, hn, m, rt);
             s += w.x * t;
             sn += w.x * vec4(m.xyz * t.a, m.w);
+            sr += w.x * rt * t.a;
         }
         if (w.z > 0.0) {
-            vec4 t = decalTap(vec2(q.x, sz * q.y * inv.y), vec2(qx.x, sz * qx.y * inv.y), vec2(qy.x, sz * qy.y * inv.y), b.z, X, sz * Y, hn, m);
+            float rt;
+            vec4 t = decalTap(vec2(q.x, sz * q.y * inv.y), vec2(qx.x, sz * qx.y * inv.y), vec2(qy.x, sz * qy.y * inv.y), b.z, X, sz * Y, hn, m, rt);
             s += w.z * t;
             sn += w.z * vec4(m.xyz * t.a, m.w);
+            sr += w.z * rt * t.a;
         }
         // The fade-in leaves the glow alone (the explosion's flash covers
         // it; Recoil's scars fade in alpha only, over 6 frames).
@@ -138,10 +155,18 @@ Decals applyDecals(vec3 albedo, vec3 n, vec3 P, vec3 dPdx, vec3 dPdy, vec3 hn) {
         float shown = b.w * (1.0 - smoothstep(0.85, 1.0, r));
         if (f.w > 0.0) shown *= clamp((f.z - time) * f.w, 0.0, 1.0);
         float opacity = shown * fadeIn;
-        float keep = 1.0 - s.a * opacity;
+        float cover = s.a * opacity;
+        float keep = 1.0 - cover;
         vec3 colour = g.w > 0.5 ? o.albedo * MODULATE * s.rgb : s.rgb;
         o.albedo = o.albedo * keep + colour * opacity;
         o.normal = o.normal * keep + sn.xyz * opacity;
+        // The layer's material replaces the ground's by the same coverage:
+        // soot (a rough dielectric) takes the gloss off what it lands on.
+        // `sr` is the coverage-weighted texture roughness, `mat.x` the
+        // layer's factor (glTF's factor x texture); metallic is uniform
+        // across the layer.
+        o.roughness = o.roughness * keep + (mat.x * sr) * opacity;
+        o.metallic = o.metallic * keep + mat.y * cover;
         o.glow *= keep;
         // Recoil's decay: the glow less the time since placement over the
         // glow life (a weaker glow ends sooner).
