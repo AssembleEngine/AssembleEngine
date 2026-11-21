@@ -14,12 +14,12 @@
 //!   surface texture is normal x/y, roughness (times the layer's factor, as
 //!   glTF's factor × texture) and the glow mask in alpha. Normal z is rebuilt
 //!   in the shader; metallic stays a per-layer factor.
-//! * It is projected three ways around its centre, weighted by the ground's
-//!   normal with constant-overlap triplanar weights. The side projections
-//!   take their second coordinate from the height relative to the centre,
-//!   so a decal across a cliff's edge or at its foot wraps onto the face
-//!   with its texels unstretched. Its extent fades with the 3D distance
-//!   from the centre (square in plan, rounded in the vertical).
+//! * It is unfolded over the ground from its centre: the plan ray to each
+//!   point, read every heightmap cell, flattened segment by segment along
+//!   the ground's slope. So a decal across a cliff's edge or at its foot
+//!   wraps onto the face with its texels unstretched, and the image is
+//!   continuous over any ground. Its extent is the square in unfolded
+//!   metres.
 //! * Binning: the world's cells of [`GRID_CELL`] metres, hashed into
 //!   [`buckets`] (about four per decal, whatever the map's size), list the
 //!   decals touching them; the shader loops over its bucket's list, oldest

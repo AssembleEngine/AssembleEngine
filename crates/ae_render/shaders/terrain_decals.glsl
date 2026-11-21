@@ -48,6 +48,68 @@ vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, ou
     return vec4(t.rgb * t.a, t.a);
 }
 
+// The ground's slope (m/m along world x, z) at `p` (world xz, ground
+// height h), by forward differences a quarter cell apart.
+vec2 slopeAt(vec2 p, float h) {
+    float e = 0.25 * u.map.w;
+    return vec2(sampleHeight((p + vec2(e, 0.0)) / u.map.w) - h, sampleHeight((p + vec2(0.0, e)) / u.map.w) - h) / e;
+}
+
+// One segment of the ground flattened into the plane: plan vector `d`
+// (along the unit ray `dir`), rise `dh`, the ground's slope at its start,
+// middle and end. The rise is taken along the slope where it happens (the
+// three averaged by their steepness: across a fold, the face's), flattened
+// as that tangent plane is, isometrically: with G.d = dh, |d'|^2 = |d|^2 +
+// dh^2, the direction across G kept. Over a ridge or a valley within the
+// segment the rise and the steepest slope can disagree along the ray; the
+// gain along it is held at 0 or more, so a segment never comes out shorter
+// along the ray than in plan.
+vec2 unfoldSegment(vec2 d, vec2 dir, float dh, vec2 g0, vec2 gm, vec2 g1) {
+    vec3 w = vec3(dot(g0, g0), dot(gm, gm), dot(g1, g1)) + 1e-3;
+    vec2 G = (w.x * g0 + w.y * gm + w.z * g1) / (w.x + w.y + w.z);
+    vec2 gain = dh / (1.0 + sqrt(1.0 + dot(G, G))) * G;
+    float along = dot(gain, dir);
+    return d + gain + dir * (max(along, 0.0) - along);
+}
+
+// A point's offset from a decal's centre c (ground height hc), unfolded
+// over the ground (metres, world xz). The plan ray from c to the point
+// (ground height hp; d = its plan offset) is read every `stride` metres,
+// fixed per decal, and each segment flattened along its slope, so the
+// result is continuous in the point (a new step starts where the last
+// segment has become the step), exact over a planar slope and over a fold
+// (a cliff's edge or foot) at any angle, the plan offset on flat ground,
+// and never nearer the centre along the ray than in plan.
+vec2 unfoldRay(vec2 c, float hc, vec2 d, float hp, float stride) {
+    float rho = length(d);
+    if (rho < 1e-4) return d;
+    vec2 dir = d / rho;
+    // At most 12: rho < the half-diagonal <= sqrt(2) 8 strides.
+    int n = min(int(rho / stride), 12);
+    vec2 sum = vec2(0.0), at = c;
+    float h = hc;
+    vec2 g = slopeAt(c, hc);
+    for (int i = 1; i <= n; i++) {
+        vec2 next = c + dir * (stride * float(i));
+        vec2 mid = (at + next) * 0.5;
+        float hi = sampleHeight(next / u.map.w);
+        vec2 gi = slopeAt(next, hi);
+        sum += unfoldSegment(dir * stride, dir, hi - h, g, slopeAt(mid, sampleHeight(mid / u.map.w)), gi);
+        at = next;
+        h = hi;
+        g = gi;
+    }
+    vec2 p = c + d, mid = (at + p) * 0.5;
+    return sum + unfoldSegment(p - at, dir, hp - h, g, slopeAt(mid, sampleHeight(mid / u.map.w)), slopeAt(p, hp));
+}
+
+// Rotates v by the smallest rotation taking the unit `from` to up, or
+// (sign -1) up to `from`.
+vec3 levelBy(vec3 v, vec3 from, float sign) {
+    vec3 k = sign * cross(from, vec3(0.0, 1.0, 0.0));
+    return v + cross(k, v) + cross(k, cross(k, v)) / (1.0 + from.y);
+}
+
 // Recoil's black body (shadertoy MslSDl): the colour of a body at `t`
 // kelvin, its brightness rising as t^4 (1 near 2500 K), in gamma space.
 vec3 blackBody(float t) {
@@ -73,13 +135,12 @@ struct Decals { vec3 albedo; vec3 normal; float roughness; float metallic; vec3 
 // hn), oldest first so newer ones cover older, on `albedo`, the shading
 // normal `n` and the surface's roughness and metallic.
 //
-// Each decal is projected three ways around its centre (the ground's height
-// there), weighted by hn in the decal's frame with constant-overlap
-// triplanar weights: from above (u, v), and along its own x and z axes
-// with the height below the centre in place of the coordinate the face
-// hides (-sign(n) dy), so a decal across a cliff's edge or into its foot
-// continues onto the face as if unfolded. Its extent fades with the 3D
-// distance from the centre: square in plan, rounded in the vertical.
+// Each decal is unfolded over the ground: u is the length along the ground
+// from its centre line along its x axis, v along its z axis (the ground
+// read every heightmap cell), so a decal across a cliff's edge or into its
+// foot continues onto the face, and the image stays continuous over any
+// ground. Its extent is the square in unfolded metres, faded over its last
+// 15 %.
 //
 // Its normal map replaces the shading normal by its alpha (a flat map
 // leaves the heightmap's normal: the scar covers the ground's detail). Its
@@ -101,54 +162,42 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         uint at = 4u + 16u * decalWords[indexAt + first + i];
         vec4 a = decalFloats(at);       // centre x, z, half x, half z
         vec4 b = decalFloats(at + 4u);  // cos, sin, layer, opacity
-        // Decal frame, scaled to -1..1 over the half-sizes (x, z): outside
-        // in plan (another cell's decal in this bucket, or past its edge)
-        // before anything else is read.
+        // Decal frame, scaled to -1..1 over the half-sizes (x, z). Outside
+        // its bounding circle in plan (another cell's decal in this bucket,
+        // or past its edge) before anything else is read: unfolding never
+        // shortens the distance from the centre, but on a slope across the
+        // decal's axes it can turn a point past the plan square's corner
+        // back inside.
         vec2 ax = b.xy, az = vec2(-b.y, b.x);
         vec2 inv = 1.0 / a.zw;
         vec2 dxz = P.xz - a.xy;
-        vec2 qp = vec2(dot(dxz, ax), dot(dxz, az)) * inv;
-        if (max(abs(qp.x), abs(qp.y)) >= 1.0 || b.z >= layers) continue;
+        if (dot(dxz, dxz) >= dot(a.zw, a.zw) || b.z >= layers) continue;
         vec4 f = decalFloats(at + 8u);   // start, 1 / fade-in, end, 1 / fade-out
         vec4 mat = decalMaterials[uint(b.z)];  // x roughness factor, y metallic factor
         vec4 g = decalFloats(at + 12u);  // glow, 0, 1 / glow life, blend
-        float dy = P.y - sampleHeight(a.xy / u.map.w);
-        // Rounded in the vertical, the height scaled by the smaller half.
-        float r = length(vec2(max(abs(qp.x), abs(qp.y)), dy * max(inv.x, inv.y)));
+        // Unfolded over the ground from the centre, so a decal across a
+        // cliff's edge or into its foot continues onto the face, and over
+        // any ground it is one continuous image (no projections to blend,
+        // so no seams).
+        float stride = max(u.map.w, max(a.z, a.w) * 0.125);
+        vec2 un = unfoldRay(a.xy, sampleHeight(a.xy / u.map.w), dxz, sampleHeight(P.xz / u.map.w), stride);
+        vec2 q = vec2(dot(un, ax), dot(un, az)) * inv;
+        // Square, in unfolded metres.
+        float r = max(abs(q.x), abs(q.y));
         if (r >= 1.0) continue;
-        vec3 q = vec3(qp.x, dy, qp.y);
-        vec3 qx = vec3(dot(dPdx.xz, ax) * inv.x, dPdx.y, dot(dPdx.xz, az) * inv.y);
-        vec3 qy = vec3(dot(dPdy.xz, ax) * inv.x, dPdy.y, dot(dPdy.xz, az) * inv.y);
-        vec3 nl = vec3(dot(hn.xz, ax), hn.y, dot(hn.xz, az));
-        vec3 w = nl * nl;
-        w = max(w - max(w.x, max(w.y, w.z)) * 0.8, 0.0);
-        w /= w.x + w.y + w.z;
-        float sx = nl.x < 0.0 ? 1.0 : -1.0, sz = nl.z < 0.0 ? 1.0 : -1.0;
-        // The world directions of the decal's +x and +z, and up.
-        vec3 X = vec3(ax.x, 0.0, ax.y), Z = vec3(az.x, 0.0, az.y), Y = vec3(0.0, 1.0, 0.0);
-        vec4 s = vec4(0.0), sn = vec4(0.0), m;
-        float sr = 0.0;
-        if (w.y > 0.0) {
-            float rt;
-            vec4 t = decalTap(q.xz, qx.xz, qy.xz, b.z, X, Z, hn, m, rt);
-            s += w.y * t;
-            sn += w.y * vec4(m.xyz * t.a, m.w);
-            sr += w.y * rt * t.a;
-        }
-        if (w.x > 0.0) {
-            float rt;
-            vec4 t = decalTap(vec2(sx * q.y * inv.x, q.z), vec2(sx * qx.y * inv.x, qx.z), vec2(sx * qy.y * inv.x, qy.z), b.z, sx * Y, Z, hn, m, rt);
-            s += w.x * t;
-            sn += w.x * vec4(m.xyz * t.a, m.w);
-            sr += w.x * rt * t.a;
-        }
-        if (w.z > 0.0) {
-            float rt;
-            vec4 t = decalTap(vec2(q.x, sz * q.y * inv.y), vec2(qx.x, sz * qx.y * inv.y), vec2(qy.x, sz * qy.y * inv.y), b.z, X, sz * Y, hn, m, rt);
-            s += w.z * t;
-            sn += w.z * vec4(m.xyz * t.a, m.w);
-            sr += w.z * rt * t.a;
-        }
+        // The gradients and the frame from the ground's tangent plane at P
+        // levelled (hn to up): its screen steps unfolded, and the world
+        // directions of the decal's +x and +z.
+        vec3 lx = levelBy(dPdx, hn, 1.0), ly = levelBy(dPdy, hn, 1.0);
+        vec2 qx = vec2(dot(lx.xz, ax), dot(lx.xz, az)) * inv;
+        vec2 qy = vec2(dot(ly.xz, ax), dot(ly.xz, az)) * inv;
+        vec3 T = levelBy(vec3(ax.x, 0.0, ax.y), hn, -1.0);
+        vec3 B = levelBy(vec3(az.x, 0.0, az.y), hn, -1.0);
+        vec4 m;
+        float sr;
+        vec4 s = decalTap(q, qx, qy, b.z, T, B, hn, m, sr);
+        vec4 sn = vec4(m.xyz * s.a, m.w);
+        sr *= s.a;
         // The fade-in leaves the glow alone (the explosion's flash covers
         // it; Recoil's scars fade in alpha only, over 6 frames).
         float fadeIn = f.y > 0.0 ? clamp((time - f.x) * f.y, 0.0, 1.0) : 1.0;
@@ -173,10 +222,10 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         float heat = g.z > 0.0 ? g.x - (time - f.x) * g.z : 0.0;
         if (heat > 0.0) {
             heat += smoothstep(0.75, 1.0, heat) * 0.2 * abs(sin(0.6 * time));
-            // Held to the centre by the 3D distance (round), over Recoil's
-            // half-diagonal sqrt(hx^2 + hz^2 + height^2), the height here
-            // the smaller half.
-            heat *= pow(smoothstep(0.9, 0.1, length(vec3(qp, dy * max(inv.x, inv.y))) * 0.57735), 7.0);
+            // Held to the centre by the unfolded distance (round), over
+            // Recoil's half-diagonal sqrt(hx^2 + hz^2 + height^2), the
+            // height there the smaller half.
+            heat *= pow(smoothstep(0.9, 0.1, length(q) * 0.57735), 7.0);
             vec3 e = blackBody(sn.w * mix(1.0, 3700.0, heat)) * heat;
             o.glow += pow(min(e, vec3(16.0)), vec3(2.2)) * s.a * shown;
         }

@@ -3237,22 +3237,22 @@ fn particles_order_independence() {
 /// Decals on a step heightmap (2 m cells, steps along x): a plateau 30 m
 /// high ending in a 20 m cliff facing +x down to ground at 10 m, and a 6 m
 /// step up to 36 m at its far side. A test atlas of eight stripes across
-/// the decal's x. Decals of half-size 12 m, centred on corner samples:
-/// E on the cliff's top edge (convex), F at its foot (concave), L on the
-/// low step's top edge.
-/// * Along each decal's x, unfolded over the edge (s: on the flat, the
-///   distance along x; on the face, the height below or above the centre),
-///   the stripes match the atlas at that s on both faces of both corners:
-///   both are painted, the face continues the flat ground's stripes in phase
-///   and unstretched (a top-down projection smears one stripe down the
-///   face; a flipped side projection mirrors them).
-/// * Ground farther than the decal's 3D distance from every centre is
-///   byte-identical to no decals.
+/// the decal's x. Decals of half-size 12 m: E on the cliff's top edge
+/// (convex), F at its foot (concave), L on the low step's top edge (all
+/// three centred on corner samples), G 4.5 m back from the top edge; in a
+/// frame of its own, R like G but turned by 0.6 rad.
+/// * Along each decal's x, unfolded over the edge (s: the length along the
+///   ground from the centre), the stripes match the atlas at that s on both
+///   faces of both corners: both are painted, the face continues the flat
+///   ground's stripes in phase and unstretched (projections around the
+///   centre put G's face out of phase; unfolding per axis bends R's).
+/// * Ground past every decal's unfolded square is byte-identical to no
+///   decals.
 /// * A unit standing in F's footprint is not painted.
 /// * Decals made but none placed draw exactly as no decals.
-/// * L's ground at the foot of the 6 m step, within the 3D distance but
-///   past the unfolded footprint, shows the top projection's copy; it is
-///   measured and printed (the documented limit of the 3D fade).
+/// * L's ground at the foot of the 6 m step, past the unfolded footprint,
+///   is not painted (the first version's three projections printed it
+///   again there).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn decals_wrap_over_cliffs() {
@@ -3295,10 +3295,14 @@ fn decals_wrap_over_cliffs() {
     let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() });
     let half = 12.0f32;
     let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
-    // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32).
-    let centres = [(64.0f32, 32.0f32), (66.0, 96.0), (24.0, 64.0)];
-    let centre_y = [30.0f32, 10.0, 36.0];
+    // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32); G
+    // 4.5 m back from the cliff's top edge (a stripe and a half: projections
+    // around the centre would put the face's stripes in opposite phase).
+    let centres = [(64.0f32, 32.0f32), (66.0, 96.0), (24.0, 64.0), (59.5, 66.0)];
+    let centre_y = [30.0f32, 10.0, 36.0, 30.0];
     let unit = (74.0f32, 104.0f32);
+    const ROTATION: f32 = 0.6;
+    let rotated = (59.5f32, 32.0f32);
 
     #[derive(Clone, Copy, PartialEq)]
     enum Decals {
@@ -3310,6 +3314,8 @@ fn decals_wrap_over_cliffs() {
         Expired,
         /// Halfway through a 1 s fade-out at the last frame.
         Fading,
+        /// Only R: turned by 0.6 rad, 4.5 m back from the cliff's top edge.
+        Rotated,
     }
     let render = |decals: Decals| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
@@ -3327,7 +3333,9 @@ fn decals_wrap_over_cliffs() {
                 Decals::Fading => Some((7.0 / 60.0 + 0.5, 1.0)),
                 _ => None,
             };
-            if decals != Decals::Empty {
+            if decals == Decals::Rotated {
+                feed.place_all(&[Decal::permanent([rotated.0, rotated.1], [half, half], ROTATION, 0)]);
+            } else if decals != Decals::Empty {
                 feed.place_all(&centres.map(|(x, z)| match life {
                     Some((life, fade_out)) => Decal { life, fade_out, ..decal(x, z) },
                     None => decal(x, z),
@@ -3362,14 +3370,25 @@ fn decals_wrap_over_cliffs() {
     let on = render(Decals::On);
     let expired = render(Decals::Expired);
     let fading = render(Decals::Fading);
+    let turned = render(Decals::Rotated);
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
     assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "decals made but none placed draw as none");
     assert_eq!(none.iter().zip(&expired).filter(|(a, b)| a != b).count(), 0, "decals past their life draw as none");
 
-    // A point's distance from decal k's centre, as the shader fades it
-    // (square in plan, rounded in the vertical; 1 at the edge).
+    // A point's distance from decal k's centre, as the shader fades it:
+    // the square in unfolded metres (the length along the ground from the
+    // centre line along x; the ground varies only along x), 1 at the edge.
     let extent3 = |p: Vec3, k: usize| {
+        let (cx, cz) = centres[k];
+        let steps = ((p.x - cx).abs() / 0.01).ceil().max(1.0) as usize;
+        let dx = (p.x - cx) / steps as f32;
+        let arc: f32 = (0..steps).map(|i| dx.hypot(height(cx + dx * (i + 1) as f32) - height(cx + dx * i as f32))).sum();
+        arc.max((p.z - cz).abs()) / half
+    };
+    // The old extent (square in plan, rounded in the vertical), which let L
+    // print again at the foot of its step.
+    let rounded = |p: Vec3, k: usize| {
         let (cx, cz) = centres[k];
         let d = p - Vec3::new(cx, centre_y[k], cz);
         (d.x.abs().max(d.z.abs())).hypot(d.y) / half
@@ -3407,8 +3426,24 @@ fn decals_wrap_over_cliffs() {
         segments.push((if top { "E top" } else { "F ground" }, flat));
         segments.push((if top { "E face" } else { "F face" }, face));
     }
+    // G: the plateau up to the edge 4.5 m out, then 0.5..7 m down the
+    // face, continuing from 4.5 m.
+    let (mut flat, mut face) = (Vec::new(), Vec::new());
+    let (gx, gz) = centres[3];
+    for dz in [-6.0f32, -2.0, 1.0] {
+        for k in 0..=100 {
+            let t = k as f32 / 100.0;
+            let x = gx - half + t * (half + 4.5 - 2.5);
+            flat.push((Vec3::new(x, 30.0, gz + dz), x - gx));
+            let drop = 0.5 + t * 6.5;
+            let fx = 64.0 + 2.0 * drop / 20.0;
+            face.push((Vec3::new(fx, 30.0 - drop, gz + dz), 4.5 + (fx - 64.0).hypot(drop)));
+        }
+    }
+    segments.push(("G top", flat));
+    segments.push(("G face", face));
     for (name, points) in &segments {
-        let samples: Vec<(f32, bool)> = points.iter().filter(|(p, s)| !near_boundary(*s) && (p.x - unit.0).hypot(p.z - unit.1) > 6.0 && (0..2).any(|k| extent3(*p, k) < 0.85)).filter_map(|&(p, s)| pixel(p).map(|i| (luma(&on, i), expected(s)))).collect();
+        let samples: Vec<(f32, bool)> = points.iter().filter(|(p, s)| !near_boundary(*s) && (p.x - unit.0).hypot(p.z - unit.1) > 6.0 && (0..centres.len()).any(|k| extent3(*p, k) < 0.85)).filter_map(|&(p, s)| pixel(p).map(|i| (luma(&on, i), expected(s)))).collect();
         let (lo, hi) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
         let mid = (lo + hi) * 0.5;
         let matching = samples.iter().filter(|&&(l, e)| (l > mid) == e).count();
@@ -3418,6 +3453,48 @@ fn decals_wrap_over_cliffs() {
         assert!(samples.len() > 120 && lights > 30 && lights < samples.len() - 30, "{name}: {} samples, {lights} light", samples.len());
         assert!(hi > 2.0 * lo.max(1.0), "{name}: no stripes (luma {lo:.0}..{hi:.0})");
         assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
+    }
+
+    // R, turned across the cliff: the ground unfolded in world (x by its
+    // length along the ground from R's centre, the cliff running along z),
+    // then turned into R's frame; the stripes run across its u.
+    {
+        let (sn, cs) = ROTATION.sin_cos();
+        let (rx, rz) = rotated;
+        let arc = |x: f32| {
+            let steps = ((x - rx).abs() / 0.01).ceil().max(1.0) as usize;
+            let dx = (x - rx) / steps as f32;
+            (0..steps).map(|i| dx.hypot(height(rx + dx * (i + 1) as f32) - height(rx + dx * i as f32))).sum::<f32>().copysign(x - rx)
+        };
+        for (name, on_face) in [("R top", false), ("R face", true)] {
+            let mut samples = Vec::new();
+            for k in 0..=40 {
+                for j in 0..=40 {
+                    let dz = -half + j as f32 * half / 20.0;
+                    let p = if on_face {
+                        let drop = 0.5 + k as f32 * 9.0 / 40.0;
+                        Vec3::new(64.0 + 2.0 * drop / 20.0, 30.0 - drop, rz + dz)
+                    } else {
+                        Vec3::new(rx - half + k as f32 * (half + 4.5 - 2.5) / 40.0, 30.0, rz + dz)
+                    };
+                    let w = arc(p.x);
+                    let (u, v) = (cs * w + sn * dz, -sn * w + cs * dz);
+                    if u.abs().max(v.abs()) > 0.85 * half || near_boundary(u) {
+                        continue;
+                    }
+                    if let Some(i) = pixel(p) {
+                        samples.push((luma(&turned, i), expected(u)));
+                    }
+                }
+            }
+            let (lo, hi) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
+            let mid = (lo + hi) * 0.5;
+            let matching = samples.iter().filter(|&&(l, e)| (l > mid) == e).count();
+            let lights = samples.iter().filter(|&&(_, e)| e).count();
+            println!("{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)", samples.len());
+            assert!(samples.len() > 120 && lights > 30 && lights < samples.len() - 30, "{name}: {} samples, {lights} light", samples.len());
+            assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
+        }
     }
 
     // Halfway through the fade-out: every painted sample of the segments
@@ -3449,7 +3526,7 @@ fn decals_wrap_over_cliffs() {
                 continue;
             }
             let Some(i) = pixel(p) else { continue };
-            let r = (0..3).map(|k| extent3(p, k)).fold(f32::MAX, f32::min);
+            let r = (0..centres.len()).map(|k| extent3(p, k)).fold(f32::MAX, f32::min);
             if r > 1.06 {
                 outside += 1;
                 changed += (rgb(&none, i) != rgb(&on, i)) as usize;
@@ -3458,7 +3535,7 @@ fn decals_wrap_over_cliffs() {
             // cell), within its 3D extent, past its unfolded footprint
             // (6 m down the face, then along the ground).
             let lz = centres[2].1;
-            if x > 28.0 && p.y == 30.0 && extent3(p, 2) < 0.94 && (x - 26.0) + 6.0 > half + 0.5 && (z - lz).abs() < half - 1.0 {
+            if x > 28.0 && p.y == 30.0 && rounded(p, 2) < 0.94 && (x - 26.0) + 6.0 > half + 0.5 && (z - lz).abs() < half - 1.0 {
                 copy += 1;
                 copy_changed += (rgb(&none, i) != rgb(&on, i)) as usize;
             }
@@ -3467,6 +3544,8 @@ fn decals_wrap_over_cliffs() {
     println!("{changed} of {outside} points outside the decals changed; L's copy past its unfolded footprint: {copy_changed} of {copy} points");
     assert!(outside > 30_000, "{outside} points outside");
     assert_eq!(changed, 0, "ground outside the decals changes");
+    assert!(copy > 50, "{copy} points past L's unfolded footprint");
+    assert_eq!(copy_changed, 0, "L prints again at the foot of its step");
 
     // The unit in F's footprint: its top unchanged, the ground beside it
     // painted.
@@ -3483,11 +3562,11 @@ fn decals_wrap_over_cliffs() {
 /// * Relit by its normal map: a decal whose normals all lean toward its +x
 ///   (u), centred on the west cliff's top edge, against the same decal with
 ///   flat normals. At angle 0 the plateau leans away from the sun (darker)
-///   and the face, its side projection unfolded downward, leans up toward
-///   it (brighter); turned by pi both reverse. A sign error in either
-///   projection's tangent fails one of the four. A decal leaning toward
-///   +v turned by pi / 2 lights as the one leaning +x turned by pi (the
-///   green channel's sign, on the top and the other side projection).
+///   and the face, unfolded downward, leans up toward it (brighter);
+///   turned by pi both reverse. A sign error in the tangent frame on
+///   either fails one of the four. A decal leaning toward +v turned by
+///   pi / 2 lights as the one leaning +x turned by pi (the green channel's
+///   sign).
 /// * Modulate: a mid-grey (sRGB 0.5) decal leaves the ground as it is; a
 ///   quarter grey (sRGB 0.25) halves it (in sRGB bytes), Recoil's
 ///   `2 * decal * ground`.
