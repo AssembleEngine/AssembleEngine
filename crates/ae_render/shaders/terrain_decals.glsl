@@ -1,6 +1,6 @@
 // Decals (src/decals.rs), applied to the terrain's albedo, normal and
 // surface material (roughness, metallic) before lighting.
-// Needs terrain_common.glsl (u, sampleHeight).
+// Needs terrain_common.glsl (u, heightTex).
 //
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
 // bits, decal capacity), the decals (16 words each: centre x, z, half-sizes
@@ -48,11 +48,18 @@ vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, ou
     return vec4(t.rgb * t.a, t.a);
 }
 
-// The ground's slope (m/m along world x, z) at `p` (world xz, ground
-// height h), by forward differences a quarter cell apart.
-vec2 slopeAt(vec2 p, float h) {
-    float e = 0.25 * u.map.w;
-    return vec2(sampleHeight((p + vec2(e, 0.0)) / u.map.w) - h, sampleHeight((p + vec2(0.0, e)) / u.map.w) - h) / e;
+// The ground at `p` (world xz): x its height, yz its slope (m/m along
+// world x, z), the heightmap's bilinear surface and its exact gradient,
+// from one gather of the cell's four samples (sampleHeight's surface,
+// without the filter's fixed-point weights).
+vec3 groundAt(vec2 p) {
+    vec2 x = p / u.map.w;
+    vec2 i = floor(x), f = x - i;
+    // The four samples around the cell (i, i + 1): w (i, i), z (i + 1, i),
+    // x (i, i + 1), y (i + 1, i + 1).
+    vec4 g = textureGather(heightTex, (i + 1.0) * u.height.zw, 0) * u.height.x;
+    float lo = mix(g.w, g.z, f.x), hi = mix(g.x, g.y, f.x);
+    return vec3(mix(lo, hi, f.y) + u.height.y, mix(g.z - g.w, g.y - g.x, f.y) / u.map.w, (hi - lo) / u.map.w);
 }
 
 // One segment of the ground flattened into the plane: plan vector `d`
@@ -72,35 +79,31 @@ vec2 unfoldSegment(vec2 d, vec2 dir, float dh, vec2 g0, vec2 gm, vec2 g1) {
     return d + gain + dir * (max(along, 0.0) - along);
 }
 
-// A point's offset from a decal's centre c (ground height hc), unfolded
+// A point's offset from a decal's centre c (its ground gc, groundAt), unfolded
 // over the ground (metres, world xz). The plan ray from c to the point
-// (ground height hp; d = its plan offset) is read every `stride` metres,
+// (its ground gp; d = its plan offset) is read every `stride` metres,
 // fixed per decal, and each segment flattened along its slope, so the
 // result is continuous in the point (a new step starts where the last
 // segment has become the step), exact over a planar slope and over a fold
 // (a cliff's edge or foot) at any angle, the plan offset on flat ground,
 // and never nearer the centre along the ray than in plan.
-vec2 unfoldRay(vec2 c, float hc, vec2 d, float hp, float stride) {
+vec2 unfoldRay(vec2 c, vec3 gc, vec2 d, vec3 gp, float stride) {
     float rho = length(d);
     if (rho < 1e-4) return d;
     vec2 dir = d / rho;
     // At most 12: rho < the half-diagonal <= sqrt(2) 8 strides.
     int n = min(int(rho / stride), 12);
     vec2 sum = vec2(0.0), at = c;
-    float h = hc;
-    vec2 g = slopeAt(c, hc);
+    vec3 g = gc;
     for (int i = 1; i <= n; i++) {
         vec2 next = c + dir * (stride * float(i));
-        vec2 mid = (at + next) * 0.5;
-        float hi = sampleHeight(next / u.map.w);
-        vec2 gi = slopeAt(next, hi);
-        sum += unfoldSegment(dir * stride, dir, hi - h, g, slopeAt(mid, sampleHeight(mid / u.map.w)), gi);
+        vec3 gi = groundAt(next);
+        sum += unfoldSegment(dir * stride, dir, gi.x - g.x, g.yz, groundAt((at + next) * 0.5).yz, gi.yz);
         at = next;
-        h = hi;
         g = gi;
     }
-    vec2 p = c + d, mid = (at + p) * 0.5;
-    return sum + unfoldSegment(p - at, dir, hp - h, g, slopeAt(mid, sampleHeight(mid / u.map.w)), slopeAt(p, hp));
+    vec2 p = c + d;
+    return sum + unfoldSegment(p - at, dir, gp.x - g.x, g.yz, groundAt((at + p) * 0.5).yz, gp.yz);
 }
 
 // Rotates v by the smallest rotation taking the unit `from` to up, or
@@ -180,7 +183,7 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         // any ground it is one continuous image (no projections to blend,
         // so no seams).
         float stride = max(u.map.w, max(a.z, a.w) * 0.125);
-        vec2 un = unfoldRay(a.xy, sampleHeight(a.xy / u.map.w), dxz, sampleHeight(P.xz / u.map.w), stride);
+        vec2 un = unfoldRay(a.xy, groundAt(a.xy), dxz, groundAt(P.xz), stride);
         vec2 q = vec2(dot(un, ax), dot(un, az)) * inv;
         // Square, in unfolded metres.
         float r = max(abs(q.x), abs(q.y));

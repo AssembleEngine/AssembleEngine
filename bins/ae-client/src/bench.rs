@@ -105,6 +105,8 @@ struct Scene {
     path: Path,
     /// Explosions emitted per frame (0: no particle renderer).
     explosions: u32,
+    /// The side of the square around the target they scatter over (metres).
+    spread: f32,
     /// Every unit the Fox, playing a clip.
     fox: bool,
     /// The sim keeps ticking: a fresh tick every [`LIVE_FRAMES`] frames,
@@ -145,22 +147,23 @@ const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 /// a 12 m grid (radius 3) from (2304, 17296), the army camera's view.
 const FOX_PARAM: u64 = 10_000 | 12 << 32 | 144 << 40 | 1081 << 52;
 
-const SCENES: [Scene; 15] = [
-    Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "army", about: "water crossing map, the army from above (8.6k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "army-fox", about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: false, lights: 0, model_lights: false },
-    Scene { name: "army-model-lights", about: "as army-fox, each Fox carrying a point light: the pass appends one light per unit (10k, the list's 8192 cap drops the rest)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: false, lights: 0, model_lights: true },
-    Scene { name: "live-fox", about: "as army-fox, the sim running: a tick every second frame, its animation records packed and uploaded", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, fox: true, live: true, lights: 0, model_lights: false },
-    Scene { name: "near-fox", about: "as army-fox, closer (fewer units, larger on screen)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: true, live: false, lights: 0, model_lights: false },
-    Scene { name: "lights-200", about: "as battle without explosions, 200 fixed point lights over 800 m around the target (ranges 15-45 m)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 200, model_lights: false },
-    Scene { name: "lights-1000", about: "as lights-200 with 1000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 1000, model_lights: false },
-    Scene { name: "lights-4000", about: "as lights-200 with 4000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 4000, model_lights: false },
-    Scene { name: "lights-low", about: "1000 lights as lights-1000, the camera low (600 m, pitch 0.3: the view reaches far into the distance)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.3], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 1000, model_lights: false },
-    Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0, fox: false, live: false, lights: 0, model_lights: false },
+const SCENES: [Scene; 16] = [
+    Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "army", about: "water crossing map, the army from above (8.6k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "scorched", about: "as battle without units, close (120 m), its 2 explosions a frame over 100 m: overlapping scorch marks fill most of the view (the decals' measure)", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: [2900.0, 17900.0, 120.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, spread: 100.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene { name: "army-fox", about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: false },
+    Scene { name: "army-model-lights", about: "as army-fox, each Fox carrying a point light: the pass appends one light per unit (10k, the list's 8192 cap drops the rest)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: true },
+    Scene { name: "live-fox", about: "as army-fox, the sim running: a tick every second frame, its animation records packed and uploaded", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: true, lights: 0, model_lights: false },
+    Scene { name: "near-fox", about: "as army-fox, closer (fewer units, larger on screen)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: false },
+    Scene { name: "lights-200", about: "as battle without explosions, 200 fixed point lights over 800 m around the target (ranges 15-45 m)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 200, model_lights: false },
+    Scene { name: "lights-1000", about: "as lights-200 with 1000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 1000, model_lights: false },
+    Scene { name: "lights-4000", about: "as lights-200 with 4000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 4000, model_lights: false },
+    Scene { name: "lights-low", about: "1000 lights as lights-1000, the camera low (600 m, pitch 0.3: the view reaches far into the distance)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.3], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 1000, model_lights: false },
+    Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
 ];
 
 fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Options {
@@ -399,13 +402,13 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
             view.lock().unwrap().camera.yaw = yaw0 + std::f32::consts::TAU * i as f32 / total as f32;
         }
     };
-    // This frame's explosions, scattered over 600 m around the target.
+    // This frame's explosions, scattered over `spread` around the target.
     let mut emitted = 0u32;
     let mut emit = || {
         let Some(feed) = &feed else { return };
         for _ in 0..scene.explosions {
             let h = emitted.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15).wrapping_mul(0x85eb_ca6b);
-            let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * 600.0, ((h >> 16) as f32 / 65535.0 - 0.5) * 600.0);
+            let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * scene.spread, ((h >> 16) as f32 / 65535.0 - 0.5) * scene.spread);
             let scale = 0.8 + (h % 7) as f32 * 0.2;
             feed.explode(scene.camera[0] + dx, scene.camera[1] + dz, scale, h);
             emitted += 1;
