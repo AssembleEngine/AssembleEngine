@@ -2775,6 +2775,140 @@ fn particles_sort_blend_and_soften() {
     assert_clean(&gpu);
 }
 
+/// The tile-binned packets (mode 8 of `~/particles`) draw the same puffs as
+/// the sorted draw at both resolutions, keep the centre sort's order, and
+/// carry the per-particle glow through their own composite:
+/// * a blue puff in front of a red one shows blue at full and at half
+///   resolution;
+/// * a puff under the ground and a dead one draw nothing (byte-identical to
+///   no particle renderer);
+/// * an explosion changes the frame;
+/// * a fire in front of smoke still blooms at both resolutions.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn particles_packets_both_resolutions() {
+    use ae_render::particles::{Burst, ParticleBlend, explosion};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::tonemap::{BLOOM_STRENGTH, ToneParams};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let eye = camera.eye(|_| ground);
+    let index = |p: Vec3| {
+        let clip = view_proj * p.extend(1.0);
+        (((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as usize * extent.width as usize + ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as usize) * 4
+    };
+    let still = |color: [f32; 4], size: f32, emissive: bool| -> ae_render::particles::EffectDef {
+        ae_render::particles::EffectDef {
+            color_start: color,
+            color_end: color,
+            size: [size, size],
+            life: [100.0, 100.0],
+            speed: [0.0, 0.0],
+            up: 0.0,
+            spread: 0.0,
+            gravity: 0.0,
+            drag: 0.0,
+            emissive,
+            emission: if emissive { [40_000.0; 2] } else { [0.0; 2] },
+            fade_in: 0.0,
+            light: None,
+        }
+    };
+    let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false), still([0.05, 0.05, 0.9, 1.0], 12.0, false)];
+    let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: effect };
+    let centre = Vec3::new(128.0, 40.0, 128.0);
+    let dir = (centre - eye).normalize();
+    let (near, far) = (centre - dir * 30.0, centre + dir * 30.0);
+    let none = render_particles(&gpu, &source, camera, extent, None);
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+
+    for downscale in [1, 2] {
+        let render = |blend, bursts: &[Burst]| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.clone(), downscale, blend)));
+        let packets = render(ParticleBlend::Packets, &[one(far, 0), one(near, 1)]);
+        let sorted = render(ParticleBlend::Sorted, &[one(far, 0), one(near, 1)]);
+        let at = index(centre);
+        let (p, s) = (&packets[at..at + 3], &sorted[at..at + 3]);
+        println!("downscale {downscale}: packets {p:?}, sorted {s:?}");
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(packets.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("particles-packets-{downscale}.ppm")), ppm).unwrap();
+            let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+            ppm.extend(sorted.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(std::path::Path::new(&dir).join(format!("particles-sorted-{downscale}.ppm")), ppm).unwrap();
+        }
+        assert!(p[2] as f32 > 1.5 * p[0] as f32, "packets show blue in front at {downscale}: {p:?}");
+        assert!(s[2] as f32 > 1.5 * s[0] as f32, "sorted show blue in front at {downscale}: {s:?}");
+
+        let buried = render(ParticleBlend::Packets, &[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)]);
+        assert_eq!(none.iter().zip(&buried).filter(|(a, b)| a != b).count(), 0, "a buried puff draws with the packets at {downscale}");
+        let boom = render(ParticleBlend::Packets, &explosion([128.0, 2.0, 128.0], true, 1.0, 7));
+        let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
+        assert!(changed > 500, "an explosion shows with the packets at {downscale}: {changed} bytes");
+    }
+
+    // The fire in front of the smoke, as the half-resolution glow test.
+    let fire_effect = still([1.0, 0.6, 0.2, 1.0], 6.0, true);
+    let smoke_effect = still([0.09, 0.085, 0.08, 0.8], 16.0, false);
+    let glow_effects = vec![fire_effect, smoke_effect];
+    let fire = Vec3::new(128.0, ground + 3.0, 128.0);
+    let back = (fire - eye).normalize();
+    let smoke = Vec3::new(fire.x + back.x * 3.0, ground + 3.0, fire.z + back.z * 3.0);
+    let bursts = [
+        Burst { pos: fire.to_array(), ground: true, effect: 0, count: 1, scale: 1.0, seed: 1 },
+        Burst { pos: smoke.to_array(), ground: true, effect: 1, count: 1, scale: 1.0, seed: 2 },
+    ];
+    let clip = view_proj * Vec4::new(fire.x, fire.y, fire.z, 1.0);
+    let (cu, cv) = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32);
+    let ring = |on: &[u8], off: &[u8]| -> f32 {
+        let luma_at = |p: &[u8], x: i32, y: i32| {
+            let i = ((y * extent.width as i32 + x) * 4) as usize;
+            luma(p, i)
+        };
+        let mut spread = 0.0f32;
+        for y in (cv - 30)..=(cv + 30) {
+            for x in (cu - 30)..=(cu + 30) {
+                let d = ((x - cu).pow(2) + (y - cv).pow(2)) as f32;
+                if ((10.0 * 10.0)..=(30.0 * 30.0)).contains(&d) {
+                    spread = spread.max(luma_at(on, x, y) - luma_at(off, x, y));
+                }
+            }
+        }
+        spread
+    };
+    for downscale in [1, 2] {
+        let render = |bloom: f32| {
+            render_particles_lit(
+                &gpu,
+                &source,
+                camera,
+                extent,
+                Some((&bursts, glow_effects.clone(), downscale, ParticleBlend::Packets)),
+                &[],
+                ToneParams { bloom, ..Default::default() },
+            )
+        };
+        let (off, on) = (render(0.0), render(BLOOM_STRENGTH));
+        let glow = ring(&on, &off);
+        println!("packets downscale {downscale}: fire glow spread {glow:.1} luma");
+        assert!(glow > 2.0, "the packets' fire glow is missing at {downscale}: {glow:.1}");
+    }
+    assert_clean(&gpu);
+}
+
 /// A medium's light from the clustered lights arrives as illuminance: at
 /// the same distance, four times the intensity adds four times the light,
 /// well past the old 10-bit ceiling (1022) that saturated every light over
@@ -2953,7 +3087,7 @@ fn particles_order_independence() {
     let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
     camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
     let eye = camera.eye(|_| ground);
-    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels];
+    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels, ParticleBlend::Packets];
     let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
     let none = render_particles(&gpu, &source, camera, extent, None);
     // Per pixel the reference changes: mean and largest channel error.
@@ -3036,6 +3170,7 @@ fn particles_order_independence() {
     let (sorted_mean, sorted_worst) = error(&images[0], reference);
     let (moments_mean, moments_worst) = error(&images[1], reference);
     let (volume_mean, volume_worst) = error(&images[3], reference);
+    let (packets_mean, packets_worst) = error(&images[6], reference);
     assert_eq!(magenta(&images[3]), 0, "the volume overflows its lists");
     if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
         for (m, image) in modes.iter().zip(&images) {
@@ -3055,7 +3190,7 @@ fn particles_order_independence() {
     // Measured: the froxels 6.4 (max 55); 4.5 over 8x8 blocks.
     let (froxels_mean, _) = error(&images[5], &images[3]);
     assert!(froxels_mean < 9.0, "cluster, the froxels against the volume: {froxels_mean}");
-    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}");
+    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}; packets mean {packets_mean:.2} max {packets_worst}");
     // Emitted in reverse: the order-independent methods give the same frame.
     let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
     for (m, image) in modes.iter().zip(&images) {
@@ -3143,6 +3278,9 @@ fn particles_order_independence() {
     // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
     // exact order, and the moments about as close.
     assert!(sorted_mean < 2.5 && moments_mean < 2.5, "cluster error: sorted {sorted_mean}, moments {moments_mean}");
+    // Measured below: the packets shade the exact per-pixel order (like the
+    // reference), with the same puff and soft fade, so they are close to it.
+    assert!(packets_mean < 3.0, "cluster error, the packets against the reference: {packets_mean} (max {packets_worst})");
     // Measured: the exact per-pixel order pops about as much as the centre
     // sort (77 against 106 pixel-frames over 40; both 73 at worst under the
     // ACES curve): the jump comes from blending particles as flat layers,
@@ -3163,6 +3301,10 @@ fn particles_order_independence() {
     // by a column's centre ray.
     let (froxels_pop, froxels_error) = (pops[5], against_volume[5]);
     assert!(froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0, "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}");
+    // Measured: the packets are the exact flat layers (like the reference),
+    // so they pop with the sort rather than with the volumes.
+    let (packets_pop, packets_error) = (pops[6], against_volume[6]);
+    assert!(packets_pop.0 > 40.0 && packets_error.0 < 6.0, "crossing, the packets: pop {packets_pop:?}, against the volume {packets_error:?}");
 
     // Stretched: the same with a dim near puff (at a third of the pair's
     // distance: a depth range about three to one, as the battle bench's), so

@@ -1,0 +1,88 @@
+#version 460
+// Packets, pass 1: one invocation per visible particle in front-to-back
+// order (the radix sort's far-to-near keys reversed). Packs the puff the
+// blend shades and marks its ranks in every tile its quad's screen bounds
+// cover, as a bitset (one bit a rank) plus a word-of-words summary.
+#include "particles_common.glsl"
+#include "particles_puff.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 1, binding = 4, std430) buffer TileMasks { uint masks[]; };
+struct PackedPuff {
+    vec4 geom;  // centre in view axes x, y; view depth; 1 / radius
+    vec4 color; // premultiplied; alpha 0: emissive
+    vec4 ext;   // cos(angle), sin(angle), texture lod, alpha
+};
+layout(set = 1, binding = 5, std430) buffer PackedPuffs { PackedPuff puffs[]; };
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint bin_size;
+    uint bins_x;
+    uint summary_words;
+    uint mask_words;
+} push;
+
+void main() {
+    uint rank = gl_GlobalInvocationID.x;
+    if (rank >= cmd.instanceCount) {
+        return;
+    }
+    // `keys` is far to near; rank 0 is the nearest particle.
+    uint slot = keys[cmd.instanceCount - 1u - rank] & 0xffffu;
+    Puff f = puffOf(slot);
+    vec3 rel = f.centre - u.camPos.xyz;
+    float z = dot(rel, u.camForward.xyz);
+    vec2 centre = vec2(dot(rel, u.camRight.xyz), dot(rel, u.camUp.xyz));
+    float radius = max(f.radius, 1e-6);
+    bool empty = f.color.a <= 0.0 && max(f.color.r, max(f.color.g, f.color.b)) <= 0.0;
+    if (empty || z <= 1e-4) {
+        // A dead or behind-the-eye entry: a miss whatever the masks say.
+        puffs[rank] = PackedPuff(vec4(0.0), vec4(0.0), vec4(0.0));
+        return;
+    }
+    // The texture's mip for this puff's screen size, as the raster path's
+    // derivatives choose it.
+    float projScale = abs(u.viewProj[1][1]) * float(push.height) * 0.5;
+    float diameter = 2.0 * radius * projScale / z;
+    float lod = max(0.0, log2(128.0 / max(diameter, 1e-6)));
+    float c = cos(f.angle);
+    float s = sin(f.angle);
+    puffs[rank] = PackedPuff(vec4(centre, z, 1.0 / radius), f.color, vec4(c, s, lod, f.color.a));
+
+    // The quad's screen bounds (the rotated square lies inside the
+    // unrotated one), from its four corners.
+    vec2 lo = vec2(1e30);
+    vec2 hi = vec2(-1e30);
+    bool behind = false;
+    for (int k = 0; k < 4; ++k) {
+        vec2 corner = vec2(k & 1, k >> 1) * 2.0 - 1.0;
+        vec4 clip = u.viewProj * vec4(f.centre + (u.camRight.xyz * corner.x + u.camUp.xyz * corner.y) * radius, 1.0);
+        behind = behind || clip.w <= 1e-4;
+        vec2 ndc = clip.xy / max(clip.w, 1e-4);
+        lo = min(lo, ndc);
+        hi = max(hi, ndc);
+    }
+    vec2 size = vec2(push.width, push.height);
+    vec2 mn = behind ? vec2(0.0) : (lo * 0.5 + 0.5) * size - 2.0;
+    vec2 mx = behind ? size - 1.0 : (hi * 0.5 + 0.5) * size + 2.0;
+    if (any(greaterThanEqual(mn, size)) || any(lessThan(mx, vec2(0.0)))) {
+        return;
+    }
+    ivec2 tile_lo = ivec2(max(mn, vec2(0.0))) / int(push.bin_size);
+    ivec2 tile_hi = ivec2(min(mx, size - 1.0)) / int(push.bin_size);
+    uint word = rank / 32u;
+    uint bit = 1u << (rank % 32u);
+    uint stride = push.summary_words + push.mask_words;
+    for (int y = tile_lo.y; y <= tile_hi.y; ++y) {
+        for (int x = tile_lo.x; x <= tile_hi.x; ++x) {
+            uint base = (uint(y) * push.bins_x + uint(x)) * stride;
+            uint old = atomicOr(masks[base + push.summary_words + word], bit);
+            if (old == 0u) {
+                atomicOr(masks[base + word / 32u], 1u << (word % 32u));
+            }
+        }
+    }
+}

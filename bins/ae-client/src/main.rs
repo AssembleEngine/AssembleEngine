@@ -279,7 +279,8 @@ fn parse() -> Result<Options> {
                     "moments" => ae_render::particles::ParticleBlend::Moments,
                     "slices" => ae_render::particles::ParticleBlend::Slices,
                     "froxels" => ae_render::particles::ParticleBlend::Froxels,
-                    other => anyhow::bail!("--particle-blend {other}: sorted, moments, slices or froxels"),
+                    "packets" => ae_render::particles::ParticleBlend::Packets,
+                    other => anyhow::bail!("--particle-blend {other}: sorted, moments, slices, froxels or packets"),
                 }
             }
             "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,

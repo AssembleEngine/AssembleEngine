@@ -1,0 +1,154 @@
+#version 460
+// Packets, pass 2 (mode 8 of ~/particles): walk a tile's depth-rank bins in
+// packets of 32 pixels. All lanes of a subgroup own one packet (8x4); for
+// each 32-rank word one lane classifies one candidate against the packet's
+// ray rectangle, the ballot collects the hits, and every lane shades the
+// same hit for its own pixel. Front to back, premultiplied "over", with the
+// sorted draw's per-particle glow. The depth is the blend's (half or full).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#include "particles_common.glsl"
+
+layout(set = 1, binding = 0) uniform sampler2D depthTex;
+layout(set = 1, binding = 1) uniform sampler2D puffTex;
+layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D outColorImg;
+layout(set = 1, binding = 3, rgba16f) uniform writeonly image2D outGlowImg;
+layout(set = 1, binding = 4, std430) readonly buffer TileMasks { uint masks[]; };
+struct PackedPuff {
+    vec4 geom;
+    vec4 color;
+    vec4 ext;
+};
+layout(set = 1, binding = 5, std430) readonly buffer PackedPuffs { PackedPuff puffs[]; };
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint bin_size;
+    uint bins_x;
+    uint summary_words;
+    uint mask_words;
+} push;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+const uint PACKET_W = 8u;
+const uint PACKET_H = 4u;
+const float EPS = 0.01;
+// Below this coverage an alpha counts as zero: an emissive puff (alpha 0)
+// adds its light, a medium masks the light behind it.
+const float GLOW_EPS = 0.5 / 255.0;
+
+uvec2 tileOrigin() {
+    return gl_WorkGroupID.xy * 16u;
+}
+
+uint binBase(uvec2 tile) {
+    uvec2 bin = tile / push.bin_size;
+    return (bin.y * push.bins_x + bin.x) * (push.summary_words + push.mask_words);
+}
+
+void main() {
+    vec2 size = vec2(push.width, push.height);
+    vec4 pr = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camRight.xyz, 1.0);
+    vec4 pu = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camUp.xyz, 1.0);
+    vec2 proj = vec2(pr.x / pr.w, pu.y / pu.w);
+
+    uint lane = gl_SubgroupInvocationID;
+    uint packet = gl_SubgroupID;
+    const uint packets_x = 16u / PACKET_W;
+    uvec2 tile = tileOrigin();
+    uvec2 origin = tile + uvec2((packet % packets_x) * PACKET_W, (packet / packets_x) * PACKET_H);
+    uvec2 px = origin + uvec2(lane % PACKET_W, lane / PACKET_W);
+    // The ray through this lane's packet pixel (not its linear workgroup
+    // invocation, which belongs to another packet of the same tile).
+    vec2 ndc = (vec2(px) + 0.5) / size * 2.0 - 1.0;
+    vec2 ray = ndc / proj;
+
+    bool live = px.x < push.width && px.y < push.height;
+    vec3 color = vec3(0.0);
+    vec3 glow = vec3(0.0);
+    float transmittance = 1.0;
+
+    // The packet's pixel centres bound its rays; a candidate outside that
+    // rectangle in local puff space cannot hit any of its pixels.
+    vec2 a = (vec2(origin) + 0.5) / size * 2.0 - 1.0;
+    vec2 b = (vec2(min(origin + uvec2(PACKET_W - 1u, PACKET_H - 1u), uvec2(push.width, push.height) - 1u)) + 0.5) / size * 2.0 - 1.0;
+    vec2 ray_lo = min(a / proj, b / proj);
+    vec2 ray_hi = max(a / proj, b / proj);
+    uint base = binBase(tile);
+
+    for (uint i = 0u; i < push.summary_words; ++i) {
+        uint summary = masks[base + i];
+        while (summary != 0u) {
+            uint word = i * 32u + uint(findLSB(summary));
+            summary &= summary - 1u;
+            uint mask = masks[base + push.summary_words + word];
+            // One lane classifies one candidate rank against the packet.
+            uint coverage = 0u;
+            if (live && (mask & (1u << lane)) != 0u) {
+                uint rank = word * 32u + lane;
+                PackedPuff p = puffs[rank];
+                float inv = p.geom.w;
+                if (inv != 0.0) {
+                    vec2 lo = (ray_lo * p.geom.z - p.geom.xy) * inv;
+                    vec2 hi = (ray_hi * p.geom.z - p.geom.xy) * inv;
+                    vec2 closest = max(max(lo, -hi), vec2(0.0));
+                    const float margin = 1e-4;
+                    if (dot(closest, closest) <= 1.0 + margin) {
+                        vec2 farthest = max(abs(lo), abs(hi));
+                        coverage = dot(farthest, farthest) < 1.0 - margin ? 2u : 1u;
+                    }
+                }
+            }
+            uint visible = subgroupBallot(coverage != 0u).x;
+            uint covered = subgroupBallot(coverage == 2u).x;
+            while (visible != 0u) {
+                uint bit = uint(findLSB(visible));
+                visible &= visible - 1u;
+                if (!live) {
+                    continue;
+                }
+                uint rank = word * 32u + bit;
+                PackedPuff p = puffs[rank];
+                float inv = p.geom.w;
+                if (inv == 0.0) {
+                    continue;
+                }
+                vec2 local = (ray * p.geom.z - p.geom.xy) * inv;
+                float r2 = dot(local, local);
+                bool full = (covered & (1u << bit)) != 0u;
+                if (!full && r2 >= 1.0) {
+                    continue;
+                }
+                vec2 cs = p.ext.xy;
+                vec2 q = vec2(dot(local, cs), dot(local, vec2(-cs.y, cs.x)));
+                float shape = textureLod(puffTex, q * 0.5 + 0.5, p.ext.z).r;
+                float d = texelFetch(depthTex, ivec2(px), 0).r;
+                float scene = d > 0.0 ? u.camPos.w / d : 1e30;
+                float radius = 1.0 / inv;
+                float front = p.geom.z - sqrt(max(1.0 - r2, 0.0)) * radius;
+                float soft = clamp((scene - front) / max(radius, 1e-3), 0.0, 1.0);
+                vec4 c = p.color * (r2 < 1.0 ? shape * soft : 0.0);
+                color += c.rgb * transmittance;
+                if (c.a <= GLOW_EPS) {
+                    glow += c.rgb * transmittance;
+                }
+                transmittance *= 1.0 - c.a;
+                live = transmittance > EPS;
+            }
+            // All lanes dead: nothing later can be seen.
+            if (subgroupBallot(live).x == 0u) {
+                break;
+            }
+        }
+        if (subgroupBallot(live).x == 0u) {
+            break;
+        }
+    }
+
+    if (px.x < push.width && px.y < push.height) {
+        imageStore(outColorImg, ivec2(px), vec4(color, 1.0 - transmittance));
+        imageStore(outGlowImg, ivec2(px), vec4(glow, 1.0));
+    }
+}

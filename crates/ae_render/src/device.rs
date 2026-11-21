@@ -232,6 +232,9 @@ pub struct GpuDevice {
     pub fragment_stores: bool,
     /// `textureCompressionBC` is enabled (BC1–BC7 model textures).
     pub texture_compression_bc: bool,
+    /// The implementation's subgroup size (`VkPhysicalDeviceSubgroupProperties`;
+    /// 32 on the GPUs the tile-binned particle blend is written for).
+    pub subgroup_size: u32,
     /// `multiDrawIndirect`, `shaderDrawParameters` and
     /// `descriptorBindingPartiallyBound` are enabled: the units' models
     /// (one multi-draw per pipeline, per-draw records by `gl_DrawID`, a
@@ -379,6 +382,10 @@ impl GpuDevice {
         } else {
             0.0
         };
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+        unsafe { vk_instance.get_physical_device_properties2(physical, &mut properties2) };
+        let subgroup_size = subgroup.subgroup_size;
         Ok(Self {
             instance,
             physical,
@@ -392,6 +399,7 @@ impl GpuDevice {
             fill_mode_non_solid,
             fragment_stores,
             texture_compression_bc,
+            subgroup_size,
             gpu_driven,
             hung: AtomicBool::new(false),
         })
