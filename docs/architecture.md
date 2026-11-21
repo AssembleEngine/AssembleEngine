@@ -228,8 +228,8 @@ Render modules wire these; the engine owns their implementations.
 | `water.draw` | graphics | depth (read), sky, fog | colour 1 |
 | `particles.sim` | compute | — | state, keys, indirect |
 | `particles.draw` | graphics | state, keys, indirect, depth | colour (half-res + upsample) |
-| `post.tonemap` | graphics | the scene, the bloom, the exposure image | the target (SDR) or the display (HDR) |
-| `post.encode` | graphics | the display (HDR only) | the target: PQ or scRGB |
+| `post.tonemap` | graphics | the scene, the bloom, the exposure image | the target (SDR, mapped from the working space to BT.709) or the display (HDR, in the working space) |
+| `post.encode` | graphics | the display (HDR only) | the target: the output gamut compressed if narrower, then PQ in BT.2020 or scRGB |
 | `readback.copy` | transfer | an image | `readback.buffer` |
 | `host.read` / `present` | transfer / present | — | — |
 

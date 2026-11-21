@@ -3217,6 +3217,51 @@ Steps (commit and stop for compaction after each):
   expression when `peak_out` is 1). Cost and HDR speed are measured in stage 7 (benchmarks
   are deferred there). Not built: HDR swapchains (stage 5), the module ABI (stage 6), so an
   HDR app reads back and a module graph cannot be HDR yet.
+- **Stage 3 is done** (2026-11-21). Range and gamut are separate:
+  `ae_render::colorspace` holds `WorkingSpace {Bt709, Bt2020}` and
+  `Gamut {Bt709, P3, Bt2020}` with matrices from the primaries only (D65 white; the
+  panel's white-point adjustment stays the compositor's), luminance rows and a
+  compression toward the achromatic axis. The app takes `with_working_space` and
+  `with_display_gamut`; `LibraryEnv` carries both, and the client has
+  `--working-space bt709|bt2020` and `--display-gamut bt709|p3|bt2020`. BT.709 is the
+  default and SDR stays bit-identical: the release skirmish capture from stage 2 still
+  compares equal with `cmp`, and the `.dot` goldens did not move.
+  Every authored colour enters the lighting in the working space. On the host: the
+  sun/sky tints (and the sky's radiance, clear colour, fog and water reflection), light
+  colours, particle effect colours, team colours and model lights; in the shaders: the
+  terrain's composed albedo, the models' base colour and emission, the water's foam and
+  body colours. `photometry.y` stops being unused and is the shaders' wide flag. The
+  exposure meter and the curve's crosstalk take the working space's luminance row.
+  `post.encode` maps the display to the output gamut (P3 by default for HDR10), then
+  compresses when the output gamut is narrower than the working space (luminance and
+  hue kept, in-gamut colours untouched, only negative channels count), then re-expresses
+  in the container (BT.2020 for HDR10; BT.709 for scRGB, whose default output gamut is
+  BT.2020 so its extended negatives pass). SDR has no encode: `post.tonemap` maps the
+  curve's result to BT.709 itself, with the identity matrix at the default. In HDR the
+  tonemap's matrix is the identity and the display stays in the working space, so the
+  gamut map runs once (review fix: the first version mapped to BT.709 in HDR too, and
+  post.encode then read the display as BT.2020, 8.74% off on the sky; the SDR
+  compression also took the working space's luminance row for a BT.709 colour).
+  Measured: an unlit sky in BT.2020 reaches SDR within 1 code of BT.709 (worst 1, 2522
+  of 57 600 channels differ); the same sunlit ground lit in the two spaces differs by a
+  channel mean of 1.54 codes, p99 2 and max 2 (46.3% within 1 code), the expected residue of
+  multiplying colours in different bases and curving the max channel. With a BT.2020
+  working space and P3 output, P3 green decodes inside P3 (0.000, 1.003, -0.000) and
+  outside BT.709 (-0.226 red), an in-P3 patch is untouched (0.301, 0.502, 0.201 against
+  0.300, 0.500, 0.200), and BT.2020 green is compressed into P3 (0.001, 0.955, 0.186),
+  still outside BT.709, luminance and hue kept. Automatic exposure meters the BT.2020
+  scene with its own luminance row: the sunlit ground settles at 0.3607 against BT.709's
+  0.3529 (ratio 1.022, the lit basis difference above, not an exposure change). The
+  unlit sky through the whole HDR10 chain decodes to the same light in either working
+  space, worst channel 1.04% apart. 54 GPU tests pass with validation (5 new), 64 lib tests (6 new), module 1, golden 2,
+  graph_file 2; a `--working-space bt2020` client capture renders with 0 validation
+  errors and warnings.
+  The levels stay at PQ's reference 203 nits in the tests and defaults: SDL reports 248
+  nits of SDR white on the reference machine, but that is the compositor's reference,
+  not necessarily the one the WSI attaches to the swapchain; stage 5 measures what is
+  actually sent, and nothing here builds a gamut decision on 248. Not built: a gamut
+  tag on authored colours (stage 4), the HDR swapchain (stage 5), the module ABI
+  (stage 6).
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -4052,6 +4097,14 @@ From M13 stage 1 (2026-11-21):
   20% darker and the key-to-paper-white range brighter than SDR. Compare on the display; if
   the darks read crushed, solve `a` per output so the HDR curve also meets the SDR one at a
   dark anchor (scene 0.1 → 0.115), keeping the key and peak anchors.
+
+From M13 stage 3 (2026-11-21):
+
+- **Gamut compression that also bounds the top channel.** The compression lifts negative
+  channels only and keeps luminance, so a saturated wide colour can still exceed the output's
+  top: BT.2020 red at 1.0 becomes (1.211, 0.000, 0.072) in BT.709, and the SDR target clips
+  the red (as does the HDR peak clamp). Reduce chroma until the largest channel also fits, at
+  the same hue, and measure the change on saturated emitters.
 
 Pie in the sky, some time:
 

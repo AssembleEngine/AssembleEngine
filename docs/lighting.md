@@ -397,7 +397,10 @@ cached models of older versions are converted again.
   textures are linear (`*_UNORM`). The one deliberate gamma-space authoring
   path is the decal shader's black-body glow (`terrain_decals.glsl`
   linearises it), because the glow mask is authored in gamma space.
-- **Shading is linear RGB** (Rec.709 primaries). Nothing does
+- **Shading is linear RGB in the working space**, BT.709's primaries by
+  default (sRGB's) or BT.2020 (`--working-space bt2020`, M13 stage 3). White
+  is D65 in both; conversions are linear 3x3 matrices that keep white and
+  luminance (`ae_render::colorspace`). Nothing does
   `pow(2.2)`/`pow(1/2.2)` to convert colour space.
 - **The scene is exposed linear RGBA16F** at the camera's reference EV;
   `post.tonemap` applies the automatic exposure's scale and the curve and
@@ -421,6 +424,81 @@ cached models of older versions are converted again.
   (`post.encode`, HDR output below).
 - Readback is a raw copy of the output attachment, so SDR captures are
   already display-encoded bytes (an HDR readback is PQ or half-float).
+
+## Working space and gamut (M13 stage 3)
+
+Range (SDR, HDR10 or scRGB) and gamut are separate axes. The gamut axis has
+two ends: the space the scene is lit in (the *working space*) and the gamut
+the output is mapped to (the *output gamut*, the display's primaries).
+
+- **The working space** is `WorkingSpace::{Bt709, Bt2020}` in
+  `ae_render::colorspace`, set on the app (`TerrainApp::with_working_space`)
+  and carried in `LibraryEnv`. BT.709 is the default and what every capture
+  before stage 3 used. White stays D65 in both, so a conversion is a linear
+  matrix from the primaries: BT.709 to BT.2020 is
+  `[0.6274, 0.3293, 0.0433; 0.0691, 0.9195, 0.0114; 0.0164, 0.0880, 0.8956]`,
+  the matrix the HDR10 container already used.
+- **Every authored colour enters the lighting in the working space.**
+  Host-side: the sun and sky tints (and so the sky's radiance, the clear
+  colour, the fog and the water's reflection), light colours, particle
+  effect colours, team colours, and the model lights (`units_lights.comp`).
+  In the shaders: the terrain's composed albedo (tileset, palette, decals),
+  the models' base colour and emission, and the water's foam and body
+  colours. All of them are authored in BT.709 until M13 stage 4 adds a gamut
+  tag, so a BT.2020 working space converts them on entry. Colours the host
+  passes as tints are normalised to unit luminance in the working space, so
+  the illuminance scalars still are illuminances.
+- **The exposure meter and the curve's crosstalk use the working space's
+  luminance row** (Rec. 709's 0.2126/0.7152/0.0722 or BT.2020's
+  0.2627/0.6780/0.0593): the scene's stored light is measured in the space
+  it is stored in.
+- **The output gamut** is `Gamut::{Bt709, P3, Bt2020}`. The default follows
+  the range: BT.709 for SDR, Display P3 for HDR10 (the reference display's
+  primaries), BT.2020 for scRGB (an extended BT.709-relative signal whose
+  container can carry a wider gamut as negative components). P3 is D65
+  Display P3: R 0.680/0.320, G 0.265/0.690, B 0.150/0.060. Only the
+  primaries are taken; the white point stays D65, so the compositor's own
+  white-point adaptation (KWin's Night Light on the reference machine)
+  is left to it. On Wayland the compositor reports the panel's primaries
+  (`wp_color_management`); SDL does not, so this stays a setting until the
+  client queries the compositor itself (M13 stage 5).
+- **Gamut compression** (`post.encode`, mirrored by
+  `colorspace::compress`): when the output gamut is narrower than the
+  working space (BT.2020 content on P3 or BT.709), the colour is moved
+  toward its own achromatic value, by one scale of every channel's distance
+  from the grey, until the most negative channel reaches zero. Luminance is
+  kept exactly, hue is kept (the channel differences from the grey scale
+  together), and a colour already in gamut is returned unchanged. It is not
+  a clip: out-of-gamut primaries lose chroma, not brightness. Values above
+  white are brightness (an HDR emitter), not a chromaticity, so only
+  negative channels count as out of gamut. The compressed colour is then
+  re-expressed in the container's primaries: BT.2020 for HDR10, BT.709 for
+  scRGB (negatives kept: an scRGB signal is extended, and the display shows
+  what it can). At the default BT.709 working space nothing is narrower than
+  the default output gamuts, so no compression runs and the map is a pure
+  re-expression.
+- **SDR has no encode pass**: `post.tonemap` maps the curve's result from
+  the working space to BT.709 itself (and compresses into it when the
+  working space is wider, with BT.709's luminance row). At the default BT.709
+  working space the matrix is the identity and SDR captures are
+  bit-identical to before stage 3. In HDR the tonemap leaves the display
+  intermediate in the working space (its matrix is the identity), so the
+  gamut map runs once, in `post.encode`.
+- **Compression lifts only the negative channels.** A colour it keeps the
+  luminance of can still have a channel above the output's top: BT.2020 red
+  at 1.0 compresses to (1.211, 0.000, 0.072) in BT.709, and the SDR target
+  clips the red at 1 (likewise at the HDR peak clamp). Not built yet: a
+  chroma reduction that also brings the top channel inside.
+- **The levels stay 203 nits of paper white** in the tests and defaults:
+  PQ's protocol reference. SDL reports 248 nits of SDR white on the
+  reference machine, and KWin sends 248 too, but that is the compositor's
+  own reference, not necessarily the one the Vulkan WSI attaches to the
+  swapchain. If the NVIDIA WSI sends PQ without its luminances, the
+  protocol's default for PQ is 203, and encoding at 248 would be about 22%
+  bright and push the peak past the panel's. M13 stage 5 measures what the
+  WSI actually sends before the client chooses; until then 203 is correct
+  for the tests and the headless readback, and nothing builds a gamut
+  decision on 248.
 
 ## HDR output
 
@@ -455,16 +533,19 @@ changes.
   the emitters further; scaling both anchors with the headroom would brighten
   every midtone. At `peak = paper_white` the curve is the SDR one exactly.
 - **HDR10**: ST.2084 (PQ) in BT.2020 at `v * paper_white` nits, 10 bits per
-  channel (`A2B10G10R10_UNORM_PACK32`). The BT.2020 re-expression is a pure
-  matrix change (BT.709 is inside BT.2020); compressing a wider working
-  space into a narrower output gamut is the gamut map (M13 stage 3). The
-  display's values are clamped at `peak / paper_white` before encoding, so
-  no channel encodes above the display's peak (the curve's asymptote is a
-  few percent above its peak anchor).
+  channel (`A2B10G10R10_UNORM_PACK32`). The display is mapped to the output
+  gamut (P3 by default), compressed into it when the working space is wider,
+  then re-expressed in BT.2020 (the container's primaries). The display's
+  values are clamped at `peak / paper_white` before encoding, so no channel
+  encodes above the display's peak (the curve's asymptote is a few percent
+  above its peak anchor).
 - **scRGB**: BT.709-relative linear light at `v * paper_white / 80` (1.0 =
   80 nits) in `R16G16B16A16_SFLOAT`; values below 0 are kept as out of
   gamut. At an 80-nit paper white the frame's values are the display's own;
-  at 203 nits they are 2.5375 times.
+  at 203 nits they are 2.5375 times. The default output gamut is BT.2020, so
+  the conversion from the default BT.709 working space is a no-op and a
+  negative (imaginary) value stays negative: scRGB's extended range is the
+  point of the encoding.
 - **The defaults** are PQ's protocol reference 203 nits and a 1000-nit peak,
   until the client reads SDL's HDR state and the swapchain's own reference
   (M13 stage 5).
@@ -493,9 +574,38 @@ changes.
   histogram and three passes go together and run in order, and the tonemap
   and bloom downsample sample the eased EV).
 - The SDR path is unchanged, byte for byte: a release capture of the same skirmish
-  frame from the stage-1 commit and from this stage compares equal (`cmp`), and the
-  `.dot` goldens did not move. In HDR the solve's peak equation reduces to the old
-  expression at `peak_out == 1`.
+  frame from the stage-1 commit and from stage 2 compares equal (`cmp`), and it still
+  does after stage 3's colour-space plumbing (the default working space's matrices are
+  the identity and nothing is compressed). The `.dot` goldens did not move. In HDR the
+  solve's peak equation reduces to the old expression at `peak_out == 1`.
+- `ae_render::colorspace` (CPU): every gamut pair keeps white and luminance and
+  round-trips in a few 1e-6; BT.709 to BT.2020 is the container matrix; P3 contains
+  BT.709 and BT.2020 contains both; compression leaves an in-gamut colour exactly
+  alone, brings an out-of-gamut one to a boundary channel with luminance and hue kept,
+  and turns imaginary all-negative light to black; a BT.2020 tint stays unit-luminance.
+- GPU `bt2020_unlit_content_reaches_sdr_within_one_code` (validation on): the sky
+  (the unlit clear colour) rendered in a BT.2020 working space reaches SDR within 1
+  code of the BT.709 frame (worst 1, 2522 of 57 600 channels differ).
+- GPU `bt2020_lit_content_differs_from_bt709_by_measured_numbers` (validation on):
+  the same sunlit ground in the working spaces differs by a channel mean of 1.54
+  codes, p99 2 and max 2 (46.3% of channels within 1 code): lighting multiplies each
+  colour in its own space and the curve maps the max channel, so lit content is close
+  but not identical, as expected.
+- GPU `auto_exposure_meters_bt2020_in_its_own_space` (validation on): the same sunlit
+  ground, auto-exposed in BT.709 and BT.2020, settles at display means 0.3529 and
+  0.3607 (ratio 1.022): the meter uses the space's own luminance row, and the residue
+  is the lit-content basis difference, not an exposure shift.
+- GPU `post_encode_compresses_wide_content_into_the_output_gamut` (validation on):
+  with a BT.2020 working space and P3 output, P3 green decodes to P3 (0.000, 1.003,
+  -0.000) and is outside BT.709 (-0.226 in red), the in-P3 patch comes back untouched
+  (0.301, 0.502, 0.201 against 0.300, 0.500, 0.200), and BT.2020 green is compressed
+  into P3 (0.001, 0.955, 0.186), still outside BT.709, with its luminance and hue
+  kept.
+- GPU `hdr10_bt2020_working_space_maps_to_the_output_once` (validation on): the
+  unlit sky through the whole HDR10 chain (203/1000 nits, clamp curve) decodes to the
+  same light in a BT.2020 working space as in BT.709, worst channel 1.04% apart (about
+  one PQ code). Before the tonemap left the HDR display in the working space it was
+  8.74%: the tonemap mapped to BT.709 and post.encode then read that as BT.2020.
 - GPU `post_encode_writes_st_2084_codes` and `post_encode_writes_scrgb_relative_to_80_nits`
   (validation on): PQ's codes at 100/203/1000 nits are exact (0 LSB), and
   scRGB is display × paper white / 80 with negatives kept.
