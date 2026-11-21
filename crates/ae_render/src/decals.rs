@@ -177,130 +177,67 @@ impl Default for LayerMaterial {
     }
 }
 
-/// The decals' textures: square layers of `size`² texels, row-major, the
-/// first row at the decal's -z edge; mips are made from them.
+/// The decals' textures, mip 0 of each layer as the GPU takes it: square
+/// layers of `size`² texels, row-major, the first row at the decal's -z
+/// edge. Their mips are made on the GPU ([`crate::upload::image_mipped`]).
 #[derive(Clone, Debug)]
 pub struct DecalAtlas {
     pub size: u32,
-    /// Straight (not premultiplied) linear RGBA.
-    pub layers: Vec<Vec<[f32; 4]>>,
-    /// Layer for layer, the tangent-space normal (x toward the decal's +x,
-    /// y toward its +z, the first rows' side being -z; z out of the ground;
-    /// each -1..1) and the glow mask (0..1). Empty: flat, no glow. For a layer
-    /// added with a normal map, z is rebuilt from x and y (the source map's
-    /// blue is roughness).
-    pub normals: Vec<Vec<[f32; 4]>>,
-    /// Layer for layer, an optional roughness texture (0..1, one value per
-    /// texel): the shader uses it directly, with no layer factor. Empty: fully
-    /// rough (1).
-    pub roughness: Vec<Vec<f32>>,
+    /// Layer for layer, the colour (`R8G8B8A8_SRGB`): sRGB RGB, straight
+    /// (not premultiplied) alpha, the coverage, linear.
+    pub colour: Vec<Vec<[u8; 4]>>,
+    /// Layer for layer, the surface (`R8G8B8A8_UNORM`): R, G the tangent
+    /// normal's x, y as `n * 0.5 + 0.5` (x toward the decal's +x, y toward
+    /// its +z, down the rows; z, out of the ground, is rebuilt in the
+    /// shader), B the roughness (used as is), A the glow mask. Empty: every
+    /// layer flat, fully rough, without glow ([`FLAT_SURFACE`]).
+    pub surface: Vec<Vec<[u8; 4]>>,
     /// Layer for layer, its surface material. Empty: every layer is
     /// [`LayerMaterial::default`].
     pub materials: Vec<LayerMaterial>,
 }
 
+/// A surface texel with a flat normal, roughness 1 and no glow.
+pub const FLAT_SURFACE: [u8; 4] = [128, 128, 255, 0];
+
+fn unorm8(c: f32) -> u8 {
+    (c.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn srgb_encode(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    unorm8(if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 })
+}
+
+fn srgb_decode(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// A colour texel from linear RGB and alpha.
+pub fn colour_texel(linear: [f32; 4]) -> [u8; 4] {
+    [srgb_encode(linear[0]), srgb_encode(linear[1]), srgb_encode(linear[2]), unorm8(linear[3])]
+}
+
+/// A surface texel from a tangent normal (any length; z out of the
+/// ground), the roughness and the glow mask.
+pub fn surface_texel(normal: [f32; 3], roughness: f32, glow: f32) -> [u8; 4] {
+    let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    let (x, y) = if len > 1e-6 { (normal[0] / len, normal[1] / len) } else { (0.0, 0.0) };
+    [unorm8(x * 0.5 + 0.5), unorm8(y * 0.5 + 0.5), unorm8(roughness), unorm8(glow)]
+}
+
 impl DecalAtlas {
-    /// Each layer's mips as sRGB RGBA8 bytes (alpha linear). Colour is
-    /// averaged weighted by alpha, so transparent texels do not darken the
-    /// edges of smaller mips.
-    pub(crate) fn mips(&self) -> Vec<Vec<Vec<u8>>> {
-        let encode = |c: f32| {
-            let c = c.clamp(0.0, 1.0);
-            let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-            (s * 255.0).round() as u8
-        };
-        self.layers
-            .iter()
-            .map(|base| {
-                let mut level = base.clone();
-                let mut side = self.size as usize;
-                let mut mips = Vec::new();
-                loop {
-                    mips.push(level.iter().flat_map(|t| [encode(t[0]), encode(t[1]), encode(t[2]), (t[3].clamp(0.0, 1.0) * 255.0).round() as u8]).collect());
-                    if side == 1 {
-                        break;
-                    }
-                    let half = side / 2;
-                    level = (0..half * half)
-                        .map(|i| {
-                            let (x, y) = (i % half * 2, i / half * 2);
-                            let texels = [level[y * side + x], level[y * side + x + 1], level[(y + 1) * side + x], level[(y + 1) * side + x + 1]];
-                            let a: f32 = texels.iter().map(|t| t[3]).sum();
-                            let colour = |k: usize| if a > 0.0 { texels.iter().map(|t| t[k] * t[3]).sum::<f32>() / a } else { texels.iter().map(|t| t[k]).sum::<f32>() * 0.25 };
-                            [colour(0), colour(1), colour(2), a * 0.25]
-                        })
-                        .collect();
-                    side = half;
-                }
-                mips
-            })
-            .collect()
-    }
-
-    /// Each layer's surface as RGBA8 UNORM mips: R, G the tangent normal
-    /// (`n * 0.5 + 0.5`; its z is reconstructed in the shader), B the
-    /// roughness texture (used as is), A the glow mask. Normals are averaged
-    /// in xyz and renormalised; roughness and the mask are averaged. Flat,
-    /// roughness 1, no glow, when [`Self::normals`] is empty; roughness 1 where
-    /// [`Self::roughness`] has no map.
-    pub(crate) fn surface_mips(&self) -> Vec<Vec<Vec<u8>>> {
-        let texels = (self.size * self.size) as usize;
-        let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
-        let unorm = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let normal = |c: f32| unorm(c * 0.5 + 0.5);
-        (0..self.layers.len())
-            .map(|i| {
-                let mut level = self.normals.get(i).unwrap_or(&flat).clone();
-                let mut rough = self.roughness.get(i).cloned().unwrap_or_else(|| vec![1.0; texels]);
-                let mut side = self.size as usize;
-                let mut mips = Vec::new();
-                loop {
-                    mips.push(level.iter().zip(&rough).flat_map(|(t, r)| [normal(t[0]), normal(t[1]), unorm(*r), unorm(t[3])]).collect());
-                    if side == 1 {
-                        break;
-                    }
-                    let half = side / 2;
-                    level = (0..half * half)
-                        .map(|i| {
-                            let (x, y) = (i % half * 2, i / half * 2);
-                            let texels = [level[y * side + x], level[y * side + x + 1], level[(y + 1) * side + x], level[(y + 1) * side + x + 1]];
-                            let sum = |k: usize| texels.iter().map(|t| t[k]).sum::<f32>();
-                            let n = [sum(0), sum(1), sum(2)];
-                            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                            let n = if len > 1e-6 { n.map(|c| c / len) } else { [0.0, 0.0, 1.0] };
-                            [n[0], n[1], n[2], sum(3) * 0.25]
-                        })
-                        .collect();
-                    rough = (0..half * half)
-                        .map(|i| {
-                            let (x, y) = (i % half * 2, i / half * 2);
-                            (rough[y * side + x] + rough[y * side + x + 1] + rough[(y + 1) * side + x] + rough[(y + 1) * side + x + 1]) * 0.25
-                        })
-                        .collect();
-                    side = half;
-                }
-                mips
-            })
-            .collect()
-    }
-
-    /// The atlas at `size`² texels per layer ([`resample`]).
-    pub fn resized(&self, size: u32) -> Self {
-        let from = self.size;
-        let colour = |l: &Vec<[f32; 4]>| resample(l, from, size, false);
-        Self {
-            size,
-            layers: self.layers.iter().map(colour).collect(),
-            normals: self.normals.iter().map(|l| resample(l, from, size, true)).collect(),
-            roughness: self.roughness.iter().map(|m| resample_scalar(m, from, size)).collect(),
-            materials: self.materials.clone(),
-        }
+    /// Each layer's surface, [`FLAT_SURFACE`] throughout when the atlas
+    /// has none.
+    pub(crate) fn surface_layers(&self) -> Vec<Vec<[u8; 4]>> {
+        if self.surface.is_empty() { vec![vec![FLAT_SURFACE; (self.size * self.size) as usize]; self.colour.len()] } else { self.surface.clone() }
     }
 
     /// Set layer `layer`'s surface material (its metallic factor). Every
     /// other layer keeps its own (or the default).
     pub fn set_layer_material(&mut self, layer: u32, material: LayerMaterial) -> Result<(), String> {
-        let n = self.layers.len();
+        let n = self.colour.len();
         if layer as usize >= n {
             return Err(format!("material for decal layer {layer}, but the atlas has {n}"));
         }
@@ -315,7 +252,7 @@ impl DecalAtlas {
     /// The per-layer materials, packed for the shader: x metallic, y..w
     /// reserved. A missing entry is [`LayerMaterial::default`].
     pub(crate) fn gpu_materials(&self) -> Vec<[f32; 4]> {
-        (0..self.layers.len())
+        (0..self.colour.len())
             .map(|i| {
                 let m = self.materials.get(i).copied().unwrap_or_default();
                 [m.metallic.clamp(0.0, 1.0), 0.0, 0.0, 0.0]
@@ -324,21 +261,16 @@ impl DecalAtlas {
     }
 
     /// Add a layer from 8-bit images, rows top first (as [`read_tga`]
-    /// returns them; the top row is the decal's -z edge), resampled to the
-    /// atlas's size: `colour` sRGB with straight alpha; `normals` the
-    /// tangent normal x/y in red/green (x toward the decal's +x, y toward
-    /// its +z, down the image) with roughness in blue and the glow mask in
-    /// alpha. `up` says whether the normal's green points up the image
-    /// (OpenGL style; flipped to the atlas's green-down convention). The z
-    /// component is rebuilt from x and y, here and in the shader. The source
-    /// may be any square; it is resampled, so the atlas alone needs
-    /// power-of-two mips. Roughness is blue as is; the layer's material starts
-    /// at metallic 0. Returns the layer.
+    /// returns them; the top row is the decal's -z edge): `colour` sRGB
+    /// with straight alpha; `normals` the surface as the atlas stores it
+    /// (tangent normal x/y in red/green, roughness in blue, the glow mask
+    /// in alpha), but with green up the image when `up` (OpenGL style;
+    /// flipped to the atlas's green-down convention, `255 - g`). A source
+    /// the atlas's size is stored as it is; any other square is resampled
+    /// ([`resample`]: colour in linear light, the surface's channels as
+    /// they are). Without `normals` the layer is [`FLAT_SURFACE`]; its
+    /// material starts at metallic 0. Returns the layer.
     pub fn add_layer(&mut self, colour: &Image, normals: Option<(&Image, bool)>) -> Result<u32, String> {
-        let linear = |c: u8| {
-            let c = c as f32 / 255.0;
-            if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-        };
         let square = |img: &Image| -> Result<(), String> {
             if img.width != img.height {
                 return Err(format!("decal image {}x{} is not square", img.width, img.height));
@@ -346,54 +278,37 @@ impl DecalAtlas {
             Ok(())
         };
         square(colour)?;
-        let colour_texels: Vec<[f32; 4]> = colour.texels.iter().map(|t| [linear(t[0]), linear(t[1]), linear(t[2]), t[3] as f32 / 255.0]).collect();
-        let layer = self.layers.len() as u32;
-        let (normal_layer, rough_layer) = match normals {
+        let size = self.size;
+        let colour_layer = if colour.width == size {
+            colour.texels.clone()
+        } else {
+            let linear: Vec<[f32; 4]> = colour.texels.iter().map(|t| [srgb_decode(t[0]), srgb_decode(t[1]), srgb_decode(t[2]), t[3] as f32 / 255.0]).collect();
+            resample(&linear, colour.width, size).into_iter().map(colour_texel).collect()
+        };
+        let surface_layer = match normals {
             Some((img, up)) => {
                 square(img)?;
-                let unorm = |c: u8| c as f32 / 255.0 * 2.0 - 1.0;
-                let ys = if up { -1.0 } else { 1.0 };
-                // One resample of the normal texture: R/G the normal x/y,
-                // B roughness, A glow. The up (z) is rebuilt afterwards.
-                let src: Vec<[f32; 4]> = img.texels.iter().map(|t| [unorm(t[0]), ys * unorm(t[1]), t[2] as f32 / 255.0, t[3] as f32 / 255.0]).collect();
-                let at = resample(&src, img.width, self.size, false);
-                let normal_layer: Vec<[f32; 4]> = at
-                    .iter()
-                    .map(|t| {
-                        let (x, y) = (t[0], t[1]);
-                        let z = (1.0 - x * x - y * y).max(0.0).sqrt();
-                        let inv = 1.0 / (x * x + y * y + z * z).sqrt().max(1e-6);
-                        [x * inv, y * inv, z * inv, t[3]]
-                    })
-                    .collect();
-                let rough_layer: Vec<f32> = at.iter().map(|t| t[2].clamp(0.0, 1.0)).collect();
-                (Some(normal_layer), Some(rough_layer))
+                let flipped: Vec<[u8; 4]> = img.texels.iter().map(|t| [t[0], if up { 255 - t[1] } else { t[1] }, t[2], t[3]]).collect();
+                Some(if img.width == size {
+                    flipped
+                } else {
+                    let unorm: Vec<[f32; 4]> = flipped.iter().map(|t| t.map(|c| c as f32 / 255.0)).collect();
+                    resample(&unorm, img.width, size).into_iter().map(|t| t.map(unorm8)).collect()
+                })
             }
-            None => (None, None),
+            None => None,
         };
-        let has_normals = normal_layer.is_some();
-        let texels = (self.size * self.size) as usize;
-        // Normals for every layer once any layer has them.
-        let flat = || vec![[0.0, 0.0, 1.0, 0.0]; texels];
-        if has_normals && self.normals.is_empty() {
-            self.normals = (0..self.layers.len()).map(|_| flat()).collect();
-        }
-        if !self.normals.is_empty() {
-            self.normals.push(normal_layer.unwrap_or_else(flat));
-        }
-        // A normal map carries its layer's roughness in blue; earlier layers
-        // without one are fully rough. Without a normal map the layer is fully
-        // rough too.
-        if has_normals && self.roughness.is_empty() {
-            self.roughness = (0..self.layers.len()).map(|_| vec![1.0; texels]).collect();
-        }
-        if !self.roughness.is_empty() {
-            self.roughness.push(rough_layer.unwrap_or_else(|| vec![1.0; texels]));
+        let layer = self.colour.len() as u32;
+        let texels = (size * size) as usize;
+        // A surface for every layer once any layer has one.
+        if surface_layer.is_some() || !self.surface.is_empty() {
+            self.surface.resize(self.colour.len(), vec![FLAT_SURFACE; texels]);
+            self.surface.push(surface_layer.unwrap_or_else(|| vec![FLAT_SURFACE; texels]));
         }
         if !self.materials.is_empty() {
             self.materials.push(LayerMaterial::default());
         }
-        self.layers.push(resample(&colour_texels, colour.width, self.size, false));
+        self.colour.push(colour_layer);
         Ok(layer)
     }
 
@@ -401,30 +316,24 @@ impl DecalAtlas {
         if !self.size.is_power_of_two() {
             return Err(format!("decal atlas size {} is not a power of two", self.size));
         }
-        if self.layers.is_empty() {
+        if self.colour.is_empty() {
             return Err("decal atlas has no layers".into());
         }
-        if !self.normals.is_empty() && self.normals.len() != self.layers.len() {
-            return Err(format!("decal atlas has {} normal layers for {} colour layers", self.normals.len(), self.layers.len()));
+        if !self.surface.is_empty() && self.surface.len() != self.colour.len() {
+            return Err(format!("decal atlas has {} surface layers for {} colour layers", self.surface.len(), self.colour.len()));
         }
-        if !self.materials.is_empty() && self.materials.len() != self.layers.len() {
-            return Err(format!("decal atlas has {} material layers for {} colour layers", self.materials.len(), self.layers.len()));
-        }
-        if !self.roughness.is_empty() && self.roughness.len() != self.layers.len() {
-            return Err(format!("decal atlas has {} roughness layers for {} colour layers", self.roughness.len(), self.layers.len()));
+        if !self.materials.is_empty() && self.materials.len() != self.colour.len() {
+            return Err(format!("decal atlas has {} material layers for {} colour layers", self.materials.len(), self.colour.len()));
         }
         if let Some((i, m)) = self.materials.iter().enumerate().find(|(_, m)| !(0.0..=1.0).contains(&m.metallic)) {
             return Err(format!("decal atlas layer {i} material metallic {} out of range", m.metallic));
         }
         let texels = (self.size * self.size) as usize;
-        if let Some(i) = self.layers.iter().position(|l| l.len() != texels) {
-            return Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.layers[i].len()));
+        if let Some(i) = self.colour.iter().position(|l| l.len() != texels) {
+            return Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.colour[i].len()));
         }
-        if let Some(i) = self.normals.iter().position(|l| l.len() != texels) {
-            return Err(format!("decal atlas normal layer {i} has {} texels, not {texels}", self.normals[i].len()));
-        }
-        if let Some((i, m)) = self.roughness.iter().enumerate().find(|(_, m)| m.len() != texels || m.iter().any(|v| !(0.0..=1.0).contains(v))) {
-            return Err(format!("decal atlas roughness layer {i} has {} texels (not {texels}) or a value out of range", m.len()));
+        if let Some(i) = self.surface.iter().position(|l| l.len() != texels) {
+            return Err(format!("decal atlas surface layer {i} has {} texels, not {texels}", self.surface[i].len()));
         }
         Ok(())
     }
@@ -518,11 +427,11 @@ pub fn normal_green_up(colour: &Image, normals: &Image) -> bool {
 }
 
 /// A square layer of `from`² texels at `to`²: box-filtered when shrinking
-/// by a whole factor, bilinear otherwise; `normals` renormalizes xyz.
-pub fn resample(texels: &[[f32; 4]], from: u32, to: u32, normals: bool) -> Vec<[f32; 4]> {
+/// by a whole factor, bilinear otherwise.
+pub fn resample(texels: &[[f32; 4]], from: u32, to: u32) -> Vec<[f32; 4]> {
     let (f, t) = (from as usize, to as usize);
     let at = |x: usize, y: usize| texels[y.min(f - 1) * f + x.min(f - 1)];
-    let mut out: Vec<[f32; 4]> = (0..t * t)
+    (0..t * t)
         .map(|i| {
             let (x, y) = (i % t, i / t);
             if f >= t && f % t == 0 {
@@ -542,32 +451,18 @@ pub fn resample(texels: &[[f32; 4]], from: u32, to: u32, normals: bool) -> Vec<[
                 std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
             }
         })
-        .collect();
-    if normals {
-        for n in &mut out {
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if len > 1e-6 {
-                (0..3).for_each(|c| n[c] /= len);
-            } else {
-                *n = [0.0, 0.0, 1.0, n[3]];
-            }
-        }
-    }
-    out
+        .collect()
 }
 
-/// [`resample`] for a one-channel map (roughness).
-fn resample_scalar(values: &[f32], from: u32, to: u32) -> Vec<f32> {
-    let packed: Vec<[f32; 4]> = values.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
-    resample(&packed, from, to, false).iter().map(|t| t[0]).collect()
-}
-
-/// The engine's decals ([`layer`]), 128² each: a scorch mark (charred
+/// The engine's decals ([`layer`]), `size`² each (a power of two; 128 is
+/// plenty, the relief keeps its depth at any size): a scorch mark (charred
 /// centre, a burnt brown ring, a ragged edge; a shallow rough hollow whose
 /// centre can glow) and a crater (a dark pit, a pale rim of thrown-up
 /// earth, in relief).
-pub fn default_atlas() -> DecalAtlas {
-    const SIZE: usize = 128;
+pub fn default_atlas(size: u32) -> DecalAtlas {
+    let n = size as usize;
+    // Heights are in texels of depth per texel at 128².
+    let relief = size as f32 / 128.0;
     fn hash(x: i32, y: i32, octave: i32) -> f32 {
         let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
         h ^= h >> 13;
@@ -598,18 +493,18 @@ pub fn default_atlas() -> DecalAtlas {
     };
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
     let layer = |f: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]| -> Vec<[f32; 4]> {
-        (0..SIZE * SIZE)
+        (0..n * n)
             .map(|i| {
-                let (u, v) = (((i % SIZE) as f32 + 0.5) / SIZE as f32, ((i / SIZE) as f32 + 0.5) / SIZE as f32);
+                let (u, v) = (((i % n) as f32 + 0.5) / n as f32, ((i / n) as f32 + 0.5) / n as f32);
                 let (x, y) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
                 f(u, v, x.hypot(y), y.atan2(x))
             })
             .collect()
     };
     let scalar = |f: &dyn Fn(f32, f32, f32, f32) -> f32| -> Vec<f32> {
-        (0..SIZE * SIZE)
+        (0..n * n)
             .map(|i| {
-                let (u, v) = (((i % SIZE) as f32 + 0.5) / SIZE as f32, ((i / SIZE) as f32 + 0.5) / SIZE as f32);
+                let (u, v) = (((i % n) as f32 + 0.5) / n as f32, ((i / n) as f32 + 0.5) / n as f32);
                 let (x, y) = (u * 2.0 - 1.0, v * 2.0 - 1.0);
                 f(u, v, x.hypot(y), y.atan2(x))
             })
@@ -638,28 +533,28 @@ pub fn default_atlas() -> DecalAtlas {
     // crater a pit inside a raised rim. Normals from the heights (in
     // texels of depth per texel), and the scorch's glow mask: its centre,
     // cracked by the noise.
-    let scorch_height = |u: f32, v: f32, r: f32| -2.5 * (1.0 - smooth(0.0, 0.7, r)) + 2.0 * fbm(u * 2.0, v * 2.0, 3);
+    let scorch_height = |u: f32, v: f32, r: f32| relief * (-2.5 * (1.0 - smooth(0.0, 0.7, r)) + 2.0 * fbm(u * 2.0, v * 2.0, 3));
     let crater_height = |u: f32, v: f32, r: f32| {
         let rr = r + (fbm(u, v, 7) - 0.5) * 0.18;
-        -5.0 * (1.0 - smooth(0.2, 0.55, rr)) + 3.0 * smooth(0.45, 0.6, rr) * (1.0 - smooth(0.6, 0.9, rr))
+        relief * (-5.0 * (1.0 - smooth(0.2, 0.55, rr)) + 3.0 * smooth(0.45, 0.6, rr) * (1.0 - smooth(0.6, 0.9, rr)))
     };
     let normals = |height: &dyn Fn(f32, f32, f32) -> f32, glow: &dyn Fn(f32, f32, f32) -> f32| -> Vec<[f32; 4]> {
         let h = |x: f32, y: f32| {
-            let (u, v) = (x / SIZE as f32, y / SIZE as f32);
+            let (u, v) = (x / n as f32, y / n as f32);
             height(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0))
         };
-        (0..SIZE * SIZE)
+        (0..n * n)
             .map(|i| {
-                let (x, y) = ((i % SIZE) as f32 + 0.5, (i / SIZE) as f32 + 0.5);
+                let (x, y) = ((i % n) as f32 + 0.5, (i / n) as f32 + 0.5);
                 let (dx, dy) = ((h(x + 1.0, y) - h(x - 1.0, y)) * 0.5, (h(x, y + 1.0) - h(x, y - 1.0)) * 0.5);
                 let len = (dx * dx + dy * dy + 1.0).sqrt();
-                let (u, v) = (x / SIZE as f32, y / SIZE as f32);
+                let (u, v) = (x / n as f32, y / n as f32);
                 [-dx / len, -dy / len, 1.0 / len, glow(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0))]
             })
             .collect()
     };
     let scorch_glow = |u: f32, v: f32, r: f32| ((1.0 - smooth(0.05, 0.6, r)) * (0.35 + 0.8 * fbm(u * 1.5, v * 1.5, 11))).clamp(0.0, 0.85);
-    let normals = vec![normals(&scorch_height, &scorch_glow), normals(&crater_height, &|_, _, _| 0.0)];
+    let normals = [normals(&scorch_height, &scorch_glow), normals(&crater_height, &|_, _, _| 0.0)];
     // Roughness textures: the final roughness, since layers have no roughness
     // factor. Char and cinders are rougher than the burnt ring, the crater's
     // pit than its rim. 8 bits is plenty for both.
@@ -674,7 +569,10 @@ pub fn default_atlas() -> DecalAtlas {
     });
     // Char and ash are matte dielectrics; the crater's loose earth less so.
     let materials = vec![LayerMaterial::default(); 2];
-    DecalAtlas { size: SIZE as u32, layers: vec![scorch, crater], normals, roughness: vec![scorch_rough, crater_rough], materials }
+    let surface = |normals: &[[f32; 4]], rough: &[f32]| -> Vec<[u8; 4]> { normals.iter().zip(rough).map(|(t, &r)| surface_texel([t[0], t[1], t[2]], r, t[3])).collect() };
+    let surface = vec![surface(&normals[0], &scorch_rough), surface(&normals[1], &crater_rough)];
+    let colour = vec![scorch.into_iter().map(colour_texel).collect(), crater.into_iter().map(colour_texel).collect()];
+    DecalAtlas { size, colour, surface, materials }
 }
 
 pub struct DecalsSetup {
@@ -980,59 +878,51 @@ mod tests {
     }
 
     #[test]
-    fn atlas_mips_reach_one_texel_and_ignore_transparent_colour() {
-        let mut layer = vec![[1.0, 0.0, 0.0, 1.0]; 4];
-        layer[3] = [0.0, 0.0, 1.0, 0.0];
-        let atlas = DecalAtlas { size: 2, layers: vec![layer], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
-        let mips = atlas.mips();
-        assert_eq!(mips[0].len(), 2);
-        assert_eq!(mips[0][1], vec![255, 0, 0, 191]);
-        assert!(default_atlas().validate().is_ok());
-    }
-
-    #[test]
     fn layers_carry_their_material_and_default_to_matte() {
-        let plain = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]; 2], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
+        let plain = DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]; 2], surface: Vec::new(), materials: Vec::new() };
         assert_eq!(plain.gpu_materials(), vec![[0.0; 4]; 2], "without materials: dielectric, roughness from the texture");
-        let mut atlas = default_atlas();
-        assert_eq!(atlas.materials.len(), atlas.layers.len());
-        assert_eq!(atlas.roughness.len(), atlas.layers.len(), "the default atlas has texture roughness");
+        assert_eq!(plain.surface_layers(), vec![vec![FLAT_SURFACE; 4]; 2], "without a surface: flat, fully rough");
+        let mut atlas = default_atlas(32);
+        assert!(atlas.validate().is_ok());
+        assert_eq!(atlas.materials.len(), atlas.colour.len());
+        assert_eq!(atlas.surface.len(), atlas.colour.len(), "the default atlas has a surface");
         assert_eq!(atlas.materials[layer::SCORCH as usize].metallic, 0.0);
         assert_eq!(atlas.materials[layer::CRATER as usize].metallic, 0.0);
-        // A new layer without a normal map takes the default until it is
-        // told otherwise, and a 1.0 roughness texture while the atlas has
-        // roughness maps.
+        // A new layer without a normal map takes the default material until
+        // it is told otherwise, and a flat, fully rough surface.
         let grey = Image { width: 4, height: 4, texels: vec![[128; 4]; 16] };
         let added = atlas.add_layer(&grey, None).unwrap();
         assert_eq!(atlas.materials[added as usize], LayerMaterial::default());
-        assert_eq!(atlas.roughness[added as usize].len(), 128 * 128);
-        assert!(atlas.roughness[added as usize].iter().all(|&v| v == 1.0));
+        assert_eq!(atlas.surface[added as usize], vec![FLAT_SURFACE; 32 * 32]);
         atlas.set_layer_material(added, LayerMaterial { metallic: 1.0 }).unwrap();
         assert_eq!(atlas.gpu_materials()[added as usize], [1.0, 0.0, 0.0, 0.0]);
         assert!(atlas.set_layer_material(99, LayerMaterial::default()).is_err());
-        assert_eq!(atlas.resized(8).materials, atlas.materials);
         atlas.materials[0].metallic = 1.5;
         assert!(atlas.validate().unwrap_err().contains("out of range"));
     }
 
+    /// The default atlas keeps its look at any size: the relief's slopes
+    /// (per texel) scale with it, so the normals match at 128 and 512.
     #[test]
-    fn the_surface_packs_normal_xy_roughness_and_glow() {
+    fn the_default_atlas_keeps_its_relief_at_any_size() {
+        let (small, big) = (default_atlas(128), default_atlas(512));
+        let tilt = |a: &DecalAtlas, l: usize| -> f32 {
+            let s = &a.surface[l];
+            s.iter().map(|t| ((t[0] as f32 - 127.5).powi(2) + (t[1] as f32 - 127.5).powi(2)).sqrt()).sum::<f32>() / s.len() as f32
+        };
+        for l in 0..2 {
+            let (t0, t1) = (tilt(&small, l), tilt(&big, l));
+            assert!(t0 > 5.0 && (t0 - t1).abs() < t0 * 0.15, "layer {l}: mean tilt {t0} at 128, {t1} at 512");
+        }
+    }
+
+    #[test]
+    fn texels_pack_colour_and_surface() {
         // A flat normal, roughness 0.25 and glow 0.5: R G 128, B 64, A 128.
-        let normal = vec![[0.0, 0.0, 1.0, 0.5]; 4];
-        let atlas = DecalAtlas { size: 2, layers: vec![vec![[0.5; 4]; 4]], normals: vec![normal], roughness: vec![vec![0.25; 4]], materials: vec![LayerMaterial::default()] };
-        let mips = atlas.surface_mips();
-        assert_eq!(mips[0][0], vec![128, 128, 64, 128, 128, 128, 64, 128, 128, 128, 64, 128, 128, 128, 64, 128]);
-        // The mip chain reaches one texel (4 bytes).
-        assert_eq!(mips[0].len(), 2);
-        assert_eq!(mips[0][1], vec![128, 128, 64, 128]);
-        // A layer with no roughness map writes texture roughness 1.
-        let flat = DecalAtlas { size: 2, layers: vec![vec![[0.5; 4]; 4]], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
-        let flat = flat.surface_mips();
-        assert_eq!(&flat[0][0][..4], &[128, 128, 255, 0]);
-        assert_eq!(flat[0][0].len() / 4, 4);
-        let mut bad = atlas;
-        bad.roughness[0][0] = 1.5;
-        assert!(bad.validate().unwrap_err().contains("roughness"));
+        assert_eq!(surface_texel([0.0, 0.0, 1.0], 0.25, 0.5), [128, 128, 64, 128]);
+        // Any length: normalised first.
+        assert_eq!(surface_texel([3.0, 0.0, 4.0], 1.0, 0.0), [204, 128, 255, 0]);
+        assert_eq!(colour_texel([0.2159, 1.0, 0.0, 0.5]), [128, 255, 0, 128]);
     }
 
     /// A 32-bit TGA of `texels` (rows top first), run-length encoded or
@@ -1074,47 +964,53 @@ mod tests {
 
     #[test]
     fn layers_are_resampled_and_normals_take_the_atlas_convention() {
-        let mut atlas = DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
-        // 4x4 colour, mid grey: box-filtered to 2x2, linear.
+        let mut atlas = DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]], surface: Vec::new(), materials: Vec::new() };
+        // 4x4 colour, mid grey: box-filtered to 2x2 in linear light.
         let grey = Image { width: 4, height: 4, texels: vec![[188, 188, 188, 255]; 16] };
-        // A normal map leaning up the image (green 1, OpenGL style), glow 0.5.
+        // A normal map leaning up the image (green 1, OpenGL style),
+        // roughness 0.5, glow 0.5.
         let up = Image { width: 4, height: 4, texels: vec![[128, 255, 128, 128]; 16] };
         let layer = atlas.add_layer(&grey, Some((&up, true))).unwrap();
         assert_eq!(layer, 1);
-        assert!((atlas.layers[1][0][0] - 0.5).abs() < 0.01 && atlas.layers[1][3][3] == 1.0);
-        // Earlier layers get flat normals; the new one leans down the rows
-        // (the atlas's +v) once flipped, renormalized. Blue is that layer's
-        // roughness (0.5), not a normal component.
-        assert_eq!(atlas.normals[0], vec![[0.0, 0.0, 1.0, 0.0]; 4]);
-        let n = atlas.normals[1][0];
-        assert!(n[1] < -0.7 && (n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.0).abs() < 1e-4 && (n[3] - 0.5).abs() < 0.01, "{n:?}");
-        assert!(n[2].abs() < 1e-4, "z is rebuilt from x and y: {n:?}");
-        assert!((atlas.roughness[1][0] - 0.5).abs() < 0.01, "blue is roughness");
+        assert_eq!(atlas.colour[1][0], [188, 188, 188, 255]);
+        // Earlier layers get a flat surface; the new one leans down the rows
+        // (the atlas's +v) once green is flipped; blue (roughness) and alpha
+        // (glow) pass through.
+        assert_eq!(atlas.surface[0], vec![FLAT_SURFACE; 4]);
+        assert_eq!(atlas.surface[1][0], [128, 0, 128, 128]);
         assert_eq!(atlas.gpu_materials()[1], [0.0; 4], "roughness is the texture; the material stays a dielectric");
-        assert_eq!(atlas.surface_mips()[1][0][2], 128, "the packed surface's blue is the roughness");
         let down = atlas.add_layer(&grey, Some((&up, false))).unwrap();
-        assert!(atlas.normals[down as usize][0][1] > 0.7);
+        assert_eq!(atlas.surface[down as usize][0], [128, 255, 128, 128]);
         assert!(atlas.validate().is_ok());
+        // A source the atlas's size is stored byte for byte.
+        let mut same = DecalAtlas { size: 4, colour: Vec::new(), surface: Vec::new(), materials: Vec::new() };
+        let texels: Vec<[u8; 4]> = (0..16u8).map(|i| [i * 9, 255 - i, i, 200]).collect();
+        let img = Image { width: 4, height: 4, texels: texels.clone() };
+        same.add_layer(&img, Some((&img, false))).unwrap();
+        assert_eq!((&same.colour[0], &same.surface[0]), (&texels, &texels));
         // Bilinear when growing: a ramp stays monotonic.
         let ramp: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
-        let big = resample(&ramp, 2, 4, false);
+        let big = resample(&ramp, 2, 4);
         assert!(big[0][0] <= big[1][0] && big[1][0] <= big[2][0] && big[2][0] <= big[3][0] && big[3][0] > big[0][0]);
-        assert!(DecalAtlas { size: 2, layers: vec![vec![[0.0; 4]; 4]], normals: vec![], roughness: Vec::new(), materials: Vec::new() }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
+        assert!(DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]], surface: Vec::new(), materials: Vec::new() }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
         // Any square resamples; only the atlas itself needs power-of-two
         // mips. (A 6x6 source shrinks into a 4x4 atlas here.)
-        let mut odd = DecalAtlas { size: 4, layers: vec![vec![[0.0; 4]; 16]], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() };
+        let mut odd = DecalAtlas { size: 4, colour: vec![vec![[0; 4]; 16]], surface: Vec::new(), materials: Vec::new() };
         assert!(odd.add_layer(&Image { width: 6, height: 6, texels: vec![[128, 128, 128, 255]; 36] }, None).is_ok());
         assert!(odd.validate().is_ok());
+        let mut bad = odd;
+        bad.surface = vec![vec![FLAT_SURFACE; 3]];
+        assert!(bad.validate().is_err());
     }
 
     /// A normal map's handedness from its own curl: with y down the rows,
     /// d(nx)/dy and d(ny)/dx agree when green points down the rows.
-    fn curl_sign(n: &[[f32; 4]], size: usize, alpha: &[[f32; 4]]) -> f32 {
-        let at = |x: usize, y: usize| n[y * size + x];
+    fn curl_sign(n: &[[u8; 4]], size: usize, alpha: &[[u8; 4]]) -> f32 {
+        let at = |x: usize, y: usize| n[y * size + x].map(|c| c as f32 / 127.5 - 1.0);
         let (mut sum, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
         for y in 1..size - 1 {
             for x in 1..size - 1 {
-                if alpha[y * size + x][3] < 0.3 {
+                if alpha[y * size + x][3] < 76 {
                     continue;
                 }
                 let a = (at(x, y + 1)[0] - at(x, y - 1)[0]) as f64;
@@ -1129,10 +1025,10 @@ mod tests {
 
     #[test]
     fn default_atlas_normals_follow_the_atlas_convention() {
-        let atlas = default_atlas();
-        let opaque = vec![[0.0, 0.0, 0.0, 1.0]; (atlas.size * atlas.size) as usize];
+        let atlas = default_atlas(128);
+        let opaque = vec![[0, 0, 0, 255]; (atlas.size * atlas.size) as usize];
         for k in 0..2 {
-            let c = curl_sign(&atlas.normals[k], atlas.size as usize, &opaque);
+            let c = curl_sign(&atlas.surface[k], atlas.size as usize, &opaque);
             assert!(c > 0.5, "layer {k}: {c}");
         }
     }
@@ -1174,7 +1070,7 @@ mod tests {
             .collect();
         names.sort();
         assert!(!names.is_empty(), "no bundled scars");
-        let mut atlas = default_atlas().resized(256);
+        let mut atlas = default_atlas(256);
         for name in names {
             let stem = name.strip_suffix(".tga").unwrap();
             let (colour, normal) = (read(&name), read(&format!("{stem}_normal.tga")));
@@ -1182,9 +1078,9 @@ mod tests {
             let up = normal_green_up(&colour, &normal);
             let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap() as usize;
             assert_eq!(atlas.materials[layer], LayerMaterial::default(), "{name}: roughness is the texture; the material stays a dielectric");
-            assert_eq!(atlas.roughness[layer].len(), (atlas.size * atlas.size) as usize, "{name}: a roughness map from blue");
+            assert_eq!(atlas.surface[layer].len(), (atlas.size * atlas.size) as usize, "{name}: a surface from the normal map");
             let size = atlas.size as usize;
-            let sign = curl_sign(&atlas.normals[layer], size, &atlas.layers[layer]);
+            let sign = curl_sign(&atlas.surface[layer], size, &atlas.colour[layer]);
             println!("{name}: green up {up}, curl {sign:.2}");
             // The sign is the convention the loader picked (green down after
             // the flip). Its magnitude is only a confidence hint: baked scar

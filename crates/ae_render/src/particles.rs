@@ -598,8 +598,7 @@ impl ParticleRenderer {
         let spawns = (0..frames_in_flight)
             .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: (MAX_BURSTS * size_of::<SpawnRecord>()) as u64, usage: storage }, MemoryLocation::CpuToGpu, "particle spawns"))
             .collect::<Result<Vec<_>>>()?;
-        let mips = puff_mips();
-        let puff = upload::image(gpu, vk::Format::R8_UNORM, PUFF as u32, PUFF as u32, &mips.iter().map(Vec::as_slice).collect::<Vec<_>>(), "particle puff")?;
+        let puff = upload::image_mipped(gpu, vk::Format::R8_UNORM, PUFF as u32, PUFF as u32, &[&puff_texels()], upload::MipFilter::Average, vk::ImageViewType::TYPE_2D, "particle puff")?;
         let puff_sampler = unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -1413,10 +1412,10 @@ impl ParticleRenderer {
     }
 }
 
-/// The puff texture and its mips: a ball fading to its edge (`(1 - r²)²`)
-/// whose density four octaves of value noise break into billows; mip `i`
-/// halves mip `i - 1` (2x2 box).
-fn puff_mips() -> Vec<Vec<u8>> {
+/// The puff texture's mip 0 (the GPU makes the mips): a ball fading to its
+/// edge (`(1 - r²)²`) whose density four octaves of value noise break into
+/// billows.
+fn puff_texels() -> Vec<u8> {
     fn hash(x: i32, y: i32, octave: i32) -> f32 {
         let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
         h ^= h >> 13;
@@ -1432,13 +1431,13 @@ fn puff_mips() -> Vec<Vec<u8>> {
         let bottom = hash(ix, iy + 1, octave) + (hash(ix + 1, iy + 1, octave) - hash(ix, iy + 1, octave)) * sx;
         top + (bottom - top) * sy
     }
-    let mut level: Vec<f32> = (0..PUFF * PUFF)
+    (0..PUFF * PUFF)
         .map(|i| {
             let (u, v) = ((i % PUFF) as f32 + 0.5, (i / PUFF) as f32 + 0.5);
             let (x, y) = (u / PUFF as f32 * 2.0 - 1.0, v / PUFF as f32 * 2.0 - 1.0);
             let r2 = x * x + y * y;
             if r2 >= 1.0 {
-                return 0.0;
+                return 0;
             }
             let ball = (1.0 - r2) * (1.0 - r2);
             let mut noise = 0.0;
@@ -1448,24 +1447,7 @@ fn puff_mips() -> Vec<Vec<u8>> {
                 noise += amplitude * value_noise(u / PUFF as f32 * f, v / PUFF as f32 * f, octave);
                 amplitude *= 0.5;
             }
-            (ball * (0.35 + 1.3 * noise) - 0.04).clamp(0.0, 1.0)
+            ((ball * (0.35 + 1.3 * noise) - 0.04).clamp(0.0, 1.0) * 255.0).round() as u8
         })
-        .collect();
-    let mut mips = Vec::new();
-    let mut side = PUFF;
-    loop {
-        mips.push(level.iter().map(|&d| (d * 255.0).round() as u8).collect());
-        if side == 1 {
-            break;
-        }
-        let half = side / 2;
-        level = (0..half * half)
-            .map(|i| {
-                let (x, y) = (i % half * 2, i / half * 2);
-                0.25 * (level[y * side + x] + level[y * side + x + 1] + level[(y + 1) * side + x] + level[(y + 1) * side + x + 1])
-            })
-            .collect();
-        side = half;
-    }
-    mips
+        .collect()
 }

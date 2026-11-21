@@ -537,7 +537,7 @@ fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas,
     if names.is_empty() {
         bail!("no scar colour maps (*.tga with a matching *_normal.tga) in {}", dir.display());
     }
-    let mut atlas = default_atlas().resized(512);
+    let mut atlas = default_atlas(512);
     let mut scars = Vec::new();
     for name in &names {
         let stem = name.strip_suffix(".tga").unwrap_or(name);

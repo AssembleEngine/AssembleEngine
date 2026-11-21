@@ -11,8 +11,7 @@ of their rights holder, who is also this repository's owner.
   strictly from b; there is no roughness factor.
 - The bundled set is ten 512² scars: `scar1` is Recoil's old `scar2`, kept as it is, and
   `scar2`–`scar10` are further scars in the same style. All are 32-bit RLE TGA.
-- The bundled files' b still holds the old normal-z component until their roughness pass;
-  the loader uses it as roughness meanwhile.
-- A source may be any square; the client's atlas resamples it to 512². The client loads every
+- A source may be any square; one of the atlas's size (512² in the client) is stored as it is,
+  any other is resampled to it. The client loads every
   `*.tga` with a matching `*_normal.tga` from the directory, in name order
   (`--scars DIR` for another set, `--scars generated` for the engine's generated scorch mark).

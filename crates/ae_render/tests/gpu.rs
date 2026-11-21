@@ -3256,7 +3256,7 @@ fn particles_order_independence() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn decals_wrap_over_cliffs() {
-    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, colour_texel};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
@@ -3291,8 +3291,8 @@ fn decals_wrap_over_cliffs() {
     // Eight stripes across the atlas's x, black and white, opaque.
     const STRIPES: f32 = 8.0;
     let size = 64u32;
-    let stripes = (0..size * size).map(|i| if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] }).collect();
-    let atlas = Arc::new(DecalAtlas { size, layers: vec![stripes], normals: Vec::new(), roughness: Vec::new(), materials: Vec::new() });
+    let stripes = (0..size * size).map(|i| colour_texel(if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] })).collect();
+    let atlas = Arc::new(DecalAtlas { size, colour: vec![stripes], surface: Vec::new(), materials: Vec::new() });
     let half = 12.0f32;
     let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
     // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32); G
@@ -3576,7 +3576,7 @@ fn decals_wrap_over_cliffs() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn decals_relit_modulated_and_glowing() {
-    use ae_render::decals::{Blend, Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::decals::{Blend, Decal, DecalAtlas, DecalFeed, DecalsSetup, colour_texel, surface_texel};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
@@ -3609,12 +3609,13 @@ fn decals_relit_modulated_and_glowing() {
     let size = 32u32;
     let texels = (size * size) as usize;
     let linear = |s: f32| ((s + 0.055) / 1.055).powf(2.4);
-    let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
+    let grey = |c: f32| vec![colour_texel([c, c, c, 1.0]); texels];
     let lean = 0.5f32.atan();
-    let layers = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25)), grey(0.3)];
-    let flat = vec![[0.0, 0.0, 1.0, 0.0]; texels];
-    let normals = vec![vec![[lean.sin(), 0.0, lean.cos(), 0.0]; texels], vec![[0.0, 0.0, 1.0, 0.6]; texels], flat.clone(), flat, vec![[0.0, lean.sin(), lean.cos(), 0.0]; texels]];
-    let atlas = Arc::new(DecalAtlas { size, layers, normals, roughness: Vec::new(), materials: Vec::new() });
+    let colour = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25)), grey(0.3)];
+    let surface = |n: [f32; 3], glow: f32| vec![surface_texel(n, 1.0, glow); texels];
+    let flat = surface([0.0, 0.0, 1.0], 0.0);
+    let surface = vec![surface([lean.sin(), 0.0, lean.cos()], 0.0), surface([0.0, 0.0, 1.0], 0.6), flat.clone(), flat, surface([0.0, lean.sin(), lean.cos()], 0.0)];
+    let atlas = Arc::new(DecalAtlas { size, colour, surface, materials: Vec::new() });
     let half = 12.0f32;
     let edge = (42.0f32, 64.0f32);
     let at_edge = |layer: u32, angle: f32| Decal::permanent([edge.0, edge.1], [half, half], angle, layer);
@@ -3730,7 +3731,7 @@ fn decals_relit_modulated_and_glowing() {
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn decals_carry_their_roughness_and_metallic() {
-    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, LayerMaterial};
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, LayerMaterial, colour_texel, surface_texel};
     use ae_render::lights::Light;
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
@@ -3751,13 +3752,12 @@ fn decals_carry_their_roughness_and_metallic() {
     // factor: 0.15, 0.95 and 0.15; the metal's metallic factor is 1.
     let size = 16u32;
     let texels = (size * size) as usize;
-    let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
-    let rough = |c: f32| vec![c; texels];
+    let grey = |c: f32| vec![colour_texel([c, c, c, 1.0]); texels];
+    let rough = |r: f32| vec![surface_texel([0.0, 0.0, 1.0], r, 0.0); texels];
     let atlas = Arc::new(DecalAtlas {
         size,
-        layers: vec![grey(0.5), grey(0.5), grey(0.5)],
-        normals: Vec::new(),
-        roughness: vec![rough(0.15), rough(0.95), rough(0.15)],
+        colour: vec![grey(0.5), grey(0.5), grey(0.5)],
+        surface: vec![rough(0.15), rough(0.95), rough(0.15)],
         materials: vec![
             LayerMaterial { metallic: 0.0 },
             LayerMaterial { metallic: 0.0 },
@@ -3829,7 +3829,7 @@ fn decals_carry_their_roughness_and_metallic() {
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn bloom_spreads_a_glow_but_not_lit_ground() {
-    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup};
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, colour_texel, surface_texel};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
@@ -3852,9 +3852,8 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
     let texels = (size * size) as usize;
     let atlas = Arc::new(DecalAtlas {
         size,
-        layers: vec![vec![[0.3, 0.3, 0.3, 1.0]; texels]],
-        normals: vec![vec![[0.0, 0.0, 1.0, 0.9]; texels]],
-        roughness: Vec::new(),
+        colour: vec![vec![colour_texel([0.3, 0.3, 0.3, 1.0]); texels]],
+        surface: vec![vec![surface_texel([0.0, 0.0, 1.0], 1.0, 0.9); texels]],
         materials: Vec::new(),
     });
     let decal = Decal { glow: 1.0, glow_life: 100.0, ..Decal::permanent([128.0, 128.0], [4.0, 4.0], 0.0, 0) };
@@ -5068,5 +5067,154 @@ fn lights_clusters_match_the_unculled_reference() {
             assert!(n > total / 50, "pitch {pitch}: the {name} lights light the ground ({n} of {total} pixels brighter)");
         }
     }
+    assert_clean(&gpu);
+}
+
+/// The bundled scars' normal maps relight the ground. One real scar
+/// (`assets/decals/scars/scar1`, loaded as the client loads it: `read_tga`,
+/// `normal_green_up`, `add_layer`, Recoil's modulate blend) on flat ground
+/// in the sun, against the same atlas with that layer's normals made flat
+/// (roughness and glow kept), close up and at a gameplay distance. Inside
+/// the scar's footprint the two frames must differ: a normal map lost on
+/// the way (channels, mips, the tangent frame) leaves them equal.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn scar_normal_maps_relight_the_ground() {
+    use ae_render::decals::{Blend, Decal, DecalFeed, DecalsSetup, default_atlas, normal_green_up, read_tga};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let n = 129;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
+    let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
+    let (colour, normal) = (read("scar1.tga"), read("scar1_normal.tga"));
+    let up = normal_green_up(&colour, &normal);
+    let mut atlas = default_atlas(512);
+    let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap();
+    let mut flat = atlas.clone();
+    for t in &mut flat.surface[layer as usize] {
+        (t[0], t[1]) = (128, 128);
+    }
+    let (atlas, flat) = (Arc::new(atlas), Arc::new(flat));
+
+    let extent = vk::Extent2D { width: 640, height: 480 };
+    let centre = [512.0f32, 512.0];
+    let render = |atlas: &Arc<ae_render::decals::DecalAtlas>, camera: Camera, decal: bool| -> Vec<u8> {
+        let feed = Arc::new(DecalFeed::default());
+        if decal {
+            feed.place_all(&[Decal { blend: Blend::Modulate, ..Decal::permanent(centre, [16.0, 16.0], 0.6, layer) }]);
+        }
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_decals(DecalsSetup { feed, capacity: 8, atlas: Some(atlas.clone()) });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    for (name, distance, min_mean) in [("close", 50.0f32, 3.0f32), ("gameplay", 250.0, 1.0)] {
+        let camera = Camera { target: Vec2::from(centre), ground: 50.0, distance, yaw: 0.4, pitch: 0.9, fov_y: 0.8 };
+        let none = render(&atlas, camera, false);
+        let mapped = render(&atlas, camera, true);
+        let flattened = render(&flat, camera, true);
+        if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+            for (tag, pixels) in [("mapped", &mapped), ("flat", &flattened)] {
+                let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+                ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+                std::fs::write(std::path::Path::new(&dir).join(format!("scar-normals-{name}-{tag}.ppm")), ppm).unwrap();
+            }
+        }
+        // The footprint: where the scar (either version) changed the ground.
+        let footprint: Vec<usize> = (0..none.len() / 4).map(|i| i * 4).filter(|&i| (luma(&none, i) - luma(&mapped, i)).abs() > 1.0 || (luma(&none, i) - luma(&flattened, i)).abs() > 1.0).collect();
+        let deltas: Vec<f32> = footprint.iter().map(|&i| (luma(&mapped, i) - luma(&flattened, i)).abs()).collect();
+        let mean = deltas.iter().sum::<f32>() / deltas.len().max(1) as f32;
+        let over2 = deltas.iter().filter(|&&d| d > 2.0).count() as f32 / deltas.len().max(1) as f32;
+        let scar = footprint.iter().map(|&i| luma(&flattened, i)).sum::<f32>() / footprint.len().max(1) as f32;
+        println!("scar normals {name}: footprint {} px, mean |dluma| {mean:.2}, {:.0} % over 2, scar luma {scar:.0} (green up: {up})", footprint.len(), over2 * 100.0);
+        assert!(footprint.len() > 200, "{name}: scar out of view");
+        assert!(mean > min_mean, "{name}: the normal map barely changes the frame (mean |dluma| {mean})");
+    }
+    assert_clean(&gpu);
+}
+
+/// The GPU mip generator (`upload::image_mipped`, `shaders/mipgen.comp`):
+/// every level a 2x2 box of the one above, down to 1x1, every layer.
+/// * Coverage (the decal atlas): a transparent texel leaves no colour.
+/// * sRGB is averaged in linear light (black and white make sRGB 188).
+/// * Normal: x, y in rg with z rebuilt, summed and renormalised (not the
+///   plain average of x), b and a averaged; also as RG8 (the tileset).
+/// * R8 averages (the particle puff, the anti-tiling noise).
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn mips_are_made_on_the_gpu() {
+    use ae_render::upload::{MipFilter, image_mipped, read_image};
+    let gpu = gpu();
+    let array = vk::ImageViewType::TYPE_2D_ARRAY;
+    let make = |format, size: u32, layers: &[&[u8]], filter, texel: u64| {
+        let mut image = image_mipped(&gpu, format, size, size, layers, filter, array, "mip test").unwrap();
+        let levels = read_image(&gpu, &image, texel).unwrap();
+        image.destroy(&gpu);
+        levels
+    };
+
+    // Two layers, 2x2: opaque red with one transparent blue texel; white
+    // and black, opaque.
+    let red: Vec<u8> = [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [0, 0, 255, 0]].concat();
+    let grey: Vec<u8> = [[255, 255, 255, 255], [0, 0, 0, 255], [255, 255, 255, 255], [0, 0, 0, 255]].concat();
+    let levels = make(vk::Format::R8G8B8A8_SRGB, 2, &[&red, &grey], MipFilter::Coverage, 4);
+    assert_eq!(levels.len(), 2);
+    assert_eq!(&levels[0][..16], &red[..], "mip 0 is the upload");
+    println!("coverage: {:?}", levels[1]);
+    assert_eq!(&levels[1][..4], &[255, 0, 0, 191], "the transparent blue leaves no colour");
+    let g = levels[1][4];
+    assert!((187..=189).contains(&g) && levels[1][7] == 255, "black and white average in linear light: {:?}", &levels[1][4..]);
+
+    // Normals: two texels leaning +x (x 0.8, z 0.6), two flat; roughness
+    // 0.2 / 0.6, glow 0 / 1.
+    let lean = [230u8, 128, 51, 0];
+    let flat = [128u8, 128, 153, 255];
+    let surface: Vec<u8> = [lean, flat, lean, flat].concat();
+    let levels = make(vk::Format::R8G8B8A8_UNORM, 2, &[&surface], MipFilter::Normal, 4);
+    let x = |c: u8| c as f32 / 255.0 * 2.0 - 1.0;
+    let (lx, ly) = (x(230), x(128));
+    let lz = (1.0 - lx * lx - ly * ly).sqrt();
+    let (fx, fy) = (x(128), x(128));
+    let fz = (1.0 - fx * fx - fy * fy).sqrt();
+    let n = [lx + fx, ly + fy, lz + fz];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    let want = ((n[0] / len * 0.5 + 0.5) * 255.0).round() as i32;
+    let got = levels[1][0] as i32;
+    println!("normal: {:?}, want x {want}", levels[1]);
+    assert!((got - want).abs() <= 1, "renormalised x: {got}, want {want}");
+    assert!((got - 179).abs() > 3, "not the plain average of x");
+    assert!((levels[1][2] as i32 - 102).abs() <= 1 && (levels[1][3] as i32 - 128).abs() <= 1, "roughness and glow averaged: {:?}", levels[1]);
+    let rg: Vec<u8> = surface.chunks(4).flat_map(|t| [t[0], t[1]]).collect();
+    let levels = make(vk::Format::R8G8_UNORM, 2, &[&rg], MipFilter::Normal, 2);
+    assert!((levels[1][0] as i32 - want).abs() <= 1, "RG8 normals: {:?}", levels[1]);
+
+    // R8, 4x4 down to one texel: the mean.
+    let r8: Vec<u8> = (0..16u8).map(|i| i * 16).collect();
+    let levels = make(vk::Format::R8_UNORM, 4, &[&r8], MipFilter::Average, 1);
+    assert_eq!(levels.len(), 3);
+    assert_eq!(levels[1].len(), 4);
+    assert!((levels[2][0] as i32 - 120).abs() <= 1, "R8 mean: {:?}", levels);
     assert_clean(&gpu);
 }

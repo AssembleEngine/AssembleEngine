@@ -264,6 +264,8 @@ impl GpuDevice {
             if features13.dynamic_rendering == vk::FALSE
                 || base.shader_clip_distance == vk::FALSE
                 || base.independent_blend == vk::FALSE
+                || base.shader_storage_image_extended_formats == vk::FALSE
+                || base.shader_storage_image_write_without_format == vk::FALSE
                 || features13.synchronization2 == vk::FALSE
                 || features13.shader_demote_to_helper_invocation == vk::FALSE
                 || features12.timeline_semaphore == vk::FALSE
@@ -309,7 +311,7 @@ impl GpuDevice {
         let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores, texture_compression_bc, gpu_driven)) = candidates
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances and a graphics+compute queue"))?;
+            .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances, storage images of any format and a graphics+compute queue"))?;
         let device_name = properties
             .device_name_as_c_str()
             .map(|name| name.to_string_lossy().into_owned())
@@ -336,6 +338,10 @@ impl GpuDevice {
         let base_features = vk::PhysicalDeviceFeatures::default()
             .shader_clip_distance(true)
             .independent_blend(true)
+            // The mip generator (shaders/mipgen.comp) writes R8, RG8 and
+            // RGBA8 images through one storage image without a format.
+            .shader_storage_image_extended_formats(true)
+            .shader_storage_image_write_without_format(true)
             .fill_mode_non_solid(fill_mode_non_solid)
             .fragment_stores_and_atomics(fragment_stores)
             .texture_compression_bc(texture_compression_bc)

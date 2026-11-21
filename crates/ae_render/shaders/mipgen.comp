@@ -1,0 +1,65 @@
+#version 460
+// One mip level from the one above it (src/upload.rs, image_mipped): each
+// texel the 2x2 box of the level above (clamped at its edge), every layer
+// at once (z). Runs at upload, outside the frame graph.
+//
+// The source is read through a sampled view of the image's own format, so
+// an sRGB image comes in linear; the destination is a storage view of the
+// UNORM twin (sRGB formats are not storage formats), so sRGB is encoded
+// here. The write has no format qualifier (shaderStorageImageWriteWithoutFormat):
+// one shader serves RGBA8, RG8 and R8, extra components are dropped.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2DArray src;
+layout(set = 0, binding = 1) uniform writeonly image2DArray dst;
+
+// Filters (MipFilter):
+// 0 average: every channel averaged.
+// 1 coverage: rgb averaged weighted by alpha (transparent texels leave
+//   no colour on the edges of smaller mips), alpha averaged.
+// 2 normal: rg a tangent normal's x, y as n * 0.5 + 0.5 with z out of the
+//   surface rebuilt; the vectors summed and renormalised; ba averaged.
+layout(push_constant) uniform Push {
+    uint mode;
+    // 1: encode rgb as sRGB (the image is sRGB).
+    uint srgb;
+} p;
+
+float encodeSrgb(float c) {
+    c = clamp(c, 0.0, 1.0);
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+void main() {
+    ivec3 size = imageSize(dst);
+    ivec3 at = ivec3(gl_GlobalInvocationID);
+    if (at.x >= size.x || at.y >= size.y || at.z >= size.z) return;
+    ivec2 hi = textureSize(src, 0).xy - 1;
+    vec4 t[4];
+    for (int i = 0; i < 4; i++) {
+        ivec2 q = min(at.xy * 2 + ivec2(i & 1, i >> 1), hi);
+        t[i] = texelFetch(src, ivec3(q, at.z), 0);
+    }
+    vec4 sum = t[0] + t[1] + t[2] + t[3];
+    vec4 o = sum * 0.25;
+    if (p.mode == 1u) {
+        float a = sum.a;
+        if (a > 0.0) {
+            o.rgb = (t[0].rgb * t[0].a + t[1].rgb * t[1].a + t[2].rgb * t[2].a + t[3].rgb * t[3].a) / a;
+        }
+    } else if (p.mode == 2u) {
+        vec3 n = vec3(0.0);
+        for (int i = 0; i < 4; i++) {
+            vec2 xy = t[i].rg * 2.0 - 1.0;
+            n += vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+        }
+        float len = length(n);
+        n = len > 1e-6 ? n / len : vec3(0.0, 0.0, 1.0);
+        o.rg = n.xy * 0.5 + 0.5;
+    }
+    if (p.srgb != 0u) {
+        o.rgb = vec3(encodeSrgb(o.r), encodeSrgb(o.g), encodeSrgb(o.b));
+    }
+    imageStore(dst, at, o);
+}

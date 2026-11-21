@@ -685,7 +685,7 @@ impl RenderApp for TerrainApp {
                 let atlas: &DecalAtlas = match &setup.atlas {
                     Some(a) => a,
                     None => {
-                        default_atlas = crate::decals::default_atlas();
+                        default_atlas = crate::decals::default_atlas(128);
                         &default_atlas
                     }
                 };

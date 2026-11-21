@@ -39,7 +39,15 @@ impl OwnedImage {
     /// With a view of `view_type` over every mip and layer (`TYPE_2D_ARRAY`
     /// for a `sampler2DArray`, even with one layer).
     pub fn with_view(gpu: &GpuDevice, desc: ImageDesc, view_type: vk::ImageViewType, name: &str) -> Result<Self> {
+        Self::with_view_flags(gpu, desc, view_type, vk::ImageCreateFlags::empty(), name)
+    }
+
+    /// [`Self::with_view`] with image create `flags` (`MUTABLE_FORMAT` for
+    /// a view of another format, as the mip generator's storage view of an
+    /// sRGB image).
+    pub fn with_view_flags(gpu: &GpuDevice, desc: ImageDesc, view_type: vk::ImageViewType, flags: vk::ImageCreateFlags, name: &str) -> Result<Self> {
         let info = vk::ImageCreateInfo::default()
+            .flags(flags)
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
             .extent(vk::Extent3D {
@@ -75,11 +83,18 @@ impl OwnedImage {
             }
         };
         unsafe { gpu.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }?;
-        let view_info = vk::ImageViewCreateInfo::default()
+        // With EXTENDED_USAGE the image's usage may name one its own format
+        // lacks (storage on sRGB, for a view of another format); the
+        // whole-image view drops storage.
+        let mut view_usage = vk::ImageViewUsageCreateInfo::default().usage(desc.usage & !vk::ImageUsageFlags::STORAGE);
+        let mut view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(view_type)
             .format(desc.format)
             .subresource_range(subresource(&desc));
+        if flags.contains(vk::ImageCreateFlags::EXTENDED_USAGE) {
+            view_info = view_info.push_next(&mut view_usage);
+        }
         let view = unsafe { gpu.device.create_image_view(&view_info, None) }?;
         gpu.set_name(image, name);
         gpu.set_name(view, name);

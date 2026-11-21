@@ -1,7 +1,8 @@
 //! glTF images to the model's KTX2 textures.
 //!
-//! * PNG and JPEG: RGBA8 (sRGB or UNORM by use) with a full mip chain
-//!   (2x2 box, in linear light for sRGB), zstd-supercompressed: lossless.
+//! * PNG and JPEG: RGBA8 (sRGB or UNORM by use), level 0 only (the
+//!   renderer makes the mips on the GPU, `ae_render::upload::image_mipped`),
+//!   zstd-supercompressed: lossless.
 //! * KTX2 in a GPU format the runtime takes: kept, its VkFormat switched
 //!   to the sRGB or UNORM twin its use asks for.
 //! * KTX2 with Basis Universal (`KHR_texture_basisu`; VkFormat undefined):
@@ -19,7 +20,7 @@ pub fn to_ktx2(bytes: &[u8], srgb: bool, warnings: &mut Vec<String>, what: &str)
     }
     let decoded = image::load_from_memory(bytes).with_context(|| format!("{what}: decode"))?.to_rgba8();
     let (w, h) = decoded.dimensions();
-    let levels = mips_rgba8(w, h, decoded.into_raw(), srgb);
+    let levels = vec![decoded.into_raw()];
     let format = if srgb { Format::RGBA8_SRGB } else { Format::RGBA8_UNORM };
     write(&Image { format, width: w, height: h, levels })
 }
@@ -63,48 +64,4 @@ fn transcode_basis(bytes: &[u8], srgb: bool) -> Result<Image> {
         bail!("transcoded data {} bytes, levels {at}", out.data.len());
     }
     Ok(Image { format, width: info.width, height: info.height, levels })
-}
-
-fn to_linear(c: u8) -> f32 {
-    let c = c as f32 / 255.0;
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
-fn to_srgb8(l: f32) -> u8 {
-    let c = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
-    (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-/// The full chain from `rgba` (level 0): each level a 2x2 box of the one
-/// above (edge texels repeated where a size is odd), colour averaged in
-/// linear light when `srgb`, alpha always linear.
-pub fn mips_rgba8(width: u32, height: u32, rgba: Vec<u8>, srgb: bool) -> Vec<Vec<u8>> {
-    let mut levels = vec![rgba];
-    let (mut w, mut h) = (width, height);
-    while w > 1 || h > 1 {
-        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-        let src = levels.last().unwrap();
-        let mut dst = vec![0u8; (nw * nh * 4) as usize];
-        for y in 0..nh {
-            for x in 0..nw {
-                let mut acc = [0.0f32; 4];
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let sx = (2 * x + dx).min(w - 1);
-                    let sy = (2 * y + dy).min(h - 1);
-                    let p = ((sy * w + sx) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += if srgb && c < 3 { to_linear(src[p + c]) } else { src[p + c] as f32 / 255.0 };
-                    }
-                }
-                let q = ((y * nw + x) * 4) as usize;
-                for c in 0..4 {
-                    let v = acc[c] / 4.0;
-                    dst[q + c] = if srgb && c < 3 { to_srgb8(v) } else { (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
-                }
-            }
-        }
-        levels.push(dst);
-        (w, h) = (nw, nh);
-    }
-    levels
 }
