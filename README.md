@@ -68,7 +68,7 @@ war, and caustics on the ground under it; O toggles it, `--no-water` leaves it o
 sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
 toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
 shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
-smoke) sorted back to front and faded softly into the ground (X sets one off at the camera target if it is in sight, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`); smoke and
+smoke) sorted back to front and faded softly into the ground (X sets one off at the camera target if it is in sight, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`; comparison blends with `--particle-blend moments|slices|froxels|packets`); smoke and
 dust cast coloured shadows on the ground, the units and the water (with the units' shadows). Each
 explosion leaves a scar (Recoil's, in `assets/decals/scars`), a decal the terrain's shader paints
 and wraps over cliff edges, relit by its normal map, its centre glowing like hot metal for up to two

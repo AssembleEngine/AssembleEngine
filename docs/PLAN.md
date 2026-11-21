@@ -2358,6 +2358,47 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
     - dust on the ground checked in play: the scene's depth falls inside a slice, so a buried
       puff fades by where the ground lies in it, and that shifts as the frame's range moves.
 
+Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
+`--particle-blend packets`; the M12 TODO):
+- **The port.** The radix sort's front-to-back ranks are marked in a bitset per tile (a
+  word-of-words summary, under an 8 MiB budget; the 65,536-slot pool fits 16-pixel tiles at
+  half resolution and 32-pixel tiles at 1280x720 full). A compute pass packs each rank's puff
+  (centre in the camera's axes, depth,
+  1/radius, premultiplied colour, angle, mip) and marks the tiles its screen bounds cover.
+  A second compute pass walks a tile in packets of 8x4 pixels (one 32-lane subgroup per
+  packet): for each 32-rank word one lane classifies one candidate against the packet's ray
+  rectangle, the ballot collects the hits, and all lanes shade the same hits for their own
+  pixels, front to back. It writes the colour and the per-particle glow into its own RGBA16F
+  targets, then composites them over the scene: the depth-aware upsample at half resolution,
+  one to one at full. A puff is the draw's sphere and soft edge (`particles_frag.glsl`), with
+  an explicit mip from its screen diameter.
+- **Correctness.** The order test runs seven blends with Packets: in the cluster it is 0.84
+  (max 26) from the exact per-pixel reference (sorted 0.75, max 26); crossing it pops 57
+  (sorted 64, reference 58) and is 1.04 from the volume (sorted 0.94); emitted in reverse
+  the frame changes by 1 (float rounding, as the sort). The new GPU test
+  `particles_packets_both_resolutions` checks blue in front, a buried puff, an explosion and
+  the per-particle glow at both resolutions (a fire in front of smoke blooms 9.5 luma at
+  full and 7.3 at half).
+- **Cost** (`bench battle`, about 40k live particles, 1280x720; three runs each, medians;
+  the machine was shared with other workflows, so the packet draw's per-run spread was
+  ±100-170% while its median stayed within 1%):
+  - sorted: 69 µs sim + 152 µs draw at half, 69 + 383 at full.
+  - packets: 69 µs sim (the same sort) + 274 µs draw at half, 69 + 681 at full.
+  - Packets cost 1.8 times the sorted draw at either resolution; full resolution costs
+    2.5 times half for both. The 8 MiB tile masks and the bin/pack pass are fixed; the
+    blend's per-pixel depth and texture work and the four times the tiles dominate full.
+  - The earlier unloaded numbers for the sorted path were 58 + 85 µs (half) and 58 + 171
+    (full); the 1.8 ratio is the comparable part.
+- **Decision:** half resolution. The packet blend is 2.5 times cheaper there and carries the
+  per-particle glow and the depth-aware composite. The sorted draw stays the default,
+  though: the packets are 1.8 times its cost at either resolution for the same order, so
+  `Packets` remains a comparison blend (like the moments, slices and froxels).
+  `bench-diff` of the sorted half path before and after (`m12-packets-sorted` against
+  `m12-pkt-sorted-half-r1`): 0 regressions; against `m12-pkt-packets-half`:
+  `pass/particles` +81% (expected, the comparison mode).
+- Validation clean: 41 GPU tests; client captures of the crossing map with explosions at
+  both resolutions report 0 errors and 0 warnings.
+
 ### M0 risk spikes
 
 | Risk | Experiment | Fallback |
@@ -3397,12 +3438,12 @@ From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
 
 From M12 (2026-11-19):
 
-- **Particle half resolution with blend mode 8.** Take care of the half-resolution sorted
-  particle draw as we switch to Mode 8 of the particle renderer: decide whether to stay at
-  half resolution or go to full resolution. Mode 8's tile bins walk pixels in packets, so its
-  cost balance differs from the sorted draw's; measure both at the scenes' fill rates before
-  choosing. The half-resolution path also carries the extra per-particle glow target and the
-  depth-aware composite (M12 step 4), which full resolution would not need.
+- **Particle half resolution with blend mode 8 — done (2026-11-21).** Mode 8 is
+  `ParticleBlend::Packets` (`--particle-blend packets`); it measured 2.5 times cheaper at half
+  resolution than at full (274 against 681 µs draw in `bench battle`), but 1.8 times the
+  sorted draw at either, so the sorted half-resolution draw stays the default and `Packets`
+  stays a comparison blend. Write-up above ("Packets, blend mode 8, and the half/full
+  decision").
 - **Automatic exposure (eye adaptation), as AAA games do.** A compute pass reduces the HDR
   scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
   brightest few percent; the exposure eases toward the target key over time (faster when the
