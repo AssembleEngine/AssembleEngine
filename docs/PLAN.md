@@ -1957,8 +1957,8 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
   - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
   - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
     colour); `default_atlas` generates a scorch mark and a crater. Each layer also carries its
-    `LayerMaterial` (GGX roughness, metallic; M12 step 3), blended into the ground by the
-    decal's coverage.
+    `LayerMaterial` (metallic; roughness comes from the layer's surface texture; M12 step 3),
+    blended into the ground by the decal's coverage.
   - Specialization constant 1 (`DECALS`): the terrain pipeline with decals is built only with
     `with_decals`. Each frame it is used only while some decal's box (its square in plan, the map's
     height range) meets the view frustum. Decals never expire, so without this gate the first death
@@ -2103,8 +2103,9 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
 
 M7 goal (after decals, before the stretch goal): decals that look like Recoil's scars.
 - **Textures.** Recoil's scars, `~/RecoilEngine/cont/base/bitmaps/bitmaps/scars/`:
-  - `scarN.tga`, each with a `scarN_normal.tga` (the bundled set is now one 512² scar);
-  - RGBA, 8-bit alpha. In the normal maps, rgb is the tangent-space normal and alpha is the glow
+  - `scarN.tga`, each with a `scarN_normal.tga` (the bundled set is now ten 512² scars);
+  - RGBA, 8-bit alpha. In the normal maps, rg is the tangent normal x/y (z rebuilt),
+    b is roughness (linear, taken as the layer's roughness), and alpha is the glow
     (heat) mask (`normVal.w`).
   - Load them into the decal atlas, replacing or joining the generated scorch and crater. The
     licence must allow it, or use them only as a reference for our own; check before shipping.
@@ -2149,23 +2150,27 @@ M7 goal (after decals, before the stretch goal): decals that look like Recoil's 
 
 Recoil's scars (results):
 - **Licence.** Recoil is GPL; the scars' rights holder (this repository's owner) allowed their
-  use, so they are in `assets/decals/scars` (one scar, the old `scar2`; the client discovers
-  every `NAME.tga` with a matching `NAME_normal.tga`) and the client uses them by default
-  (`--scars DIR` for another set, `--scars generated` for the engine's). The generated scorch
-  and crater gained their own normal maps (from generated heights) and, for the scorch, a glow
-  mask.
+  use, so they are in `assets/decals/scars` (ten scars: the old `scar2` plus nine more 512²
+  scars, `scar2`–`scar10`; the client discovers every `NAME.tga` with a matching
+  `NAME_normal.tga`) and the client uses them by default (`--scars DIR` for another set,
+  `--scars generated` for the engine's). The generated scorch and crater gained their own
+  normal maps (from generated heights) and, for the scorch, a glow mask.
 - **Textures.**
   - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
-  - `DecalAtlas::add_layer` resamples to the atlas's size (box when shrinking, bilinear when
-    growing). The client's atlas with scars is 512² (the generated layers grown).
-  - The atlas gained `normals` (empty: flat), a second array (binding 19, UNORM; mips average
-    and renormalize the normal, average the mask).
+  - `DecalAtlas::add_layer` takes any square source and resamples it to the atlas's size (box
+    when shrinking by a whole factor, bilinear otherwise). Only the atlas needs power-of-two
+    mips. The client's atlas with scars is 512² (the generated layers grown).
+  - The normal map's blue channel is the layer's roughness: `add_layer` reconstructs the
+    normal's z from rg and stores blue as that layer's roughness texture, with no roughness
+    factor. (Before this the blue was the normal's z; the bundled files' blue is still the
+    old z until their roughness pass.) The atlas gained `normals` (empty: flat), a second
+    array (binding 19, UNORM; mips average and renormalize the normal, average the mask).
   - Handedness differs per file: the old scar1's normal map had green down the image, the old
     scar2's up (its own curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x
     downsample). `normal_green_up` measures it and `add_layer` flips to the atlas's convention
     (green toward the decal's +z, down the rows). A unit test loads every bundled scar pair:
-    after loading, its curl is positive (0.73 for the current single scar), as the generated
-    layers'.
+    after loading, its curl is positive (0.02 to 0.73 across the bundled set; a baked map can
+    carry little tangential signal), as the generated layers'.
 - **Record**: 16 words, adding glow, glow end, 1 / glow life and the blend.
 - **Shading** (`terrain_decals.glsl`; `applyDecals` returns albedo, normal and glow):
   - **Relit by its normal map.** Each projection's tangents are the world gradients of its u
@@ -2718,19 +2723,21 @@ Steps (commit and stop for compaction after each):
     0.14/255). A first version of the shared BRDF itself multiplied the specular by the
     cosine twice (the terrain test found it).
   - **Decals paint a material, not only a colour**: the channel allocation is albedo RGBA (RGB
-    colour, A coverage) and surface RGBA (R normal x, G normal y, B roughness, A glow); normal
-    z is reconstructed in the shader and metallic stays a per-layer factor. Each `DecalAtlas`
-    layer carries a `LayerMaterial` (roughness and metallic factors; one `vec4` per layer,
-    binding 21), and roughness is factor × texture as in glTF, blended into the ground by the
-    decal's coverage. The default scorch is 0.95/0 (soot is a matte dielectric, so it takes the
-    gloss off rock and wet ground), the crater 0.9/0; the default atlas generates a per-texel
-    roughness map, custom atlas layers write 1 and use their factor. Custom layers default to
-    0.9/0 until `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
+    colour, A coverage) and surface RGBA (R/G the tangent normal x and y, B roughness, A glow);
+    the normal's z is reconstructed in the shader and metallic stays a per-layer factor, but
+    roughness comes strictly from the texture, with no layer factor. Each `DecalAtlas` layer
+    carries a `LayerMaterial` (metallic; one `vec4` per layer, binding 21), blended into the
+    ground by the decal's coverage. The default atlas generates per-texel roughness maps: the
+    scorch 0.855 to 0.95 (char and cinders rougher than the burnt ring), the crater 0.81 to
+    0.9 (the pit rougher than its rim). A scar takes its roughness from the normal map's blue;
+    a layer added without a normal map writes 1. Layers default to metallic 0 until
+    `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
     `mix(0.04, albedo, metallic)`, so a painted metal decal works. GPU
     `decals_carry_their_roughness_and_metallic`: three identical grey layers under a light at
-    the view's mirror read 199 (final roughness 0.15), 136 (0.95) and 249 (metallic 0.15); the
-    albedo and normals are the same, so only the layer's material can explain the difference.
-    CPU tests cover the surface packing, the defaults, the range checks and `resized`.
+    the view's mirror read 199 (roughness texture 0.15), 136 (0.95) and 249 (metallic 1.0);
+    the albedo and normals are the same, so only the layers' roughness textures and metallic
+    factor explain the difference. CPU tests cover the surface packing, the defaults, the
+    range checks and `resized`.
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth

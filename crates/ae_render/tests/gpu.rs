@@ -3747,8 +3747,8 @@ fn decals_carry_their_roughness_and_metallic() {
     let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
 
     // Three layers of the same mid grey: a smooth dielectric, a rough
-    // dielectric, and a smooth metal. Their roughness is factor x texture:
-    // 0.5 x 0.3, 1.0 x 0.95 and 0.15 x 1.0.
+    // dielectric, and a smooth metal. Roughness is the texture, with no
+    // factor: 0.15, 0.95 and 0.15; the metal's metallic factor is 1.
     let size = 16u32;
     let texels = (size * size) as usize;
     let grey = |c: f32| vec![[c, c, c, 1.0]; texels];
@@ -3757,11 +3757,11 @@ fn decals_carry_their_roughness_and_metallic() {
         size,
         layers: vec![grey(0.5), grey(0.5), grey(0.5)],
         normals: Vec::new(),
-        roughness: vec![rough(0.3), rough(0.95), rough(1.0)],
+        roughness: vec![rough(0.15), rough(0.95), rough(0.15)],
         materials: vec![
-            LayerMaterial { roughness: 0.5, metallic: 0.0 },
-            LayerMaterial { roughness: 1.0, metallic: 0.0 },
-            LayerMaterial { roughness: 0.15, metallic: 1.0 },
+            LayerMaterial { metallic: 0.0 },
+            LayerMaterial { metallic: 0.0 },
+            LayerMaterial { metallic: 1.0 },
         ],
     });
 

@@ -16,11 +16,10 @@ layout(constant_id = 1) const bool DECALS = false;
 
 layout(std430, set = 0, binding = 17) readonly buffer DecalBuf { uint decalWords[]; };
 layout(set = 0, binding = 18) uniform sampler2DArray decalAtlas;
-// Layer for layer: the tangent normal (xy, n * 0.5 + 0.5; z is
-// reconstructed), the roughness texture (times the layer's factor) and the
-// glow mask.
+// Layer for layer: the tangent normal xy (n * 0.5 + 0.5; z is
+// reconstructed), the roughness texture (used as is) and the glow mask.
 layout(set = 0, binding = 19) uniform sampler2DArray decalSurface;
-// Layer for layer: x roughness factor, y metallic factor (src/decals.rs,
+// Layer for layer: x metallic factor; y..w reserved (src/decals.rs,
 // LayerMaterial).
 layout(std430, set = 0, binding = 21) readonly buffer DecalMaterialBuf { vec4 decalMaterials[]; };
 
@@ -167,7 +166,7 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         vec2 dxz = P.xz - a.xy;
         if (dot(dxz, dxz) >= dot(a.zw, a.zw) || b.z >= layers) continue;
         vec4 f = decalFloats(at + 8u);   // start, 1 / fade-in, end, 1 / fade-out
-        vec4 mat = decalMaterials[uint(b.z)];  // x roughness factor, y metallic factor
+        vec4 mat = decalMaterials[uint(b.z)];  // x metallic factor
         vec4 g = decalFloats(at + 12u);  // glow, 0, 1 / glow life, blend
         // Unfolded over the ground from the centre, so a decal across a
         // cliff's edge or into its foot continues onto the face, and over
@@ -209,11 +208,10 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         o.normal = o.normal * keep + sn.xyz * opacity;
         // The layer's material replaces the ground's by the same coverage:
         // soot (a rough dielectric) takes the gloss off what it lands on.
-        // `sr` is the coverage-weighted texture roughness, `mat.x` the
-        // layer's factor (glTF's factor x texture); metallic is uniform
-        // across the layer.
-        o.roughness = o.roughness * keep + (mat.x * sr) * opacity;
-        o.metallic = o.metallic * keep + mat.y * cover;
+        // `sr` is the coverage-weighted texture roughness, used as is;
+        // `mat.x` is the layer's metallic factor, uniform across the layer.
+        o.roughness = o.roughness * keep + sr * opacity;
+        o.metallic = o.metallic * keep + mat.x * cover;
         o.glow *= keep;
         // Recoil's decay: the glow less the time since placement over the
         // glow life (a weaker glow ends sooner).
