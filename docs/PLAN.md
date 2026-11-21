@@ -4108,6 +4108,77 @@ From M13 stage 3 (2026-11-21):
   the red (as does the HDR peak clamp). Reduce chroma until the largest channel also fits, at
   the same hue, and measure the change on saturated emitters.
 
+From the render side (2026-11-22):
+
+- **A screen-space distortion effect** (heat haze over burning ground, the shockwave ring of
+  an explosion, a cloaked unit's shimmer, the lensing above a water splash). It displaces where
+  the already-rendered scene is sampled instead of drawing geometry, so it is a view-side
+  effect like the particles: its targets come from the observer's effects, never enter the sim
+  digest, and the fog of war hides them with everything else. Style it after the water's
+  missing refraction (`water_ra`, M16, wants the same scene copy) rather than as a second
+  mechanism.
+  - **Collect the individual targets first, summarise second.** Each live distortion writes a
+    target into a per-frame list: a world position and height, a radius (or box), a direction
+    field (radial for a shockwave, an upward ripple for heat, along a normal for a cloak), a
+    strength, a falloff and a life or noise phase. Then one summary step turns the list into a
+    coarse screen-space field — a quarter-resolution texture, or a binning compute pass over
+    8x8 or 16x16 pixel tiles — holding one offset vector per texel. The distortion pass reads
+    that one sample (bilinear) per pixel, so N overlapping effects cost the same as one and the
+    list stays a data structure the benches and the editor can show.
+  - **Make overlapping distortions sane, not additive.** Summing the vectors gives a pixel
+    twice the offset where two identical effects overlap and lets a crowd smear the image
+    without bound. Combine instead as a weight-normalised average, `v = Σ w_i v_i /
+    max(1, Σ w_i)`: two identical distortions of one pixel then give the offset of one, and a
+    single effect is left untouched. Then clamp `|v|` to a fixed maximum (a few pixels, or a
+    fraction of the screen), so no pile-up distorts more than the limit. Every candidate below
+    must be order independent — commutative and associative, up to the clamp — so the frame
+    does not depend on emitter order, on which worker appended a target, or on a sort:
+    - **A. weight-normalised average, clamped** (the default above): smooth, exact for
+      identical overlaps, but a strong and a weak effect meeting give a mean rather than the
+      strong one;
+    - **B. max magnitude, direction from the stronger target**: exactly one effect where they
+      coincide, hard creases where two fields of different direction cross;
+    - **C. coverage saturate `1 - Π (1 - c_i)`, times one direction** (as the particles'
+      optical depth does with `exp(-Σ)`): only the strength saturates and the direction needs a
+      separate choice;
+    - also try drawing each target's quad into the coarse target with a saturating blend
+      (`MAX`, or `1 - (1 - a)(1 - b)`), which gets an order-free combine for free and is
+      cheaper than a binning pass.
+    - Measure A against B and the quad variant on a dense overlap scene (a dozen shockwaves
+      in one spot), for both the combine's sanity (two identical targets versus one) and the
+      look at the crossing points; keep the one that reads best and is cheapest.
+  - **Where it sits in the frame.** The warp is a uv offset into the scene colour, so it belongs
+    between the scene's draws and the bloom and the tonemap (the same place the exposure
+    meter sits), and the depth, the vision lookup and the HDR exposure stay unwarped. Decide:
+    - whether the bloom is sampled at the same warped uv (the glow then bends with the scene)
+      or at the pixel's own uv (the glow stays put);
+    - whether the distortion samples the scene only, or the scene and the glow, so a fire
+      behind heat haze keeps its bloom;
+    - edge handling: clamp the uv and fade the offset to zero at the screen edge, since there
+      is nothing outside the frame to pull in;
+    - a screen-space field is rebuilt every frame (the camera moves), so do not try to cache
+      it; a world-space field would need the depth buffer to reconstruct positions, and that is
+      its own design.
+  - **Graph and ABI.** Like water and the shadows: a library pass (`distortion.summarise`,
+    `distortion.apply`), a library resource or two, `DECLARE_DISTORTION` (or the field declared
+    as optional, with the pass recording nothing when no target is live), `when: distortion` in
+    graph files, both modules and both `.graph.json` files, new goldens, and the `library`
+    checks (a graph with a distortion target feed needs the pass). A module that knows nothing
+    about it keeps rendering as today. The UI (M8) and the render module's grade and vignette
+    draw after it, so they are never warped; a module's own post chain would need the pass
+    inserted, which is why the field is a library pass and not baked into the tonemap.
+  - **Cost and tests.** One quarter-resolution target plus the collect/summary pass and a
+    fullscreen apply (the tonemap's own 17 µs at 1280x720 is the scale), measured in `battle`
+    and a new `heat` bench scene with dozens of live fields against `bench-diff`. Gates:
+    distortion off is byte-identical to today; two identical overlapping targets change the
+    frame exactly as one does; the clamped maximum is never exceeded; a shockwave over the sky
+    does nothing; emitters outside the observer's sight distort nothing; the field is
+    deterministic for a given target list.
+  - Not decided: whether the target list is filtered by the observer's vision at collect time
+    or the field is masked by the vision texture in the apply; whether a target is a screen
+    quad (cheap, camera-facing) or a world sphere projected at collect time; whether the water's
+    refraction (M16) reuses the same combine and field.
+
 Pie in the sky, some time:
 
 - **`KHR_physics_rigid_bodies` for collision volumes and IK joint limits.** Explore the glTF
