@@ -3030,7 +3030,8 @@ Steps (commit and stop for compaction after each):
     adaptation does; the tonemap adds the already-scaled bloom.
   - **The key** is `KEY_LUMINANCE` 0.5, pre-curve display-linear: what the reference scene
     (untextured terrain, 100 000 lx) meters at EV14, so adaptation settles on the calibrated
-    look (1.0 settled 0.9 EV brighter: display mean 0.773 against 0.596). Culling uses
+    look (1.0 settled 0.9 EV brighter: display mean 0.773 against 0.596; M13 stage 1's
+    curve: 0.353 against 0.366). Culling uses
     `MIN_EV100` (the widest exposure adaptation may reach) when auto is on and the graph has the
     exposure image, so a light is never cut that the brighter image would show; a bench run
     with auto against `--ev100 14` shows no consistent change.
@@ -3049,7 +3050,9 @@ Steps (commit and stop for compaction after each):
     glowing scars darkens the ground away from it to 192.0 luma with the bloom on and 192.3
     off (equal with the glow unmetered), and to 192.3 at the centre against 200.2 near the edge
     (198.2 and 199.7 with the centre weight at 1). All 43 GPU tests pass with validation, and
-    the auto-exposure tests with sync validation.
+    the auto-exposure tests with sync validation. M13 stage 1's curve moved them: 0.353 and
+    0.353 (ratio 1.000), manual 1.73, 0.353 against 0.366, and the glow 154.6/154.8, the
+    centre 154.8 against 161.4 (159.7 and 160.8 with the weight at 1).
   - **The glow and the centre**: the meter adds the glow at the bloom's strength (clamped at 4.0
     at the reference exposure), and weights each block 4× at the centre falling over 0.25
     screen heights (`METER_CENTER_WEIGHT`/`METER_CENTER_SIGMA`). The glow is unblurred: metering
@@ -3154,6 +3157,33 @@ Steps (commit and stop for compaction after each):
     mid-grey, no clamp to 1); new HDR `.dot` goldens.
   - **7. Measure and document.** Bench at 1440p and 3840×1600: tonemap and encode passes
     and the bandwidth of a 10-bit against a 16F swapchain, compared with `bench-diff`.
+- **Stage 1 is done** (2026-11-21). Lottes 2016 (`x^a / ((x^a)^d * b + c)`) is the
+  default curve (`Clamp` stays for exact linear reads). `a` and `d` are 1 (with these
+  anchors a larger shoulder exponent makes the curve fall again past the peak, so values
+  above it would display darker than white), and `b`, `c` are solved on the CPU from two
+  anchors: the automatic exposure's key (0.5 pre-curve) displays at 0.40 linear, and 16.0
+  displays as white. The curve maps the max channel and scales the others with it (hue
+  kept); from 2.0 to 16.0 scene units a `smoothstep`-weighted share (up to 0.7) of the
+  luminance-mapped grey joins in, so a fireball's core whitens while its edge stays
+  orange. At EV14 the sunlit untextured ground displays at a mean of 0.366 linear (0.596
+  with the fit) while the stored scene is unchanged (0.492), and automatic exposure
+  settles at 0.353 against 0.366 manual. `KEY_LUMINANCE` and EV14 did not move: the
+  curve's mid anchor *is* the key, so the calibration and the curve are one definition.
+  Before/after captures (the army at 1400 m; 12 explosions at 350 m) turn the fireball's
+  flat white discs (253,253,252; mean chroma 26 above 200 luma) into a warm gradient with
+  an orange rim (core 243,242,232; mean chroma 67 above 200 luma), and the ground reads
+  darker with more colour. Three GPU thresholds were re-baselined, each one measuring a
+  code delta the curve compresses: `decals_relit_modulated_and_glowing`'s glow rise 60 →
+  25 codes (33 measured, 95 → 129), `scar_normal_maps_relight_the_ground`'s close-up mean
+  |dluma| 3.0 → 2.5 (2.93 measured), and `water_covers_the_low_ground_only`'s wave motion
+  a fifteenth → a twentieth (105 of 1678 pixels). All the others pass unchanged, including
+  `auto_exposure_holds_the_key_across_sunlight`, whose manual ratio fell from 1.88 to 1.73
+  against its 1.6 floor. New `the_curve_places_the_sunlit_ground` pins the gate.
+  Cost: `pass/tonemap` 16.4 → 17.4 µs in `--bench army` at 1280×720 (three interleaved
+  rounds against the ACES commit on the same machine; one 1.024 µs timestamp step),
+  `gpu_total` +0.2%. `bench-diff` against `bench/results/baseline` is not usable here: that
+  baseline is from 785e1d3 (2026-11-14), has no exposure passes, and flags M4–M12's own
+  growth (26 regressions unrelated to the curve); re-record it (TODO).
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -3975,31 +4005,15 @@ From M12 (2026-11-19):
   - test: a lamp billboard or in-scattering adds a halo with bloom on and none with it off,
     while the ground it lights changes by 0.0; plus an occlusion case.
 
-From the M12 automatic exposure (2026-11-21):
+From M13 stage 1 (2026-11-21):
 
-- **ACES makes everything overly bright; a fireball becomes fully white.** Seen in the client
-  (`ae-client`, explosion on the fox scenes): the whole image reads too bright, and an
-  explosion's core and its bloom clip to a flat white disc with no colour or shape left. What
-  is known:
-  - the curve is Narkowicz's fit, per channel in the input's primaries and pre-exposed
-    (`aces(1.0) = 0.803`, about 232 in sRGB), and the EV14 calibration relies on that; sunlit
-    untextured ground displays at a mean of 0.596 linear (about 200 of 255 luma in the GPU
-    tests), high for a mid-tone;
-  - per channel, a hot emitter's three channels all reach the fit's 1.0 shoulder, so its hue
-    goes to white; the bloom adds 0.3 of the clamped glow on top before the curve;
-  - automatic exposure targets `KEY_LUMINANCE` 0.5, calibrated to match manual EV14, so it
-    keeps the bright look rather than correcting it, and an explosion darkens the frame only
-    slowly (1.5/s) and by its share of a centre-weighted mean.
-
-  Decide before changing (each moves every capture and the GPU tests' thresholds): a lower
-  calibration (EV14's look, or the key below 0.5); a curve with a longer shoulder that keeps
-  hue (on luminance or max channel, or a fit such as Hill's ACES or AgX); a cap or
-  desaturation on emitters and the bloom's contribution; or explosion emission levels set
-  against the display rather than the sun. Gate: a fireball keeps an orange-to-yellow
-  gradient and no clipped disc at the default exposure, and sunlit untextured ground
-  displays at a mean of 0.35–0.45 linear (from 0.596). M13's stage 1 (above) takes this
-  up: Narkowicz's fit gives way to Lottes 2016 with peak / paper white as its parameter,
-  and the exposure calibration moves with it.
+- **Re-record `bench/results/baseline`.** It is from 785e1d3 (2026-11-14) and has no exposure
+  passes, so `ae-tool bench-diff` against it flags M4–M12's own growth (26 regressions) and
+  cannot judge a stage; stage 1 was measured against its parent commit instead.
+- **Look check: the curve's toe.** The solved Lottes curve has slope `1 / c` ≈ 1.29 at zero,
+  which lifts the darks; with the lowered midtones the far ground reads greyer and flatter in
+  the stage 1 captures. If it reads muddy on the display, try `contrast` (`a`) above 1, which
+  deepens the toe without moving the anchors.
 
 Pie in the sky, some time:
 

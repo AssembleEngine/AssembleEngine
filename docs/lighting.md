@@ -20,8 +20,8 @@ eased EV (Automatic exposure below).
 - Camera exposure is EV100 with `exposure = 1 / (1.2 * 2^EV100)`; the default
   is EV14 (≈ 5.086e-5), which keeps the old terrain look: a fully lit
   Lambertian surface gets `100000 * exposure / pi ≈ 1.62`, the old `1.6` sun
-  coefficient. The default tone curve is ACES; `Clamp` stays for migration
-  captures and debugging.
+  coefficient. The default tone curve is Lottes 2016 (Colour below);
+  `Clamp` stays for migration captures and debugging.
 - The exposure is applied by the scene passes before they store into the
   RGBA16F scene; `post.tonemap` only curves. Every pass that writes the
   scene (terrain, units, water, the particle modes' final writes) uses the
@@ -63,7 +63,7 @@ in the same frame's bloom and tonemap.
   spreads the light only about 20 pixels at 1280×720. The effect is small,
   since the scene already holds the same emitters at full strength: in the
   GPU test a fireball-sized patch of glowing scars darkens the surrounding
-  ground by 0.3 of 255 luma more with the bloom on (192.0 against 192.3).
+  ground by 0.2 of 255 luma more with the bloom on (154.6 against 154.8).
   An explosion's fire and smoke particles are drawn into the scene and
   metered at full weight.
 - **Centre-weighted**: each block's count is weighted by
@@ -71,8 +71,8 @@ in the same frame's bloom and tonemap.
   `r` its distance from the frame's centre in screen heights: 4× at the
   centre, half-way down at about 0.3 heights (`METER_CENTER_SIGMA` 0.25).
   Counts are integers (4 per unit weight), so the percentiles stay `u32`
-  arithmetic. In the GPU test the same patch darkens the ground to 192.3
-  luma at the centre and 200.2 near the edge (198.2 and 199.7 with the
+  arithmetic. In the GPU test the same patch darkens the ground to 154.8
+  luma at the centre and 161.4 near the edge (159.7 and 160.8 with the
   weight set to 1).
 - **Adaptation** (`exposure.adapt`, compute, one invocation): the trimmed
   mean log2 luminance — the darkest and brightest 2% skipped
@@ -82,7 +82,7 @@ in the same frame's bloom and tonemap.
   less exposure. `KEY_LUMINANCE` is 0.5 (pre-curve display-linear), what the
   reference scene (untextured terrain under 100 000 lx) meters at EV14, so
   adaptation settles on the calibrated look: the GPU test's auto capture
-  there has display mean 0.575 against 0.596 at manual EV14. The EV eases
+  there has display mean 0.353 against 0.366 at manual EV14. The EV eases
   exponentially in EV space,
   `ev += (target - ev) * (1 - exp(-rate * dt))` (`dt` is wall-clock time
   in the window, pauses included, so the eye keeps adapting on a paused
@@ -341,7 +341,7 @@ of four 2×2 means per 4×4 block, then an 11-tap Gaussian (sigma 2
 quarter-size texels, ±5 is the 4% tail) along x and y. The result is added
 to the scene before the tone curve, scaled by `ToneParams::bloom` (0.3,
 RA3's `kBloomStrength`; 0 turns it off, and the client's `Z` toggles it
-without changing the graph), so ACES rolls it off with the rest. The buffer is
+without changing the graph), so the curve rolls it off with the rest. The buffer is
 `RGBA16F` like the scene; a graph without a glow (and its three bloom
 passes) binds the scene to the second tonemap sampler and switches bloom
 off. The glow input is clamped at 4.0 exposed radiance (`BLOOM_CLAMP`), as
@@ -403,12 +403,21 @@ cached models of older versions are converted again.
   `post.tonemap` applies the automatic exposure's scale and the curve and
   writes display-referred linear values, and the output attachment is
   `*_SRGB`, so the hardware performs the sRGB OETF on store.
-- **The ACES curve is Narkowicz's fit**: linear to display-referred linear,
-  per channel in the input's primaries (no AP0/AP1, no D60 adaptation), an
-  art choice rather than a colorimetric ACES output transform. It is
-  pre-exposed (`aces(1.0) = 0.803`, about 232 in sRGB), which the EV14
-  calibration relies on. A 0..1 sRGB attachment is an SDR assumption; HDR
-  output (M13) needs PQ or scRGB and another ODT.
+- **The tone curve is Lottes 2016** (`x^a / ((x^a)^d * b + c)`, GDC
+  "Advanced Techniques and Optimization of HDR"; M13 stage 1 replaced
+  Narkowicz's ACES fit). `a` (1.0) is the contrast, `d` (1.0) the shoulder,
+  and `b`, `c` are solved on the CPU from two anchors: the automatic
+  exposure's key (0.5 pre-curve) displays at 0.40 linear, and 16.0 displays
+  as white. With these anchors `d > 1` makes the curve fall again past the
+  peak (values above it would display darker than white), so 1 is the largest
+  monotone shoulder. The curve maps the max channel and scales the others
+  with it, so an emitter keeps its hue; from 2.0 to 16.0 scene units a
+  smoothstep-weighted share (up to 0.7) of the luminance-mapped grey joins
+  in, so a fireball's core whitens while its edge stays orange. At EV14 the
+  sunlit untextured ground displays at a mean of 0.366 linear (0.596 with
+  the fit), and the GPU test `the_curve_places_the_sunlit_ground` pins it.
+  A 0..1 sRGB attachment is an SDR assumption; HDR output (M13) needs PQ or
+  scRGB and another encode.
 - Readback is a raw copy of the sRGB attachment, so captures are already
   display-encoded bytes.
 
@@ -423,11 +432,16 @@ cached models of older versions are converted again.
   (roughness in the UBO and its range check); `library` (the exposure image,
   histogram and three passes go together and run in order, and the tonemap
   and bloom downsample sample the eased EV).
+- GPU `the_curve_places_the_sunlit_ground` (validation on): flat untextured
+  ground under the full sun at the default exposure displays at a mean of
+  0.366 linear (0.596 under Narkowicz's fit), while the clamp curve reads the
+  same stored scene as before (0.492), so the curve moves the display and not
+  the exposure.
 - GPU `auto_exposure_holds_the_key_across_sunlight` (validation on): a flat
   ground lit by 100 000 and 25 000 lx, looked at straight down, converges
   over 5 s of the readback clock to display means within 0.3% of each other
-  (0.773 and 0.770, ratio 1.003), while at a manual EV14 the same change
-  gives 1.88. Both are in range, so it is the eased EV and not a clamp.
+  (0.353 and 0.353, ratio 1.000), while at a manual EV14 the same change
+  gives 1.73. Both are in range, so it is the eased EV and not a clamp.
 - GPU `photometric_sun_exposure_and_inverse_square` (validation on): the sun
   scales with its illuminance and one EV doubles the stored scene (so the
   exposure happens before storage, and the tonemap only curves); a white
