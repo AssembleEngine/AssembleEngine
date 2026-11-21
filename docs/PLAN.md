@@ -920,7 +920,7 @@ Terrain edits on screen (`TerrainChanged` reaching the render heightfield):
 Material tilesets (the proposal above; full write-up with captures, texture formats, settings and
 numbers in [docs/tilesets.md](tilesets.md)):
 - `ae_render::terrain::tileset`: a tileset is up to 8 tileable layers (albedo + height in an
-  `R8G8B8A8_SRGB` array, normals in an `R8G8_UNORM` array, full mips), a table from the 8 gameplay
+  `R8G8B8A8_SRGB` array, normals in an `R8G8_UNORM` array, full mips made on the GPU from mip 0), a table from the 8 gameplay
   material ids to a ground and a cliff layer, and per-layer (tile size, normal strength, projection)
   and per-set (cliff slope range, blend depth, detail tilt, boundary warp, macro variation)
   settings. Two procedural placeholder sets, `temperate` and `desert`, 7 layers each, from periodic
@@ -936,7 +936,7 @@ numbers in [docs/tilesets.md](tilesets.md)):
   before (water and generated maps). `ae-client --tileset temperate|desert|none` (default
   temperate), `--tileset-size`, `--weights`; M toggles tileset/palette, B the weights view.
 - Plumbing: `OwnedImage::with_view` (2D-array views), `upload::image_layers` (layers × mips, 16-byte
-  staging offsets), a trilinear REPEAT sampler, bindings 10–12 (pool sizes raised).
+  staging offsets; the tileset now goes through `upload::image_mipped`, mips on the GPU), a trilinear REPEAT sampler, bindings 10–12 (pool sizes raised).
 - Checked: tiling, unit normals, determinism and table validation (unit tests; the tiling measure
   fails on a broken edge); GPU test `tileset_boundaries_are_irregular_and_bounded` (a material
   boundary meanders 15 px and frays in 66 of 232 rows inside its allowed band, the palette's is
@@ -1696,8 +1696,8 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     the scene; this is also its depth test.
   - The depth buffer is now declared with sampled usage in every graph (native, both modules,
     both graph files). The existing goldens and bench scenes are unchanged.
-- **Look.** A 128² puff texture generated at start, mipmapped: a radial falloff broken up by four
-  octaves of value noise.
+- **Look.** A 128² puff texture generated at start (mip 0; the GPU makes the mips): a radial
+  falloff broken up by four octaves of value noise.
   - Each particle gets a random rotation and brightness.
   - Smoke and dust are lit by the sun (past the hills) and the sky, and fogged. Emissive
     particles fade in the fog.
@@ -1955,8 +1955,9 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     fade-out) is placed through a `DecalFeed`; the app stamps its start time. `TerrainApp::with_decals` keeps a ring of
     `DecalsSetup::capacity` (the oldest goes first) across renderer re-creation.
   - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
-  - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
-    colour); `default_atlas` generates a scorch mark and a crater. Each layer also carries its
+  - Atlas: two texture arrays (`DecalAtlas`: mip 0 of each layer as the GPU takes it, sRGB colour
+    with straight alpha and the packed surface; the GPU makes the mips, the colour's weighted by
+    alpha); `default_atlas(size)` generates a scorch mark and a crater. Each layer also carries its
     `LayerMaterial` (metallic; roughness comes from the layer's surface texture; M12 step 3),
     blended into the ground by the decal's coverage.
   - Specialization constant 1 (`DECALS`): the terrain pipeline with decals is built only with
@@ -2157,20 +2158,49 @@ Recoil's scars (results):
   normal maps (from generated heights) and, for the scorch, a glow mask.
 - **Textures.**
   - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
-  - `DecalAtlas::add_layer` takes any square source and resamples it to the atlas's size (box
-    when shrinking by a whole factor, bilinear otherwise). Only the atlas needs power-of-two
-    mips. The client's atlas with scars is 512² (the generated layers grown).
-  - The normal map's blue channel is the layer's roughness: `add_layer` reconstructs the
-    normal's z from rg and stores blue as that layer's roughness texture, with no roughness
-    factor. (Before this the blue was the normal's z; the bundled files' blue is still the
-    old z until their roughness pass.) The atlas gained `normals` (empty: flat), a second
-    array (binding 19, UNORM; mips average and renormalize the normal, average the mask).
+  - `DecalAtlas::add_layer` stores a source of the atlas's size byte for byte; any other square
+    is resampled (box when shrinking by a whole factor, bilinear otherwise; colour in linear
+    light). Only the atlas needs power-of-two mips. The client's atlas with scars is 512²
+    (`default_atlas(512)` generates its layers at that size, the relief scaled to keep its
+    slopes).
+  - The normal map is already the atlas's surface layout (rg the normal's x/y, b roughness, a
+    glow): `add_layer` only flips green (`255 - g`) for a green-up map. Nothing rebuilds z on
+    the CPU; the shader does. The surface is a second array (binding 19, UNORM; its mips
+    renormalize the normal and average roughness and the mask).
   - Handedness differs per file: the old scar1's normal map had green down the image, the old
     scar2's up (its own curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x
     downsample). `normal_green_up` measures it and `add_layer` flips to the atlas's convention
     (green toward the decal's +z, down the rows). A unit test loads every bundled scar pair:
     after loading, its curl is positive (0.02 to 0.73 across the bundled set; a baked map can
     carry little tangential signal), as the generated layers'.
+- **Mips on the GPU** (2026-11-21): every texture the engine mips is uploaded as mip 0 and its
+  chain made by one compute shader (`upload::image_mipped`, `shaders/mipgen.comp`). Each level
+  is a 2x2 box of the one above, clamped at an odd edge, with every layer in one dispatch. sRGB
+  images are read through their sRGB view (linear) and written through a UNORM storage view
+  (`MUTABLE_FORMAT | EXTENDED_USAGE`), encoding sRGB in the shader. Filters: `Average`,
+  `Coverage` (rgb weighted by alpha) and `Normal` (rg a tangent normal's x/y, z rebuilt, summed
+  and renormalized; b, a averaged).
+  - Users: the decal atlas (Coverage) and surface (Normal), the tileset albedo (Average) and
+    normals (Normal, RG8), the anti-tiling noise and the particle puff (R8), and model textures
+    that arrive with level 0 alone. `ae_gltf` now stores PNG/JPEG as level 0 only. BC and Basis
+    textures keep the levels they bring (a compute shader cannot write them). The terrain
+    pyramid and error levels are data reductions, not filtered mips, and stay as they are.
+  - The device now requires `shaderStorageImageExtendedFormats` and
+    `shaderStorageImageWriteWithoutFormat`: one formatless shader writes R8, RG8 and RGBA8.
+  - The tileset's per-layer mean, which the anti-tiling blend needs, is now averaged over mip 0
+    on the CPU instead of read from the last mip.
+  - GPU `mips_are_made_on_the_gpu` (with `upload::read_image`): coverage leaves no colour from
+    a transparent texel, black and white average to sRGB 188, a normal mip is the renormalized
+    sum (185, not the plain 179), and RG8 and R8 work. All 40 GPU tests pass.
+- **Do the scars' normal maps show?** GPU `scar_normal_maps_relight_the_ground`: `scar1`, loaded
+  as the client loads it, with Modulate blend on flat sunlit ground, against the same atlas with
+  that layer's normals made flat (roughness and glow kept). Over the scar's footprint:
+  - close (50 m): mean |Δluma| 4.6, and 36 % of pixels change by more than 2;
+  - at gameplay distance (250 m): mean 2.4, and 32 %.
+
+  They relight the ground, but subtly. The scars are mostly gentle (median tilt 0.15, p90 0.63),
+  dark under Modulate, and rough (blue about 0.93). The same numbers before and after the GPU
+  mips.
 - **Record**: 16 words, adding glow, glow end, 1 / glow life and the blend.
 - **Shading** (`terrain_decals.glsl`; `applyDecals` returns albedo, normal and glow):
   - **Relit by its normal map.** Each projection's tangents are the world gradients of its u
@@ -2736,8 +2766,8 @@ Steps (commit and stop for compaction after each):
     `decals_carry_their_roughness_and_metallic`: three identical grey layers under a light at
     the view's mirror read 199 (roughness texture 0.15), 136 (0.95) and 249 (metallic 1.0);
     the albedo and normals are the same, so only the layers' roughness textures and metallic
-    factor explain the difference. CPU tests cover the surface packing, the defaults, the
-    range checks and `resized`.
+    factor explain the difference. CPU tests cover the surface packing, the defaults and the
+    range checks.
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth
