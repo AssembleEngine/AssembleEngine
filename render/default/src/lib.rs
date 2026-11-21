@@ -1,14 +1,15 @@
 //! The default render module: the terrain, then the units over it (sharing
 //! its colour target and depth buffer), the water surface when the scene
-//! has it, then present or readback, all
-//! from the engine's pass library; the draws write the HDR scene image and
-//! the glow (their light sources only), the bloom reads the glow at a
-//! quarter size, and `post.tonemap` turns both into the target. It declares
-//! the same graph the engine declares natively
-//! (`ae_render::terrain::app::native_graph`), which the host's tests check
-//! pass for pass.
+//! has it, the automatic exposure's meter (the scene's log luminance into a
+//! histogram, then the eased EV into a 1×1 image), the bloom, then present
+//! or readback, all from the engine's pass library; the draws write the HDR
+//! scene image and the glow (their light sources only), the bloom reads the
+//! glow at a quarter size, and `post.tonemap` turns both into the target
+//! with the eased EV. It declares the same graph the engine declares
+//! natively (`ae_render::terrain::app::native_graph`), which the host's
+//! tests check pass for pass.
 
-use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, Declaration, DeclareEnv, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 #[derive(Default)]
 struct Scene;
@@ -46,6 +47,10 @@ impl RenderModule for Scene {
         let maps = [map, tint];
         // The clustered lights: the list the host writes and each cluster's.
         let lights = [library(&mut g, "lights.list"), library(&mut g, "lights.clusters")];
+        // The eased EV and its metering histogram (host-owned, shared by the
+        // slots: the executor derives the cross-frame barriers).
+        let exposure = g.image(EXPOSURE_NAME, exposure_spec(), Class::External);
+        let histogram = library(&mut g, EXPOSURE_HISTOGRAM_NAME);
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
@@ -145,14 +150,31 @@ impl RenderModule for Scene {
                 .sampled(depth, ShaderStage::Fragment)
                 .id();
         }
+        // The meter (the scene, the glow the bloom shows, and the depth to
+        // undo the fog of war's dimming), after every scene writer and before
+        // the bloom and the tonemap.
+        let clear = p.library("exposure.clear");
+        g.pass("exposure clear", PassKind::Transfer, clear).access(histogram, Role::TransferDst).id();
+        let meter = p.library("exposure.meter");
+        g.pass("exposure meter", PassKind::Compute, meter)
+            .sampled(scene, ShaderStage::Compute)
+            .sampled(depth, ShaderStage::Compute)
+            .sampled(glow, ShaderStage::Compute)
+            .access(histogram, Role::StorageBufferReadWrite(ShaderStage::Compute))
+            .id();
+        let adapt = p.library("exposure.adapt");
+        g.pass("exposure adapt", PassKind::Compute, adapt)
+            .access(histogram, Role::StorageBufferRead(ShaderStage::Compute))
+            .access(exposure, Role::StorageImageReadWrite(ShaderStage::Compute))
+            .id();
         let downsample = p.library("bloom.downsample");
-        g.pass("bloom downsample", PassKind::Graphics, downsample).sampled(glow, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        g.pass("bloom downsample", PassKind::Graphics, downsample).sampled(glow, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
         let blur_x = p.library("bloom.blur_x");
         g.pass("bloom blur x", PassKind::Graphics, blur_x).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
         let blur_y = p.library("bloom.blur_y");
         g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");

@@ -148,7 +148,44 @@ pub fn bloom_spec(width: u32, height: u32) -> crate::ImageSpec {
     crate::ImageSpec::color_2d(BLOOM_FORMAT, w, h, 0x4 | 0x10)
 }
 
+/// The exposure image: a 1×1 `RGBA32F` the `exposure` library passes read
+/// and write, sampled by `post.bloom` and `post.tonemap`. It is the frame's
+/// metered, eased EV100, a small buffer so the exposure reaches the shading
+/// passes on the GPU with no CPU readback:
+///
+/// | texel | meaning |
+/// |---|---|
+/// | `x` | the EV100 the tonemap and the bloom apply this frame |
+/// | `y` | the metered mean log2 luminance of the stored scene |
+/// | `z` | the target EV100 the metering asked for, before easing |
+/// | `w` | 1 when the frame metered (auto-exposure on), 0 when manual |
+///
+/// A graph that declares it also declares [`EXPOSURE_HISTOGRAM_NAME`] and
+/// the `exposure.clear`, `exposure.meter` and `exposure.adapt` passes, and
+/// `post.bloom`'s downsample and `post.tonemap` sample it (the scene is
+/// stored at the camera's reference EV and the tonemap applies the eased
+/// one). `RGBA32F`: 16 bytes, and the diagnostics cost nothing to carry.
+pub const EXPOSURE_FORMAT: u32 = 109; // VK_FORMAT_R32G32B32A32_SFLOAT
+pub const EXPOSURE_NAME: &str = "exposure";
+/// The metering histogram: [`EXPOSURE_BINS`] `u32` counts of the scene's
+/// log2 luminance in [`EXPOSURE_LOG2_MIN`]..[`EXPOSURE_LOG2_MAX`]
+/// (`exposure.meter` adds, `exposure.adapt` reads and the next frame's
+/// `exposure.clear` zeroes), a host-owned `External` buffer.
+pub const EXPOSURE_HISTOGRAM_NAME: &str = "exposure.histogram";
+pub const EXPOSURE_BINS: u32 = 128;
+pub const EXPOSURE_LOG2_MIN: f32 = -8.0;
+pub const EXPOSURE_LOG2_MAX: f32 = 8.0;
+pub const EXPOSURE_HISTOGRAM_BYTES: u64 = EXPOSURE_BINS as u64 * 4;
+
+/// The exposure image as a graph declares it (`External`, 1×1): sampled and
+/// storage (the `exposure.adapt` pass writes it).
+pub fn exposure_spec() -> crate::ImageSpec {
+    // Usage: sampled (0x4) | storage (0x8).
+    crate::ImageSpec::color_2d(EXPOSURE_FORMAT, 1, 1, 0x4 | 0x8)
+}
+
 pub const PROGRAM_MAGIC: u32 = u32::from_le_bytes(*b"AEPT");
+
 pub const PROGRAM_VERSION: u32 = 1;
 const PROGRAM_HEADER_WORDS: usize = 4;
 const PROGRAM_WORDS: usize = 6;

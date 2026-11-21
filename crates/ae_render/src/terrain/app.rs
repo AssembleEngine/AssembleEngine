@@ -38,6 +38,7 @@ use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
 use crate::bloom::{Bloom, BloomPass};
 use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
+use crate::exposure::{Exposure, ExposureFrame};
 use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
@@ -185,11 +186,18 @@ pub enum PassWork {
     /// [`LibraryPass::ParticlesDraw`] with its colour attachment, the
     /// depth buffer it samples, and the glow target it writes.
     Particles { color: ResourceId, depth: ResourceId, glow: ResourceId },
-    /// [`LibraryPass::Tonemap`] with the scene image it samples and the
-    /// bloom (the last `bloom.blur_y` output), if the graph has one.
-    Tonemap { scene: ResourceId, bloom: Option<ResourceId> },
-    /// A `post.bloom` pass: its sampled input and colour attachment.
-    Bloom { pass: BloomPass, input: ResourceId, output: ResourceId },
+    /// [`LibraryPass::Tonemap`] with the scene image it samples, the bloom
+    /// (the last `bloom.blur_y` output), if the graph has one, and the
+    /// exposure image (the eased EV), if the graph has one.
+    Tonemap { scene: ResourceId, bloom: Option<ResourceId>, exposure: Option<ResourceId> },
+    /// A `post.bloom` pass: its sampled input and colour attachment, and
+    /// the exposure image the downsample scales by.
+    Bloom { pass: BloomPass, input: ResourceId, output: ResourceId, exposure: Option<ResourceId> },
+    /// [`LibraryPass::ExposureMeter`] with the scene image it meters, the
+    /// depth it rebuilds world positions from (to undo the fog of war's
+    /// dimming), and the glow (the light the bloom shows), each if the graph
+    /// has the meter sample it.
+    ExposureMeter { scene: ResourceId, depth: Option<ResourceId>, glow: Option<ResourceId> },
 }
 
 /// The render module driving the graph, with its wired declaration.
@@ -270,6 +278,12 @@ pub struct TerrainApp {
     /// The glow's three bloom passes (quarter size), when the graph has a
     /// glow.
     bloom: Option<Bloom>,
+    /// The metering and adaptation passes, and the eased EV they hand the
+    /// tonemap.
+    exposure: Option<Exposure>,
+    /// When the previous frame adapted the exposure (wall clock, pauses
+    /// included: the eye keeps adapting while the game is paused).
+    last_adapt_at: Option<Instant>,
     tone: ToneParams,
     /// The configured bloom strength, kept while [`TerrainView::bloom`] is
     /// switched off.
@@ -342,6 +356,8 @@ impl TerrainApp {
             particle_renderer: None,
             tonemap: None,
             bloom: None,
+            exposure: None,
+            last_adapt_at: None,
             tone_bloom: tone.bloom,
             tone,
             lights: None,
@@ -646,6 +662,9 @@ impl RenderApp for TerrainApp {
         if let Some(mut old) = self.bloom.take() {
             old.destroy(gpu);
         }
+        if let Some(mut old) = self.exposure.take() {
+            old.destroy(gpu);
+        }
         if let Some(mut old) = self.particle_renderer.take() {
             old.destroy(gpu);
         }
@@ -673,6 +692,8 @@ impl RenderApp for TerrainApp {
         self.output_format = output;
         self.tonemap = Some(Tonemap::new(gpu, output, frames_in_flight).context("tonemap")?);
         self.bloom = Some(Bloom::new(gpu, frames_in_flight).context("bloom")?);
+        self.exposure = Some(Exposure::new(gpu, frames_in_flight).context("exposure")?);
+        self.last_adapt_at = None;
         let mut lights = LightRenderer::new(gpu, frames_in_flight).context("lights")?;
         lights.set_unculled(self.unculled_lights);
         // The scene's draws write the HDR scene image.
@@ -784,8 +805,29 @@ impl RenderApp for TerrainApp {
         // The view's switch keeps the configured strength for resuming,
         // and turns the bloom off without changing the graph.
         self.tone.bloom = if view.bloom { self.tone_bloom } else { 0.0 };
+        let has_bloom = self.wiring.as_ref().is_some_and(|w| w.glow.is_some());
+        let has_exposure = self.graph_has(LibraryResource::Exposure);
+        // Auto-exposure's step: real time, not the effects' clock, so the
+        // exposure keeps adapting while paused (an explosion inspected on a
+        // paused frame still darkens the image). Readback steps a fixed
+        // 1/60 s a frame, keeping captures deterministic. Capped so a stall
+        // cannot jump the exposure.
+        let dt = match self.output {
+            TerrainOutput::Readback => 1.0 / 60.0,
+            TerrainOutput::Present => self.last_adapt_at.map_or(0.0, |last| wall_now.saturating_duration_since(last).as_secs_f32().min(0.1)),
+        };
+        self.last_adapt_at = Some(wall_now);
+        // The meter undoes the fog of war's dimming where the terrain shades
+        // by it this frame.
+        let vision = if params.vision { self.renderer.as_ref().and_then(|r| r.vision_uniform()) } else { None };
+        if let Some(exposure) = &mut self.exposure {
+            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 } });
+        }
         if let Some(tonemap) = &mut self.tonemap {
-            tonemap.write(slot, self.tone, self.wiring.as_ref().is_some_and(|w| w.glow.is_some()));
+            tonemap.write(slot, self.tone, has_bloom, has_exposure);
+        }
+        if let Some(bloom) = &mut self.bloom {
+            bloom.write(slot, self.tone.ev100, has_exposure);
         }
         let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
         let stats = renderer.read_stats(slot);
@@ -873,7 +915,12 @@ impl RenderApp for TerrainApp {
                 particles.lights(&|p| source.height_at(p), &mut list);
             }
             let planes = super::renderer::frustum_planes(params.view_proj);
-            let cutoff = crate::lighting::cull_cutoff(self.tone.exposure());
+            // Auto-exposure may reach MIN_EV100 (the largest exposure, the
+            // widest cull radius): bound the lights there so adaptation
+            // never hides one it would show.
+            // Only a graph with the exposure image adapts.
+            let ev100 = if self.tone.auto && has_exposure { crate::lighting::MIN_EV100 } else { self.tone.ev100 };
+            let cutoff = crate::lighting::cull_cutoff(crate::lighting::exposure(ev100));
             list.retain(|l| {
                 let (c, r) = l.bounds(cutoff);
                 planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
@@ -963,6 +1010,8 @@ impl RenderApp for TerrainApp {
             LibraryResource::ParticleIndirect => Binding::Buffer(self.particle_renderer.as_ref()?.indirect()),
             LibraryResource::LightList => Binding::Buffer(self.lights.as_ref()?.list(slot)),
             LibraryResource::LightClusters => Binding::Buffer(self.lights.as_ref()?.clusters(slot)),
+            LibraryResource::Exposure => Binding::Image(self.exposure.as_ref()?.image()),
+            LibraryResource::ExposureHistogram => Binding::Buffer(self.exposure.as_ref()?.histogram()),
         })
     }
 
@@ -997,6 +1046,9 @@ impl RenderApp for TerrainApp {
         }
         if let Some(mut bloom) = self.bloom.take() {
             bloom.destroy(gpu);
+        }
+        if let Some(mut exposure) = self.exposure.take() {
+            exposure.destroy(gpu);
         }
         if let Some(mut particles) = self.particle_renderer.take() {
             particles.destroy(gpu);
@@ -1075,6 +1127,7 @@ impl TerrainApp {
             particles: self.particle_renderer.as_ref(),
             tonemap: self.tonemap.as_ref(),
             bloom: self.bloom.as_ref(),
+            exposure: self.exposure.as_ref(),
             lights: self.lights.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
@@ -1092,6 +1145,7 @@ struct SceneRecorder<'a> {
     particles: Option<&'a ParticleRenderer>,
     tonemap: Option<&'a Tonemap>,
     bloom: Option<&'a Bloom>,
+    exposure: Option<&'a Exposure>,
     lights: Option<&'a LightRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
@@ -1105,6 +1159,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
         let units = || self.units.context("unit renderer not created");
         let terrain = || self.renderer.context("terrain renderer not created");
         let particles = || self.particles.context("particle renderer not created");
+        let exposure = || self.exposure.context("exposure not created");
         match &pass.work {
             PassWork::Library(lib) => match lib {
                 LibraryPass::TerrainLod => terrain()?.record_lod(ctx, self.update_lod),
@@ -1123,10 +1178,13 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 }
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
                 LibraryPass::LightsCluster => self.lights.context("lights not created")?.record_cluster(ctx, self.units),
+                LibraryPass::ExposureClear => exposure()?.record_clear(ctx),
+                LibraryPass::ExposureAdapt => exposure()?.record_adapt(ctx),
                 LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
                 LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => anyhow::bail!("bloom passes are wired as PassWork::Bloom"),
+                LibraryPass::ExposureMeter => anyhow::bail!("exposure.meter is wired as PassWork::ExposureMeter"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
             PassWork::Fullscreen { sampled } => {
@@ -1136,12 +1194,20 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 program.record(ctx, &images, self.sampler)?;
             }
             PassWork::Particles { color, depth, glow } => particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?, ctx.image(*glow)?)?,
-            PassWork::Tonemap { scene, bloom } => {
+            PassWork::Tonemap { scene, bloom, exposure } => {
                 let bloom = bloom.map(|r| ctx.image(r)).transpose()?;
-                self.tonemap.context("tonemap not created")?.record(ctx, ctx.image(*scene)?, bloom, self.sampler)?
+                let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
+                self.tonemap.context("tonemap not created")?.record(ctx, ctx.image(*scene)?, bloom, exposure, self.sampler)?
             }
-            PassWork::Bloom { pass: bloom_pass, input, output } => {
-                self.bloom.context("bloom not created")?.record(ctx, *bloom_pass, ctx.image(*input)?, ctx.image(*output)?, self.sampler)?
+            PassWork::Bloom { pass: bloom_pass, input, output, exposure } => {
+                let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
+                self.bloom.context("bloom not created")?.record(ctx, *bloom_pass, ctx.image(*input)?, ctx.image(*output)?, exposure, self.sampler)?
+            }
+            PassWork::ExposureMeter { scene, depth, glow } => {
+                let depth = depth.map(|r| ctx.image(r)).transpose()?;
+                let glow = glow.map(|r| ctx.image(r)).transpose()?;
+                let vision = self.renderer.map(|t| t.vision_buffer(ctx.slot));
+                exposure()?.record_meter(ctx, ctx.image(*scene)?, depth, glow, vision)?
             }
             PassWork::Readback { image, buffer } => {
                 let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
@@ -1209,6 +1275,14 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     let tint = (map.is_some() && particles.is_some()).then(|| library_particle_shadows(&mut graph));
     // The clustered lights: the list the host writes and each cluster's.
     let lights = [LibraryResource::LightList, LibraryResource::LightClusters].map(|r| library_buffer(&mut graph, r));
+    // The eased EV and its metering histogram (host-owned, shared by the
+    // slots: the executor derives the cross-frame barriers).
+    let exposure = graph.image(
+        ae_render_abi::module::EXPOSURE_NAME,
+        ImageDesc::color_2d(vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32), 1, 1, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE),
+        ResourceClass::External,
+    );
+    let exposure_histogram = library_buffer(&mut graph, LibraryResource::ExposureHistogram);
     // A receiver samples the maps the graph has, and reads the lights.
     let receivers = [map, tint];
     fn lit(pass: ae_framegraph::PassBuilder<'_, LibraryPass>, lights: [ResourceId; 2], stage: ShaderStage) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
@@ -1318,12 +1392,30 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .sampled(depth, ShaderStage::Fragment)
             .id();
     }
+    // Automatic exposure: the histogram zeroed, the scene metered (with the
+    // depth, to undo the fog of war's dimming, and the glow the bloom
+    // shows), the EV adapted. It runs after every scene writer (the
+    // particles) and before the bloom and the tonemap, so the frame's eased
+    // EV is the one shown.
+    graph.pass("exposure clear", PassKind::Transfer, LibraryPass::ExposureClear).access(exposure_histogram, Role::TransferDst).id();
+    graph
+        .pass("exposure meter", PassKind::Compute, LibraryPass::ExposureMeter)
+        .sampled(scene, ShaderStage::Compute)
+        .sampled(depth, ShaderStage::Compute)
+        .sampled(glow, ShaderStage::Compute)
+        .access(exposure_histogram, Role::StorageBufferReadWrite(ShaderStage::Compute))
+        .id();
+    graph
+        .pass("exposure adapt", PassKind::Compute, LibraryPass::ExposureAdapt)
+        .access(exposure_histogram, Role::StorageBufferRead(ShaderStage::Compute))
+        .access(exposure, Role::StorageImageReadWrite(ShaderStage::Compute))
+        .id();
     // The bloom: the glow at a quarter size, brightest 2x2 mean per 4x4,
     // then an 11-tap Gaussian along x and y (RA3-graphics' three passes).
-    graph.pass("bloom downsample", PassKind::Graphics, LibraryPass::BloomDownsample).sampled(glow, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+    graph.pass("bloom downsample", PassKind::Graphics, LibraryPass::BloomDownsample).sampled(glow, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
     graph.pass("bloom blur x", PassKind::Graphics, LibraryPass::BloomBlurX).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
     graph.pass("bloom blur y", PassKind::Graphics, LibraryPass::BloomBlurY).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
-    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
     match output {
         TerrainOutput::Present => {
             graph.pass("present", PassKind::Present, LibraryPass::Present).present(target).root().id();
@@ -1488,7 +1580,8 @@ impl TerrainApp {
             LibraryResource::ParticleIndirect => self.particle_renderer.as_ref().map(|p| p.indirect_desc()),
             LibraryResource::LightList => self.lights.as_ref().map(|l| l.list_desc()),
             LibraryResource::LightClusters => self.lights.as_ref().map(|l| l.clusters_desc()),
-            LibraryResource::ReadbackTarget | LibraryResource::ShadowMap | LibraryResource::ParticleShadows => None,
+            LibraryResource::ExposureHistogram => self.exposure.as_ref().map(|e| e.histogram_desc()),
+            LibraryResource::ReadbackTarget | LibraryResource::ShadowMap | LibraryResource::ParticleShadows | LibraryResource::Exposure => None,
         })?;
         if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {
             anyhow::bail!("`readback.target` needs an offscreen target of the graph's extent (create_offscreen)");
@@ -1527,9 +1620,14 @@ impl TerrainApp {
                                 ae_framegraph::ResourceDesc::Image(image) => image,
                                 ae_framegraph::ResourceDesc::Buffer(_) => unreachable!("post.tonemap samples an image"),
                             };
+                            let is_exposure = |r: ResourceId| {
+                                let i = image(r);
+                                i.width == 1 && i.height == 1 && i.format == vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32)
+                            };
                             let scene = sampled.iter().copied().find(|&r| image(r).width == env.extent.width && image(r).height == env.extent.height && image(r).format == env.scene_format).context("tonemap scene")?;
-                            let bloom = sampled.iter().copied().find(|&r| r != scene);
-                            PassWork::Tonemap { scene, bloom }
+                            let exposure = sampled.iter().copied().find(|&r| is_exposure(r));
+                            let bloom = sampled.iter().copied().find(|&r| r != scene && Some(r) != exposure);
+                            PassWork::Tonemap { scene, bloom, exposure }
                         }
                         LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => {
                             let kind = match lib {
@@ -1537,9 +1635,30 @@ impl TerrainApp {
                                 LibraryPass::BloomBlurX => BloomPass::BlurX,
                                 _ => BloomPass::BlurY,
                             };
-                            let input = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).context("bloom input")?;
+                            let sampled: Vec<ResourceId> = pass.intents.iter().filter(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).collect();
+                            let size = |r: ResourceId| match graph.resources[r.index()].desc {
+                                ae_framegraph::ResourceDesc::Image(image) => (image.width, image.height),
+                                ae_framegraph::ResourceDesc::Buffer(_) => (0, 0),
+                            };
+                            let input = sampled.iter().copied().find(|&r| size(r) != (1, 1)).context("bloom input")?;
+                            let exposure = sampled.iter().copied().find(|&r| size(r) == (1, 1));
                             let output = pass.intents.iter().find(|i| matches!(i.role, Role::ColorAttachment(_))).map(|i| i.resource).context("bloom output")?;
-                            PassWork::Bloom { pass: kind, input, output }
+                            PassWork::Bloom { pass: kind, input, output, exposure }
+                        }
+                        LibraryPass::ExposureMeter => {
+                            // Format and size, as the library checks them.
+                            let spec = |r: ResourceId| match graph.resources[r.index()].desc {
+                                ae_framegraph::ResourceDesc::Image(image) => Some((image.format, image.width, image.height)),
+                                ae_framegraph::ResourceDesc::Buffer(_) => None,
+                            };
+                            let (w, h) = (env.extent.width, env.extent.height);
+                            let format = |raw: u32| vk::Format::from_raw(raw as i32);
+                            let sampled: Vec<ResourceId> = pass.intents.iter().filter(|i| i.role == Role::Sampled(ShaderStage::Compute)).map(|i| i.resource).collect();
+                            let find = |want: (vk::Format, u32, u32)| sampled.iter().copied().find(|&r| spec(r) == Some(want));
+                            let scene = find((env.scene_format, w, h)).context("exposure meter scene")?;
+                            let depth = find((env.depth_format, w, h));
+                            let glow = find((format(ae_render_abi::module::GLOW_FORMAT), w, h));
+                            PassWork::ExposureMeter { scene, depth, glow }
                         }
                         lib => PassWork::Library(lib),
                     }
@@ -1564,6 +1683,7 @@ impl TerrainApp {
         }
         library::check_graph(&graph, &resources, |i| match &passes[i].work {
             PassWork::Library(lib) => Some(*lib),
+            PassWork::ExposureMeter { .. } => Some(LibraryPass::ExposureMeter),
             PassWork::Bloom { pass, .. } => Some(match pass {
                 BloomPass::Downsample => LibraryPass::BloomDownsample,
                 BloomPass::BlurX => LibraryPass::BloomBlurX,

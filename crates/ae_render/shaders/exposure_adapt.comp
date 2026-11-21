@@ -1,0 +1,77 @@
+#version 460
+// exposure.adapt (src/exposure.rs): the histogram into the frame's eased
+// EV100 (the 1x1 exposure image), one invocation. Excludes the darkest and
+// brightest few percent, targets the key luminance, eases exponentially in
+// EV space (a faster rate toward a brighter scene's higher EV, a slower one
+// toward a darker scene's) and clamps to the configured bounds. Exponential,
+// not a capped step: the metering's frame-to-frame noise (bins an eighth of
+// an EV wide, units and particles moving) is filtered rather than followed.
+// Mirrors `lighting::target_ev100` and `lighting::adapt_ev100`.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Exposure {
+    vec4 params;  // x: scene EV100, y: dt, z: min EV100, w: max EV100
+    vec4 rates;   // x: 1 when auto, y: the key luminance, z: toward a brighter scene, w: toward a darker one (1/s)
+    vec4 trim;    // x: low percentile, y: high percentile, z: bins
+} e;
+
+layout(std430, set = 0, binding = 1) readonly buffer Histogram { uint bins[]; } h;
+layout(rgba32f, set = 0, binding = 3) uniform image2D exposure;
+
+const float LOG2_MIN = -8.0;
+const float LOG2_MAX = 8.0;
+
+float binLog2(uint i, uint bins) {
+    return LOG2_MIN + (float(i) + 0.5) * (LOG2_MAX - LOG2_MIN) / float(bins);
+}
+
+void main() {
+    float metered = e.rates.x;
+    uint bins = uint(e.trim.z);
+    if (metered < 0.5) {
+        // Manual exposure: the scene clears this frame's EV, and the
+        // tonemap's scale is exactly 1 (no clamp: a manual EV may lie
+        // outside the automatic bounds).
+        imageStore(exposure, ivec2(0, 0), vec4(e.params.x, 0.0, e.params.x, 0.0));
+        return;
+    }
+    vec4 prev = imageLoad(exposure, ivec2(0, 0));
+    // A fresh image is undefined; anything outside the plausible range
+    // starts from the scene's reference EV.
+    float current = (prev.x > 0.0 && prev.x < 64.0) ? prev.x : e.params.x;
+    float mean = 0.0;
+    float target = current;
+    {
+        uint total = 0u;
+        for (uint i = 0u; i < bins; ++i) {
+            total += h.bins[i];
+        }
+        if (total > 0u) {
+            uint low = uint(float(total) * e.trim.x);
+            uint high = max(uint(float(total) * (1.0 - e.trim.y)), low + 1u);
+            // The mean of the bins between the percentiles, weighted by the
+            // part of each bin inside the window.
+            uint seen = 0u;
+            uint used = 0u;
+            float sum = 0.0;
+            for (uint i = 0u; i < bins; ++i) {
+                uint next = seen + h.bins[i];
+                uint lo = max(seen, low);
+                uint hi = min(next, high);
+                if (hi > lo) {
+                    sum += float(hi - lo) * binLog2(i, bins);
+                    used += hi - lo;
+                }
+                seen = next;
+            }
+            if (used > 0u) {
+                mean = sum / float(used);
+                target = e.params.x + (mean - log2(max(e.rates.y, 1e-6)));
+            }
+        }
+    }
+    float tgt = clamp(target, e.params.z, e.params.w);
+    float rate = tgt > current ? e.rates.z : e.rates.w;
+    float eased = clamp(current + (tgt - current) * (1.0 - exp(-rate * e.params.y)), e.params.z, e.params.w);
+    imageStore(exposure, ivec2(0, 0), vec4(eased, mean, tgt, metered));
+}

@@ -94,13 +94,14 @@ wire_enum!(
         Present = 14,
         DepthAttachment = 15,
         DepthRead = 16,
+        StorageBufferReadWrite = 17,
     }
 );
 
 impl RoleKind {
     pub fn takes_stage(self) -> bool {
         use RoleKind::*;
-        matches!(self, Sampled | StorageImageRead | StorageImageWrite | StorageImageReadWrite | StorageBufferRead | StorageBufferWrite | UniformBuffer)
+        matches!(self, Sampled | StorageImageRead | StorageImageWrite | StorageImageReadWrite | StorageBufferRead | StorageBufferWrite | StorageBufferReadWrite | UniformBuffer)
     }
 }
 
@@ -114,6 +115,8 @@ pub enum Role {
     StorageImageReadWrite(ShaderStage),
     StorageBufferRead(ShaderStage),
     StorageBufferWrite(ShaderStage),
+    /// Read and written in place (atomics, a counter it increments).
+    StorageBufferReadWrite(ShaderStage),
     UniformBuffer(ShaderStage),
     VertexBuffer,
     IndexBuffer,
@@ -139,6 +142,7 @@ impl Role {
             StorageImageReadWrite(s) => (RoleKind::StorageImageReadWrite as u32, s as u32),
             StorageBufferRead(s) => (RoleKind::StorageBufferRead as u32, s as u32),
             StorageBufferWrite(s) => (RoleKind::StorageBufferWrite as u32, s as u32),
+            StorageBufferReadWrite(s) => (RoleKind::StorageBufferReadWrite as u32, s as u32),
             UniformBuffer(s) => (RoleKind::UniformBuffer as u32, s as u32),
             VertexBuffer => (RoleKind::VertexBuffer as u32, 0),
             IndexBuffer => (RoleKind::IndexBuffer as u32, 0),

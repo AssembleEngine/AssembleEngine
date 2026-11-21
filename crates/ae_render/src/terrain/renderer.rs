@@ -761,7 +761,7 @@ impl TerrainRenderer {
                 Some(level) => [level, 1.0, 0.08, p.time],
                 None => [0.0, 0.0, 0.0, p.time],
             },
-            vision: self.vision.map_or([0.0; 4], |v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32]),
+            vision: self.vision_uniform().unwrap_or([0.0; 4]),
             unit_shadow,
             effects: [p.effect_time, 0.0, 0.0, 0.0],
             photometry: p.photometry,
@@ -774,6 +774,19 @@ impl TerrainRenderer {
     /// The vision grid this renderer was made for.
     pub fn vision_grid(&self) -> Option<VisionGrid> {
         self.vision
+    }
+
+    /// The vision planes' layout as the shaders read it (`u.vision`: cells
+    /// wide, high, the cell size and the u32 words per row), or `None`
+    /// without a vision grid.
+    pub fn vision_uniform(&self) -> Option<[f32; 4]> {
+        self.vision.map(|v| [v.width as f32, v.height as f32, v.cell_size, (v.stride() * 2) as f32])
+    }
+
+    /// Slot `slot`'s vision planes (line of sight, then explored), as
+    /// [`Self::write_vision`] last wrote them; 16 bytes without a grid.
+    pub fn vision_buffer(&self, slot: usize) -> vk::Buffer {
+        self.vision_bufs[slot].buffer
     }
 
     /// Write `slot`'s vision planes (its previous submission has completed):

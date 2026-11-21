@@ -1,26 +1,36 @@
 digraph frame_graph {
   rankdir=LR;
   node [shape=box, style=filled];
-  p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p1 [label="1: lights\nCompute", fillcolor="#d1e7dd"];
-  p2 [label="2: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p3 [label="3: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
-  p4 [label="4: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
-  p5 [label="5: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
-  p6 [label="6: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p7 [label="7: present\nPresent", fillcolor="#e2e3e5"];
+  p3 [label="0: exposure clear\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="1: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="2: lights\nCompute", fillcolor="#d1e7dd"];
+  p2 [label="3: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p4 [label="4: exposure meter\nCompute", fillcolor="#d1e7dd"];
+  p5 [label="5: exposure adapt\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="6: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p7 [label="7: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p8 [label="8: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p9 [label="9: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p10 [label="10: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p2 [label="terrain.leaves"];
   p0 -> p2 [label="terrain.indirect"];
   p1 -> p2 [label="lights.list"];
   p1 -> p2 [label="lights.clusters"];
-  p2 -> p3 [label="glow"];
-  p2 -> p6 [label="scene"];
-  p3 -> p4 [label="bloom.0"];
-  p3 -> p5 [label="bloom.0"];
-  p4 -> p5 [label="bloom.0"];
-  p4 -> p5 [label="bloom.1"];
-  p5 -> p6 [label="bloom.0"];
-  p6 -> p7 [label="target"];
+  p2 -> p4 [label="depth"];
+  p2 -> p4 [label="scene"];
+  p2 -> p4 [label="glow"];
+  p2 -> p6 [label="glow"];
+  p2 -> p9 [label="scene"];
+  p3 -> p4 [label="exposure.histogram"];
+  p4 -> p5 [label="exposure.histogram"];
+  p5 -> p6 [label="exposure"];
+  p5 -> p9 [label="exposure"];
+  p6 -> p7 [label="bloom.0"];
+  p6 -> p8 [label="bloom.0"];
+  p7 -> p8 [label="bloom.0"];
+  p7 -> p8 [label="bloom.1"];
+  p8 -> p9 [label="bloom.0"];
+  p9 -> p10 [label="target"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
   // physical 2 Transient: glow

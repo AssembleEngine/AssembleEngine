@@ -1,16 +1,19 @@
 digraph frame_graph {
   rankdir=LR;
   node [shape=box, style=filled];
-  p0 [label="0: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p1 [label="1: lights\nCompute", fillcolor="#d1e7dd"];
-  p2 [label="2: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p3 [label="3: water\nGraphics", fillcolor="#cfe2ff"];
-  p4 [label="4: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
-  p5 [label="5: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
-  p6 [label="6: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
-  p7 [label="7: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p8 [label="8: copy\nTransfer", fillcolor="#fff3cd"];
-  p9 [label="9: host read\nTransfer", fillcolor="#fff3cd"];
+  p4 [label="0: exposure clear\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="1: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="2: lights\nCompute", fillcolor="#d1e7dd"];
+  p2 [label="3: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p3 [label="4: water\nGraphics", fillcolor="#cfe2ff"];
+  p5 [label="5: exposure meter\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="6: exposure adapt\nCompute", fillcolor="#d1e7dd"];
+  p7 [label="7: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p8 [label="8: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p9 [label="9: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p10 [label="10: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p11 [label="11: copy\nTransfer", fillcolor="#fff3cd"];
+  p12 [label="12: host read\nTransfer", fillcolor="#fff3cd"];
   p0 -> p2 [label="terrain.leaves"];
   p0 -> p2 [label="terrain.indirect"];
   p1 -> p2 [label="lights.list"];
@@ -20,15 +23,22 @@ digraph frame_graph {
   p2 -> p3 [label="depth"];
   p2 -> p3 [label="scene"];
   p2 -> p3 [label="glow"];
-  p3 -> p4 [label="glow"];
-  p3 -> p7 [label="scene"];
-  p4 -> p5 [label="bloom.0"];
-  p4 -> p6 [label="bloom.0"];
-  p5 -> p6 [label="bloom.0"];
-  p5 -> p6 [label="bloom.1"];
-  p6 -> p7 [label="bloom.0"];
-  p7 -> p8 [label="readback.target"];
-  p8 -> p9 [label="readback.buffer"];
+  p2 -> p5 [label="depth"];
+  p3 -> p5 [label="scene"];
+  p3 -> p5 [label="glow"];
+  p3 -> p7 [label="glow"];
+  p3 -> p10 [label="scene"];
+  p4 -> p5 [label="exposure.histogram"];
+  p5 -> p6 [label="exposure.histogram"];
+  p6 -> p7 [label="exposure"];
+  p6 -> p10 [label="exposure"];
+  p7 -> p8 [label="bloom.0"];
+  p7 -> p9 [label="bloom.0"];
+  p8 -> p9 [label="bloom.0"];
+  p8 -> p9 [label="bloom.1"];
+  p9 -> p10 [label="bloom.0"];
+  p10 -> p11 [label="readback.target"];
+  p11 -> p12 [label="readback.buffer"];
   // physical 0 Transient: depth
   // physical 1 Transient: scene
   // physical 2 Transient: glow

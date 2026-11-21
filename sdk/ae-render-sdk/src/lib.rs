@@ -16,7 +16,7 @@
 //! ae_render_sdk::render_module!(Scene);
 //! ```
 
-pub use ae_render_abi::module::{BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME, bloom_size, bloom_spec, glow_spec, particle_shadow_spec, scene_spec, shadow_map_spec};
+pub use ae_render_abi::module::{BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, EXPOSURE_FORMAT, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_LOG2_MAX, EXPOSURE_LOG2_MIN, EXPOSURE_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME, bloom_size, bloom_spec, exposure_spec, glow_spec, particle_shadow_spec, scene_spec, shadow_map_spec};
 pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 pub use ae_render_abi as abi;
 

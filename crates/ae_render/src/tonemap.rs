@@ -1,6 +1,8 @@
 //! `post.tonemap`: the HDR scene ([`ae_render_abi::module::SCENE_FORMAT`],
-//! linear light, already exposed by the scene passes) to the output by a
-//! tone curve (`shaders/tonemap.frag`), as one fullscreen triangle.
+//! linear light, stored at the camera's reference exposure) to the output by
+//! a tone curve (`shaders/tonemap.frag`), as one fullscreen triangle. With
+//! automatic exposure ([`crate::exposure`]) it first scales the stored scene
+//! by the eased EV read from the 1×1 exposure image.
 
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
@@ -21,7 +23,9 @@ pub enum Curve {
 
 /// The camera exposure and the curve. The exposure is applied by the scene
 /// passes before they store into the HDR buffer
-/// ([`crate::lighting::exposure`]), so the tonemap itself only curves.
+/// ([`crate::lighting::exposure`]), so the tonemap itself only curves; with
+/// `auto` the display exposure is the metered, eased EV from the exposure
+/// image and the tonemap scales the stored scene by the difference.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ToneParams {
     pub ev100: f32,
@@ -32,6 +36,11 @@ pub struct ToneParams {
     /// How much of the graph's bloom joins the scene before the curve
     /// (RA3's 0.3; 0 turns it off without changing the graph).
     pub bloom: f32,
+    /// Automatic exposure (eye adaptation, [`crate::exposure`]): the scene
+    /// is stored at `ev100` and the tonemap applies the metered, eased EV
+    /// instead. Off: `ev100` is the exposure the scene is stored and shown
+    /// at.
+    pub auto: bool,
 }
 
 impl ToneParams {
@@ -43,7 +52,7 @@ impl ToneParams {
 
 impl Default for ToneParams {
     fn default() -> Self {
-        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Aces, sun_illuminance: crate::lighting::SUN_ILLUMINANCE, bloom: BLOOM_STRENGTH }
+        Self { ev100: crate::lighting::DEFAULT_EV100, curve: Curve::Aces, sun_illuminance: crate::lighting::SUN_ILLUMINANCE, bloom: BLOOM_STRENGTH, auto: false }
     }
 }
 
@@ -58,24 +67,29 @@ pub const BLOOM_STRENGTH: f32 = 0.3;
 impl Tonemap {
     /// For an output of `format`.
     pub fn new(gpu: &GpuDevice, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
-        // Two samplers: the scene and the bloom. A graph without a bloom
-        // binds the scene to the second and the uniform switches it off.
-        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), 16, 2, &[format], frames_in_flight)? })
+        // Three samplers: the scene, the bloom and the 1×1 exposure image.
+        // A graph without a bloom or an exposure pass binds the scene to
+        // the missing one and the uniform switches it off.
+        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), 32, 3, &[format], frames_in_flight)? })
     }
 
-    /// Frame slot `slot`'s parameters (before it records).
-    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool) {
-        // Exposure was applied before the scene was stored; only the curve
-        // is left here.
-        let words: [f32; 4] = [params.bloom, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, if bloom { 1.0 } else { 0.0 }, 0.0];
+    /// Frame slot `slot`'s parameters (before it records): the graph's
+    /// bloom, whether it declares the exposure image, and the EV100 the
+    /// scene was stored at ([`ToneParams::ev100`]).
+    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool, exposure: bool) {
+        // Exposure was applied before the scene was stored; the auto
+        // exposure scales the stored scene by the image's EV against this
+        // reference (1 when they agree).
+        let words: [f32; 8] = [params.bloom, if params.curve == Curve::Aces { 1.0 } else { 0.0 }, if bloom { 1.0 } else { 0.0 }, if exposure { 1.0 } else { 0.0 }, params.ev100, 0.0, 0.0, 0.0];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.program.write_uniforms(slot, &bytes);
     }
 
-    /// The scene, plus the bloom's blurred light when the graph has one
-    /// (the scene stands in for it otherwise, unread).
-    pub fn record(&self, ctx: &PassContext<'_>, scene: ImageBinding, bloom: Option<ImageBinding>, sampler: vk::Sampler) -> Result<()> {
-        self.program.record(ctx, &[scene, bloom.unwrap_or(scene)], sampler)
+    /// The scene, plus the bloom's blurred light and the exposure image when
+    /// the graph has them (the scene stands in for either otherwise,
+    /// unread).
+    pub fn record(&self, ctx: &PassContext<'_>, scene: ImageBinding, bloom: Option<ImageBinding>, exposure: Option<ImageBinding>, sampler: vk::Sampler) -> Result<()> {
+        self.program.record(ctx, &[scene, bloom.unwrap_or(scene), exposure.unwrap_or(scene)], sampler)
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

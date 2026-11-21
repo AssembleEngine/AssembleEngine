@@ -217,6 +217,9 @@ pub enum Role {
     StorageImageReadWrite(ShaderStage),
     StorageBufferRead(ShaderStage),
     StorageBufferWrite(ShaderStage),
+    /// Read and written in place (atomics): the barriers make the previous
+    /// writes visible to the reads as well as ordering the writes.
+    StorageBufferReadWrite(ShaderStage),
     UniformBuffer(ShaderStage),
     VertexBuffer,
     IndexBuffer,
@@ -289,6 +292,7 @@ impl Role {
             ),
             Role::StorageBufferRead(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_READ, false),
             Role::StorageBufferWrite(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_WRITE, true),
+            Role::StorageBufferReadWrite(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE, true),
             Role::UniformBuffer(stage) => make(L::UNDEFINED, stage.stages(), A::UNIFORM_READ, false),
             Role::VertexBuffer => make(L::UNDEFINED, S::VERTEX_ATTRIBUTE_INPUT, A::VERTEX_ATTRIBUTE_READ, false),
             Role::IndexBuffer => make(L::UNDEFINED, S::INDEX_INPUT, A::INDEX_READ, false),
@@ -317,6 +321,7 @@ impl Role {
             | Role::Present => desc.is_image(),
             Role::StorageBufferRead(_)
             | Role::StorageBufferWrite(_)
+            | Role::StorageBufferReadWrite(_)
             | Role::UniformBuffer(_)
             | Role::VertexBuffer
             | Role::IndexBuffer
@@ -348,7 +353,7 @@ impl Role {
             ResourceDesc::Buffer(buffer) => {
                 use vk::BufferUsageFlags as U;
                 let required = match self {
-                    Role::StorageBufferRead(_) | Role::StorageBufferWrite(_) => U::STORAGE_BUFFER,
+                    Role::StorageBufferRead(_) | Role::StorageBufferWrite(_) | Role::StorageBufferReadWrite(_) => U::STORAGE_BUFFER,
                     Role::UniformBuffer(_) => U::UNIFORM_BUFFER,
                     Role::VertexBuffer => U::VERTEX_BUFFER,
                     Role::IndexBuffer => U::INDEX_BUFFER,

@@ -18,6 +18,7 @@ pub mod decals;
 pub mod demo;
 pub mod device;
 pub mod executor;
+pub mod exposure;
 pub mod fullscreen;
 pub mod graph_file;
 pub mod library;

@@ -20,7 +20,9 @@
     { "name": "particles.indirect", "kind": "library", "when": "particles" },
     { "name": "shadows.color", "kind": "library", "when": "particle_shadows" },
     { "name": "lights.list", "kind": "library" },
-    { "name": "lights.clusters", "kind": "library" }
+    { "name": "lights.clusters", "kind": "library" },
+    { "name": "exposure", "kind": "library" },
+    { "name": "exposure.histogram", "kind": "library" }
   ],
   "passes": [
     { "name": "terrain lod", "kind": "compute", "library": "terrain.lod",
@@ -51,13 +53,19 @@
       "access": ["particles.state storage_buffer_write:compute", "particles.keys storage_buffer_write:compute", "particles.indirect storage_buffer_write:compute", "lights.list storage_buffer_read:compute", "lights.clusters storage_buffer_read:compute"] },
     { "name": "particles", "kind": "graphics", "library": "particles.draw", "when": "particles",
       "access": ["particles.state storage_buffer_read:vertex", "particles.keys storage_buffer_read:vertex", "particles.indirect indirect", "scene color:load", "glow color:load", "depth sampled:fragment"] },
+    { "name": "exposure clear", "kind": "transfer", "library": "exposure.clear",
+      "access": ["exposure.histogram transfer_dst"] },
+    { "name": "exposure meter", "kind": "compute", "library": "exposure.meter",
+      "access": ["scene sampled:compute", "depth sampled:compute", "glow sampled:compute", "exposure.histogram storage_buffer_read_write:compute"] },
+    { "name": "exposure adapt", "kind": "compute", "library": "exposure.adapt",
+      "access": ["exposure.histogram storage_buffer_read:compute", "exposure storage_image_read_write:compute"] },
     { "name": "bloom downsample", "kind": "graphics", "library": "bloom.downsample",
-      "access": ["glow sampled:fragment", "bloom.0 color:dont_care"] },
+      "access": ["glow sampled:fragment", "exposure sampled:fragment", "bloom.0 color:dont_care"] },
     { "name": "bloom blur x", "kind": "graphics", "library": "bloom.blur_x",
       "access": ["bloom.0 sampled:fragment", "bloom.1 color:dont_care"] },
     { "name": "bloom blur y", "kind": "graphics", "library": "bloom.blur_y",
       "access": ["bloom.1 sampled:fragment", "bloom.0 color:dont_care"] },
     { "name": "tonemap", "kind": "graphics", "library": "post.tonemap",
-      "access": ["scene sampled:fragment", "bloom.0 sampled:fragment", "target color:dont_care"] }
+      "access": ["scene sampled:fragment", "bloom.0 sampled:fragment", "exposure sampled:fragment", "target color:dont_care"] }
   ]
 }

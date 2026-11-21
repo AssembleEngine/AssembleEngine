@@ -816,7 +816,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0 });
+            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0, auto: false });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -879,6 +879,245 @@ fn photometric_sun_exposure_and_inverse_square() {
     // without extinguishing the light: the range window still applies.
     let big = render(0.0, 14.0, vec![Light::point(Vec3::new(target.x, ground + 1.0, target.y), Vec3::ONE, 1.0e9, 2.0, 100.0)], false);
     assert!(add(&big, &dark) > 0.02, "the regularisation radius does not put the light out: {}", add(&big, &dark));
+    assert_clean(&gpu);
+}
+
+/// Automatic exposure (M12): the metered, eased EV (a GPU histogram, a
+/// 1x1 exposure image, no readback) holds the display's mean near the key
+/// across a fourfold sun change, while the same change at a manual EV
+/// brightens the capture. At the reference sun auto matches the manual
+/// reference EV (the key is calibrated there). A frame that is all fog of
+/// war meters as if it were in sight, so the fog darkens the auto capture
+/// as much as the manual one instead of being exposed away. Starts at the
+/// reference EV and eases exponentially (1.5/s toward a brighter scene,
+/// 0.5/s toward a darker one), so the darker scene needs the longer run.
+/// Automatic exposure meters what the player sees and where they look: a
+/// fireball-sized cluster of glowing scars darkens the plain ground around it a little more
+/// with the bloom on (the glow the bloom shows is metered) than with it off, and
+/// more when it sits at the centre of the frame than at its edge (centre-
+/// weighted metering).
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn auto_exposure_meters_the_glow_and_the_centre() {
+    use ae_render::decals::{Decal, DecalAtlas, DecalFeed, DecalsSetup, colour_texel, surface_texel};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use glam::{Vec2, Vec4};
+
+    let gpu = gpu();
+    let n = 65;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    // Straight down, so the frame is ground only.
+    let camera = Camera { target: Vec2::new(128.0, 128.0), ground: 10.0, distance: 160.0, yaw: 0.0, pitch: 1.55, fov_y: 0.8 };
+    let size = 16u32;
+    let texels = (size * size) as usize;
+    let atlas = Arc::new(DecalAtlas {
+        size,
+        colour: vec![vec![colour_texel([0.3, 0.3, 0.3, 1.0]); texels]],
+        surface: vec![vec![surface_texel([0.0, 0.0, 1.0], 1.0, 0.9); texels]],
+        materials: Vec::new(),
+    });
+    let screen = |x: f32, z: f32| {
+        let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(x, 10.0, z, 1.0);
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+    };
+    let render = |at: [f32; 2], bloom: f32| -> Vec<u8> {
+        let feed = Arc::new(DecalFeed::default());
+        // A 5x5 cluster of glowing scars, 12 m apart: a fireball-sized
+        // patch of light (one scar glows only at its core).
+        let scars: Vec<Decal> = (0..25)
+            .map(|k| {
+                let (i, j) = ((k % 5) as f32 - 2.0, (k / 5) as f32 - 2.0);
+                Decal { glow: 1.0, glow_life: 1000.0, ..Decal::permanent([at[0] + 12.0 * i, at[1] + 12.0 * j], [8.0, 8.0], 0.0, 0) }
+            })
+            .collect();
+        feed.place_all(&scars);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_decals(DecalsSetup { feed, capacity: 32, atlas: Some(atlas.clone()) })
+            .with_tone(ToneParams { bloom, auto: true, ..Default::default() });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera = camera;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        // 10 s: the exposure settles.
+        run_headless(&gpu, &mut app, target, 600, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    // The centre and a spot near the frame's left or right edge.
+    let (centre, edge) = ([128.0, 128.0], [128.0 + 70.0, 128.0]);
+    let (eu, _) = screen(edge[0], edge[1]);
+    // Plain ground on the far side from the edge spot, clear of both
+    // scars' glow and bloom.
+    let (x0, x1) = if eu > extent.width as f32 / 2.0 { (8, 40) } else { (extent.width as usize - 40, extent.width as usize - 8) };
+    let ground = |p: &[u8]| -> f32 {
+        let mut sum = 0.0;
+        let mut count = 0.0;
+        for y in 8..extent.height as usize - 8 {
+            for x in x0..x1 {
+                let i = (y * extent.width as usize + x) * 4;
+                sum += 0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32;
+                count += 1.0;
+            }
+        }
+        sum / count
+    };
+    let strength = ae_render::tonemap::BLOOM_STRENGTH;
+    let shot = render(centre, strength);
+    if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
+        let mut ppm = format!("P6 {} {} 255\n", extent.width, extent.height).into_bytes();
+        ppm.extend(shot.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(format!("{dir}/auto-exposure-scar.ppm"), ppm).unwrap();
+    }
+    let centre_bloom = ground(&shot);
+    let centre_plain = ground(&render(centre, 0.0));
+    let edge_plain = ground(&render(edge, 0.0));
+    eprintln!("edge scar at x {eu:.0}; ground luma: centre scar with bloom {centre_bloom:.1}, without {centre_plain:.1}; edge scar without bloom {edge_plain:.1}");
+    // The glow joins at the bloom's strength (0.3) on top of the same light
+    // in the scene, so it moves the exposure a little; readback is
+    // deterministic, so a small margin is a real difference.
+    assert!(centre_bloom < centre_plain - 0.15, "the bloom's glow is metered: {centre_bloom:.1} vs {centre_plain:.1}");
+    assert!(centre_plain < edge_plain - 1.0, "the centre weighs more: {centre_plain:.1} vs {edge_plain:.1}");
+    assert_clean(&gpu);
+}
+
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn auto_exposure_holds_the_key_across_sunlight() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    // A vision feed with no frame published: every cell reads as never
+    // seen (dimmed to 0.2).
+    let grid = ae_render::terrain::renderer::VisionGrid {
+        width: 32,
+        height: 32,
+        cell_size: 32.0,
+    };
+    let render = |sun: f32, auto: bool, fog: bool| -> Vec<u8> {
+        let mut app =
+            TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ToneParams {
+                sun_illuminance: sun,
+                auto,
+                bloom: 0.0,
+                ..Default::default()
+            });
+        if fog {
+            app = app.with_vision(Arc::new(ae_render::terrain::app::VisionFeed::new(grid)));
+        }
+        {
+            // Straight down at the flat map: the ground fills the frame, no
+            // sky, so the meter sees one surface at two sun levels.
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
+        // 10 s at the readback clock's 60 Hz: the 25% scene is two EV down,
+        // which the darkening rate (0.5/s) closes to about 0.013 EV.
+        run_headless(&gpu, &mut app, target, 600, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let linear = |v: u8| -> f32 {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let mean = |pixels: &[u8]| -> f32 {
+        let total = (extent.width * extent.height) as f32;
+        pixels
+            .chunks(4)
+            .map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0)
+            .sum::<f32>()
+            / total
+    };
+    let bright_auto = mean(&render(100_000.0, true, false));
+    let dim_auto = mean(&render(25_000.0, true, false));
+    let bright_manual = mean(&render(100_000.0, false, false));
+    let dim_manual = mean(&render(25_000.0, false, false));
+    let fog_auto = mean(&render(100_000.0, true, true));
+    let fog_manual = mean(&render(100_000.0, false, true));
+    let auto_ratio = bright_auto / dim_auto;
+    let manual_ratio = bright_manual / dim_manual;
+    let (fog_auto_ratio, fog_manual_ratio) = (fog_auto / bright_auto, fog_manual / bright_manual);
+    eprintln!(
+        "mean auto {bright_auto:.3} / {dim_auto:.3} = {auto_ratio:.3}; manual {bright_manual:.3} / {dim_manual:.3} = {manual_ratio:.3}; \
+         fogged auto {fog_auto:.3} ({fog_auto_ratio:.3} of clear), manual {fog_manual:.3} ({fog_manual_ratio:.3})"
+    );
+    assert!(
+        (bright_auto / bright_manual - 1.0).abs() < 0.1,
+        "auto settles on the reference look: {bright_auto:.3} vs {bright_manual:.3}"
+    );
+    assert!(
+        (fog_auto_ratio / fog_manual_ratio - 1.0).abs() < 0.15,
+        "the fog of war is not exposed away: auto keeps {fog_auto_ratio:.3} of the clear frame, manual {fog_manual_ratio:.3}"
+    );
+    assert!(
+        bright_auto > 0.05 && dim_auto > 0.05,
+        "auto-exposure keeps a visible image: {bright_auto} {dim_auto}"
+    );
+    assert!(
+        (auto_ratio - 1.0).abs() < 0.15,
+        "auto-exposure holds the key: {auto_ratio:.3}"
+    );
+    assert!(
+        manual_ratio > 1.6,
+        "manual exposure follows the sun: {manual_ratio:.3}"
+    );
     assert_clean(&gpu);
 }
 
@@ -2952,7 +3191,7 @@ fn particles_light_by_illuminance() {
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
     let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0 };
+    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0, auto: false };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {

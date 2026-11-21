@@ -29,8 +29,9 @@
 //!
 //! * **Resources** are declared in file order. `library`: an engine library
 //!   buffer by its name (`External`, size 0; the host sizes it), or the
-//!   units' shadow map `shadows.map` or the particles' coloured shadows
-//!   `shadows.color` (their fixed specs). `image`:
+//!   units' shadow map `shadows.map`, the particles' coloured shadows
+//!   `shadows.color` or the exposure image `exposure` (their fixed specs).
+//!   `image`:
 //!   the target's size times `scale` (default 1), `format` a Vulkan format
 //!   name or `target` (the target's colour format), `usage` flag names,
 //!   `class` `transient` (default) or `persistent`. `output`: the image the
@@ -49,6 +50,7 @@
 //!   `depth_read`, `sampled:<stage>`, `storage_image_read:<stage>`,
 //!   `storage_image_write:<stage>`, `storage_image_read_write:<stage>`,
 //!   `storage_buffer_read:<stage>`, `storage_buffer_write:<stage>`,
+//!   `storage_buffer_read_write:<stage>`,
 //!   `uniform:<stage>` (`vertex`, `fragment`, `graphics`, `compute`),
 //!   `vertex_buffer`, `index_buffer`, `indirect`, `transfer_src`,
 //!   `transfer_dst`, `host_read`; `flag` n makes the pass conditional, run
@@ -330,6 +332,7 @@ fn role(text: &str) -> Result<Role> {
         "storage_image_read_write" => Role::StorageImageReadWrite(stage(needs("stage")?)?),
         "storage_buffer_read" => Role::StorageBufferRead(stage(needs("stage")?)?),
         "storage_buffer_write" => Role::StorageBufferWrite(stage(needs("stage")?)?),
+        "storage_buffer_read_write" => Role::StorageBufferReadWrite(stage(needs("stage")?)?),
         "uniform" => Role::UniformBuffer(stage(needs("stage")?)?),
         "vertex_buffer" => none().map(|()| Role::VertexBuffer)?,
         "index_buffer" => none().map(|()| Role::IndexBuffer)?,
@@ -406,6 +409,8 @@ impl GraphFile {
                         g.image(&r.name, ae_render_abi::module::shadow_map_spec(), Class::External)
                     } else if r.name == ae_render_abi::module::PARTICLE_SHADOW_NAME {
                         g.image(&r.name, ae_render_abi::module::particle_shadow_spec(), Class::External)
+                    } else if r.name == ae_render_abi::module::EXPOSURE_NAME {
+                        g.image(&r.name, ae_render_abi::module::exposure_spec(), Class::External)
                     } else {
                         g.buffer(&r.name, 0, 0, Class::External)
                     }

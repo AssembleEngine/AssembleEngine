@@ -206,16 +206,19 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: Default::default(), particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--ev100 X] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
     let mut o = Options::default();
     let mut observer_given = false;
+    // `--ev100` alone is a manual exposure; with `--auto-exposure` (either
+    // order) it is the reference the scene is stored at.
+    let (mut ev100_given, mut auto_given) = (false, false);
     let mut args = std::env::args().skip(1);
     let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
     while let Some(arg) = args.next() {
@@ -263,7 +266,11 @@ fn parse() -> Result<Options> {
                     other => bail!("--tonemap {other:?}: clamp or aces"),
                 }
             }
-            "--ev100" => o.tone.ev100 = value("--ev100", &mut args)?.parse().context("--ev100")?,
+            "--ev100" => {
+                o.tone.ev100 = value("--ev100", &mut args)?.parse().context("--ev100")?;
+                ev100_given = true;
+            }
+            "--auto-exposure" => auto_given = true,
             "--sun-lux" => o.tone.sun_illuminance = value("--sun-lux", &mut args)?.parse().context("--sun-lux")?,
             "--no-particles" => o.particles = false,
             "--no-decals" => o.decals = false,
@@ -350,6 +357,13 @@ fn parse() -> Result<Options> {
     }
     if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
         bail!("--frames, --warmup, --label, --out and --no-save go with --bench\n{USAGE}");
+    }
+    if auto_given {
+        o.tone.auto = true;
+    } else if ev100_given {
+        // A fixed EV is the manual exposure: auto-exposure would cancel it
+        // out.
+        o.tone.auto = false;
     }
     Ok(o)
 }

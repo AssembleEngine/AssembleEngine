@@ -6,9 +6,12 @@
 //! The glow holds only light sources (glowing decals, the water's glints,
 //! emissive models and particles), not lit surfaces: a white sail or
 //! sunlit sand does not bloom however bright it is. The water's soft sheen
-//! is kept out separately (`shaders/water.frag`), and every input is
-//! clamped at [`crate::bloom::BLOOM_CLAMP`] exposed light before it is
-//! blurred.
+//! is kept out separately (`shaders/water.frag`), and each input is
+//! clamped at [`crate::bloom::BLOOM_CLAMP`] display-referred light before it
+//! is blurred: `bloom.downsample` applies the eased EV's scale (auto
+//! exposure, [`crate::exposure`]) before the clamp, so the clamp is
+//! exposure-relative and stays 4.0 of display light whatever the adaptation
+//! does.
 
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
@@ -37,30 +40,49 @@ pub struct Bloom {
 impl Bloom {
     pub fn new(gpu: &GpuDevice, frames_in_flight: usize) -> Result<Self> {
         let format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
-        let make = |label: &str, shader: &[u8]| {
-            FullscreenProgram::new(gpu, label, shader, 0, 1, &[format], frames_in_flight)
+        let make = |label: &str, shader: &[u8], uniforms: u32, sampled: usize| {
+            FullscreenProgram::new(gpu, label, shader, uniforms, sampled, &[format], frames_in_flight)
                 .with_context(|| format!("{label} program"))
         };
         Ok(Self {
             passes: [
-                make("bloom.downsample", spirv!("bloom_downsample.frag"))?,
-                make("bloom.blur_x", spirv!("bloom_blur_x.frag"))?,
-                make("bloom.blur_y", spirv!("bloom_blur_y.frag"))?,
+                // The downsample also takes the 1×1 exposure image (the
+                // display scale it applies before the clamp).
+                make("bloom.downsample", spirv!("bloom_downsample.frag"), 16, 2)?,
+                make("bloom.blur_x", spirv!("bloom_blur_x.frag"), 0, 1)?,
+                make("bloom.blur_y", spirv!("bloom_blur_y.frag"), 0, 1)?,
             ],
         })
     }
 
+    /// Frame slot `slot`'s uniforms (before it records): the EV100 the
+    /// scene was stored at, and whether the graph declares the exposure
+    /// image.
+    pub fn write(&mut self, slot: usize, scene_ev100: f32, exposure: bool) {
+        let words: [f32; 4] = [scene_ev100, if exposure { 1.0 } else { 0.0 }, 0.0, 0.0];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        self.passes[BloomPass::Downsample as usize].write_uniforms(slot, &bytes);
+    }
+
     /// Record `pass`: `input` sampled in the fragment stage into `output`
-    /// (in `COLOR_ATTACHMENT_OPTIMAL`).
+    /// (in `COLOR_ATTACHMENT_OPTIMAL`), and the exposure image for the
+    /// downsample when the graph has one (the input stands in otherwise,
+    /// unread).
     pub fn record(
         &self,
         ctx: &PassContext<'_>,
         pass: BloomPass,
         input: ImageBinding,
         _output: ImageBinding,
+        exposure: Option<ImageBinding>,
         sampler: vk::Sampler,
     ) -> Result<()> {
-        self.passes[pass as usize].record(ctx, &[input], sampler)
+        let images = match pass {
+            BloomPass::Downsample => [input, exposure.unwrap_or(input)],
+            BloomPass::BlurX | BloomPass::BlurY => [input, input],
+        };
+        let count = if pass == BloomPass::Downsample { 2 } else { 1 };
+        self.passes[pass as usize].record(ctx, &images[..count], sampler)
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

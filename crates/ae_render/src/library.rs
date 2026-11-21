@@ -39,6 +39,13 @@
 //! it as a second colour attachment (the light sources only; the rest
 //! black) and the three `post.bloom` passes read it at a quarter of the
 //! size. A graph without it draws the same scene with no bloom.
+//!
+//! Automatic exposure ([`crate::exposure`], [`LibraryResource::Exposure`]):
+//! a graph that declares the 1×1 exposure image has the `exposure.clear`,
+//! `exposure.meter` and `exposure.adapt` passes, and `post.bloom`'s
+//! downsample and `post.tonemap` sample the image (the scenes are stored at
+//! the camera's reference EV and the tonemap applies the eased one). All or
+//! none: the checks reject a partial declaration or the wrong order.
 
 use ae_framegraph::{BufferDesc, FrameGraph, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage};
 use ash::vk;
@@ -81,10 +88,18 @@ pub enum LibraryResource {
     LightList,
     /// The lights of each view cluster (`lights.cluster` writes).
     LightClusters,
+    /// The 1×1 exposure image (a small RGBA32F buffer): the metered, eased
+    /// EV100. `exposure.adapt` writes it; `post.bloom`'s downsample and
+    /// `post.tonemap` sample it ([`ae_render_abi::module::EXPOSURE_NAME`]).
+    Exposure,
+    /// The metering histogram ([`ae_render_abi::module::EXPOSURE_HISTOGRAM_NAME`]):
+    /// `exposure.clear` zeroes it, `exposure.meter` adds counts,
+    /// `exposure.adapt` reads it.
+    ExposureHistogram,
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 16] = [
+    pub const ALL: [LibraryResource; 18] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
         Self::UnitInstances,
@@ -101,6 +116,8 @@ impl LibraryResource {
         Self::ParticleShadows,
         Self::LightList,
         Self::LightClusters,
+        Self::Exposure,
+        Self::ExposureHistogram,
     ];
 
     pub fn name(self) -> &'static str {
@@ -121,6 +138,8 @@ impl LibraryResource {
             Self::ParticleShadows => ae_render_abi::module::PARTICLE_SHADOW_NAME,
             Self::LightList => "lights.list",
             Self::LightClusters => "lights.clusters",
+            Self::Exposure => ae_render_abi::module::EXPOSURE_NAME,
+            Self::ExposureHistogram => ae_render_abi::module::EXPOSURE_HISTOGRAM_NAME,
         }
     }
 
@@ -129,7 +148,7 @@ impl LibraryResource {
     }
 
     pub fn is_image(self) -> bool {
-        matches!(self, Self::ReadbackTarget | Self::ShadowMap | Self::ParticleShadows)
+        matches!(self, Self::ReadbackTarget | Self::ShadowMap | Self::ParticleShadows | Self::Exposure)
     }
 }
 
@@ -167,8 +186,19 @@ pub enum LibraryPass {
     /// The HDR scene image (sampled in the fragment stage, of the scene's
     /// format) to the output (one colour attachment of the target's
     /// format): the tone curve (the scene is stored exposed), plus the
-    /// bloom's light when the graph has a `glow` and `post.bloom` passes.
+    /// bloom's light when the graph has a `glow` and `post.bloom` passes
+    /// and the display exposure when it declares the exposure image.
     Tonemap,
+    /// The metering histogram's counts zeroed for the frame (`transfer`;
+    /// `cmd_fill_buffer`).
+    ExposureClear,
+    /// The scene's log luminance into the histogram (compute): the scene
+    /// sampled in the compute stage at a quarter of the size, one count per
+    /// 4×4 block.
+    ExposureMeter,
+    /// The histogram into the eased EV100, the 1×1 exposure image (compute,
+    /// one invocation).
+    ExposureAdapt,
     /// The glow target's brightest mean per 4×4 block, at a quarter of the
     /// size: `bloom.downsample` (the glow `Sampled(Fragment)`, the first
     /// bloom image a colour attachment).
@@ -208,7 +238,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 20] = [
+    pub const ALL: [LibraryPass; 23] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -226,6 +256,9 @@ impl LibraryPass {
         Self::BloomDownsample,
         Self::BloomBlurX,
         Self::BloomBlurY,
+        Self::ExposureClear,
+        Self::ExposureMeter,
+        Self::ExposureAdapt,
         Self::ReadbackCopy,
         Self::HostRead,
         Self::Present,
@@ -250,6 +283,9 @@ impl LibraryPass {
             Self::BloomDownsample => "bloom.downsample",
             Self::BloomBlurX => "bloom.blur_x",
             Self::BloomBlurY => "bloom.blur_y",
+            Self::ExposureClear => "exposure.clear",
+            Self::ExposureMeter => "exposure.meter",
+            Self::ExposureAdapt => "exposure.adapt",
             Self::ReadbackCopy => "readback.copy",
             Self::HostRead => "host.read",
             Self::Present => "present",
@@ -262,9 +298,9 @@ impl LibraryPass {
 
     pub fn kind(self) -> PassKind {
         match self {
-            Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim | Self::LightsCluster => PassKind::Compute,
+            Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim | Self::LightsCluster | Self::ExposureMeter | Self::ExposureAdapt => PassKind::Compute,
             Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY => PassKind::Graphics,
-            Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead => PassKind::Transfer,
+            Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead | Self::ExposureClear => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
     }
@@ -273,6 +309,13 @@ impl LibraryPass {
     pub fn requires(self) -> &'static [(LibraryResource, Role)] {
         use LibraryResource as R;
         match self {
+            Self::ExposureClear => &[(R::ExposureHistogram, Role::TransferDst)],
+            Self::ExposureMeter => &[(R::ExposureHistogram, Role::StorageBufferReadWrite(ShaderStage::Compute))],
+            // Read and write: the previous frame's EV is the easing's start.
+            Self::ExposureAdapt => &[
+                (R::ExposureHistogram, Role::StorageBufferRead(ShaderStage::Compute)),
+                (R::Exposure, Role::StorageImageReadWrite(ShaderStage::Compute)),
+            ],
             Self::TerrainLod => &[(R::TerrainLeaves, Role::StorageBufferWrite(ShaderStage::Compute)), (R::TerrainIndirect, Role::StorageBufferWrite(ShaderStage::Compute))],
             Self::TerrainDraw => &[(R::TerrainLeaves, Role::StorageBufferRead(ShaderStage::Vertex)), (R::TerrainIndirect, Role::IndirectBuffer)],
             Self::UnitsReset => &[(R::UnitIndirect, Role::TransferDst)],
@@ -442,6 +485,16 @@ pub fn resolve<R>(graph: &mut FrameGraph<R>, env: &LibraryEnv, desc: impl Fn(Lib
                     )));
                 }
             }
+            (ResourceDesc::Image(image), true) if lib == LibraryResource::Exposure => {
+                use ae_render_abi::module as m;
+                let format = vk::Format::from_raw(m::EXPOSURE_FORMAT as i32);
+                if image.format != format || image.width != 1 || image.height != 1 || !image.aspect.contains(vk::ImageAspectFlags::COLOR) {
+                    return Err(error(format!(
+                        "`{}` is {:?} {}x{}; the exposure image is {format:?} 1x1 with a colour aspect (exposure_spec)",
+                        resource.name, image.format, image.width, image.height
+                    )));
+                }
+            }
             (ResourceDesc::Image(image), true) => {
                 if image.format != env.color_format || image.width != env.extent.width || image.height != env.extent.height {
                     return Err(error(format!(
@@ -506,6 +559,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     }
     if lib == LibraryPass::Tonemap {
         return check_tonemap(graph, pass, env);
+    }
+    if lib == LibraryPass::ExposureMeter {
+        return check_exposure_meter(graph, pass, env);
     }
     if matches!(lib, LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY) {
         return check_bloom(graph, pass, lib, env);
@@ -593,13 +649,15 @@ pub fn glow_resource<R>(graph: &FrameGraph<R>) -> Option<ResourceId> {
 
 /// `post.tonemap`: the scene `sampled:fragment` (and the bloom, a quarter
 /// of its size, when the graph declares a glow) and one colour attachment
-/// of the output's, nothing else.
+/// of the output's, nothing else. With the exposure image it samples it
+/// third (`sampled:fragment`, the graph's 1×1 exposure spec).
 fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Result<(), LibraryError> {
     let p = &graph.passes[pass];
     let name = &p.name;
     let bloom_format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
+    let exposure_format = vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32);
     let (bw, bh) = ae_render_abi::module::bloom_size(env.extent.width, env.extent.height);
-    let (mut scene, mut bloom, mut color) = (0, 0, 0);
+    let (mut scene, mut bloom, mut exposure, mut color) = (0, 0, 0, 0);
     let mut sampled = 0;
     for intent in &p.intents {
         let r = &graph.resources[intent.resource.index()];
@@ -617,10 +675,14 @@ fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Res
                 scene += 1;
                 sampled += 1;
             }
+            Role::Sampled(ShaderStage::Fragment) if image.format == exposure_format && (image.width, image.height) == (1, 1) => {
+                exposure += 1;
+                sampled += 1;
+            }
             Role::Sampled(ShaderStage::Fragment) => {
                 if image.format != bloom_format || (image.width, image.height) != (bw, bh) {
                     return Err(error(format!(
-                        "pass `{name}` (post.tonemap) samples `{}` ({:?} {}x{}); the bloom is {:?} {bw}x{bh}",
+                        "pass `{name}` (post.tonemap) samples `{}` ({:?} {}x{}); the bloom is {:?} {bw}x{bh} or the exposure is {exposure_format:?} 1x1",
                         r.name, image.format, image.width, image.height, bloom_format
                     )));
                 }
@@ -633,26 +695,75 @@ fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Res
         }
     }
     let need_bloom = glow_resource(graph).is_some();
+    let need_exposure = graph.resources.iter().any(|r| r.name == ae_render_abi::module::EXPOSURE_NAME);
     if scene != 1 || color != 1 || bloom != usize::from(need_bloom) {
         return Err(error(format!(
-            "pass `{name}` (post.tonemap) samples one scene image{}and writes one colour attachment; it has {scene}, {bloom} and {color}",
+            "pass `{name}` (post.tonemap) samples one scene image{}and writes one colour attachment; it has {scene}, {bloom}, {exposure} and {color}",
             if need_bloom { " and the bloom " } else { " " }
+        )));
+    }
+    if need_exposure && exposure != 1 {
+        return Err(error(format!(
+            "pass `{name}` (post.tonemap) must sample `{}` (the graph declares it: the tonemap applies the eased EV)",
+            ae_render_abi::module::EXPOSURE_NAME
         )));
     }
     Ok(())
 }
 
-/// The bloom's passes: `bloom.downsample` reads the full-size glow and
-/// writes the first quarter-size bloom image; the two blurs read one and
-/// write the other. One sampled input and one colour attachment, no depth.
+/// `exposure.meter`: the scene sampled in the compute stage, full size, and
+/// optionally the depth (to undo the fog of war's dimming) and the glow
+/// (the light the bloom shows), both full size, nothing else (its histogram
+/// is in the library's requirements).
+fn check_exposure_meter<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Result<(), LibraryError> {
+    let p = &graph.passes[pass];
+    let name = &p.name;
+    let histogram = LibraryResource::ExposureHistogram.name();
+    let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
+    let (w, h) = (env.extent.width, env.extent.height);
+    let (mut scene, mut depth, mut glow, mut other) = (0, 0, 0, 0);
+    for intent in &p.intents {
+        let r = &graph.resources[intent.resource.index()];
+        if r.name == histogram && intent.role == Role::StorageBufferReadWrite(ShaderStage::Compute) {
+            continue;
+        }
+        let ResourceDesc::Image(image) = r.desc else {
+            other += 1;
+            continue;
+        };
+        if intent.role != Role::Sampled(ShaderStage::Compute) {
+            other += 1;
+            continue;
+        }
+        match (image.format, image.width, image.height) {
+            (f, iw, ih) if f == env.scene_format && (iw, ih) == (w, h) => scene += 1,
+            (f, iw, ih) if f == env.depth_format && (iw, ih) == (w, h) => depth += 1,
+            (f, iw, ih) if f == glow_format && (iw, ih) == (w, h) => glow += 1,
+            _ => other += 1,
+        }
+    }
+    if scene != 1 || depth > 1 || glow > 1 || other != 0 {
+        return Err(error(format!(
+            "pass `{name}` (exposure.meter) samples one scene image ({:?} {w}x{h}), at most one depth ({:?}) and at most one glow ({glow_format:?}), full size, in the compute stage, and adds to `{histogram}`; it has {scene} scene, {depth} depth, {glow} glow and {other} other intents",
+            env.scene_format, env.depth_format
+        )));
+    }
+    Ok(())
+}
+
+/// The bloom's passes: `bloom.downsample` reads the full-size glow (and the
+/// exposure image, when the graph declares it) and writes the first
+/// quarter-size bloom image; the two blurs read one and write the other.
+/// One sampled input and one colour attachment, no depth.
 fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &LibraryEnv) -> Result<(), LibraryError> {
     let p = &graph.passes[pass];
     let name = &p.name;
     let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
     let bloom_format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
+    let exposure_format = vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32);
     let (bw, bh) = ae_render_abi::module::bloom_size(env.extent.width, env.extent.height);
     let (want_in, want_size) = if lib == LibraryPass::BloomDownsample { (glow_format, (env.extent.width, env.extent.height)) } else { (bloom_format, (bw, bh)) };
-    let (mut input, mut output) = (0, 0);
+    let (mut input, mut output, mut exposure) = (0, 0, 0);
     for intent in &p.intents {
         let r = &graph.resources[intent.resource.index()];
         let ResourceDesc::Image(image) = r.desc else {
@@ -660,6 +771,7 @@ fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &Li
         };
         match intent.role {
             Role::Sampled(ShaderStage::Fragment) if image.format == want_in && (image.width, image.height) == want_size => input += 1,
+            Role::Sampled(ShaderStage::Fragment) if lib == LibraryPass::BloomDownsample && image.format == exposure_format && (image.width, image.height) == (1, 1) => exposure += 1,
             Role::ColorAttachment(_) if image.format == bloom_format && (image.width, image.height) == (bw, bh) => output += 1,
             Role::Sampled(ShaderStage::Fragment) => {
                 return Err(error(format!(
@@ -676,8 +788,20 @@ fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &Li
             role => return Err(error(format!("pass `{name}` ({}) does not use `{}` as {role:?}", lib.name(), r.name))),
         }
     }
-    if input != 1 || output != 1 || p.intents.len() != 2 {
-        return Err(error(format!("pass `{name}` ({}) samples one image and writes one colour attachment; it has {input} and {output} ({} intents)", lib.name(), p.intents.len())));
+    let need_exposure = lib == LibraryPass::BloomDownsample && graph.resources.iter().any(|r| r.name == ae_render_abi::module::EXPOSURE_NAME);
+    if need_exposure && exposure != 1 {
+        return Err(error(format!(
+            "pass `{name}` (bloom.downsample) must sample `{}` (the graph declares it: the clamp follows the eased EV)",
+            ae_render_abi::module::EXPOSURE_NAME
+        )));
+    }
+    if input != 1 || output != 1 || exposure != usize::from(need_exposure) || p.intents.len() != 2 + usize::from(need_exposure) {
+        return Err(error(format!(
+            "pass `{name}` ({}) samples one image{} and writes one colour attachment; it has {input}, {exposure} and {output} ({} intents)",
+            lib.name(),
+            if need_exposure { " and the exposure" } else { "" },
+            p.intents.len()
+        )));
     }
     Ok(())
 }
@@ -741,6 +865,41 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
     } else if written(LibraryPass::BloomDownsample) || written(LibraryPass::BloomBlurX) || written(LibraryPass::BloomBlurY) {
         return Err(error("the graph has `post.bloom` passes but no `glow` image (bloom reads the light sources' glow)".into()));
     }
+    // Automatic exposure: the image and the histogram go with the three
+    // passes, all or none.
+    let (exposure, histogram) = (map.contains(&Some(LibraryResource::Exposure)), map.contains(&Some(LibraryResource::ExposureHistogram)));
+    if exposure != histogram {
+        return Err(error(format!(
+            "the graph declares one of `{}` and `{}`; auto-exposure needs both",
+            LibraryResource::Exposure.name(),
+            LibraryResource::ExposureHistogram.name()
+        )));
+    }
+    let exposure_passes = [LibraryPass::ExposureClear, LibraryPass::ExposureMeter, LibraryPass::ExposureAdapt];
+    let missing: Vec<&str> = exposure_passes.into_iter().filter(|lib| !written(*lib)).map(LibraryPass::name).collect();
+    if exposure && !missing.is_empty() {
+        return Err(error(format!(
+            "the graph declares `{}` but no `{}` pass",
+            LibraryResource::Exposure.name(),
+            missing.join("`, `")
+        )));
+    }
+    if exposure {
+        // Write-write on the histogram orders nothing: a clear declared
+        // after the meter would wipe the frame's counts.
+        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib));
+        if let (Some(clear), Some(meter), Some(adapt)) = (first(LibraryPass::ExposureClear), first(LibraryPass::ExposureMeter), first(LibraryPass::ExposureAdapt))
+            && !(clear < meter && meter < adapt)
+        {
+            return Err(error("the graph's auto-exposure passes must run `exposure.clear`, then `exposure.meter`, then `exposure.adapt`".into()));
+        }
+    }
+    if !exposure && exposure_passes.into_iter().any(written) {
+        return Err(error(format!(
+            "the graph has auto-exposure passes but no `{}` image (the eased EV has nowhere to live)",
+            LibraryResource::Exposure.name()
+        )));
+    }
     Ok(())
 }
 
@@ -757,12 +916,14 @@ mod tests {
         Some(BufferDesc { size: 64 + r as u64, usage: vk::BufferUsageFlags::STORAGE_BUFFER })
     }
 
-    /// Resolve and check every pass; the first error.
+    /// Resolve and check every pass, then the graph-wide rules; the first
+    /// error.
     fn wire(mut graph: FrameGraph<LibraryPass>, env: &LibraryEnv) -> Result<FrameGraph<LibraryPass>, LibraryError> {
         let map = resolve(&mut graph, env, size)?;
         for (i, p) in graph.passes.iter().enumerate() {
             check(&graph, i, p.record, &map, env)?;
         }
+        check_graph(&graph, &map, |i| Some(graph.passes[i].record))?;
         Ok(graph)
     }
 
@@ -776,6 +937,12 @@ mod tests {
             let graph = wire(native_graph(&env(), output), &env()).unwrap();
             let leaves = graph.resources.iter().find(|r| r.name == "terrain.leaves").unwrap();
             assert_eq!(leaves.desc, ae_framegraph::ResourceDesc::Buffer(size(LibraryResource::TerrainLeaves).unwrap()));
+            for lib in [LibraryPass::ExposureClear, LibraryPass::ExposureMeter, LibraryPass::ExposureAdapt] {
+                assert!(graph.passes.iter().any(|p| p.record == lib), "the scene meters and adapts the exposure");
+            }
+            assert!(graph.resources.iter().any(|r| r.name == ae_render_abi::module::EXPOSURE_NAME && r.desc.is_image()));
+            let histogram = graph.resources.iter().find(|r| r.name == ae_render_abi::module::EXPOSURE_HISTOGRAM_NAME).unwrap();
+            assert_eq!(histogram.desc, ae_framegraph::ResourceDesc::Buffer(size(LibraryResource::ExposureHistogram).unwrap()));
         }
         let no_units = LibraryEnv { units: false, ..env() };
         assert!(wire(native_graph(&no_units, TerrainOutput::Present), &no_units).is_ok());
@@ -934,5 +1101,37 @@ mod tests {
         g.passes.retain(|p| p.record != LibraryPass::UnitsPose);
         let e = shadows(&g).unwrap_err();
         assert!(e.contains("no `units.pose` pass"), "{e}");
+
+        // Automatic exposure: the three passes all run in order, the image
+        // and the histogram go together, and the tonemap and the bloom read
+        // the eased EV.
+        let mut g = base();
+        g.passes.retain(|p| p.record != LibraryPass::ExposureAdapt);
+        let e = err(g, &env());
+        assert!(e.contains("declares `exposure`") && e.contains("exposure.adapt"), "{e}");
+        let mut g = base();
+        let (clear, meter) = (pass(&g, LibraryPass::ExposureClear), pass(&g, LibraryPass::ExposureMeter));
+        g.passes.swap(clear, meter);
+        let e = err(g, &env());
+        assert!(e.contains("must run `exposure.clear`, then"), "{e}");
+        let mut g = base();
+        let t = pass(&g, LibraryPass::Tonemap);
+        let exposure = g.resources.iter().position(|r| r.name == ae_render_abi::module::EXPOSURE_NAME).unwrap();
+        g.passes[t].intents.retain(|i| i.resource.index() != exposure);
+        let e = err(g, &env());
+        assert!(e.contains("must sample `exposure`"), "{e}");
+        let mut g = base();
+        let d = pass(&g, LibraryPass::BloomDownsample);
+        g.passes[d].intents.retain(|i| i.resource.index() != exposure);
+        let e = err(g, &env());
+        assert!(e.contains("bloom.downsample") && e.contains("`exposure`"), "{e}");
+        // The meter samples the scene, not an arbitrary image.
+        let mut g = base();
+        let m = pass(&g, LibraryPass::ExposureMeter);
+        let scene = g.passes[m].intents.iter().position(|i| i.role == Role::Sampled(ShaderStage::Compute)).unwrap();
+        let blooms = g.resources.iter().position(|r| r.name == "bloom.0").unwrap();
+        g.passes[m].intents[scene].resource = ResourceId(blooms as u32);
+        let e = err(g, &env());
+        assert!(e.contains("exposure.meter") && e.contains("one scene image"), "{e}");
     }
 }

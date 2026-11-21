@@ -1,0 +1,150 @@
+#version 460
+// exposure.meter (src/exposure.rs): the HDR scene's log luminance into a
+// histogram, one count per 4x4 block (four taps, the block's mean
+// luminance). Metering at a quarter of the size keeps the counts few (a
+// 1280x720 frame is about 58k); each workgroup bins its 64 blocks in shared
+// memory and adds only its non-zero bins to the global histogram, so the
+// global atomics stay few even when the whole frame falls in one bin. The
+// histogram is cleared by `exposure.clear` earlier in the frame and read by
+// `exposure.adapt` after this pass. Auto-exposure off: nothing to meter.
+//
+// The fog of war is a look, not light: the terrain and the water dim the
+// out-of-sight ground by the vision (0.5 explored, 0.2 never seen), and a
+// mostly unexplored frame would otherwise meter dark and brighten the
+// exposure until the fog washed out. With the depth and the vision planes
+// bound, each tap's world position is rebuilt from the depth, and its
+// light is divided by the vision there, so the meter sees the ground as if
+// it were in sight.
+//
+// The bloom is light the player sees: with the glow bound, each tap adds the
+// glow at the bloom's strength (clamped like bloom.downsample, at the
+// reference exposure), as post.tonemap adds the blurred bloom. The blur
+// spreads it only about 20 pixels at 1280x720, so the unblurred glow meters
+// nearly the same light. (Metering the blurred bloom itself would put the
+// meter after the bloom, whose downsample reads this frame's exposure: the
+// frame graph orders a read before a resource's first write after it.) And the centre matters more than the edges: each block counts
+// with a weight peaking at the centre (CENTER_WEIGHT times the edge's,
+// falling off over CENTER_SIGMA of the screen height), so what the player
+// looks at sets the exposure. Weights are integer counts (4 per unit), so
+// the histogram and its percentiles stay plain u32.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Exposure {
+    vec4 params;  // x: scene EV100, y: dt, z: min EV100, w: max EV100
+    vec4 rates;   // x: 1 when auto, y: the key luminance, z/w: rates per second
+    vec4 trim;    // x: low percentile, y: high percentile, z: bins
+    vec4 vision;  // the terrain's u.vision: cells wide, high, cell size, u32 words per row
+    vec4 flags;   // x: 1 when the vision planes apply
+    vec4 meter;   // x: the bloom's strength, y: centre weight, z: centre sigma (of the height)
+    mat4 invViewProj;
+} e;
+
+// Atomics read and write: the graph declares it storage_buffer_read_write.
+layout(std430, set = 0, binding = 1) buffer Histogram { uint bins[]; } h;
+layout(set = 0, binding = 2) uniform sampler2D scene;
+layout(set = 0, binding = 4) uniform sampler2D depthTex;
+layout(std430, set = 0, binding = 5) readonly buffer VisionBuf { uint planes[]; };
+layout(set = 0, binding = 6) uniform sampler2D glowTex;
+
+// Whether the graph binds the depth (the vision needs it) and the glow.
+layout(push_constant) uniform Push { uint depth; uint glow; } push;
+
+// bloom.downsample's clamp (src/bloom.rs BLOOM_CLAMP).
+const float BLOOM_CLAMP = 4.0;
+
+// A block's count at weight 1.
+const float COUNT_SCALE = 4.0;
+
+const float LOG2_MIN = -8.0;
+const float LOG2_MAX = 8.0;
+// ae_render_abi::module::EXPOSURE_BINS (src/exposure.rs asserts it).
+const uint MAX_BINS = 128u;
+
+shared uint local[MAX_BINS];
+
+// Mirrors terrain_shading.glsl's visionCell and visionAt.
+float visionCell(ivec2 c) {
+    c = clamp(c, ivec2(0), ivec2(e.vision.xy) - 1);
+    uint stride = uint(e.vision.w);
+    uint i = uint(c.y) * stride + uint(c.x) / 32u;
+    uint bit = 1u << (uint(c.x) % 32u);
+    if ((planes[i] & bit) != 0u) {
+        return 1.0;
+    }
+    return (planes[stride * uint(e.vision.y) + i] & bit) != 0u ? 0.5 : 0.2;
+}
+
+float visionAt(vec2 world) {
+    vec2 p = world / e.vision.z - 0.5;
+    ivec2 c = ivec2(floor(p));
+    vec2 f = fract(p);
+    float a = mix(visionCell(c), visionCell(c + ivec2(1, 0)), f.x);
+    float b = mix(visionCell(c + ivec2(0, 1)), visionCell(c + ivec2(1, 1)), f.x);
+    return mix(a, b, f.y);
+}
+
+// The vision the scene was dimmed by at texel `q` (1 where nothing was
+// drawn: reverse-Z clears to 0).
+float dimmedBy(ivec2 q, ivec2 size) {
+    float d = texelFetch(depthTex, q, 0).r;
+    if (d <= 0.0) {
+        return 1.0;
+    }
+    vec2 ndc = (vec2(q) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec4 w = e.invViewProj * vec4(ndc, d, 1.0);
+    return max(visionAt(w.xz / w.w), 0.2);
+}
+
+void main() {
+    if (e.rates.x < 0.5) {
+        return;
+    }
+    uint bins = min(uint(e.trim.z), MAX_BINS);
+    uint lane = gl_LocalInvocationIndex;
+    for (uint i = lane; i < MAX_BINS; i += 64u) {
+        local[i] = 0u;
+    }
+    barrier();
+
+    ivec2 size = textureSize(scene, 0);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 4;
+    if (p.x < size.x && p.y < size.y) {
+        bool undim = e.flags.x > 0.5 && push.depth != 0u;
+        bool glow = push.glow != 0u && e.meter.x > 0.0;
+
+        // Four taps at the block's quarters (fewer on an odd edge).
+        vec3 c = vec3(0.0);
+        float n = 0.0;
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 2; ++i) {
+                ivec2 q = p + ivec2(2 * i + 1, 2 * j + 1);
+                if (q.x >= size.x || q.y >= size.y) {
+                    continue;
+                }
+                vec3 t = texelFetch(scene, q, 0).rgb;
+                t = undim ? t / dimmedBy(q, size) : t;
+                if (glow) {
+                    t += min(texelFetch(glowTex, q, 0).rgb, vec3(BLOOM_CLAMP)) * e.meter.x;
+                }
+                c += t;
+                n += 1.0;
+            }
+        }
+        c /= max(n, 1.0);
+        // Rec. 709 luminance of the stored (reference-exposed) light.
+        float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float t = clamp((log2(max(y, 1e-9)) - LOG2_MIN) / (LOG2_MAX - LOG2_MIN), 0.0, 1.0);
+        // Distance from the centre in screen heights.
+        vec2 d = (vec2(p + 2) - 0.5 * vec2(size)) / float(size.y);
+        float w = 1.0 + (e.meter.y - 1.0) * exp(-dot(d, d) / (2.0 * e.meter.z * e.meter.z));
+        atomicAdd(local[min(uint(t * float(bins)), bins - 1u)], uint(w * COUNT_SCALE + 0.5));
+    }
+    barrier();
+
+    for (uint i = lane; i < bins; i += 64u) {
+        uint count = local[i];
+        if (count != 0u) {
+            atomicAdd(h.bins[i], count);
+        }
+    }
+}
