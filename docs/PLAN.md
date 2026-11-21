@@ -292,7 +292,107 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
+| **M17** Formatting + lints (next stage) | decided: rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
 | Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+
+### M17 — Formatting, lints and the commit gate (next stage)
+
+The workspace has neither a formatter config nor a linter config, and no CI. This stage adds both
+gates locally, before more code lands: one canonical format, clippy clean, and a pre-commit hook
+that refuses a commit which breaks either. It is the next stage, ahead of M8–M10 and the remaining
+M11–M16 work.
+
+**Format: rustfmt, one config, no alternatives.** Decided:
+- `cargo fmt` / rustfmt only (no dprint, no custom formatter, no nightly-only options), so the
+  command is the one a Rust developer already runs and its output is defined by the toolchain.
+- A workspace `rustfmt.toml` with `max_width = 120`; every other option stays at its default.
+  Rationale: the existing hand-wrapped code is written mostly at 120 columns or less (69,481 lines
+  of Rust; 4,542 lines over 100 columns, 2,348 over 120), so 120 makes the one-time diff the
+  smallest and matches the style already in the tree. Defaults elsewhere mean no configuration
+  drift and no bikeshedding. rustfmt at its default width proposes 3,765 hunks in the current
+  tree; re-measure with 120 before the mechanical commit.
+- `edition = "2024"` comes from the workspace, not a duplicated setting.
+- A pinned toolchain, `rust-toolchain.toml` (channel 1.98.1, components `rustfmt`, `clippy`,
+  targets `wasm32-wasip1-threads` and `wasm32-unknown-unknown`), because rustfmt's output changes
+  between releases. The hook, a developer's shell and CI then use the same binary.
+- Not formatted: `vendor/` (the patched flecs copy; formatting would fight the patch files),
+  `target/`, and generated `.dot`/SPIR-V. Formatting does include the guest crates that are not
+  workspace members (`games/*`, `render/*`, `spikes/*/guest*`, `crates/ae_sim/tests/guest`),
+  through their own manifests.
+
+**Lints: clippy clean, with determinism as the veto.** The target is
+`cargo clippy --workspace --all-targets -- -D warnings`. Measured starting point (this machine,
+2026-11-21): the run fails on clippy's deny-by-default correctness lints, `approx_constant` in
+`ae_render/src/terrain/heightmap.rs` (eight occurrences) and `ae_spatial/tests/brute_force.rs`
+(one); because it stops there, the warning count is not yet known for the whole workspace (the
+crates that built report 17 warnings in `ae_ecs` and 23 in `ae_nav`, with their test targets).
+Warnings are fixed in reviewable batches, grouped by lint rather than by file, and every batch is
+checked by `cargo test --workspace` and the pinned digests.
+
+- **A clippy fix must not change bits.** `approx_constant` is the clear example: replacing
+  `0.7071` with `FRAC_1_SQRT_2` changes the generated heightmap and therefore captures and goldens.
+  Where the suggested fix would change a digest, a golden or deterministic content, keep the value
+  and put a scoped `#[allow(clippy::…)]` with the reason next to it. `suboptimal_flops` (it
+  suggests `mul_add`, which is FMA) and similar float suggestions are reviewed by hand in the
+  sim and nav code, where the determinism rules already forbid FMA and transcendentals outside
+  `libm`. An `allow` is always scoped to the item and carries a comment; crate-level allows need a
+  written reason in the commit.
+- No lint is enabled beyond clippy's defaults in this stage, except `-D warnings`; pedantic and
+  nursery lints are a later decision, after the tree is clean.
+- Guest crates are formatted but not clippy-checked here (they build for wasm and some have their
+  own manifests); their clippy check joins the guest build step when CI exists. That gap is
+  accepted for now.
+
+**The hook: a tracked `.githooks/pre-commit`, installed once.** Git does not clone hooks, so the
+repo carries them in `.githooks/` and the setup is one idempotent command,
+`git config core.hooksPath .githooks`, documented in the README's build section and in CLAUDE.md.
+`ae-tool hooks install` prints and sets it (and is safe to run twice). The hook:
+1. Collects the staged paths. A commit touching no Rust, manifest or build input returns at once,
+   so a docs-only commit stays instant.
+2. With any staged `.rs` file, runs the formatter check over the workspace and the guest crates.
+   It fails with the file names and `cargo fmt --all` as the fix.
+3. With any staged `.rs`, `Cargo.toml`, `Cargo.lock`, `build.rs` or `.cargo/` file, runs
+   `cargo clippy --workspace --all-targets -- -D warnings` and prints the first diagnostics.
+   Warm, incremental runs reuse `target/`; the first cold run after a dependency change is the
+   expensive one, and the hook's time is measured in step 3, not guessed. If a warm run is too
+   slow to live with, the hook narrows to the touched packages (`cargo clippy -p …`) and CI, when
+   it exists, runs the full one.
+4. Never edits the index or the working tree, and has no skip environment variable: `git commit
+   --no-verify` is git's own escape hatch for a work-in-progress commit, and the stage documents
+   that such a commit must be re-run through the hook before it is shared. The hook is a local
+   guard, not a security boundary.
+
+Partial staging is the known rough edge: the formatter and clippy read the working tree, not the
+index, so an unstaged edit elsewhere can fail the check. The message says which command to run
+(`cargo fmt --all`, or stage all with `git add -A`); no attempt is made to format a temporary
+index copy, because the simple check is the one people can reason about.
+
+**Steps** (each its own commit):
+1. `rust-toolchain.toml`, `rustfmt.toml` (`max_width = 120`) and the guest-format wrapper; record
+   the hunk count at 120.
+2. The mechanical reformat only, no behavior change; add the commit to `.git-blame-ignore-revs`
+   and say so in the commit body.
+3. Fix clippy: first the two `approx_constant` sites (with scoped allows where the bits are
+   pinned), then the remaining warnings; record the counts per crate before and after and measure
+   a warm clippy run.
+4. `.githooks/pre-commit`, `ae-tool hooks install`, README and CLAUDE.md, plus `docs/PLAN.md`
+   progress.
+5. Verify: a deliberately misformatted staged change is refused; a warning-producing staged change
+   is refused; a clean commit passes; a fresh clone with the hook installed passes on docs-only and
+   on code commits.
+
+**Exit criteria:**
+- `cargo fmt --all -- --check` exits 0, guests included, from a fresh checkout.
+- `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
+- The hook refuses both a misformatted and a warning-producing commit, and does not fire on a
+  docs-only one.
+- `cargo test --workspace` is green, and the pinned digests (`ae_sim --test sandbox`, the crossing
+  and skirmish goldens, the replay tests) are unchanged: formatting cannot move bits, and any
+  clippy fix that would is not taken.
+- README and CLAUDE.md state the toolchain pin, the format, the two commands and the hook setup.
+
+**Not in M17:** CI (still none; the hook is local), pedantic/nursery lints, formatting of
+`vendor/`, and clippy on the wasm guest crates. These are revisited when CI exists.
 
 ### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
 
