@@ -169,6 +169,11 @@ impl SdlWindow {
         (width.max(0) as u32, height.max(0) as u32)
     }
 
+    /// The SDL window handle, for display queries (`crate::display`).
+    pub(crate) fn raw(&self) -> *mut sdl::SDL_Window {
+        self.window
+    }
+
     /// Request a window size (logical units). Used by the exercise mode.
     pub fn set_size(&mut self, width: u32, height: u32) {
         unsafe { sdl::SDL_SetWindowSize(self.window, width as i32, height as i32) };

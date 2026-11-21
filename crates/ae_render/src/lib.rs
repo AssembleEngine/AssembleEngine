@@ -2,6 +2,8 @@
 //! (`~/ecs_sim/src/render/`) with its GPU tests.
 //!
 //! - `window`: SDL3 window and event pump on the main thread, `SurfaceSource`;
+//! - `display`: the window's HDR state and the surface's colour spaces (the
+//!   `--probe-display` report);
 //! - `device`: instance and device, validation counters;
 //! - `swapchain`, `memory`, `pipeline`: Vulkan plumbing;
 //! - `executor`: realizes a baked [`ae_framegraph`] graph, records and submits;
@@ -17,6 +19,7 @@ pub mod bloom;
 pub mod decals;
 pub mod demo;
 pub mod device;
+pub mod display;
 pub mod executor;
 pub mod exposure;
 pub mod fullscreen;

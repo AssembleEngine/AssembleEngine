@@ -15,6 +15,11 @@
 //! and the running client swaps it in at the next frame, or keeps the old
 //! one and prints why.
 //!
+//! `--probe-display` prints SDL's HDR state for the window and the (format,
+//! colour space) pairs the Vulkan surface offers, with the device's HDR
+//! extensions, then exits; it renders nothing. The HDR output path is chosen
+//! from its report.
+//!
 //! Shows the terrain of the M2 crossing maps (`water`, the default, or
 //! `land`; `--map-cells` as in `ae-headless`, default 2560 = pathsim's full
 //! map), map-rendering's generated test map (`generated`), or the frame
@@ -181,6 +186,9 @@ struct Options {
     /// Material tileset name, `None` for the palette.
     tileset: Option<String>,
     tileset_size: u32,
+    /// `--probe-display`: print the display's HDR capabilities and the
+    /// surface's colour spaces, render nothing, and exit.
+    probe_display: bool,
     /// `--bench`: scenes to measure instead of opening a window.
     bench: Option<bench::BenchOptions>,
     /// Threads recording render passes (1: the render thread alone).
@@ -206,11 +214,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new() }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|aces] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -242,6 +250,7 @@ fn parse() -> Result<Options> {
             }
             "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
             "--exercise" => o.exercise = true,
+            "--probe-display" => o.probe_display = true,
             "--capture" => o.capture = Some(value("--capture", &mut args)?),
             "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
@@ -818,6 +827,13 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
 }
 
 fn run(o: Options) -> Result<ExitCode> {
+    if o.probe_display {
+        // A window is needed for a surface, and on Wayland the compositor
+        // describes it only once it is mapped; nothing is rendered.
+        let mut window = SdlWindow::new("AssembleEngine display probe", 320, 200)?;
+        ae_render::display::probe(&mut window)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if let Some(b) = &o.bench {
         return bench::run(&bench::BenchOptions { record_threads: o.record_threads, particles_full: o.particles_full, particle_blend: o.particle_blend, ..b.clone() });
     }
