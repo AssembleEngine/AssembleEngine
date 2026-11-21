@@ -591,6 +591,7 @@ Two rules keep this from tangling:
 | what is hashed / saved | `crates/ae_sim/src/digest.rs`, `schema.rs` |
 | what an observer may see | `crates/ae_view/src/lib.rs`, `ae_services/src/view.rs` |
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
+| how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
 | graph validation | `crates/ae_framegraph/src/{descriptor,bake,barriers}.rs` |
 | the render module contract | `crates/ae_render_abi/src/`, `ae_render/src/module.rs` |
 | content packaging | `crates/ae_vfs/src/lib.rs`, `ae_catalog/src/lib.rs` |
@@ -599,8 +600,10 @@ Two rules keep this from tangling:
 
 Named here so the diagrams are not read as promises: RmlUi UI and the widget sandbox (M8),
 `ae-editor` with the inspector/archetype/schedule views, lights and an HDR scene target (M12/M13),
-the second navigation hierarchy level, async compute and runtime multi-module sims, and the
-per-worker bump arenas that would remove wasi-libc's heap lock from allocation-heavy guest systems.
+the second navigation hierarchy level, async compute and runtime multi-module sims, querying the
+compositor's colour-management target primaries (an own `wp_color_management` client on SDL's
+`wl_display`, or the EDID from sysfs; the display gamut is a setting for now), and the per-worker
+bump arenas that would remove wasi-libc's heap lock from allocation-heavy guest systems.
 
 M11 (glTF models and skinning) is just starting: the model format (`ae_model`) and the offline
 converter (`ae_gltf`) exist, and nothing draws one yet.

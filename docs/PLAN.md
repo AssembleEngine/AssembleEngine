@@ -3061,12 +3061,102 @@ Steps (commit and stop for compaction after each):
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
-- After M12 (needs the HDR scene target).
-- The swapchain in an HDR colour space (`VK_EXT_swapchain_colorspace`: HDR10 ST.2084 or scRGB),
-  `VK_EXT_hdr_metadata`, and an output pass aimed at the display's peak and paper-white levels.
-  SDR displays keep today's path.
-- Settings: on/off, paper white, peak brightness. Check what Linux compositors (Wayland
-  `wp_color_management`) and Windows expose before choosing the format.
+- After M12 (needs the HDR scene target). Split into stages; each ends at a review that
+  commits its code and docs before the next starts.
+- **Range and gamut are separate axes.** Range: SDR, HDR10 (PQ) or scRGB (HLG is not
+  used). Gamut: the working space the scene is lit in (BT.709, the default, or BT.2020)
+  and the output gamut it is mapped to (BT.709, P3 or BT.2020).
+- **Output chain in HDR graphs**: scene → `post.tonemap` → display → (module grade,
+  vignette, later UI) → `post.encode` → swapchain. `display` is RGBA16F linear in units
+  of paper white, in the working space, up to peak / paper white. `post.encode` maps the
+  gamut to the output gamut by compression toward the achromatic axis (not clipping),
+  then encodes PQ in BT.2020 at `v × paper white` nits (HDR10) or `v × paper white / 80`
+  BT.709-relative (scRGB, negatives allowed).
+- **SDR at the defaults stays byte-identical.** The tone curve (stage 1) is the one
+  deliberate change to the SDR captures.
+- Output gamut is a setting (`--display-gamut p3|bt2020|bt709`, P3 by default for HDR10).
+  On Wayland the compositor does report the panel's target primaries
+  (`wp_color_management`: here R 0.688477/0.308594, G 0.257813/0.669922,
+  B 0.147461/0.061523, about 96% of P3); SDL does not expose them, so they stay a setting
+  until the client queries the compositor itself. Levels default from SDL (paper white =
+  SDR white level × 80, peak = paper white × headroom) with `--paper-white`/`--peak`
+  overrides, corrected in stage 5 by the reference the WSI actually sends (below).
+- **Stage 0, the probe, exists** (`ae-client --probe-display`, `ae_render::display`): it
+  opens a window, enables `VK_EXT_swapchain_colorspace`, and prints SDL's HDR state and
+  every (format, colour space) pair the surface offers, then exits. It renders nothing.
+  On the reference machine (LG ULTRAWIDE 3840×1600 over DP-3, KWin Wayland, RTX 3060 Ti,
+  Vulkan 1.4.357) it reports: HDR enabled; SDL white level 3.1 scRGB (248 nits), headroom
+  1.778 (peak 441 nits); `VK_EXT_hdr_metadata` present; 30 pairs, among them
+  `A2B10G10R10_UNORM_PACK32` and `A2R10G10B10_UNORM_PACK32` with `HDR10_ST2084_EXT` and
+  `HDR10_HLG_EXT`, and `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR_EXT`. Under
+  `WAYLAND_DEBUG=1` KWin sends the same luminances (0, 441, 248), target_max_cll 441,
+  target_max_fall 402, `tf gamma22`, and target primaries that match the EDID. KDE's HDR
+  page shows SDR brightness 320 nits and peak 570 (an override); the protocol advertises
+  248 and 441.
+- The output description's white point is 0.359478/0.362865, against the EDID's D65
+  0.3134/0.3291 — most likely Night Light or another white-point adjustment in KWin.
+  Stage 3 takes only the R/G/B primaries (or P3) and keeps D65 white: KWin adapts the
+  white point itself.
+- **Decided from the probe (2026-11-21): both encodings.** HDR10 (PQ) at
+  `A2B10G10R10_UNORM_PACK32` first, scRGB at `R16G16B16A16_SFLOAT` as the alternative;
+  no HLG.
+- **Open: the reference luminance the swapchain's image description carries.** What
+  matters is not KWin's output description but the one the Vulkan WSI attaches to the
+  swapchain surface: KWin maps the client's reference luminance onto its own (248). If
+  the NVIDIA WSI sends PQ without `set_luminances`, the protocol's default reference for
+  PQ is 203 nits, so paper white would be encoded at 203; encoding at 248 without saying
+  so would come out about 22% bright and push the peak past 441. scRGB (`ext_linear`)
+  defaults to a reference of 80. Stage 5 measures what is sent before choosing defaults.
+- Stages:
+  - **1. A parametric, hue-preserving tone curve** (replaces Narkowicz's fit, and with it
+    the ACES TODO above). Lottes 2016: `x^a / ((x^a)^d · b + c)`, with `pow` for the
+    contrast and the shoulder and peak / paper white as a parameter; the hue handling is
+    the max-channel tonemap plus the ratio, then a crosstalk/saturation step. SDR is the
+    same curve at ratio 1. (The no-FMA and `libm` rules bind the sim, not render shaders,
+    so `pow` is fine.) `KEY_LUMINANCE` and the EV14 reference move with the curve, as one
+    change. Gate: sunlit untextured ground at the default exposure displays at a mean of
+    0.35–0.45 linear (from 0.596), and a fireball keeps an orange-to-yellow gradient with
+    no clipped disc; before re-baselining, before/after captures (near army, explosion)
+    are posted for a look review; every moved threshold is listed old → new, including
+    the auto-exposure GPU tests, with bench-diff.
+  - **2. The display intermediate and `post.encode`, headless** (native graph, no
+    swapchain or ABI change). `OutputEncoding {Sdr, Hdr10Pq, ScRgb}` and `DisplayLevels`
+    in `LibraryEnv`; readback into A2B10G10R10_UNORM and RGBA16F. Gate: SDR goldens
+    unchanged; PQ of 100/203/1000 nits within 1 LSB of ST.2084; HDR readback at peak =
+    paper white matches the SDR frame; an emitter decodes above paper white and nothing
+    above peak; zero validation messages.
+  - **3. Working space and gamut mapping.** `--working-space bt709|bt2020`, conversions at
+    every sample site and on the host (light, particle, team, fog, sky colours), the
+    meter's luminance row, and compression to the output gamut in `post.encode`
+    (`--display-gamut p3` by default; from the primaries only, D65 white). Gate: BT.709
+    keeps the SDR captures byte-identical; unlit BT.2020 content reaches SDR within 1 LSB
+    of BT.709 and the lit difference is reported as numbers; synthetic patches decode
+    inside P3 and outside BT.709, are compressed with hue kept, and in-gamut patches are
+    untouched.
+  - **4. Authoring wide-gamut colours.** A gamut tag (`srgb` default, `p3`, `bt2020`) on
+    the types effects and lights are authored with, converted at upload; one effect
+    re-authored in P3; catalogue validation rejects an unknown tag.
+  - **5. The HDR swapchain in the client.** Choose the pair from the probe's data, gate
+    HDR on the setting and the offered pair and SDL's window state, recreate on
+    `SDL_EVENT_WINDOW_HDR_STATE_CHANGED` and monitor changes, key the swapchain rebuild
+    and the graph redeclare on (format, colour space), call `vkSetHdrMetadataEXT` after
+    every recreate. Defaults come from SDL, corrected by the measured WSI reference.
+    Flags `--hdr off|auto|hdr10|scrgb`, `--paper-white`, `--peak`, `--display-gamut`, and
+    a toggle key. Gate: a windowed HDR run under `WAYLAND_DEBUG=1`, grepping the client's
+    own `wp_image_description_creator_params_v1` requests (`set_tf_named`,
+    `set_luminances`, `set_mastering_*`) and including what `vkSetHdrMetadataEXT` sends,
+    to derive the encode reference from what is actually sent; a toggle through KDE's HDR
+    switch recreating the swapchain both ways; `--hdr off` identical to stage 3; zero
+    validation messages.
+  - **6. Render ABI and modules.** Bump the ABI; `declare` carries the encoding, levels,
+    working space and output gamut; SDK `display_spec`/`DISPLAY_NAME`; both guest modules
+    and both JSON graphs; the post module's grade works above 1 (contrast pivots at
+    mid-grey, no clamp to 1); new HDR `.dot` goldens.
+  - **7. Measure and document.** Bench at 1440p and 3840×1600: tonemap and encode passes
+    and the bandwidth of a 10-bit against a 16F swapchain, compared with `bench-diff`.
+- Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
+  which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
+  dynamic HDR metadata.
 
 ### M14 — Unit scripts (in design)
 
@@ -3906,8 +3996,10 @@ From the M12 automatic exposure (2026-11-21):
   hue (on luminance or max channel, or a fit such as Hill's ACES or AgX); a cap or
   desaturation on emitters and the bloom's contribution; or explosion emission levels set
   against the display rather than the sun. Gate: a fireball keeps an orange-to-yellow
-  gradient and no clipped disc at the default exposure, and sunlit ground sits nearer a
-  mid-grey.
+  gradient and no clipped disc at the default exposure, and sunlit untextured ground
+  displays at a mean of 0.35–0.45 linear (from 0.596). M13's stage 1 (above) takes this
+  up: Narkowicz's fit gives way to Lottes 2016 with peak / paper white as its parameter,
+  and the exposure calibration moves with it.
 
 Pie in the sky, some time:
 

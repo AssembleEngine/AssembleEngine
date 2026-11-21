@@ -94,7 +94,7 @@ seconds (`--no-decals`; `--scars generated` for the engine's own scorch mark). D
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
 | `crates/ae_framegraph` | Frame graph declare/bake/barriers (colour, depth, several writers per resource), plus the declaration decoder | ecs_sim `frame_graph` |
-| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window; adaptive terrain (`terrain`); GPU-culled unit instances (`units`); the pass library, render module host and fullscreen programs with SPIR-V reflection (`library`, `module`, `fullscreen`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
+| `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window and the display/colour-space probe (`display`); adaptive terrain (`terrain`); GPU-culled unit instances (`units`); the pass library, render module host and fullscreen programs with SPIR-V reflection (`library`, `module`, `fullscreen`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
 | `bins/ae-client` | Window plus render thread and sim thread: the crossing map's terrain and units with camera controls, or offscreen captures | new |
 | `crates/ae_render_abi` | Frame graph declaration wire format and builder; the render module contract and program table (no deps, builds for WASM) | new |
 | `sdk/ae-render-sdk` | Guest SDK for render modules: `RenderModule` trait, `render_module!` exports | new |
@@ -171,6 +171,7 @@ cargo run --release -p ae-client -- --map generated --units 0          # mountai
 cargo run --release -p ae-client -- --game skirmish                     # units fighting; those that die in view explode (X: an explosion at the camera target, if in sight)
 cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12 --capture boom.ppm   # explosions, a second in
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
+cargo run --release -p ae-client -- --probe-display                      # the display's HDR state and the surface's colour spaces, then exit
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
