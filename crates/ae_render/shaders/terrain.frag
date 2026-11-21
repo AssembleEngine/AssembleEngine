@@ -387,6 +387,11 @@ void main() {
     if ((u.cfg.z & FLAG_LOD_COLORS) != 0u) {
         albedo = mix(albedo, hue(float(inDepth) * 0.13), 0.65);
     }
+    // Every colour above was authored in BT.709 (the tileset's sRGB albedo,
+    // the palette, the decals): the lighting runs in the working space.
+    bool wide = u.photometry.y > 0.5;
+    albedo = aeToWorking(albedo, wide);
+    glow = aeToWorking(glow, wide);
 
     vec3 L = normalize(u.sun.xyz);
     vec3 V = normalize(u.camPos.xyz - inWorld);
@@ -403,9 +408,9 @@ void main() {
     // terrain is a rough dielectric (F0 0.04, the tileset's roughness);
     // a decal's material can raise the roughness or make the patch
     // metallic (F0 = its colour).
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(ground.xz, ground.y), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
-    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(ground.xz, ground.y), units)) * tint;
+    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
+    vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     SurfaceBRDF s = SurfaceBRDF(albedo, mix(vec3(0.04), albedo, metallic), max(roughness, 0.04), metallic);
     vec3 color = brdfLight(s, shadeN, V, L, sunE);
     color += brdfDiffuse(s, shadeN, V) * skyE + brdfAmbient(s, shadeN, V) * skyR;
@@ -432,10 +437,10 @@ void main() {
             color += brdfDiffuse(s, shadeN, V) * sunE * max(dot(shadeN, L), 0.0) * caustic * 0.9;
         }
         // The water body's in-scattered radiance (cd/m²), deep and shallow.
-        vec3 deep = vec3(786.0, 3146.0, 4719.0);
-        vec3 shallow = vec3(3146.0, 7471.0, 8258.0);
+        vec3 deep = aeToWorking(vec3(786.0, 3146.0, 4719.0), wide);
+        vec3 shallow = aeToWorking(vec3(3146.0, 7471.0, 8258.0), wide);
         vec3 tint = mix(shallow, deep, 1.0 - exp(-depth * u.water.z * 0.3));
-        color = mix(color * vec3(0.6, 0.8, 0.85), tint, 1.0 - exp(-depth * u.water.z));
+        color = mix(color * aeToWorking(vec3(0.6, 0.8, 0.85), wide), tint, 1.0 - exp(-depth * u.water.z));
         // Water puts a glow out within a metre.
         glow *= 1.0 - smoothstep(0.0, 1.0, depth);
     }

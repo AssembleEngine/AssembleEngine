@@ -77,6 +77,9 @@ pub struct ExposureFrame {
     /// The bloom's strength this frame (0 with the bloom off): the meter
     /// adds the glow at it, so the light the bloom shows counts.
     pub bloom: f32,
+    /// The scene's working space: the stored light's luminance row
+    /// ([`crate::colorspace::WorkingSpace::luminance_row`]).
+    pub working: crate::colorspace::WorkingSpace,
 }
 
 /// The per-frame uniform block, std140 (160 bytes).
@@ -100,6 +103,8 @@ struct Settings {
     meter: [f32; 4],
     /// The inverse view-projection (column-major).
     inv_view_proj: [f32; 16],
+    /// The working space's luminance row (Rec. 709 or BT.2020).
+    luma: [f32; 4],
 }
 
 /// The meter's push constant: whether the graph binds the depth (with the
@@ -382,6 +387,10 @@ impl Exposure {
                 0.0,
             ],
             inv_view_proj: frame.view_proj.inverse().to_cols_array(),
+            luma: {
+                let l = frame.working.luminance_row();
+                [l[0], l[1], l[2], 0.0]
+            },
         };
         if let Some(bytes) = self.ubos.get_mut(slot).and_then(|u| u.mapped()) {
             bytes[..size_of::<Settings>()].copy_from_slice(pipeline::push_bytes(&settings));

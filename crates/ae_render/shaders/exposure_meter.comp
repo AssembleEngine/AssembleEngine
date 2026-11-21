@@ -37,6 +37,7 @@ layout(std140, set = 0, binding = 0) uniform Exposure {
     vec4 flags;   // x: 1 when the vision planes apply
     vec4 meter;   // x: the bloom's strength, y: centre weight, z: centre sigma (of the height)
     mat4 invViewProj;
+    vec4 luma;    // xyz: the working space's luminance row
 } e;
 
 // Atomics read and write: the graph declares it storage_buffer_read_write.
@@ -131,8 +132,9 @@ void main() {
             }
         }
         c /= max(n, 1.0);
-        // Rec. 709 luminance of the stored (reference-exposed) light.
-        float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        // The working space's luminance of the stored (reference-exposed)
+        // light (Rec. 709's row, or BT.2020's).
+        float y = dot(c, e.luma.xyz);
         float t = clamp((log2(max(y, 1e-9)) - LOG2_MIN) / (LOG2_MAX - LOG2_MIN), 0.0, 1.0);
         // Distance from the centre in screen heights.
         vec2 d = (vec2(p + 2) - 0.5 * vec2(size)) / float(size.y);

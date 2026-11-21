@@ -549,7 +549,7 @@ fn terrain_renders_offscreen() {
     // the default curve (the CPU mirror of the tonemap shader).
     let exposure = ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100);
     let curve = ae_render::tonemap::Lottes::default();
-    let sky_radiance = ae_render::lighting::sky_radiance();
+    let sky_radiance = ae_render::lighting::sky_radiance(ae_render::colorspace::WorkingSpace::Bt709);
     let sky: Vec<u8> = curve
         .map_rgb([sky_radiance[0] * exposure, sky_radiance[1] * exposure, sky_radiance[2] * exposure])
         .iter()
@@ -5725,7 +5725,7 @@ fn srgb_linear(v: u8) -> f32 {
 /// Run `post.encode` over a constant display image and return the target's
 /// bytes for each value: a hand-built graph (no scene), so the values the
 /// shader encodes are exact.
-fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncoding, extent: vk::Extent2D, levels: ae_render::encode::DisplayLevels, values: &[[f32; 4]]) -> Vec<Vec<u8>> {
+fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncoding, extent: vk::Extent2D, levels: ae_render::encode::DisplayLevels, working: ae_render::colorspace::WorkingSpace, gamut: ae_render::colorspace::Gamut, values: &[[f32; 4]]) -> Vec<Vec<u8>> {
     use ae_render::encode::{DISPLAY_FORMAT, Encode};
     use ae_render::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
     use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
@@ -5738,6 +5738,8 @@ fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncodi
         sampler: vk::Sampler,
         encoding: ae_render::encode::OutputEncoding,
         levels: ae_render::encode::DisplayLevels,
+        working: ae_render::colorspace::WorkingSpace,
+        gamut: ae_render::colorspace::Gamut,
         value: [f32; 4],
     }
     impl Recorder<u8> for Paint {
@@ -5749,7 +5751,7 @@ fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncodi
                 // The fill pass draws nothing: the clear is the display's
                 // value.
                 1 => {
-                    self.encode.write(ctx.slot, self.encoding, self.levels);
+                    self.encode.write(ctx.slot, self.encoding, self.levels, self.working, self.gamut);
                     self.encode.record(ctx, ctx.image(self.display)?, self.sampler)?;
                 }
                 3 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
@@ -5784,7 +5786,7 @@ fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncodi
     let sampler_info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST);
     let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
     let encode = Encode::new(gpu, encoding, format, 2).unwrap();
-    let mut paint = Paint { display, target, buffer, encode, sampler, encoding, levels, value: [0.0; 4] };
+    let mut paint = Paint { display, target, buffer, encode, sampler, encoding, levels, working, gamut, value: [0.0; 4] };
     let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
     executor.set_graph(graph).unwrap();
     let mut frames = Vec::new();
@@ -5819,7 +5821,7 @@ fn post_encode_writes_st_2084_codes() {
     // then one past the peak (8.0 = 1624 nits).
     let values: [[f32; 4]; 4] = [[100.0 / 203.0, 100.0 / 203.0, 100.0 / 203.0, 1.0], [1.0; 4], [1000.0 / 203.0; 4], [8.0; 4]];
     let nits = [100.0f32, 203.0, 1000.0, 1000.0];
-    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, &values);
+    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::Hdr10Pq.default_gamut(), &values);
     for (frame, want) in frames.iter().zip(nits) {
         let code = pq_code(want);
         let mut worst = 0i32;
@@ -5847,7 +5849,7 @@ fn post_encode_writes_scrgb_relative_to_80_nits() {
     let gpu = gpu();
     let extent = vk::Extent2D { width: 4, height: 4 };
     let value: [f32; 4] = [0.4, 0.2, -0.1, 1.0];
-    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels { paper_white: 203.0, peak: 1000.0 }, &[value]);
+    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels { paper_white: 203.0, peak: 1000.0 }, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::ScRgb.default_gamut(), &[value]);
     let p = scrgb_pixel(&frames[0], 0);
     let scale = 203.0 / 80.0;
     eprintln!("scRGB: {p:?} for display {value:?}, scale {scale}");
@@ -5855,7 +5857,7 @@ fn post_encode_writes_scrgb_relative_to_80_nits() {
         assert!((p[k] - value[k] * scale).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k] * scale);
     }
     // Paper white at 80 nits: no scale.
-    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels::FLAT, &[value]);
+    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels::FLAT, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::ScRgb.default_gamut(), &[value]);
     let p = scrgb_pixel(&frames[0], 0);
     for k in 0..3 {
         assert!((p[k] - value[k]).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k]);
@@ -5923,6 +5925,68 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
     eprintln!("HDR10 at peak = paper white: luminance diff mean {mean:.5}, p99 {p99:.5}, max {max:.5}");
     assert!(mean < 0.0025, "the HDR frame carries the SDR frame's light: mean {mean}");
     assert!(max < 0.01, "no pixel strays: max {max}");
+    assert_clean(&gpu);
+}
+
+/// M13 stage 3: in HDR the tonemap's output (the display intermediate) stays
+/// in the working space and `post.encode` maps it to the output gamut once.
+/// The unlit sky through the whole HDR10 chain decodes to the same light in
+/// a BT.2020 working space as in BT.709, per BT.2020 container channel,
+/// within the 10-bit PQ step.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn hdr10_bt2020_working_space_maps_to_the_output_once() {
+    use ae_render::colorspace::WorkingSpace;
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 65, height: 65, data: vec![0.5; 65 * 65] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 160, height: 120 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let render = |working: WorkingSpace| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_working_space(working)
+            .with_tone(ToneParams { curve: Curve::Clamp, bloom: 0.0, ..Default::default() })
+            .with_display(OutputEncoding::Hdr10Pq, levels);
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(256.0, 256.0);
+            // Up: the clear colour (the sky) fills the frame.
+            view.camera.pitch = -1.4;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let narrow = render(WorkingSpace::Bt709);
+    let wide = render(WorkingSpace::Bt2020);
+    let mut worst = 0f32;
+    for p in 0..(extent.width * extent.height) as usize {
+        let (a, b) = (hdr10_nits(&narrow, p * 4), hdr10_nits(&wide, p * 4));
+        for k in 0..3 {
+            // Relative to the channel's light: one PQ code near 100 nits is
+            // about 1%.
+            worst = worst.max((a[k] - b[k]).abs() / a[k].max(1.0));
+        }
+    }
+    eprintln!("HDR10 sky, BT.2020 against BT.709 working space: worst channel {:.2}%", 100.0 * worst);
+    assert!(worst < 0.03, "the wide working space maps to the output once: worst {worst}");
     assert_clean(&gpu);
 }
 
@@ -6064,5 +6128,255 @@ fn hdr_emitters_reach_above_paper_white_and_stop_at_peak() {
     assert!(y > levels.paper_white, "the emitter is above paper white: {y}");
     assert!(band, "some pixel is between paper white and the peak (a gradient, not only a clamp)");
     assert!(worst_channel <= levels.peak * 1.01, "nothing is above the peak: {worst_channel}");
+    assert_clean(&gpu);
+}
+
+/// M13 stage 3: unlit content in a BT.2020 working space reaches SDR within
+/// one 8-bit code of the same content lit in BT.709. The sky is the unlit
+/// case (the clear colour, converted into the working space and back by the
+/// tonemap): a camera looking up sees only it, and the default curve's clamp
+/// is a linear read.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn bt2020_unlit_content_reaches_sdr_within_one_code() {
+    use ae_render::colorspace::WorkingSpace;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 65, height: 65, data: vec![0.5; 65 * 65] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 160, height: 120 };
+    let render = |working: WorkingSpace| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_working_space(working)
+            .with_tone(ToneParams { curve: Curve::Clamp, bloom: 0.0, ..Default::default() });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(256.0, 256.0);
+            // Up: the clear colour (the sky) fills the frame, no terrain.
+            view.camera.pitch = -1.4;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let srgb = render(WorkingSpace::Bt709);
+    let wide = render(WorkingSpace::Bt2020);
+    let (mut worst, mut differing) = (0i32, 0usize);
+    for p in 0..(extent.width * extent.height) as usize {
+        for k in 0..3 {
+            let d = srgb[p * 4 + k].abs_diff(wide[p * 4 + k]) as i32;
+            worst = worst.max(d);
+            differing += (d > 0) as usize;
+        }
+    }
+    eprintln!("unlit BT.2020 against BT.709: worst {worst} codes, {differing} of {} channels differ", 3 * (extent.width * extent.height) as usize);
+    assert!(worst <= 1, "unlit content reaches SDR within 1 code: worst {worst}");
+    assert_clean(&gpu);
+}
+
+/// M13 stage 3: lit content differs between the working spaces, by how much
+/// is measured here. The same sunlit ground with the same colours in BT.709
+/// and BT.2020: the conversions are exact for unlit colours, but the lighting
+/// multiplies each colour in its own space (and the tone curve maps the max
+/// channel), so the two frames are close rather than identical.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn bt2020_lit_content_differs_from_bt709_by_measured_numbers() {
+    use ae_render::colorspace::WorkingSpace;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let render = |working: WorkingSpace| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_working_space(working)
+            .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let srgb = render(WorkingSpace::Bt709);
+    let wide = render(WorkingSpace::Bt2020);
+    let mut diffs = Vec::new();
+    let mut close = 0usize;
+    for p in 0..(extent.width * extent.height) as usize {
+        for k in 0..3 {
+            let d = srgb[p * 4 + k].abs_diff(wide[p * 4 + k]) as f32;
+            diffs.push(d);
+            close += (d <= 1.0) as usize;
+        }
+    }
+    let n = diffs.len() as f32;
+    let mean = diffs.iter().sum::<f32>() / n;
+    diffs.sort_by(f32::total_cmp);
+    let p99 = diffs[(diffs.len() * 99 / 100).min(diffs.len() - 1)];
+    let max = diffs[diffs.len() - 1];
+    eprintln!(
+        "lit BT.2020 against BT.709: channel diff mean {mean:.2}, p99 {p99:.0}, max {max:.0} codes; {:.2}% within 1 code",
+        100.0 * close as f32 / n
+    );
+    assert!(mean < 3.0, "the lit frames stay close: mean {mean}");
+    assert!(max < 24.0, "no gross difference: max {max}");
+    assert_clean(&gpu);
+}
+
+/// M13 stage 3: `post.encode` maps the working space's wide colour into the
+/// output gamut by compression toward the achromatic axis. A BT.2020
+/// working space with P3 output: a P3 patch decodes inside P3 and outside
+/// BT.709, a BT.2020 patch outside P3 comes back inside with its luminance
+/// and hue kept, and an in-gamut patch is untouched.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn post_encode_compresses_wide_content_into_the_output_gamut() {
+    use ae_render::colorspace::{self, Gamut, WorkingSpace};
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    // Display values are in the working space (BT.2020): P3 green expressed
+    // there, a P3-inside patch (70% P3 white + 30% P3 green), and BT.2020
+    // green, which is outside P3.
+    let p3_green = [0.0, 1.0, 0.0];
+    let p3_in = [0.3, 0.5, 0.2];
+    let values = [
+        colorspace::convert(Gamut::P3, Gamut::Bt2020, p3_green),
+        colorspace::convert(Gamut::P3, Gamut::Bt2020, p3_in),
+        [0.0, 1.0, 0.0],
+    ];
+    let frames = encode_values(
+        &gpu,
+        OutputEncoding::Hdr10Pq,
+        extent,
+        levels,
+        WorkingSpace::Bt2020,
+        Gamut::P3,
+        &values.map(|v| [v[0], v[1], v[2], 1.0]),
+    );
+    // Decode PQ to paper-white units (the BT.2020 container), then to P3 and
+    // BT.709 challenge values.
+    let decode = |frame: &[u8]| -> [f32; 3] {
+        let nits = hdr10_nits(frame, 0);
+        colorspace::convert(Gamut::Bt2020, Gamut::P3, nits.map(|n| n / levels.paper_white))
+    };
+    let decoded: Vec<[f32; 3]> = frames.iter().map(|f| decode(f)).collect();
+    let to709 = |c: [f32; 3]| colorspace::convert(Gamut::P3, Gamut::Bt709, c);
+    eprintln!("P3 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}", values[0], decoded[0], to709(decoded[0]));
+    eprintln!("P3 patch: {:.4?} -> P3 {:.4?}", values[1], decoded[1]);
+    eprintln!("BT.2020 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}", values[2], decoded[2], to709(decoded[2]));
+    // A P3 patch decodes inside P3 (all channels non-negative) and outside
+    // BT.709 (a negative channel there).
+    assert!(decoded[0].iter().all(|v| *v >= -1e-3), "P3 green inside P3: {:?}", decoded[0]);
+    assert!(to709(decoded[0]).iter().any(|v| *v < -0.01), "P3 green outside BT.709: {:?}", to709(decoded[0]));
+    // In gamut: untouched, within the 10-bit quantization (about 1.5% here).
+    for k in 0..3 {
+        assert!((decoded[0][k] - p3_green[k]).abs() < 0.02, "P3 green unchanged: {:?}", decoded[0]);
+        assert!((decoded[1][k] - p3_in[k]).abs() < 0.02, "P3 patch unchanged: {:?}", decoded[1]);
+    }
+    // BT.2020 green: compressed into P3 (no negative channel), still outside
+    // BT.709, with its luminance and hue kept.
+    let wide = colorspace::convert(Gamut::Bt2020, Gamut::P3, values[2]);
+    let want = colorspace::compress(Gamut::P3, wide);
+    assert!(decoded[2].iter().all(|v| *v >= -1e-3), "BT.2020 green compresses into P3: {:?}", decoded[2]);
+    assert!(to709(decoded[2]).iter().any(|v| *v < -0.01), "still outside BT.709: {:?}", to709(decoded[2]));
+    let y = |c: [f32; 3]| Gamut::P3.luminance(c);
+    assert!((y(decoded[2]) - y(want)).abs() < 0.01, "luminance kept: {} vs {}", y(decoded[2]), y(want));
+    for k in 0..3 {
+        assert!((decoded[2][k] - want[k]).abs() < 0.02, "channel {k}: {:?} vs {want:?}", decoded[2]);
+    }
+    assert_clean(&gpu);
+}
+
+/// M13 stage 3: automatic exposure meters the stored scene in its own working
+/// space, so a BT.2020 scene is metered with BT.2020's luminance row and
+/// adapts to the same key EV. The residual between the two displays is the
+/// lit content's own difference (the max-channel curve in a different basis),
+/// not an exposure change.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn auto_exposure_meters_bt2020_in_its_own_space() {
+    use ae_render::colorspace::WorkingSpace;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::ToneParams;
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 160, height: 120 };
+    let render = |working: WorkingSpace| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_working_space(working)
+            .with_tone(ToneParams { auto: true, bloom: 0.0, ..Default::default() });
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        // 10 s at the readback clock: adaptation has settled.
+        run_headless(&gpu, &mut app, target, 600, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let linear = |v: u8| -> f32 {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let mean = |pixels: &[u8]| -> f32 {
+        let total = (extent.width * extent.height) as f32;
+        pixels.chunks(4).map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0).sum::<f32>() / total
+    };
+    let narrow = mean(&render(WorkingSpace::Bt709));
+    let wide = mean(&render(WorkingSpace::Bt2020));
+    eprintln!("auto-exposed ground: BT.709 {narrow:.4}, BT.2020 {wide:.4}, ratio {:.4}", wide / narrow);
+    assert!((wide / narrow - 1.0).abs() < 0.05, "the meter settles the wide scene at the same key: {:.4} against {:.4}", wide, narrow);
     assert_clean(&gpu);
 }

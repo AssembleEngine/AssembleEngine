@@ -314,6 +314,7 @@ impl ParticleFeed {
     }
 }
 
+#[derive(Clone)]
 pub struct ParticlesSetup {
     pub feed: Arc<ParticleFeed>,
     /// Pool slots (at most [`MAX_CAPACITY`]).

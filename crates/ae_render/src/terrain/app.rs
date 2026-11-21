@@ -37,6 +37,7 @@ use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap
 use crate::fullscreen::FullscreenProgram;
 use crate::module::{ModuleFrame, RenderModule};
 use crate::bloom::{Bloom, BloomPass};
+use crate::colorspace::{Gamut, WorkingSpace};
 use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
 use crate::exposure::{Exposure, ExposureFrame};
 use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
@@ -289,6 +290,10 @@ pub struct TerrainApp {
     encoding: OutputEncoding,
     /// The display's paper white and peak, in nits (HDR only).
     levels: DisplayLevels,
+    /// The scene's working space (M13 stage 3): BT.709 unless set.
+    working: WorkingSpace,
+    /// The output gamut; `None` is the encoding's default (P3 for HDR10).
+    display_gamut: Option<Gamut>,
     /// `post.encode`, for the output's format (HDR only).
     encode: Option<Encode>,
     /// The configured bloom strength, kept while [`TerrainView::bloom`] is
@@ -368,6 +373,8 @@ impl TerrainApp {
             tone,
             encoding: OutputEncoding::Sdr,
             levels: DisplayLevels::default(),
+            working: WorkingSpace::Bt709,
+            display_gamut: None,
             encode: None,
             lights: None,
             fixed_lights: Vec::new(),
@@ -448,6 +455,27 @@ impl TerrainApp {
         self.encoding = encoding;
         self.levels = levels;
         self
+    }
+
+    /// The output gamut (M13 stage 3): the display's primaries. Default:
+    /// [`OutputEncoding::default_gamut`] (BT.709 for SDR, P3 for HDR10,
+    /// BT.2020 for scRGB).
+    pub fn with_display_gamut(mut self, gamut: Gamut) -> Self {
+        self.display_gamut = Some(gamut);
+        self
+    }
+
+    /// The space the scene is lit in (M13 stage 3): BT.709 (the default) or
+    /// BT.2020. Authored colours are converted into it, and the output
+    /// converts back; only the default keeps SDR captures bit-identical.
+    pub fn with_working_space(mut self, working: WorkingSpace) -> Self {
+        self.working = working;
+        self
+    }
+
+    /// The output gamut in effect.
+    pub fn gamut(&self) -> Gamut {
+        self.display_gamut.unwrap_or_else(|| self.encoding.default_gamut())
     }
 
     /// Shade by the sun's shadows: the hills' over the terrain, the units
@@ -636,7 +664,9 @@ impl TerrainApp {
             time,
             effect_time,
             shadows: view.shadows && self.shadows,
-            photometry: [self.tone.exposure(), 0.0, self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
+            // y: the working space is BT.2020 (the shaders' `wide` flag).
+            photometry: [self.tone.exposure(), if self.working.is_wide() { 1.0 } else { 0.0 }, self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
+            working: self.working,
             // The units' shadows when the graph draws them.
             // (and the particles' coloured shadows when it draws those).
             unit_shadows: (view.shadows && self.shadows && self.graph_has(LibraryResource::ShadowMap)).then(|| crate::shadow::Cascades {
@@ -657,9 +687,9 @@ impl TerrainApp {
 /// The terrain's fog (colour and density) for other passes, as the terrain
 /// renderer sets it.
 /// Distance fog as the sky's radiance and its density.
-fn fog(info: &TerrainInfo, on: bool) -> [f32; 4] {
+fn fog(info: &TerrainInfo, on: bool, working: WorkingSpace) -> [f32; 4] {
     let density = if on { 1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2) } else { 0.0 };
-    let r = crate::lighting::sky_radiance();
+    let r = crate::lighting::sky_radiance(working);
     [r[0], r[1], r[2], density]
 }
 
@@ -747,10 +777,28 @@ impl RenderApp for TerrainApp {
         let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, &lights, color, DEPTH_FORMAT, frames_in_flight)
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
-            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+            // The team colours are authored in BT.709 (M13 stage 4 adds a
+            // gamut tag); the scene lights in the working space.
+            let mut setup = setup.clone();
+            for class in &mut setup.classes {
+                class.color = self.working.from_709(class.color);
+            }
+            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, &setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }
         if let Some(setup) = &self.particles {
-            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, setup, color, frames_in_flight).context("particle renderer")?);
+            // The effects' colours are authored in BT.709; their burst
+            // lights stay authored (the app converts all host lights
+            // together, and `Light::point` normalises in BT.709).
+            let mut setup = setup.clone();
+            for effect in &mut setup.effects {
+                let colour = |c: [f32; 4]| {
+                    let w = self.working.from_709([c[0], c[1], c[2]]);
+                    [w[0], w[1], w[2], c[3]]
+                };
+                effect.color_start = colour(effect.color_start);
+                effect.color_end = colour(effect.color_end);
+            }
+            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, &setup, color, frames_in_flight).context("particle renderer")?);
         }
         self.renderer = Some(terrain);
         self.lights = Some(lights);
@@ -850,7 +898,7 @@ impl RenderApp for TerrainApp {
         // by it this frame.
         let vision = if params.vision { self.renderer.as_ref().and_then(|r| r.vision_uniform()) } else { None };
         if let Some(exposure) = &mut self.exposure {
-            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 } });
+            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
         }
         // HDR: the curve's peak anchor displays at the display's peak over
         // its paper white, so emitters land above paper white and the
@@ -860,10 +908,14 @@ impl RenderApp for TerrainApp {
             tone.lottes.peak_out = self.levels.headroom();
         }
         if let Some(tonemap) = &mut self.tonemap {
-            tonemap.write(slot, tone, has_bloom, has_exposure);
+            // SDR writes BT.709; HDR writes the display intermediate in the
+            // working space, which post.encode maps to the output gamut.
+            let written = if self.encoding.uses_display() { self.working.gamut() } else { Gamut::Bt709 };
+            tonemap.write(slot, tone, has_bloom, has_exposure, self.working, written);
         }
+        let gamut = self.gamut();
         if let Some(encode) = &mut self.encode {
-            encode.write(slot, self.encoding, self.levels);
+            encode.write(slot, self.encoding, self.levels, self.working, gamut);
         }
         if let Some(bloom) = &mut self.bloom {
             bloom.write(slot, self.tone.ev100, has_exposure);
@@ -916,7 +968,7 @@ impl RenderApp for TerrainApp {
                 view_proj: params.view_proj,
                 cam_pos: params.cam_pos,
                 proj_scale: view.camera.proj_scale(self.extent.height as f32),
-                fog: fog(&self.source.info, params.fog),
+                fog: fog(&self.source.info, params.fog, self.working),
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows,
                 photometry: params.photometry,
@@ -935,7 +987,7 @@ impl RenderApp for TerrainApp {
                 near: camera.near(),
                 extent: self.extent,
                 time: params.effect_time,
-                fog: fog(&self.source.info, params.fog),
+                fog: fog(&self.source.info, params.fog, self.working),
                 shadows: params.shadows,
                 unit_shadows: params.unit_shadows.filter(|c| c.tinted),
                 photometry: params.photometry,
@@ -952,6 +1004,14 @@ impl RenderApp for TerrainApp {
             if let Some(particles) = self.particle_renderer.as_mut() {
                 let source = &self.source;
                 particles.lights(&|p| source.height_at(p), &mut list);
+            }
+            // Every host light (the app's and the bursts') is authored in
+            // BT.709 and normalised to unit luminance there; the cluster
+            // lives in the working space.
+            if self.working.is_wide() {
+                for light in &mut list {
+                    light.color = self.working.from_709(light.color);
+                }
             }
             let planes = super::renderer::frustum_planes(params.view_proj);
             // Auto-exposure may reach MIN_EV100 (the largest exposure, the
@@ -1139,7 +1199,7 @@ impl Recorder<ScenePass> for TerrainApp {
             // The sky behind the terrain: its radiance, stored exposed like
             // the scene.
             _ => {
-                let r = crate::lighting::sky_radiance();
+                let r = crate::lighting::sky_radiance(self.working);
                 let e = self.tone.exposure();
                 [r[0] * e, r[1] * e, r[2] * e, 1.0]
             }
@@ -1617,6 +1677,8 @@ impl TerrainApp {
             particles: self.particle_renderer.is_some(),
             encoding: self.encoding,
             levels: self.levels,
+            working: self.working,
+            gamut: self.gamut(),
         })
     }
 

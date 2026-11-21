@@ -152,8 +152,11 @@ pub struct FrameParams {
     /// draws and samples it this frame).
     pub unit_shadows: Option<Cascades>,
     /// Photometric lighting: exposure and the sun's and sky's illuminances
-    /// in lux (y unused).
+    /// in lux (y: 1 when the working space is BT.2020).
     pub photometry: [f32; 4],
+    /// The scene's working space (the sky's radiance is its fog and clear
+    /// colour).
+    pub working: crate::colorspace::WorkingSpace,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -752,9 +755,9 @@ impl TerrainRenderer {
                     | if self.has_shadows && p.shadows { 256 } else { 0 },
                 MAX_DRAW_LEAVES.min(1 << self.max_depth),
             ],
-            // Distance fog: the sky's radiance.
+            // Distance fog: the sky's radiance in the working space.
             fog: {
-                let c = crate::lighting::sky_radiance();
+                let c = crate::lighting::sky_radiance(p.working);
                 [c[0], c[1], c[2], if p.fog { 1.0 / (i.cells.0.max(i.cells.1) as f32 * i.cell_size * 1.2) } else { 0.0 }]
             },
             water: match i.water_level {

@@ -15,13 +15,14 @@ layout(location = 1) out vec4 outGlow;
 void main() {
     vec3 n = normalize(inNormal);
     vec3 v = normalize(u.camPos.xyz - inWorld);
+    bool wide = u.photometry.y > 0.5;
     vec3 tint;
     float units = unitSunAt(inWorld, n, tint);
     // Illuminance (lux) before the receiver cosine; the particles' tint
     // multiplies the sunlight they colour.
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y));
-    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
+    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * n.y));
+    vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     // The darts are flat-shaded blocks: a rough dielectric with a slight
     // sheen, so they sit with the terrain rather than looking like metal.
     SurfaceBRDF s = SurfaceBRDF(inColor, vec3(0.04), 0.7, 0.0);

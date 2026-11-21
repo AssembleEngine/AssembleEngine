@@ -38,6 +38,7 @@ vec4 sampleMetallicRoughness(Material m) {
 }
 
 void main() {
+    bool wide = u.photometry.y > 0.5;
     Material m = materials[inMaterial];
     vec4 base = m.baseColor * inColor;
     if (m.tex.x != 0u) {
@@ -48,6 +49,9 @@ void main() {
         discard;
     }
 #endif
+    // glTF's base colour (sRGB) is BT.709: the lighting runs in the
+    // working space.
+    base.rgb = aeToWorking(base.rgb, wide);
     vec3 n = normalize(inNormal);
     vec3 t = inTangent.xyz;
     if (m.params.z > 0.5 && dot(n, u.camPos.xyz - inWorld) < 0.0) {
@@ -66,6 +70,7 @@ void main() {
     if (m.tex.w != 0u) {
         emissive *= sampleTex(m, 3u).rgb;
     }
+    emissive = aeToWorking(emissive, wide);
     float metallic = clamp(m.pbr.x, 0.0, 1.0);
     float roughness = clamp(m.pbr.y, 0.0, 1.0);
     if (m.tex2.x != 0u) {
@@ -80,9 +85,9 @@ void main() {
     float units = unitSunAt(inWorld, n, tint);
     // Illuminance (lux) before the cosine; the particles' tint colours the
     // sunlight they shade.
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
-    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
+    vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
+    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
+    vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     SurfaceBRDF s = SurfaceBRDF(base.rgb, mix(vec3(0.04), base.rgb, metallic), roughness, metallic);
     vec3 color = brdfLight(s, n, v, normalize(u.sun.xyz), sunE);
     color += brdfDiffuse(s, n, v) * skyE + brdfAmbient(s, n, v) * (skyR * ao);

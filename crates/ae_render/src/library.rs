@@ -450,6 +450,12 @@ pub struct LibraryEnv {
     pub encoding: crate::encode::OutputEncoding,
     /// The display's paper white and peak, in nits (unused in SDR).
     pub levels: crate::encode::DisplayLevels,
+    /// The scene's working space ([`crate::colorspace::WorkingSpace`]): what
+    /// the scene's colours and the meter's luminance are in.
+    pub working: crate::colorspace::WorkingSpace,
+    /// The output gamut the display intermediate is mapped to (unused in
+    /// SDR, whose tonemap maps to BT.709 itself).
+    pub gamut: crate::colorspace::Gamut,
 }
 
 impl LibraryEnv {
@@ -992,7 +998,7 @@ mod tests {
     use ae_framegraph::{ImageDesc, LoadOp, PassKind};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, scene_format: vk::Format::R16G16B16A16_SFLOAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true, encoding: crate::encode::OutputEncoding::Sdr, levels: crate::encode::DisplayLevels::default() }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, scene_format: vk::Format::R16G16B16A16_SFLOAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true, encoding: crate::encode::OutputEncoding::Sdr, levels: crate::encode::DisplayLevels::default(), working: Default::default(), gamut: Default::default() }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {

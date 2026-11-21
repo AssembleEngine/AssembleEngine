@@ -18,6 +18,7 @@
 //! intermediate instead ([`crate::encode::DISPLAY_FORMAT`], paper-white
 //! units), which `post.encode` maps to the output.
 
+use crate::colorspace::{self, Gamut, WorkingSpace};
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
 use crate::fullscreen::FullscreenProgram;
@@ -136,7 +137,13 @@ impl Lottes {
     /// other channels scale with it (hue kept), and above paper white a
     /// `smoothstep`-weighted share of the luminance-mapped grey joins in.
     pub fn map_rgb(&self, c: [f32; 3]) -> [f32; 3] {
-        let y = crate::lighting::luminance(c);
+        self.map_rgb_in(WorkingSpace::Bt709, c)
+    }
+
+    /// [`Self::map_rgb`] with the working space's luminance row (the
+    /// shader's crosstalk uses the scene's row).
+    pub fn map_rgb_in(&self, working: WorkingSpace, c: [f32; 3]) -> [f32; 3] {
+        let y = working.gamut().luminance(c);
         let mx = c[0].max(c[1]).max(c[2]);
         let m = self.map(mx);
         let scale = if mx > 1e-6 { m / mx } else { 0.0 };
@@ -221,19 +228,23 @@ pub struct Tonemap {
 /// `kBloomStrength`).
 pub const BLOOM_STRENGTH: f32 = 0.3;
 
+/// The tonemap's uniform block: three vec4s, a mat3 (columns padded to
+/// vec4), the working space's luminance row and the output's (w: compress).
+const UNIFORM_BYTES: u32 = 3 * 16 + 48 + 2 * 16;
+
 impl Tonemap {
     /// For an output of `format`.
     pub fn new(gpu: &GpuDevice, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         // Three samplers: the scene, the bloom and the 1×1 exposure image.
         // A graph without a bloom or an exposure pass binds the scene to
         // the missing one and the uniform switches it off.
-        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), 48, 3, &[format], frames_in_flight)? })
+        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), UNIFORM_BYTES, 3, &[format], frames_in_flight)? })
     }
 
     /// Frame slot `slot`'s parameters (before it records): the graph's
     /// bloom, whether it declares the exposure image, and the EV100 the
     /// scene was stored at ([`ToneParams::ev100`]).
-    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool, exposure: bool) {
+    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool, exposure: bool, working: WorkingSpace, output: Gamut) {
         // Exposure was applied before the scene was stored; the auto
         // exposure scales the stored scene by the image's EV against this
         // reference (1 when they agree).
@@ -245,7 +256,7 @@ impl Tonemap {
             (Curve::Lottes, Some(bc)) => (bc, 1.0),
             _ => ((0.0, 1.0), 0.0),
         };
-        let words: [f32; 12] = [
+        let mut words: Vec<f32> = vec![
             params.bloom,
             curve,
             if bloom { 1.0 } else { 0.0 },
@@ -259,6 +270,25 @@ impl Tonemap {
             params.lottes.contrast,
             params.lottes.shoulder,
         ];
+        // `output` is the gamut the tonemap writes in: SDR's BT.709 (the
+        // curve's result, in the working space, is mapped to it and, when
+        // the working space is wider, compressed into it), or in HDR the
+        // working space itself (the display intermediate, which post.encode
+        // maps to the output gamut once). Both matrices are the identity at
+        // the default, so an SDR capture stays bit-identical.
+        let to_output = colorspace::matrix(working.gamut(), output);
+        for col in colorspace::columns(to_output) {
+            words.extend_from_slice(&col);
+            words.push(0.0);
+        }
+        // The crosstalk's grey is the working space's luminance.
+        let luma = working.luminance_row();
+        words.extend_from_slice(&[luma[0], luma[1], luma[2], 0.0]);
+        // The compression's grey is the output's luminance (the colour is
+        // in the output's primaries by then); w: 1 when the output gamut is
+        // narrower than the working space.
+        let out_luma = output.luminance_row();
+        words.extend_from_slice(&[out_luma[0], out_luma[1], out_luma[2], if output.contains(working) { 0.0 } else { 1.0 }]);
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.program.write_uniforms(slot, &bytes);
     }

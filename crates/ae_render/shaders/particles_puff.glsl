@@ -50,8 +50,9 @@ Puff puffOf(uint slot) {
         // Media: albedo times the illuminance it scatters, as radiance; the
         // sun past the hills, half the sky (a volume has no normal), and the
         // clustered lights.
-        vec3 sunE = aeUnitTint(AE_SUN_TINT) * (u.photometry.z * sunAt(p.posAge.xyz));
-        vec3 skyE = aeUnitTint(AE_SKY_TINT) * (u.photometry.w * 0.5);
+        bool wide = u.photometry.y > 0.5;
+        vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * sunAt(p.posAge.xyz));
+        vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * 0.5);
         vec3 light = (sunE + skyE) / AE_PI;
         if (p.info.w != 0u) {
             // Packed as illuminance times exposure: back to lux.

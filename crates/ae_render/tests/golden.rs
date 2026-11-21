@@ -24,7 +24,7 @@ fn scene(units: bool, water: bool, shadows: bool, output: TerrainOutput) -> Stri
 }
 
 fn scene_with(units: bool, water: bool, shadows: bool, particles: bool, output: TerrainOutput) -> String {
-    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, scene_format: ae_render::terrain::app::SCENE_FORMAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows, particles, encoding: ae_render::encode::OutputEncoding::Sdr, levels: ae_render::encode::DisplayLevels::default() };
+    let env = LibraryEnv { color_format: vk::Format::B8G8R8A8_SRGB, scene_format: ae_render::terrain::app::SCENE_FORMAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 1280, height: 720 }, units, water, shadows, particles, encoding: ae_render::encode::OutputEncoding::Sdr, levels: ae_render::encode::DisplayLevels::default(), working: Default::default(), gamut: Default::default() };
     let mut graph = native_graph(&env, output);
     // Fixed library sizes (the renderers' real ones depend on the map), with
     // every usage a library buffer may need.

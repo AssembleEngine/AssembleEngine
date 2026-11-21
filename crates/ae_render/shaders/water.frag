@@ -67,10 +67,10 @@ vec2 waveSlope(vec2 p, float t, float pix, out float lost) {
     return slope;
 }
 
-vec3 skyRadiance(vec3 dir) {
+vec3 skyRadiance(vec3 dir, bool wide) {
     // A uniform hemisphere at the sky's radiance; the zenith a little
     // darker than the horizon (the fog colour is the horizon).
-    vec3 zenith = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI) * 0.6;
+    vec3 zenith = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI) * 0.6;
     return mix(u.fog.rgb, zenith, sqrt(clamp(dir.y, 0.0, 1.0)));
 }
 
@@ -79,6 +79,7 @@ void main() {
     if (u.camPos.y < u.water.x) {
         discard;
     }
+    bool wide = u.photometry.y > 0.5;
     vec3 P = inWorld;
     float t = u.water.w;
     vec3 toEye = u.camPos.xyz - P;
@@ -111,12 +112,12 @@ void main() {
 
     vec3 R = reflect(-E, N);
     vec3 L = normalize(u.sun.xyz);
-    vec3 reflection = skyRadiance(R);
+    vec3 reflection = skyRadiance(R, wide);
     // The glints: the sun's and the clustered lights', through the shared
     // GGX lobe (specular only: the water's diffuse is the foam).
     vec3 tint;
     float units = unitSunAt(P, vec3(0.0, 1.0, 0.0), tint);
-    vec3 sunE = aeUnitTint(AE_SUN_TINT) * u.photometry.z * min(sunAt(P.xz, P.y), units) * tint;
+    vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * u.photometry.z * min(sunAt(P.xz, P.y), units) * tint;
     SurfaceBRDF s = SurfaceBRDF(vec3(0.0), vec3(0.06), max(roughness, 0.04), 0.0);
     // `brdfSpecular` is before the receiver cosine; the lights below apply
     // theirs in `lightsSpecular`.
@@ -145,12 +146,13 @@ void main() {
     float edge = 1.0 - smoothstep(0.05, 0.45, depth);
     float texture_ = valueNoise(P.xz * 0.45 + vec2(t * 0.05, -t * 0.03)) * 0.6 + valueNoise(P.xz * 1.1 + vec2(-t * 0.07, t * 0.04) + 7.1) * 0.4;
     float foam = clamp((crest * 0.8 + edge * 0.75) * smoothstep(0.3, 0.7, texture_ + 0.2 * edge), 0.0, 0.9);
-    vec3 skyR = aeUnitTint(AE_SKY_TINT) * (u.photometry.w / AE_PI);
-    vec3 foamColor = vec3(0.86, 0.90, 0.90) * (sunE * max(L.y, 0.0) * 0.45 / AE_PI + skyR * 0.7);
+    vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
+    vec3 foamTint = aeToWorking(vec3(0.86, 0.90, 0.90), wide);
+    vec3 foamColor = foamTint * (sunE * max(L.y, 0.0) * 0.45 / AE_PI + skyR * 0.7);
     // The clustered lights on the foam (their glints on the water come
     // with the speculars).
     if (lightsOn()) {
-        foamColor += vec3(0.86, 0.90, 0.90) * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N) / AE_PI;
+        foamColor += foamTint * lightsDiffuse(lightClusterFrag(gl_FragCoord), P, N) / AE_PI;
     }
     rgb = rgb * (1.0 - foam) + foamColor * foam;
     alpha = alpha * (1.0 - foam) + foam;

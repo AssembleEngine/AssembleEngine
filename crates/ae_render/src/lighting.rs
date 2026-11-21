@@ -118,12 +118,14 @@ pub fn unit_tint(c: [f32; 3]) -> [f32; 3] {
     [c[0] / y, c[1] / y, c[2] / y]
 }
 
-pub fn sun_tint() -> [f32; 3] {
-    unit_tint(SUN_TINT)
+/// The sun's tint in the working space (unit luminance there).
+pub fn sun_tint(space: crate::colorspace::WorkingSpace) -> [f32; 3] {
+    space.unit_tint(SUN_TINT)
 }
 
-pub fn sky_tint() -> [f32; 3] {
-    unit_tint(SKY_TINT)
+/// The sky's tint in the working space (unit luminance there).
+pub fn sky_tint(space: crate::colorspace::WorkingSpace) -> [f32; 3] {
+    space.unit_tint(SKY_TINT)
 }
 
 /// The exposure factor of an EV100 setting: `1 / (1.2 * 2^EV100)`.
@@ -132,10 +134,10 @@ pub fn exposure(ev100: f32) -> f32 {
 }
 
 /// The sky's radiance (cd/m²) as a uniform hemisphere: the illuminance over
-/// pi, tinted and normalised to unit luminance. The scene's clear colour,
-/// the distance fog and the water's reflection use it.
-pub fn sky_radiance() -> [f32; 3] {
-    let t = sky_tint();
+/// pi, tinted and normalised to unit luminance in `space`. The scene's clear
+/// colour, the distance fog and the water's reflection use it.
+pub fn sky_radiance(space: crate::colorspace::WorkingSpace) -> [f32; 3] {
+    let t = sky_tint(space);
     let k = SKY_ILLUMINANCE / std::f32::consts::PI;
     [t[0] * k, t[1] * k, t[2] * k]
 }
@@ -152,8 +154,12 @@ mod tests {
 
     #[test]
     fn tints_keep_their_luminance() {
-        assert!((luminance(sun_tint()) - 1.0).abs() < 1e-5);
-        assert!((luminance(sky_tint()) - 1.0).abs() < 1e-5);
+        for space in [crate::colorspace::WorkingSpace::Bt709, crate::colorspace::WorkingSpace::Bt2020] {
+            assert!((space.gamut().luminance(sun_tint(space)) - 1.0).abs() < 1e-5);
+            assert!((space.gamut().luminance(sky_tint(space)) - 1.0).abs() < 1e-5);
+            // The same physical colour: white and luminance kept.
+            assert!((space.gamut().luminance(sky_radiance(space)) - super::SKY_ILLUMINANCE / std::f32::consts::PI).abs() < 1e-2);
+        }
     }
 
     #[test]

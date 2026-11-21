@@ -189,6 +189,11 @@ struct Options {
     /// `--probe-display`: print the display's HDR capabilities and the
     /// surface's colour spaces, render nothing, and exit.
     probe_display: bool,
+    /// The scene's working space (M13 stage 3), BT.709 by default.
+    working_space: ae_render::colorspace::WorkingSpace,
+    /// The output gamut (M13 stage 3); `None` is the encoding's default
+    /// (P3 for HDR10). Only an HDR output maps a gamut.
+    display_gamut: Option<ae_render::colorspace::Gamut>,
     /// `--bench`: scenes to measure instead of opening a window.
     bench: Option<bench::BenchOptions>,
     /// Threads recording render passes (1: the render thread alone).
@@ -214,11 +219,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false, working_space: Default::default(), display_gamut: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|lottes] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|lottes] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -251,6 +256,8 @@ fn parse() -> Result<Options> {
             "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
             "--exercise" => o.exercise = true,
             "--probe-display" => o.probe_display = true,
+            "--working-space" => o.working_space = value("--working-space", &mut args)?.parse().context("--working-space")?,
+            "--display-gamut" => o.display_gamut = Some(value("--display-gamut", &mut args)?.parse().context("--display-gamut")?),
             "--capture" => o.capture = Some(value("--capture", &mut args)?),
             "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
@@ -592,7 +599,10 @@ fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) ->
     if o.shadows {
         app = app.with_shadows();
     }
-    app = app.with_tone(o.tone);
+    app = app.with_tone(o.tone).with_working_space(o.working_space);
+    if let Some(gamut) = o.display_gamut {
+        app = app.with_display_gamut(gamut);
+    }
     app.view().lock().unwrap().weights = o.weights;
     app
 }

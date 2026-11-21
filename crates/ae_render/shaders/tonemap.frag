@@ -11,6 +11,8 @@
 // stays orange. In SDR the output's format encodes (an sRGB attachment). In
 // HDR the target is the display intermediate (RGBA16F, paper-white units,
 // up to the peak) and post.encode encodes that.
+#include "gamut.glsl"
+
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Tonemap {
@@ -18,6 +20,11 @@ layout(set = 0, binding = 0) uniform Tonemap {
                    // w: 1 when it has the exposure image
     vec4 exposure; // x: the EV100 the scene was stored at
     vec4 curve;    // x: b, y: c, z: contrast a, w: shoulder d
+    mat3 toOutput; // the working space to the gamut written: SDR's BT.709,
+                   // or in HDR the working space itself (the identity)
+    vec4 luma;     // xyz: the working space's luminance row (the crosstalk)
+    vec4 outLuma;  // xyz: the written gamut's luminance row (the compression);
+                   // w: 1 when it is narrower than the working space
 } t;
 layout(set = 0, binding = 1) uniform sampler2D scene;
 layout(set = 0, binding = 2) uniform sampler2D bloom;
@@ -47,7 +54,7 @@ vec3 lottes(vec3 c) {
     // Ordinary pixels take the branch: the second curve and the dot only
     // run where the crosstalk is non-zero.
     if (mx > CROSSTALK_START) {
-        float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float y = dot(c, t.luma.xyz);
         float w = CROSSTALK * smoothstep(CROSSTALK_START, CROSSTALK_PEAK, mx);
         mapped = mix(mapped, vec3(curve1(y)), w);
     }
@@ -71,5 +78,15 @@ void main() {
         c += texture(bloom, uv).rgb * t.params.x;
     }
     c = t.params.y > 0.5 ? lottes(c) : min(c, vec3(1.0));
+    // SDR's output is BT.709; a BT.2020 working space is mapped into it
+    // (and out-of-gamut colour compressed) here, since SDR has no
+    // post.encode. In HDR the display stays in the working space (the
+    // identity) and post.encode maps it. At the default working space the
+    // matrix is the identity and nothing is compressed, so the frame is
+    // bit-identical.
+    c = t.toOutput * c;
+    if (t.outLuma.w > 0.5) {
+        c = aeGamutCompress(c, t.outLuma.xyz);
+    }
     color = vec4(c, 1.0);
 }

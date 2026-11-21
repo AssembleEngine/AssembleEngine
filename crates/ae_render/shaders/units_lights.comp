@@ -50,7 +50,9 @@ void main() {
         Light l;
         l.position = place(unit, modelPos * fit);
         l.range = ml.color.w;
-        l.color = ml.color.xyz;
+        // glTF authored the tint in BT.709; the cluster lives in the
+        // working space.
+        l.color = aeToWorking(ml.color.xyz, u.photometry.y > 0.5);
         l.kind = kind;
         l.direction = kind == LIGHT_CONE ? normalize(orient(unit, normalize(modelDir))) : vec3(0.0, -1.0, 0.0);
         l.halfLength = 0.0;
