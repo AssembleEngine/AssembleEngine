@@ -44,8 +44,11 @@ void main() {
         return;
     }
     // The texture's mip for this puff's screen size, as the raster path's
-    // derivatives choose it.
-    float projScale = abs(u.viewProj[1][1]) * float(push.height) * 0.5;
+    // derivatives choose it. The projection's vertical scale from a point
+    // one unit up at unit depth (viewProj[1][1] alone is scaled by the
+    // camera's pitch).
+    vec4 pu = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camUp.xyz, 1.0);
+    float projScale = abs(pu.y / pu.w) * float(push.height) * 0.5;
     float diameter = 2.0 * radius * projScale / z;
     float lod = max(0.0, log2(128.0 / max(diameter, 1e-6)));
     float c = cos(f.angle);

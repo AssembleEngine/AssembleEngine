@@ -3278,9 +3278,12 @@ fn particles_order_independence() {
     // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
     // exact order, and the moments about as close.
     assert!(sorted_mean < 2.5 && moments_mean < 2.5, "cluster error: sorted {sorted_mean}, moments {moments_mean}");
-    // Measured below: the packets shade the exact per-pixel order (like the
-    // reference), with the same puff and soft fade, so they are close to it.
-    assert!(packets_mean < 3.0, "cluster error, the packets against the reference: {packets_mean} (max {packets_worst})");
+    // The packets shade the centre sort's order per pixel (like the sorted
+    // draw), with the same puff and soft fade, so they are about as close
+    // to the exact order as the sorted draw. Measured: 0.75 against the
+    // sorted 0.74 (a candidate skipped by a packet, as when a saturated
+    // lane stopped classifying its rank, showed as 0.84).
+    assert!(packets_mean < 3.0 && (packets_mean - sorted_mean).abs() < 0.05, "cluster error, the packets against the reference: {packets_mean} (max {packets_worst}; sorted {sorted_mean})");
     // Measured: the exact per-pixel order pops about as much as the centre
     // sort (77 against 106 pixel-frames over 40; both 73 at worst under the
     // ACES curve): the jump comes from blending particles as flat layers,
@@ -3301,8 +3304,8 @@ fn particles_order_independence() {
     // by a column's centre ray.
     let (froxels_pop, froxels_error) = (pops[5], against_volume[5]);
     assert!(froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0, "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}");
-    // Measured: the packets are the exact flat layers (like the reference),
-    // so they pop with the sort rather than with the volumes.
+    // The packets are flat layers in the centre sort's order (like the
+    // sorted draw), so they pop with the sort rather than with the volumes.
     let (packets_pop, packets_error) = (pops[6], against_volume[6]);
     assert!(packets_pop.0 > 40.0 && packets_error.0 < 6.0, "crossing, the packets: pop {packets_pop:?}, against the volume {packets_error:?}");
 

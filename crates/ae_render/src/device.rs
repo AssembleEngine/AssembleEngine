@@ -232,9 +232,12 @@ pub struct GpuDevice {
     pub fragment_stores: bool,
     /// `textureCompressionBC` is enabled (BC1–BC7 model textures).
     pub texture_compression_bc: bool,
-    /// The implementation's subgroup size (`VkPhysicalDeviceSubgroupProperties`;
-    /// 32 on the GPUs the tile-binned particle blend is written for).
-    pub subgroup_size: u32,
+    /// A compute pipeline can pin 32-lane, full subgroups
+    /// (`subgroupSizeControl` and `computeFullSubgroups` are enabled, 32 is in
+    /// the size range for compute, and eight subgroups fit a workgroup), as
+    /// the tile-binned particle blend needs
+    /// ([`crate::pipeline::compute_pipeline_subgroup32`]).
+    pub compute_subgroups_32: bool,
     /// `multiDrawIndirect`, `shaderDrawParameters` and
     /// `descriptorBindingPartiallyBound` are enabled: the units' models
     /// (one multi-draw per pipeline, per-draw records by `gl_DrawID`, a
@@ -324,6 +327,24 @@ impl GpuDevice {
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
+        // Pinned 32-lane subgroups (the packets' particle blend); the
+        // features are core in 1.3 but optional.
+        let compute_subgroups_32 = {
+            let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features13);
+            unsafe { vk_instance.get_physical_device_features2(physical, &mut features) };
+            let mut control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
+            let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+            let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut control).push_next(&mut subgroup);
+            unsafe { vk_instance.get_physical_device_properties2(physical, &mut properties2) };
+            features13.subgroup_size_control == vk::TRUE
+                && features13.compute_full_subgroups == vk::TRUE
+                && (control.min_subgroup_size..=control.max_subgroup_size).contains(&32)
+                && control.required_subgroup_size_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && control.max_compute_workgroup_subgroups >= 8
+                && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::BALLOT)
+        };
         let extensions: Vec<*const c_char> = if surface.is_some() {
             vec![ash::khr::swapchain::NAME.as_ptr()]
         } else {
@@ -334,7 +355,9 @@ impl GpuDevice {
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
-            .shader_demote_to_helper_invocation(true);
+            .shader_demote_to_helper_invocation(true)
+            .subgroup_size_control(compute_subgroups_32)
+            .compute_full_subgroups(compute_subgroups_32);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true).descriptor_binding_partially_bound(gpu_driven);
         let mut features11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(gpu_driven);
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
@@ -382,10 +405,6 @@ impl GpuDevice {
         } else {
             0.0
         };
-        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
-        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
-        unsafe { vk_instance.get_physical_device_properties2(physical, &mut properties2) };
-        let subgroup_size = subgroup.subgroup_size;
         Ok(Self {
             instance,
             physical,
@@ -399,7 +418,7 @@ impl GpuDevice {
             fill_mode_non_solid,
             fragment_stores,
             texture_compression_bc,
-            subgroup_size,
+            compute_subgroups_32,
             gpu_driven,
             hung: AtomicBool::new(false),
         })

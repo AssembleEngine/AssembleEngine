@@ -30,7 +30,11 @@ layout(push_constant) uniform Push {
     uint mask_words;
 } push;
 
-layout(local_size_x = 16, local_size_y = 16) in;
+// One 16x16 tile a workgroup, as eight 32-lane subgroups (the pipeline
+// pins the subgroup size to 32 with full subgroups, which needs the X
+// size a multiple of 32: the pixels come from the subgroup's ids, not
+// the local invocation's).
+layout(local_size_x = 256) in;
 
 const uint PACKET_W = 8u;
 const uint PACKET_H = 4u;
@@ -84,9 +88,12 @@ void main() {
             uint word = i * 32u + uint(findLSB(summary));
             summary &= summary - 1u;
             uint mask = masks[base + push.summary_words + word];
-            // One lane classifies one candidate rank against the packet.
+            // One lane classifies one candidate rank against the packet,
+            // whether or not its own pixel is still live (or on the
+            // screen): the loop breaks once no lane is, so here some pixel
+            // of the packet still needs every candidate.
             uint coverage = 0u;
-            if (live && (mask & (1u << lane)) != 0u) {
+            if ((mask & (1u << lane)) != 0u) {
                 uint rank = word * 32u + lane;
                 PackedPuff p = puffs[rank];
                 float inv = p.geom.w;

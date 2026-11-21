@@ -640,7 +640,7 @@ impl ParticleRenderer {
         ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
         ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
         ensure!(setup.blend.needs_sort() || setup.downscale == 2, "{:?} particles need downscale 2", setup.blend);
-        ensure!(setup.blend != ParticleBlend::Packets || gpu.subgroup_size == 32, "the packets' blend needs 32-lane subgroups (this device has {})", gpu.subgroup_size);
+        ensure!(setup.blend != ParticleBlend::Packets || gpu.compute_subgroups_32, "the packets' blend needs pinned, full 32-lane compute subgroups (subgroupSizeControl, computeFullSubgroups)");
         ensure!(!setup.blend.lists() || gpu.fragment_stores, "the particles' reference needs fragmentStoresAndAtomics");
         let formats: &[vk::Format] = match setup.blend {
             ParticleBlend::Moments => &MOMENT_FORMATS,
@@ -779,7 +779,11 @@ impl ParticleRenderer {
         let packets = setup.blend == ParticleBlend::Packets;
         let packet_stage = |code: &[u8], what: &str| pipeline::compute_pipeline(device, code, packet_pipeline_layout).with_context(|| format!("particle {what} pipeline"));
         let packet_bin = packets.then(|| packet_stage(spirv!("particles_bins.comp"), "bins")).transpose()?;
-        let packet_blend = packets.then(|| packet_stage(spirv!("particles_packets.comp"), "packets")).transpose()?;
+        // The blend's ballots are 32-bit and its packets are one subgroup
+        // each: pinned to 32 full lanes.
+        let packet_blend = packets
+            .then(|| pipeline::compute_pipeline_subgroup32(device, spirv!("particles_packets.comp"), packet_pipeline_layout).context("particle packets pipeline"))
+            .transpose()?;
         let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
         // The sorted half-resolution draw writes the colour and its glow
         // together, per particle (the composite only upsamples). The
@@ -1500,6 +1504,16 @@ impl ParticleRenderer {
             let push = [target.extent.width, target.extent.height, target.bin_size, target.bins_x, target.summary_words, target.mask_words];
             unsafe {
                 device.cmd_end_rendering(cmd);
+                // The graph made the scene's depth readable by the fragment
+                // stage; the blend samples it in compute. Chained through
+                // the graph's barrier (its second scope is the fragment
+                // stage), the depth writes become visible to compute.
+                let depth_to_compute = [vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                    .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)];
+                device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&depth_to_compute));
                 barrier(&[to_general(target.color.image), to_general(target.glow.image)]);
                 device.cmd_fill_buffer(cmd, target.masks.buffer, 0, vk::WHOLE_SIZE, 0);
                 let clear = [vk::BufferMemoryBarrier2::default()
@@ -1668,8 +1682,8 @@ impl ParticleRenderer {
                     };
                     let push = [target.extent.width, target.extent.height, target.bin_size, target.bins_x, target.summary_words, target.mask_words];
                     // The downsample left the half depth an attachment; the
-                    // blend and the composite sample it.
-                    barrier(&[to_sampled(half.depth.image)]);
+                    // blend (compute) and the composite sample it.
+                    barrier(&[to_sampled(half.depth.image).dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER)]);
                     barrier(&[to_general(target.color.image), to_general(target.glow.image)]);
                     device.cmd_fill_buffer(cmd, target.masks.buffer, 0, vk::WHOLE_SIZE, 0);
                     let clear = [vk::BufferMemoryBarrier2::default()
