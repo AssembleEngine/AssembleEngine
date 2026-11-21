@@ -3809,6 +3809,17 @@ From the M12 automatic exposure (2026-11-21):
   gradient and no clipped disc at the default exposure, and sunlit ground sits nearer a
   mid-grey.
 
+Pie in the sky, some time:
+
+- **`KHR_physics_rigid_bodies` for collision volumes and IK joint limits.** Explore the glTF
+  physics extension and decide what of it to take: its shapes (box, sphere, capsule, convex
+  hull, compound) as the units' collision volumes, and its joints' limits (hinge ranges, swing
+  and twist cones) as the limits a look-at/IK solver must respect ("Pie in the sky, some time:
+  look-at / IK for unit scripts", under Later improvements). Today a unit has one volume and
+  aiming is by joint turns and clips only. Survey first: what exporters write, how other
+  engines read it, and whether its shapes suit the one volume per unit that the nav and spatial
+  services read (a hitbox per body part would be a new sim concept, not just a loader change).
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
