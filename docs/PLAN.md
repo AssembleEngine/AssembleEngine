@@ -3261,9 +3261,40 @@ Steps (commit and stop for compaction after each):
   The levels stay at PQ's reference 203 nits in the tests and defaults: SDL reports 248
   nits of SDR white on the reference machine, but that is the compositor's reference,
   not necessarily the one the WSI attaches to the swapchain; stage 5 measures what is
-  actually sent, and nothing here builds a gamut decision on 248. Not built: a gamut
-  tag on authored colours (stage 4), the HDR swapchain (stage 5), the module ABI
+  actually sent, and nothing here builds a gamut decision on 248. Not built then: a gamut
+  tag on authored colours (stage 4, below), the HDR swapchain (stage 5), the module ABI
   (stage 6).
+- **Stage 4 is done** (2026-11-22). Authored colours carry a gamut tag:
+  `Gamut` serialises as `srgb` (the default), `p3` or `bt2020` (`bt709`,
+  `display-p3` and `rec2020` are aliases), and an unknown tag is a parse error. Effects
+  moved from a Rust table to `assets/effects.json` (version 1), a strict catalogue:
+  unknown names, fields, versions and tags are rejected, and
+  `particles::parse_effects` validates it and orders the table by `effect` index
+  (`EFFECT_NAMES`: flash, fire, sparks, smoke, dust). Each definition's particle colours
+  and burst light tint are in its gamut; `ParticleRenderer::new` converts them into the
+  working space at upload and normalises the light tint there (`unit_tint_from`).
+  `UnitClass` carries a gamut too (converted in `UnitRenderer::new`). The engine's fixed
+  and scattered lights stay BT.709 (`Light` is the 64-byte GPU record) and glTF's model
+  lights are linear sRGB by the spec. The fire is re-authored in P3 as unit-luminance
+  tints like every emissive colour (the `emission` scalar carries the brightness; a
+  catalogue test checks it): its death tint `[3.784, 0.189, 0.032]` uploads into the
+  default BT.709 working space as `[4.593, 0.038, -0.054]`, and an HDR10 P3 output
+  decodes it back to `[3.789, 0.187, 0.032]` (still outside BT.709). The emission adds
+  linearly, so in BT.709 the negative blue takes blue from the light behind the fire
+  (exact in a linear basis); only a pixel that ends negative is clipped, by the SDR
+  target. Review fix: the first P3 fire had luminance 0.965 and 0.951, dimming it by
+  3.5-4.9% along with the hue change. The display intermediate still
+  stays in the working space: only SDR's tonemap or `post.encode` maps it to the output.
+  55 GPU tests pass with validation (1 new), 67 lib tests (3 new), module 1, golden 2,
+  graph_file 2 (after the review: 68 lib tests, 4 new). The default SDR frame without
+  explosions is still byte-identical to stage 3 (release, `--map land --units 0 --camera
+  6000,6000,350,0.6,0.45`, built from 0ae663c and from stage 4); the explosion capture
+  (the same plus `--explode 12 --capture-frames 10`) changes as intended: 48 136 of
+  921 600 pixels differ (5.22%), mean channel 0.249, max 63, and the brightest 200
+  pixels' mean goes from (239.5, 233.8, 158.9) to (239.6, 228.2, 102.4), the fire's
+  deeper red. Not built: a light catalogue beyond
+  effects (fixed lights are generated, not content), a gamut tag in glTF (`extras`), the
+  HDR swapchain (stage 5), the module ABI (stage 6).
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.

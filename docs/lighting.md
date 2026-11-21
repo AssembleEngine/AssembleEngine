@@ -444,10 +444,11 @@ the output is mapped to (the *output gamut*, the display's primaries).
   effect colours, team colours, and the model lights (`units_lights.comp`).
   In the shaders: the terrain's composed albedo (tileset, palette, decals),
   the models' base colour and emission, and the water's foam and body
-  colours. All of them are authored in BT.709 until M13 stage 4 adds a gamut
-  tag, so a BT.2020 working space converts them on entry. Colours the host
-  passes as tints are normalised to unit luminance in the working space, so
-  the illuminance scalars still are illuminances.
+  colours. All are authored in BT.709 except the effects and unit looks that
+  carry a `p3` or `bt2020` tag (M13 stage 4, next section); the host converts
+  each into the working space on entry. Colours the host passes as tints are
+  normalised to unit luminance in the working space, so the illuminance
+  scalars still are illuminances.
 - **The exposure meter and the curve's crosstalk use the working space's
   luminance row** (Rec. 709's 0.2126/0.7152/0.0722 or BT.2020's
   0.2627/0.6780/0.0593): the scene's stored light is measured in the space
@@ -499,6 +500,50 @@ the output is mapped to (the *output gamut*, the display's primaries).
   WSI actually sends before the client chooses; until then 203 is correct
   for the tests and the headless readback, and nothing builds a gamut
   decision on 248.
+
+## Authored colour gamut (M13 stage 4)
+
+- **The tag** is `Gamut`, written `srgb` (BT.709, the default), `p3`
+  (Display P3) or `bt2020`; `bt709`, `display-p3` and `rec2020` are aliases.
+  There is no fourth value: an unknown tag in a catalogue is a parse error,
+  not a silent BT.709 default (`colorspace::Gamut`'s serde knows only these
+  spellings, and `particles::parse_effects` reports the file's error).
+- **Effects are authored in the catalogue** `assets/effects.json` (version
+  1): the engine's five effects by name, in `effect` index order (`flash`,
+  `fire`, `sparks`, `smoke`, `dust`). `particles::default_effects` parses it
+  once. The file is strict: an unknown effect name, version, field or gamut
+  tag is rejected, and every colour a definition carries — its particle
+  colours and its burst light's tint — is in the definition's gamut.
+- **The conversion happens once, at upload, into the working space.** The
+  particle renderer converts `color_start`/`color_end` and normalises each
+  burst light's tint in the effect's gamut before converting it
+  (`WorkingSpace::unit_tint_from`), so the candela scalar still is the
+  light's luminance. The unit renderer converts each look's colour
+  (`UnitClass::gamut`). The scene's fixed and scattered lights are generated
+  in BT.709 (`Light` is the 64-byte GPU record the cluster reads); glTF
+  model lights are linear sRGB by the spec, and `units_lights.comp` converts
+  them. Nothing converts again on the way to the display: the HDR display
+  intermediate stays in the working space, and only `post.encode` (or SDR's
+  `post.tonemap`) maps it to the output gamut.
+- **The fire is re-authored in P3.** Like every emissive colour its tints
+  are unit luminance in their gamut (the `emission` scalar is the
+  brightness in cd/m²; `emissive_colours_are_unit_luminance_tints_in_their_gamut`
+  checks the catalogue, the flash's death tint being tuned at 0.978 before
+  it). Its death tint is `[3.784, 0.189, 0.032]` in Display P3; uploaded
+  into the default BT.709 working space it is `[4.593, 0.038, -0.054]`
+  (luminance kept), a red with no BT.709 blue. The emission adds linearly,
+  so the negative blue takes blue from the light behind the fire, which is
+  exact in a linear basis; only a pixel whose sum ends negative is clipped,
+  by the SDR target, so the SDR fire is a deeper red. An HDR10 output at P3
+  carries it whole, and `p3_authored_effect_survives_post_encode` decodes
+  it back to `[3.789, 0.187, 0.032]` (still outside BT.709: `-0.054` blue). The other
+  four effects stay `srgb`, and an SDR frame with no explosion is
+  byte-identical to stage 3's.
+- **A tag is not a second working space.** It is a fact about the author's
+  numbers, not a licence to map at upload: the colour is converted into the
+  working space and no further. A P3 colour outside BT.709 therefore has a
+  negative component in the default working space, which is meaningful: HDR
+  P3 shows it and SDR clips it, exactly as other wide content behaves.
 
 ## HDR output
 
@@ -583,6 +628,22 @@ changes.
   BT.709 and BT.2020 contains both; compression leaves an in-gamut colour exactly
   alone, brings an out-of-gamut one to a boundary channel with luminance and hue kept,
   and turns imaginary all-negative light to black; a BT.2020 tint stays unit-luminance.
+- `ae_render::colorspace` and `ae_render::particles` (CPU): the tag parses as
+  `srgb`/`bt709`, `p3`/`display-p3` or `bt2020`/`rec2020`, and an unknown tag is an
+  error; the bundled `assets/effects.json` is the engine's five effects in `effect`
+  order, with the fire tagged P3, its BT.709 death tint negative in blue and its
+  luminance kept, and its burst light unit-luminance in P3; an unknown effect name,
+  field or version is rejected.
+- GPU `p3_authored_effect_survives_post_encode` (validation on): the fire's P3 death
+  tint `[3.784, 0.189, 0.032]`, uploaded into the default BT.709 working space as
+  `[4.593, 0.038, -0.054]`, decodes from an HDR10 P3 frame back to
+  `[3.789, 0.187, 0.032]` (still outside BT.709, `-0.054` blue): the display intermediate kept the working space and only
+  `post.encode` mapped the gamut, once. The release explosion capture
+  (`--map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12
+  --capture-frames 10`) changes accordingly against 0ae663c: 5.22% of pixels differ
+  (mean channel 0.249, max 63) and the brightest 200 pixels' mean goes from
+  (239.5, 233.8, 158.9) to (239.6, 228.2, 102.4). An SDR frame with no explosion is byte-identical to
+  stage 3's.
 - GPU `bt2020_unlit_content_reaches_sdr_within_one_code` (validation on): the sky
   (the unlit clear colour) rendered in a BT.2020 working space reaches SDR within 1
   code of the BT.709 frame (worst 1, 2522 of 57 600 channels differ).

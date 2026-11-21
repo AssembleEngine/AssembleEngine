@@ -594,6 +594,7 @@ Two rules keep this from tangling:
 | what an observer may see | `crates/ae_view/src/lib.rs`, `ae_services/src/view.rs` |
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
 | how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
+| a particle effect's look, or the gamut an authored colour is in | `assets/effects.json` (parsed by `crates/ae_render/src/particles.rs`), `colorspace.rs` |
 | graph validation | `crates/ae_framegraph/src/{descriptor,bake,barriers}.rs` |
 | the render module contract | `crates/ae_render_abi/src/`, `ae_render/src/module.rs` |
 | content packaging | `crates/ae_vfs/src/lib.rs`, `ae_catalog/src/lib.rs` |
