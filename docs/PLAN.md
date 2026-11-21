@@ -131,16 +131,22 @@ Interpolation: previous + latest transforms uploaded per instance, lerped in the
 ### Renderer
 
 - Lift `ecs_sim/src/render/frame_graph/*` unchanged with its tests, then add in order: depth-stencil, MRT,
-  multi-writer versions, indirect/compute buffers, bindless, async compute (vkflecs-baseline as reference).
+  multi-writer versions, indirect/compute buffers, fully bindless resources (M15), async compute
+  (vkflecs-baseline as reference).
 - Render ABI: `rg_declare(descriptor)` lists resources, passes (roles, attachments, pipeline, draw source), roots;
   host validates and rebakes only when `signature()` changes. One per-frame call returns pass enables,
   uniform blocks, draw-stream params. Shaders are content SPIR-V, reflected with rspirv
   (`vkflecs-baseline/src/shader_reflection.rs`) and checked against declared access.
+- Bindless resources (M15): shaders reach a resource by a renderer-issued 32-bit handle into a
+  few global descriptor arrays (sampled images, samplers, storage images, storage buffers,
+  uniform buffers) instead of a binding slot. The frame graph still owns resources, transitions
+  and lifetimes, and handles stay valid across rebakes; the per-binding layouts above remain
+  until every library pass and module has moved.
 - Draw sources are data: `InstanceStream{view table, field→attribute map, mesh/material set}`; compute pass
   does culling + LOD → indirect draws. Multi-threaded recording per pass group.
 - Engine pass libraries the module instantiates, wires, or replaces: `terrain_cbt` (map-rendering `leb.rs` +
   RedAlert `cbt.glsl`; surface appearance from the material tilesets below), `water_ra` (RedAlert
-  `src/draw.cpp:189-610` pass order + shaders), cascaded shadows, fog of war (sensor grid → texture),
+  `src/draw.cpp:189-610` pass order + shaders; M16), cascaded shadows, fog of war (sensor grid → texture),
   decals, GPU particles, post, UI.
 - Models: glTF converted offline to one bone-based format (M11: bones and joints; pieces are joints at weight 1), drawn in two GPU layouts (rigid: one joint per vertex; skinned: four), GPU-driven; piece animation = sim WASM writing `PieceTransform` columns. Superseded in part (2026-11-16): glTF loaded directly, no `.aemodel` (Later improvements, "glTF loaded at run time"); animation by unit scripts and a CPU pose fast path (M14), not `PieceTransform` columns.
 - UI: RmlUi behind a C FFI crate, rendered in a frame graph pass; untrusted widget modules drive documents
@@ -286,7 +292,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
-| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) — see "Planned milestones M11–M14" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
 
@@ -2432,11 +2438,13 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M14 (M11 done, M14 in design)
+## Planned milestones M11–M16 (M11, M12 done; M14 in design)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
-M14 (unit scripts) needs M11; its order against M12/M13 is open.
+M14 (unit scripts) needs M11; its order against M12/M13 is open. M15 (bindless resources) is
+independent of the others and can come after M3. M16 (the RedAlert-graphics port) is a survey
+with water as its fixed scope; its parts can land one at a time after M7.
 
 The plan so far had only one line on models (Renderer: "glTF converted offline; piece animation =
 sim WASM writing `PieceTransform` columns"). No loader, format or skinning was planned. M11 fills
@@ -2584,9 +2592,12 @@ Steps (commit and stop for compaction after each):
    particles lit per particle; the first sources (particle bursts, glTF lights).
 3. Speculars: the sun's and the lights' on units, terrain and water.
 4. The glow target and the bloom.
-5. The particles' blend mode 8 from `~/particles` (tile bins walked in packets of pixels),
+5. Automatic exposure (eye adaptation): meter the scene in a histogram, ease the EV, and hand
+   the tonemap and the bloom the adapted exposure.
+6. The particles' blend mode 8 from `~/particles` (tile bins walked in packets of pixels),
    measured against the sorted default. With Mode 8, decide whether the particles stay at half
-   resolution or go to full resolution (TODO below).
+   resolution or go to full resolution (see "Packets, blend mode 8, and the half/full
+   decision").
 
 - Step 1, the HDR scene target and the tonemap — done (2026-11-19).
   - The terrain, units, water and particles draw into `scene`
@@ -3396,6 +3407,198 @@ Design:
       in `bone_world` fails it (180° off).
     - Not done: queries of other units; effects at joints; the renderer drawing `Facing`;
       nav writing `Facing` and posting the move callins.
+
+### M15 — Fully bindless resources (priority: medium)
+
+Where the renderer is today: every pass's descriptor set layout is its shader's set/binding
+contract (`pipeline::set_layout`), image views are written into per-pass sets per frame slot,
+and the only array is the models' 1024-descriptor partially bound combined image sampler
+array (`models::MAX_TEXTURES`, `descriptorBindingPartiallyBound`). Fullscreen programs declare
+one uniform block and one combined image sampler per sampled intent. Until now, "bindless"
+appeared only in the lift list above.
+
+Target: a resource is addressed by a handle, not a binding slot.
+- **Handles.** A renderer-owned slab (`ImageHandle`, `BufferHandle`, generational) issues an
+  index into a global array per resource class; the frame graph assigns a handle when it
+  creates the resource and keeps it across rebakes. Roles still select transitions and
+  barriers; a handle never changes a resource's lifetime.
+- **Descriptor layout.** A small fixed set of global sets with variable-count arrays: sampled
+  images (2D, 2D array, cube, depth/comparison), samplers, storage images, storage buffers,
+  uniform buffers. Requires `runtimeDescriptorArray`,
+  `descriptorBindingVariableDescriptorCount`, `descriptorBindingPartiallyBound`, the
+  `descriptorBinding*UpdateAfterBind` flags and the `shader*Array(Non)UniformIndexing` flags,
+  with `nonuniformEXT` at non-uniform index sites.
+- **Shaders.** `layout(set = 0, binding = 0) uniform sampler2D textures[];` with handles from
+  push constants, uniforms, draw records and instance attributes. The library passes move
+  first; fullscreen programs follow through the render ABI (a bindless program declares which
+  arrays and how many entries it indexes), with the module contract version bumped and the
+  old per-binding form kept for one version.
+- **Descriptor strategy.** Descriptor sets with update-after-bind first;
+  `VK_EXT_descriptor_buffer` (not in Vulkan 1.3) is measured as a follow-up only if descriptor
+  writes still show on the CPU frame.
+- **Limits and fallbacks.** A fixed capacity per class, counted and reported like the light
+  cuts; a white/black fallback for retired handles; out-of-range indices are a shader bug,
+  checked in tests with GPU-assisted validation.
+- **Reflection.** rspirv gains the array declarations and dynamic-index flags; a module that
+  indexes an array it did not declare, or with a count it was not given, fails at load.
+- **Samplers.** Decide combined image samplers versus separate image and sampler arrays (the
+  tileset needs a trilinear REPEAT sampler, shadows a comparison sampler, the models a large
+  texture array).
+
+Steps (commit and stop for compaction after each):
+1. Device features and the handle table: enable the descriptor-indexing feature set and the
+   dynamic-index flags for every stage; report a device that lacks them (today's baseline
+   stays). No renderer change yet.
+2. Sampled images: the global array and the terrain's textures (palette, tileset, decals,
+   shadows, vision, noise) plus the post chain; byte-identical frames; cost measured.
+3. Buffers and storage images: lights, particles, units, palettes and the model tables go
+   bindless; model draw records carry texture handles; uniform blocks follow.
+4. Module contract: bindless arrays in `ae_render_abi`, reflection, the SDK, both modules and
+   both graph files; the contract version bumps and the compatibility path is tested.
+5. Descriptor buffer evaluation; retire per-pass descriptor writes where it wins.
+
+Verification:
+- GPU tests: for every existing scene, the bindless path and the fixed-slot path render
+  byte-identical frames (terrain, water, units, particles, decals, models, the post module);
+  validation and synchronization validation clean, and GPU-assisted validation clean in a
+  test-only run that deliberately indexes past the count.
+- A module with more sampled images than any old per-pass layout held (for example 64)
+  renders; a retired handle draws the fallback and logs once.
+- Resize and topology hot reload keep handles valid (the graph bakes again, the arrays do not
+  move); the frame-graph goldens gain handles but not passes or resources.
+- `bench-diff`: GPU time within the scene tolerances; the CPU frame records descriptor writes
+  before and after, and the shader indexing cost is measured (register pressure and
+  non-uniform indexing can cost more than the writes saved).
+- Handles are assigned in creation order, never by address or hash iteration, so the bench
+  scenes and captures stay seeded.
+
+Not decided: one set or one per resource class; combined versus separate samplers; whether to
+require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately or keep
+per-sampler bindings for a version; how the editor and the frame-graph visualiser name
+handles.
+
+### M16 — RedAlert-graphics survey and port (water first, priority: medium)
+
+`~/RedAlert-graphics` is the C++/Vulkan reconstruction of RA3's look: `src/draw.cpp` holds the
+frame's pass order, and `README.md` documents each shader it rebuilds, its parameters and its
+cost. The plan already lifted its CBT/LEB terrain and its decal look; M7 ported the water's
+surface composition only (no reflection, refraction, underwater pass or displaced surface).
+This milestone surveys the prototype and ports the pieces that read well at RTS distances.
+**Only water is fixed scope now**; everything else is decided when it is implemented, against
+the prototype and the frame budget.
+
+**Committed: the water stack.**
+- Pass order, from `src/draw.cpp` (~240-490): wave-particle simulation into a displacement
+  texture → churn target → separable blur → adaptive ocean LOD (CBT/LEB, `src/water_lod.cpp`,
+  `cbt_*`) → shadow map → planar reflection (geometry only, mirrored across the water plane,
+  sky excluded) → opaque scene → refraction copy → underwater pass into the copy (depth tint,
+  caustics, submerged-unit treatment) → bubbles into the copy → water surface
+  (`ocean.frag`: `refraction + reflection × .5 + environment × fresnel × 2 × shadow`) →
+  submarine overlay → spray over the water.
+- In our renderer that becomes library passes over new resources: `water.displace` (compute),
+  `water.churn`, `water.reflect` (a mirrored terrain + units pass), `water.refract` (a
+  scene-colour + depth copy), `water.underwater` (full screen), `water.draw` (replacing
+  today's flat quad with a displaced surface), `water.spray` and `water.bubbles`. The frame
+  graph's ordered writers and depth roles already have the shape; the pass library, goldens,
+  modules and graph files grow with them.
+- The surface mesh: today water is one quad at the water level and the depth test decides
+  coverage, so there is nothing to displace. Port the demo's adaptive ocean mesh, or start
+  with a fixed grid over the map; the demo's error metric (analytic swell + measured
+  displacement curvature, `cbt_error.comp`) is the reference. Measure at our cameras and map
+  sizes (the demo's ocean square is 2.6 km; our maps are 10 km).
+- Displacement: wakes and blast rings as wave particles (`particle.*`, `wave_particle.glsl`,
+  `particle_churn.*`, `gpu_particle.*`, `blur.comp`), which produce the height/normal field
+  the surface reads. Emitters come from the observer's view stream (hull positions and
+  speeds, impact events), so fog of war hides them and nothing enters the sim digest.
+- Data: absorption, wind, swell, foam, caustics and the RTS visibility aids become map or game
+  settings rather than constants.
+- Budget: the demo's own costs are in its README (blur 0.27-0.36 ms, ocean draw, reflection,
+  refraction, underwater pass at 1280x720 on an RTX 3060 Ti). Today our whole frame is about
+  0.4-0.6 ms for terrain + units at 720p; the port agrees a water budget when the first scene
+  runs. `--bench` gains water scenes (overview, army, close, underwater) recorded like the
+  others.
+
+**Candidates, decided at implementation time** (the user's list; each entry says what the
+prototype does and what our side needs):
+- **Reflection, refraction and underwater passes.** Reflection is a real mirrored pass: flip
+  the camera across the water plane, draw only terrain/units above it (sky and water excluded),
+  break it up with the detail normals, weight it by Fresnel. Refraction is a scene copy
+  distorted by the surface normal, with the depth growing the bend and a small blur; 0 A.D.'s
+  colour-delta guard rejects samples that would pull above-water geometry down. The underwater
+  pass runs after the opaque scene and before the water: it reconstructs world position from
+  depth, tints by absorption (RA3's 1D depth LUT), adds baked caustics projected along the sun
+  and scaled by the shadow map, and writes the refraction copy. Ours needs a scene copy, a
+  depth-sampling full-screen pass and a policy for what the copies may contain (see
+  visibility).
+- **How to paint terrain and underwater units.** The sea floor gets weed/rock patches, sand
+  ripples and fine grain so the refraction does not read as a blur; material tilesets already
+  give us the layers, so add underwater layers and caustic lighting to them. Submerged units
+  are lit by the sunlight that reaches their depth and tinted by the water above them
+  (`SUB_TINT`, with `SUB_KEEP` so paint stays readable and a `SUB_TINT_MAX` cap); RA3 also
+  offers a soft outline, a darkened surface silhouette and an after-water overlay
+  (`submerged.frag`) as player aids. Decide which aids fit an RTS camera.
+- **Underwater particle effects, including bubbles.** The demo's bubbles are spray records
+  with negative gravity: clusters of eight few-centimetre bubbles, wobbling as they rise,
+  clear in the middle, mirror-rimmed, sun highlight on top, a flat dot under two pixels, lit by
+  the light that reaches their depth, drawn into the refraction copy after the underwater pass
+  and so bent and softened by the water. Propellers emit them; ships' wakes do not. Blast
+  splash and bow spray are separate ballistic clumps with soft-particle fades, a flip-book
+  stamped into the displacement/churn targets and whitewater fading over seconds. Our particle
+  pool would need a second, depth-aware class (in the copy, not over the water), emitters from
+  the view stream, and a decision on how much of the flip-book simulation to port.
+- **Water effects like wakes and sprays.** The prototype's wakes: wave particles at stern and
+  bow drifting outward at the Kelvin half-angle, amplitude fading with age, churn in a second
+  target (normals, not foam colour), a blur that shapes both, displacement limits that ease
+  rather than clamp, and blast rings scaled by the crater radius (cavity, jet, rings, spray,
+  whitewater) with shallow-water breaking. At RTS distances wakes are a few pixels: decide a
+  distance at which they are drawn (near camera only) and a cheaper far path.
+- **Units visibility questions for RTS.** Reflection, refraction and the underwater pass can
+  each leak a unit the observer cannot see, and a reflection of a ghost would be a lie. Draw
+  only the observer's view stream into every copy, and define what a blip, a ghost or an
+  explored-only cell reflects (probably nothing). A submerged unit is invisible without
+  sonar/line of sight; the visibility aids above are presentation, not simulation. The
+  renderer receives submerged/visibility state from the view tables, never from the sim.
+- **Underwater view.** The demo clamps its camera above the water, so this is new design: when
+  the camera dips, a full-screen water fog/tint, the surface seen from below (Snell's window,
+  underside shading, no sky), bubbles and particles in the volume, and a blend at the crossing.
+  Decide whether the RTS camera is ever allowed below the surface, and what the game does when
+  it is.
+
+**Also in the prototype, not committed** (decide by what the first water scene needs): cloud
+shadows, the sky, the decal merge/cloud clusters, its bloom technique (we have our own), the
+flip-book particle systems, and the shore travel-time field and caustic bake (we would compute
+these in `ae_map` or a bake step, not per frame).
+
+Steps:
+1. Survey: run the demo, capture reference frames at RTS-like cameras, and write
+   `docs/water.md` with its passes, resources, parameters and costs; decide the candidate
+   pieces above.
+2. Data and bake: absorption/wind/swell/foam settings, a shore travel-time field and a caustic
+   texture (map bake or runtime), so the shaders have the demo's inputs.
+3. Reflection and refraction copies: the passes and graph resources, the water sampling them,
+   an RTS camera scene and its cost.
+4. Underwater pass and unit painting: depth-reconstructed tint and caustics, submerged-unit
+   absorption and the chosen visibility aids.
+5. Displacement, wakes, spray and bubbles: emitters from the view stream, the surface mesh,
+   and the near/far LOD decision.
+6. Underwater view and the visibility policy across every water pass, then tuning.
+
+Verification:
+- Captures against the demo at the same view (same map, sea floor and camera) for colour,
+  reflection, refraction, foam, wakes, spray and bubbles, with the numbers in `docs/water.md`.
+- GPU tests: reflection shows only above-water geometry; refraction bends the floor but never
+  paints a unit above the water; the underwater tint matches the depth LUT; bubbles land in
+  the refraction copy and not in the scene; a submerged unit is absent from an observer's
+  reflection, refraction, underwater pass and overlay without line of sight; water switched
+  off is byte-identical to today.
+- Validation and synchronization validation clean; `bench-diff` with the new water scenes and
+  no regressions in the existing ones; no sim digest changes.
+
+Not decided: adaptive ocean mesh (CBT) versus a fixed grid at our map sizes; a real mirrored
+reflection versus a cheaper screen-space approximation; which wakes/blasts are view-side
+(visual only) and which need a synced water field (submarines, amphibious gameplay); the
+visibility policy's details; whether the underwater pass runs always or only near/below the
+surface; how the copy layer exposes submerged state to the renderer (a view field or a mask).
 
 ## TODO (open, not a priority now)
 
