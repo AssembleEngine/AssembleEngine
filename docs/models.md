@@ -310,7 +310,8 @@ Decisions taken with the user (docs/PLAN.md, M11):
     has one fixed sun, and a directional light on a unit would swing the scene's light with the
     unit's facing (and instancing gives one per unit).
   - **Range** absent (infinite) is no authored cutoff; the renderer bounds it by the
-    exposure-derived cull radius.
+    exposure-derived cull radius (the widest exposure automatic exposure may reach, so
+    adaptation never culls a light it would show).
   - **Falloff** is physical inverse square with the spec's quartic window; the source radius
     regularises only the near field (glTF has no source radius).
   - **Spot angles** are clamped to [0, π/2] and inner ≤ outer.

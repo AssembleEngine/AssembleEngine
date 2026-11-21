@@ -2789,7 +2789,7 @@ Steps (commit and stop for compaction after each):
     radiance times exposure. Five GPU tests with absolute thresholds were re-baselined for
     the curve (the generated-map capture with eight explosions shifts by a mean 24/255; blur
     and pop measures that read display bytes now see roughly 70% of the clamp values).
-  - Not done: auto-exposure (the bloom now precedes the tonemap); authored sources have no glTF radius (the
+  - Not done: authored sources have no glTF radius (the
     range-derived size is a convention); the ACES/sky/fog calibration is a look decision
     (capture numbers in lighting.md).
 - Step 3, speculars — done (2026-11-20). Full write-up in [lighting.md](lighting.md)
@@ -2896,11 +2896,68 @@ Steps (commit and stop for compaction after each):
     half-resolution attachment: battle's `pass/particles` 85.0 → 151.6 µs and the frame
     1 078 → 1 143 µs (+6.0%); the other scenes have no particles there and stay within their
     spread.
-  - Not done: auto-exposure (after step 5); the sky has no sun disc, so the sun itself does
-    not bloom; bloom is a two-pass separable Gaussian, not a multi-scale pyramid; water replaces
-    the glow under its whole surface, so a glowing decal under shallow, nearly transparent water
-    loses its bloom (RA3 does the same; TODO); the test-only OIT particle blends do not feed the
-    bloom.
+  - Not done: the sky has no sun disc, so the sun itself does not bloom; bloom is a two-pass
+    separable Gaussian, not a multi-scale pyramid; water replaces the glow under its whole
+    surface, so a glowing decal under shallow, nearly transparent water loses its bloom (RA3 does
+    the same; TODO); the test-only OIT particle blends do not feed the bloom.
+- Step 5, automatic exposure — done (2026-11-21). Full write-up in
+  [lighting.md](lighting.md) ("Automatic exposure").
+  - **GPU-resident loop** (`ae_render::exposure`): `exposure.clear` (transfer) zeroes a 128-bin
+    histogram; `exposure.meter` (compute) samples the scene at a quarter resolution (four taps
+    per 4×4 block), averages the block and adds its log2 luminance to the bin (shared-memory
+    bins per workgroup, then one global add per non-zero bin); `exposure.adapt` (compute, one
+    invocation) trims the darkest and brightest 2%, computes the target
+    `scene_ev100 + (mean_log2 - log2(key))`, eases toward it exponentially in EV space (1.5/s
+    toward a brighter scene, 0.5/s toward a darker one, wall-clock time with pauses included;
+    readback steps 1/60 s a frame) and clamps it to 10..18 EV. It writes a
+    1×1 `RGBA32F` exposure image (eased EV, metered mean, target, metered flag). No CPU
+    readback.
+  - **Fog of war is not metered**: the meter samples the depth too and, where the frame shades by
+    vision, divides each tap by the vision at its world position (rebuilt from the depth), so an
+    unexplored frame meters as if in sight and the fog keeps its manual-EV darkness.
+  - **Roles**: the meter declares the histogram `StorageBufferReadWrite` (a new frame-graph role,
+    ABI code 17, `storage_buffer_read_write` in graph files: atomics read and write) and the
+    adapt pass the image `StorageImageReadWrite` (it reads the previous EV).
+  - **Where a new EV takes effect**: the scene draws still store at the camera EV
+    (`ToneParams::ev100`, the reference); `bloom.downsample` and `post.tonemap` sample the
+    exposure image and scale by `2^(scene_ev - eased_ev)`, so the frame's tonemap and bloom use
+    the EV adapted from that same frame's metering. With auto off, adaptation writes the camera
+    EV and the factor is exactly 1, leaving today's frames unchanged (`--ev100` alone selects
+    this; the client's default is auto, and `--auto-exposure` in either order with `--ev100`
+    keeps auto with that EV as the reference).
+  - **The bloom's clamp is exposure-relative**: the downsample applies the display scale before
+    clamping each tap at 4.0, so the clamp stays 4.0 of display-referred light whatever the
+    adaptation does; the tonemap adds the already-scaled bloom.
+  - **The key** is `KEY_LUMINANCE` 0.5, pre-curve display-linear: what the reference scene
+    (untextured terrain, 100 000 lx) meters at EV14, so adaptation settles on the calibrated
+    look (1.0 settled 0.9 EV brighter: display mean 0.773 against 0.596). Culling uses
+    `MIN_EV100` (the widest exposure adaptation may reach) when auto is on and the graph has the
+    exposure image, so a light is never cut that the brighter image would show; a bench run
+    with auto against `--ev100 14` shows no consistent change.
+  - **Graphs**: the native graph, the default module and `render/default.graph.json` declare the
+    `exposure` image (as a library image), the `exposure.histogram` buffer and the three passes
+    between the particles and the bloom; the tonemap and the bloom downsample sample the exposure
+    image. The library checks the image, the histogram and the three passes as all-or-none, their
+    order, and the two reads. The graph goldens were regenerated.
+  - **Verification**: CPU `lighting::target_ev100`, `lighting::adapt_ev100` and the `library`
+    wiring tests; GPU `auto_exposure_holds_the_key_across_sunlight`: a flat ground at 100 000
+    and 25 000 lx converges over 5 s to display means 0.575 and 0.567 (ratio 1.015), while the
+    same change at a manual EV14 gives 1.88; auto at 100 000 lx is within 4% of manual EV14
+    (0.575 vs 0.596); an all-unexplored frame keeps 0.212 of the clear frame under auto and
+    0.220 at manual (1.022 under auto with the vision correction switched off); the run is 10 s
+    for the slower rates. GPU `auto_exposure_meters_the_glow_and_the_centre`: a 5×5 patch of
+    glowing scars darkens the ground away from it to 192.0 luma with the bloom on and 192.3
+    off (equal with the glow unmetered), and to 192.3 at the centre against 200.2 near the edge
+    (198.2 and 199.7 with the centre weight at 1). All 43 GPU tests pass with validation, and
+    the auto-exposure tests with sync validation.
+  - **The glow and the centre**: the meter adds the glow at the bloom's strength (clamped at 4.0
+    at the reference exposure), and weights each block 4× at the centre falling over 0.25
+    screen heights (`METER_CENTER_WEIGHT`/`METER_CENTER_SIGMA`). The glow is unblurred: metering
+    the blurred bloom would put the meter after the bloom, whose downsample reads this frame's
+    exposure, and the frame graph ties a read before a resource's first write to that write
+    (a cycle). The bloom's blur spreads about 20 px at 1280×720, so the difference is small.
+  - Open: no spot metering on a selection or the cursor; the meter includes the sky; one
+    adaptation curve (two rates), no per-scene look or min/max override beyond the constants.
 
 ### M13 — HDR output on a supporting display (priority: lower)
 
@@ -3661,13 +3718,18 @@ From M12 (2026-11-19):
   sorted draw at either, so the sorted half-resolution draw stays the default and `Packets`
   stays a comparison blend. Write-up above ("Packets, blend mode 8, and the half/full
   decision").
-- **Automatic exposure (eye adaptation), as AAA games do.** A compute pass reduces the HDR
-  scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
-  brightest few percent; the exposure eases toward the target key over time (faster when the
-  scene brightens than when it darkens), clamped to a min and max EV, the tonemap reading it
-  from a small buffer, with no CPU readback. The bloom (M12 step 4) now precedes the tonemap;
-  meter the scene before it and define when a new EV takes effect; say whether the bloom's
-  clamp (4 exposed) is scene-referred or exposure-relative.
+- **Automatic exposure (eye adaptation), as AAA games do — done (2026-11-21).** A compute pass
+  meters the HDR scene's log luminance into a 128-bin histogram (four taps per 4×4 block);
+  `exposure.adapt` trims the darkest and brightest 2%, targets the key, eases exponentially in EV
+  space (1.5/s toward a brighter scene, 0.5/s toward a darker one, wall-clock time), weights the
+  centre of the frame 4× and counts the glow the bloom shows, clamps to 10..18 EV and writes a
+  1×1 exposure image the bloom
+  and the tonemap sample, with no CPU readback. The scene is stored at the camera's reference EV
+  and the tonemap applies the eased EV's scale, so a new EV takes effect in the same frame's
+  bloom and tonemap. The bloom's 4.0 clamp is exposure-relative (the scale is applied before the
+  clamp). The fog of war's dimming is divided out of the metering. Write-up in
+  [lighting.md](lighting.md) ("Automatic exposure"). Not done: spot metering on a selection or
+  the cursor, excluding the sky, and per-scene tuning beyond the constants.
 - **Roughness-aware sky specular.** `brdfAmbient` is Schlick Fresnel times a hemisphere
   factor, independent of roughness; at a low camera pitch the ground's ambient specular
   approaches the sky's colour (Fresnel rises at grazing) where a roughness-aware directional
