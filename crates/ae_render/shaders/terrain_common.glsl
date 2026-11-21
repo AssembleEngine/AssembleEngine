@@ -182,9 +182,27 @@ void splitConforming(uint id) {
 
 vec2 latticeToCell(ivec2 p) { return vec2(p) * (u.map.z / float(1 << LATTICE_BITS)); }
 
+// The height of the bilinear surface at cell coordinate `cell` (texel `i` is
+// at cell `i`, so linear filtering interpolates between neighbouring
+// samples with the sampler's fixed-point weights; `groundAt` below is the
+// same surface, and the two must change together).
 float sampleHeight(vec2 cell) {
     vec2 uv = (cell + 0.5) * u.height.zw;
     return textureLod(heightTex, uv, 0.0).r * u.height.x + u.height.y;
+}
+
+// The ground at world `p` (xz): x its height, yz its slope (m/m along world
+// x, z) — `sampleHeight`'s surface and its exact gradient, from one gather
+// of the cell's four samples (no filter weights, so the gradient does not
+// ramp over part of a cell).
+vec3 groundAt(vec2 p) {
+    vec2 x = p / u.map.w;
+    vec2 i = floor(x), f = x - i;
+    // The four samples around the cell (i, i + 1): w (i, i), z (i + 1, i),
+    // x (i, i + 1), y (i + 1, i + 1).
+    vec4 g = textureGather(heightTex, (i + 1.0) * u.height.zw, 0) * u.height.x;
+    float lo = mix(g.w, g.z, f.x), hi = mix(g.x, g.y, f.x);
+    return vec3(mix(lo, hi, f.y) + u.height.y, mix(g.z - g.w, g.y - g.x, f.y) / u.map.w, (hi - lo) / u.map.w);
 }
 
 // --------------------------------------------------------------------------------------

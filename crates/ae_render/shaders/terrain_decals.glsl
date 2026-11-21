@@ -1,6 +1,6 @@
 // Decals (src/decals.rs), applied to the terrain's albedo, normal and
 // surface material (roughness, metallic) before lighting.
-// Needs terrain_common.glsl (u, heightTex).
+// Needs terrain_common.glsl (u, groundAt).
 //
 // The buffer, in 32-bit words: a header (bucket mask, 0, cell size as float
 // bits, decal capacity), the decals (16 words each: centre x, z, half-sizes
@@ -46,20 +46,6 @@ vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, ou
     m = vec4(tn.x * T + tn.y * B + tn.z * N, sm.w);
     roughness = sm.z;
     return vec4(t.rgb * t.a, t.a);
-}
-
-// The ground at `p` (world xz): x its height, yz its slope (m/m along
-// world x, z), the heightmap's bilinear surface and its exact gradient,
-// from one gather of the cell's four samples (sampleHeight's surface,
-// without the filter's fixed-point weights).
-vec3 groundAt(vec2 p) {
-    vec2 x = p / u.map.w;
-    vec2 i = floor(x), f = x - i;
-    // The four samples around the cell (i, i + 1): w (i, i), z (i + 1, i),
-    // x (i, i + 1), y (i + 1, i + 1).
-    vec4 g = textureGather(heightTex, (i + 1.0) * u.height.zw, 0) * u.height.x;
-    float lo = mix(g.w, g.z, f.x), hi = mix(g.x, g.y, f.x);
-    return vec3(mix(lo, hi, f.y) + u.height.y, mix(g.z - g.w, g.y - g.x, f.y) / u.map.w, (hi - lo) / u.map.w);
 }
 
 // One segment of the ground flattened into the plane: plan vector `d`
@@ -161,6 +147,11 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
     uint first = entry >> 8u, count = entry & 255u;
     float time = u.effects.x;
     float layers = float(textureSize(decalAtlas, 0).z);
+    // The pixel's own ground, gathered on the first decal that reaches the
+    // unfold: a pixel with no decals never pays for it, and a bucket with
+    // many never pays more than once.
+    vec3 groundP = vec3(0.0);
+    bool haveGroundP = false;
     for (uint i = 0u; i < count; i++) {
         uint at = 4u + 16u * decalWords[indexAt + first + i];
         vec4 a = decalFloats(at);       // centre x, z, half x, half z
@@ -182,8 +173,12 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         // cliff's edge or into its foot continues onto the face, and over
         // any ground it is one continuous image (no projections to blend,
         // so no seams).
+        if (!haveGroundP) {
+            groundP = groundAt(P.xz);
+            haveGroundP = true;
+        }
         float stride = max(u.map.w, max(a.z, a.w) * 0.125);
-        vec2 un = unfoldRay(a.xy, groundAt(a.xy), dxz, groundAt(P.xz), stride);
+        vec2 un = unfoldRay(a.xy, groundAt(a.xy), dxz, groundP, stride);
         vec2 q = vec2(dot(un, ax), dot(un, az)) * inv;
         // Square, in unfolded metres.
         float r = max(abs(q.x), abs(q.y));
