@@ -1980,7 +1980,8 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
   steps). Each segment is flattened along the ground's slope, isometrically: `d' = d + dh G /
   (1 + sqrt(1 + |G|^2))`, with `dh` the segment's own rise and `G` the slope at its start, middle
   and end averaged by steepness, so that across a fold the face's slope is used. The sum, turned
-  into the decal's frame, is the uv.
+  into the decal's frame, is the uv. Each point's height and slope come from one gather of its
+  heightmap cell.
   - Continuous in the point (a new step starts where the last segment has become that step), exact
     over a planar slope and over a fold at any angle (a cliff's edge or foot), and the plan offset
     on flat ground. There is one image, nothing to blend, so no seams.
@@ -2041,7 +2042,20 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     - the specialization forced off (no stripes).
   - All 38 GPU tests pass, run with `--test-threads=1`.
   - Cost: `battle`'s terrain pass 420 µs before, 423 µs after (`bench-diff`: 27 of 28 metrics
-    unchanged, none regressed).
+    unchanged, none regressed). From 900 m the scorch marks are a few pixels each, so this hides
+    the cost.
+  - The close measure is the bench scene `scorched` (no units, 120 m away, 2 explosions a frame
+    over 100 m, so overlapping marks fill most of the view). Its terrain pass is about 2.55 ms and
+    varies ±33 % within a run as marks pile up, so the unfold's own cost was measured by running it
+    8 times per decal and dividing the extra time by 7:
+    - slopes by forward differences (three bilinear taps a point, 9 + 6n a fragment): ~150 µs;
+    - each point's height and slope from one `textureGather` of its cell (`groundAt`, 3 + 2n):
+      ~93 µs. Kept.
+    - Skipping the middle sample where the ends' slopes already predict a segment's rise: no faster
+      (~100 µs); this map is rarely that planar, and the branch costs. Not kept.
+  - `groundAt`'s slope is the bilinear surface's exact gradient, which steps at cell edges where the
+    forward differences ramped over a quarter cell. On seeds 6 and 8 of the scripted map, 0.01 to
+    0.02 % of pixels changed by more than 2 %, all in the cracks below the crease, with no seam.
 - **Where it departs from the plan:**
   - The plan projected each decal three ways around its centre. It is unfolded over the ground
     instead (Projection, above), and its extent is the unfolded square, not a 3D distance.
