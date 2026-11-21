@@ -3184,6 +3184,39 @@ Steps (commit and stop for compaction after each):
   `gpu_total` +0.2%. `bench-diff` against `bench/results/baseline` is not usable here: that
   baseline is from 785e1d3 (2026-11-14), has no exposure passes, and flags M4–M12's own
   growth (26 regressions unrelated to the curve); re-record it (TODO).
+- **Stage 2 is done** (2026-11-21). `post.encode` and the display intermediate exist in the
+  native graph, headless: `OutputEncoding {Sdr, Hdr10Pq, ScRgb}` and `DisplayLevels
+  {paper_white, peak}` (nits) in `LibraryEnv`, `ae_render::encode` holding the pass and a
+  CPU mirror of the shader's mapping. A `TerrainApp::with_display` renders to
+  `A2B10G10R10_UNORM_PACK32` or `RGBA16F` and reads back the packed 10-bit or half-float
+  pixels. `post.encode` samples the display 1:1 (`texelFetch`), clamps at `peak /
+  paper_white`, and writes ST.2084 in BT.2020 (a pure re-expression of the working space's
+  BT.709: the gamut *compression* is stage 3) or scRGB at `v * paper_white / 80` with
+  negatives kept. The curve's peak anchor is `Lottes::peak_out`: 1 in SDR, `peak /
+  paper_white` in HDR, solved with the mid anchor; the key still displays at 0.40 of paper
+  white either way, but only the key: below it the HDR toe is flatter (slope at zero 0.95
+  at 441/203 nits against SDR's 1.29), so darks display about 20% darker than in SDR
+  (scene 0.1: 0.092 against 0.115), and from the key to paper white brighter (scene 1.0:
+  0.691 against 0.579). The scene's peak stays at 16 units — the content's range, chosen in
+  stage 1 — and only what it displays at rises to the display's peak, so the content's
+  whole range uses the display's; moving the scene's peak to 16 × headroom would reserve
+  the top of the display's range for scene light the content does not have, and scaling
+  both anchors with the headroom would brighten every midtone. At peak = paper white the
+  curve is the SDR one (the identity the readback test measures). SDR is untouched:
+  `post.tonemap` writes the sRGB target directly, the native graph has no display and no
+  encode, and the `.dot` goldens did not move.
+  Measured: `post.encode` writes ST.2084's 10-bit codes at 100, 203 and 1000 nits exactly
+  (0 LSB off, 520/594/769) and a value past the peak stops at its code; at peak = paper
+  white the HDR10 frame's decoded luminance matches the SDR frame's to a mean of 0.0019 and
+  a max of 0.0032 linear (one quantization step), the 80-nit scRGB readback matches it to
+  0.0011/0.0028 per channel and the 203-nit one over 2.5375 the same, and an explosion
+  (203-nit paper white, 441-nit peak) reaches 437.7 nits with no channel above 439.8. All
+  49 GPU tests pass with validation (5 new), the lib tests 58, and the module and golden
+  tests are unchanged. SDR is byte-identical: the same skirmish capture from the stage-1
+  commit and this stage compares equal byte for byte (the solver's peak equation is the old
+  expression when `peak_out` is 1). Cost and HDR speed are measured in stage 7 (benchmarks
+  are deferred there). Not built: HDR swapchains (stage 5), the module ABI (stage 6), so an
+  HDR app reads back and a module graph cannot be HDR yet.
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -4014,6 +4047,11 @@ From M13 stage 1 (2026-11-21):
   which lifts the darks; with the lowered midtones the far ground reads greyer and flatter in
   the stage 1 captures. If it reads muddy on the display, try `contrast` (`a`) above 1, which
   deepens the toe without moving the anchors.
+- **Look check in stage 5: HDR darks against SDR.** With `a = 1` the HDR curve's toe is flatter
+  than SDR's (slope at zero 0.95 at 441/203 nits against 1.29), so HDR shows the darks about
+  20% darker and the key-to-paper-white range brighter than SDR. Compare on the display; if
+  the darks read crushed, solve `a` per output so the HDR curve also meets the SDR one at a
+  dark anchor (scene 0.1 → 0.115), keeping the key and peak anchors.
 
 Pie in the sky, some time:
 

@@ -228,6 +228,8 @@ Render modules wire these; the engine owns their implementations.
 | `water.draw` | graphics | depth (read), sky, fog | colour 1 |
 | `particles.sim` | compute | — | state, keys, indirect |
 | `particles.draw` | graphics | state, keys, indirect, depth | colour (half-res + upsample) |
+| `post.tonemap` | graphics | the scene, the bloom, the exposure image | the target (SDR) or the display (HDR) |
+| `post.encode` | graphics | the display (HDR only) | the target: PQ or scRGB |
 | `readback.copy` | transfer | an image | `readback.buffer` |
 | `host.read` / `present` | transfer / present | — | — |
 

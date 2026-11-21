@@ -416,10 +416,70 @@ cached models of older versions are converted again.
   in, so a fireball's core whitens while its edge stays orange. At EV14 the
   sunlit untextured ground displays at a mean of 0.366 linear (0.596 with
   the fit), and the GPU test `the_curve_places_the_sunlit_ground` pins it.
-  A 0..1 sRGB attachment is an SDR assumption; HDR output (M13) needs PQ or
-  scRGB and another encode.
-- Readback is a raw copy of the sRGB attachment, so captures are already
-  display-encoded bytes.
+  In SDR the output attachment is a 0..1 sRGB image and the hardware
+  encodes it; HDR output keeps a display intermediate and encodes it
+  (`post.encode`, HDR output below).
+- Readback is a raw copy of the output attachment, so SDR captures are
+  already display-encoded bytes (an HDR readback is PQ or half-float).
+
+## HDR output
+
+The output's encoding is separate from the scene's light: the scene stays
+exposed linear RGBA16F whatever the output, and only the end of the chain
+changes.
+
+- **The display intermediate** (`post.encode`, `ae_render::encode`) is
+  RGBA16F linear light in units of paper white, in the working space, from 0
+  to `peak / paper_white`. `post.tonemap` writes it instead of the target
+  when the output is HDR, and `post.encode` maps it to the target;
+  `DisplayLevels {paper_white, peak}` (nits) comes from
+  `LibraryEnv`/`TerrainApp::with_display`. SDR graphs have neither: the
+  tonemap writes the sRGB target directly, so SDR output is byte-identical
+  to what it was before HDR existed.
+- **The curve's white point stays at 16 scene units; what it displays at
+  rises.** `Lottes::peak_out` is the output of the peak anchor in
+  paper-white units: 1 in SDR and `peak / paper_white` in HDR. The mid anchor
+  stays the metered key at 0.40 of paper white in both, so the exposure
+  places the key where SDR does; above it the curve is deliberately
+  different, or the extra display range would go unused. Below it the
+  HDR curve is not the SDR one either: with `a = 1` the solved toe is
+  flatter (slope at zero `1 / c`: 1.29 in SDR, 0.95 at 441/203 nits, 1.00 at
+  441/248), so the darks display about 20% darker than in SDR (scene 0.1:
+  0.115 SDR, 0.092 HDR; 0.25: 0.247 against 0.217) and the range from the key
+  to paper white brighter (scene 1.0: 0.579 against 0.691). An emitter between the two anchors (a
+  fireball is several scene units) displays above paper white on an HDR
+  display. The scene's peak (16) is a property of the content — stage 1 chose
+  it as the top of the scene's range — so it maps to the display's peak. The
+  alternative, moving the scene's peak to 16 × headroom, spends the top of
+  the display's range on scene light the content does not have and compresses
+  the emitters further; scaling both anchors with the headroom would brighten
+  every midtone. At `peak = paper_white` the curve is the SDR one exactly.
+- **HDR10**: ST.2084 (PQ) in BT.2020 at `v * paper_white` nits, 10 bits per
+  channel (`A2B10G10R10_UNORM_PACK32`). The BT.2020 re-expression is a pure
+  matrix change (BT.709 is inside BT.2020); compressing a wider working
+  space into a narrower output gamut is the gamut map (M13 stage 3). The
+  display's values are clamped at `peak / paper_white` before encoding, so
+  no channel encodes above the display's peak (the curve's asymptote is a
+  few percent above its peak anchor).
+- **scRGB**: BT.709-relative linear light at `v * paper_white / 80` (1.0 =
+  80 nits) in `R16G16B16A16_SFLOAT`; values below 0 are kept as out of
+  gamut. At an 80-nit paper white the frame's values are the display's own;
+  at 203 nits they are 2.5375 times.
+- **The defaults** are PQ's protocol reference 203 nits and a 1000-nit peak,
+  until the client reads SDL's HDR state and the swapchain's own reference
+  (M13 stage 5).
+- **Verification**: `post_encode_writes_st_2084_codes` (a constant display
+  through the pass: 100, 203 and 1000 nits are ST.2084's codes 520, 594 and
+  769 exactly, and a value past the peak stops at its code),
+  `post_encode_writes_scrgb_relative_to_80_nits` (203/80 scale, negatives
+  kept), `hdr10_readback_matches_the_sdr_frame_at_paper_white_peak` (the
+  decoded luminance matches the SDR frame to a mean of 0.0019 and a max of
+  0.0032), `scrgb_readback_scales_the_display_by_paper_white` (channel-wise
+  0.0011/0.0028 at both 80 and 203 nits), and
+  `hdr_emitters_reach_above_paper_white_and_stop_at_peak` (an explosion at a
+  203-nit paper white and 441-nit peak reaches 437.7 nits, no channel above
+  439.8). The lib test `pq_codes_match_st_2084` pins the OETF and its
+  inverse.
 
 ## Verification
 
@@ -432,6 +492,21 @@ cached models of older versions are converted again.
   (roughness in the UBO and its range check); `library` (the exposure image,
   histogram and three passes go together and run in order, and the tonemap
   and bloom downsample sample the eased EV).
+- The SDR path is unchanged, byte for byte: a release capture of the same skirmish
+  frame from the stage-1 commit and from this stage compares equal (`cmp`), and the
+  `.dot` goldens did not move. In HDR the solve's peak equation reduces to the old
+  expression at `peak_out == 1`.
+- GPU `post_encode_writes_st_2084_codes` and `post_encode_writes_scrgb_relative_to_80_nits`
+  (validation on): PQ's codes at 100/203/1000 nits are exact (0 LSB), and
+  scRGB is display × paper white / 80 with negatives kept.
+- GPU `hdr10_readback_matches_the_sdr_frame_at_paper_white_peak` and
+  `scrgb_readback_scales_the_display_by_paper_white` (validation on): with
+  peak = paper white the HDR frame's decoded light is the SDR frame's
+  (mean 0.0019, max 0.0032 linear; scRGB 0.0011/0.0028 per channel), and at
+  203 nits it is the same frame over 2.5375.
+- GPU `hdr_emitters_reach_above_paper_white_and_stop_at_peak` (validation
+  on): an explosion's core decodes to 437.7 nits with no channel above the
+  441-nit peak.
 - GPU `the_curve_places_the_sunlit_ground` (validation on): flat untextured
   ground under the full sun at the default exposure displays at a mean of
   0.366 linear (0.596 under Narkowicz's fit), while the clamp curve reads the
