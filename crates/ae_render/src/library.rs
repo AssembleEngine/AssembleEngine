@@ -184,11 +184,17 @@ pub enum LibraryPass {
     /// into [`LibraryResource::LightClusters`] (compute).
     LightsCluster,
     /// The HDR scene image (sampled in the fragment stage, of the scene's
-    /// format) to the output (one colour attachment of the target's
-    /// format): the tone curve (the scene is stored exposed), plus the
-    /// bloom's light when the graph has a `glow` and `post.bloom` passes
-    /// and the display exposure when it declares the exposure image.
+    /// format) to the target in an SDR graph (where the tonemap encodes), or
+    /// to the display ([`crate::encode::DISPLAY_FORMAT`], paper-white units)
+    /// in an HDR one: the tone curve (the scene is stored exposed), plus the
+    /// bloom's light when the graph has a `glow` and `post.bloom` passes and
+    /// the display exposure when it declares the exposure image.
     Tonemap,
+    /// The display intermediate (sampled in the fragment stage) to the
+    /// output's encoding (one colour attachment of the target's format), in
+    /// an HDR graph only: ST.2084 or scRGB, clamped at the display's peak
+    /// ([`crate::encode`]).
+    PostEncode,
     /// The metering histogram's counts zeroed for the frame (`transfer`;
     /// `cmd_fill_buffer`).
     ExposureClear,
@@ -238,7 +244,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 23] = [
+    pub const ALL: [LibraryPass; 24] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::UnitsReset,
@@ -253,6 +259,7 @@ impl LibraryPass {
         Self::ParticlesDraw,
         Self::LightsCluster,
         Self::Tonemap,
+        Self::PostEncode,
         Self::BloomDownsample,
         Self::BloomBlurX,
         Self::BloomBlurY,
@@ -280,6 +287,7 @@ impl LibraryPass {
             Self::ParticlesDraw => "particles.draw",
             Self::LightsCluster => "lights.cluster",
             Self::Tonemap => "post.tonemap",
+            Self::PostEncode => "post.encode",
             Self::BloomDownsample => "bloom.downsample",
             Self::BloomBlurX => "bloom.blur_x",
             Self::BloomBlurY => "bloom.blur_y",
@@ -299,7 +307,7 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod | Self::UnitsCull | Self::UnitsPose | Self::ParticlesSim | Self::LightsCluster | Self::ExposureMeter | Self::ExposureAdapt => PassKind::Compute,
-            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY => PassKind::Graphics,
+            Self::TerrainDraw | Self::UnitsDraw | Self::ShadowsDraw | Self::ShadowsParticles | Self::WaterDraw | Self::ParticlesDraw | Self::Tonemap | Self::PostEncode | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY => PassKind::Graphics,
             Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead | Self::ExposureClear => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
@@ -357,7 +365,7 @@ impl LibraryPass {
             ],
             Self::LightsCluster => &[(R::LightList, Role::StorageBufferWrite(ShaderStage::Compute)), (R::LightClusters, Role::StorageBufferWrite(ShaderStage::Compute))],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
-            Self::WaterDraw | Self::Tonemap | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY | Self::HostRead | Self::Present => &[],
+            Self::WaterDraw | Self::Tonemap | Self::PostEncode | Self::BloomDownsample | Self::BloomBlurX | Self::BloomBlurY | Self::HostRead | Self::Present => &[],
         }
     }
 
@@ -437,6 +445,23 @@ pub struct LibraryEnv {
     pub shadows: bool,
     /// The scene has particles (the particle renderer exists).
     pub particles: bool,
+    /// How the output image encodes the display's light (SDR has no display
+    /// intermediate; the tonemap writes the target, as before).
+    pub encoding: crate::encode::OutputEncoding,
+    /// The display's paper white and peak, in nits (unused in SDR).
+    pub levels: crate::encode::DisplayLevels,
+}
+
+impl LibraryEnv {
+    /// The image `post.tonemap` writes: the display ([`crate::encode::DISPLAY_FORMAT`],
+    /// paper-white units) in an HDR graph, the output in an SDR one.
+    pub fn display_format(&self) -> vk::Format {
+        if self.encoding.uses_display() {
+            crate::encode::DISPLAY_FORMAT
+        } else {
+            self.color_format
+        }
+    }
 }
 
 /// Library resource of each graph resource (by `ResourceId` index).
@@ -559,6 +584,9 @@ pub fn check<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, map: &Reso
     }
     if lib == LibraryPass::Tonemap {
         return check_tonemap(graph, pass, env);
+    }
+    if lib == LibraryPass::PostEncode {
+        return check_encode(graph, pass, env);
     }
     if lib == LibraryPass::ExposureMeter {
         return check_exposure_meter(graph, pass, env);
@@ -689,8 +717,16 @@ fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Res
                 bloom += 1;
                 sampled += 1;
             }
-            Role::ColorAttachment(_) if image.format == env.color_format => color += 1,
-            Role::ColorAttachment(_) => return Err(error(format!("pass `{name}` (post.tonemap) writes `{}` ({:?}); the output is {:?}", r.name, image.format, env.color_format))),
+            Role::ColorAttachment(_) if image.format == env.display_format() => color += 1,
+            Role::ColorAttachment(_) => {
+                return Err(error(format!(
+                    "pass `{name}` (post.tonemap) writes `{}` ({:?}); it writes the {} ({:?})",
+                    r.name,
+                    image.format,
+                    if env.encoding.uses_display() { "display" } else { "output" },
+                    env.display_format()
+                )))
+            }
             role => return Err(error(format!("pass `{name}` (post.tonemap) does not use `{}` as {role:?}", r.name))),
         }
     }
@@ -707,6 +743,41 @@ fn check_tonemap<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Res
             "pass `{name}` (post.tonemap) must sample `{}` (the graph declares it: the tonemap applies the eased EV)",
             ae_render_abi::module::EXPOSURE_NAME
         )));
+    }
+    Ok(())
+}
+
+/// `post.encode`: the display (sampled in the fragment stage, full size,
+/// [`crate::encode::DISPLAY_FORMAT`]) and one colour attachment of the
+/// target's, nothing else. Only an HDR graph has it.
+fn check_encode<R>(graph: &FrameGraph<R>, pass: usize, env: &LibraryEnv) -> Result<(), LibraryError> {
+    let p = &graph.passes[pass];
+    let name = &p.name;
+    if !env.encoding.uses_display() {
+        return Err(error(format!("pass `{name}` (post.encode) does not exist in an SDR graph; post.tonemap writes the output")));
+    }
+    let (w, h) = (env.extent.width, env.extent.height);
+    let (mut display, mut target) = (0, 0);
+    for intent in &p.intents {
+        let r = &graph.resources[intent.resource.index()];
+        let ResourceDesc::Image(image) = r.desc else {
+            return Err(error(format!("pass `{name}` (post.encode) does not use buffer `{}`", r.name)));
+        };
+        match intent.role {
+            Role::Sampled(ShaderStage::Fragment) if image.format == crate::encode::DISPLAY_FORMAT && (image.width, image.height) == (w, h) => display += 1,
+            Role::ColorAttachment(_) if image.format == env.color_format && (image.width, image.height) == (w, h) => target += 1,
+            Role::Sampled(ShaderStage::Fragment) => {
+                return Err(error(format!(
+                    "pass `{name}` (post.encode) samples `{}` ({:?} {}x{}); the display is {:?} {w}x{h}",
+                    r.name, image.format, image.width, image.height, crate::encode::DISPLAY_FORMAT
+                )))
+            }
+            Role::ColorAttachment(_) => return Err(error(format!("pass `{name}` (post.encode) writes `{}` ({:?}); the output is {:?}", r.name, image.format, env.color_format))),
+            role => return Err(error(format!("pass `{name}` (post.encode) does not use `{}` as {role:?}", r.name))),
+        }
+    }
+    if display != 1 || target != 1 {
+        return Err(error(format!("pass `{name}` (post.encode) samples one display image and writes one colour attachment; it has {display} and {target}")));
     }
     Ok(())
 }
@@ -811,7 +882,9 @@ fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &Li
 /// the units' shadow map has a `shadows.draw` pass write it, and one that
 /// declares the particles' coloured shadows declares the map too and has a
 /// `shadows.particles` pass write them (`libs`: each pass's library pass).
-pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(usize) -> Option<LibraryPass>) -> Result<(), LibraryError> {
+/// An HDR output has a `post.encode` pass and an SDR one has none (the
+/// tonemap writes the target in SDR and the display in HDR).
+pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, env: &LibraryEnv, libs: impl Fn(usize) -> Option<LibraryPass>) -> Result<(), LibraryError> {
     let written = |lib: LibraryPass| (0..graph.passes.len()).any(|i| libs(i) == Some(lib));
     if (written(LibraryPass::UnitsDraw) || written(LibraryPass::ShadowsDraw)) && !written(LibraryPass::UnitsPose) {
         return Err(error("the graph draws the units but no `units.pose` pass writes their palettes (`units.palette`)".into()));
@@ -900,6 +973,15 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
             LibraryResource::Exposure.name()
         )));
     }
+    // The display intermediate and `post.encode` go with an HDR output: the
+    // tonemap writes the display there, so only the encode writes the target.
+    if env.encoding.uses_display() != written(LibraryPass::PostEncode) {
+        return Err(error(if env.encoding.uses_display() {
+            "the output is HDR but the graph has no `post.encode` pass (the tonemap writes the display, not the target)".into()
+        } else {
+            "the graph has `post.encode` but the output is SDR (the tonemap writes the target)".into()
+        }));
+    }
     Ok(())
 }
 
@@ -907,9 +989,10 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, libs: impl Fn(us
 mod tests {
     use super::*;
     use crate::terrain::app::{TerrainOutput, native_graph};
+    use ae_framegraph::{ImageDesc, LoadOp, PassKind};
 
     fn env() -> LibraryEnv {
-        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, scene_format: vk::Format::R16G16B16A16_SFLOAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true }
+        LibraryEnv { color_format: vk::Format::R8G8B8A8_SRGB, scene_format: vk::Format::R16G16B16A16_SFLOAT, depth_format: vk::Format::D32_SFLOAT, extent: vk::Extent2D { width: 64, height: 32 }, units: true, water: true, shadows: true, particles: true, encoding: crate::encode::OutputEncoding::Sdr, levels: crate::encode::DisplayLevels::default() }
     }
 
     fn size(r: LibraryResource) -> Option<BufferDesc> {
@@ -923,7 +1006,7 @@ mod tests {
         for (i, p) in graph.passes.iter().enumerate() {
             check(&graph, i, p.record, &map, env)?;
         }
-        check_graph(&graph, &map, |i| Some(graph.passes[i].record))?;
+        check_graph(&graph, &map, env, |i| Some(graph.passes[i].record))?;
         Ok(graph)
     }
 
@@ -952,6 +1035,48 @@ mod tests {
         let graph = native_graph(&env(), TerrainOutput::Readback);
         let (units, water) = (pass(&graph, LibraryPass::UnitsDraw), pass(&graph, LibraryPass::WaterDraw));
         assert!(water > units, "the water is declared after the units");
+    }
+
+    #[test]
+    fn an_hdr_graph_adds_the_display_and_the_encode() {
+        use crate::encode::{DISPLAY_FORMAT, DISPLAY_NAME, DisplayLevels, OutputEncoding};
+        let hdr = LibraryEnv { color_format: vk::Format::A2B10G10R10_UNORM_PACK32, encoding: OutputEncoding::Hdr10Pq, levels: DisplayLevels::default(), ..env() };
+        let graph = wire(native_graph(&hdr, TerrainOutput::Readback), &hdr).unwrap();
+        // The tonemap writes the display (paper-white units), and the encode
+        // reads it and writes the 10-bit target.
+        let display = graph.resources.iter().find(|r| r.name == DISPLAY_NAME).expect("the display exists");
+        assert_eq!(display.desc, ae_framegraph::ResourceDesc::Image(ImageDesc::color_2d(DISPLAY_FORMAT, 64, 32, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)));
+        let tonemap = &graph.passes[pass(&graph, LibraryPass::Tonemap)];
+        let colour = tonemap.intents.iter().find(|i| matches!(i.role, Role::ColorAttachment(_))).unwrap();
+        assert_eq!(graph.resources[colour.resource.index()].name, DISPLAY_NAME);
+        let encode = &graph.passes[pass(&graph, LibraryPass::PostEncode)];
+        assert!(encode.intents.iter().any(|i| i.role == Role::Sampled(ShaderStage::Fragment) && graph.resources[i.resource.index()].name == DISPLAY_NAME));
+        assert!(encode.intents.iter().any(|i| matches!(i.role, Role::ColorAttachment(_)) && graph.resources[i.resource.index()].name == LibraryResource::ReadbackTarget.name()));
+        // An SDR graph has neither: the tonemap writes the target.
+        let sdr = wire(native_graph(&env(), TerrainOutput::Readback), &env()).unwrap();
+        assert!(!sdr.passes.iter().any(|p| p.record == LibraryPass::PostEncode));
+        assert!(!sdr.resources.iter().any(|r| r.name == DISPLAY_NAME));
+    }
+
+    #[test]
+    fn the_encode_needs_an_hdr_graph_and_the_display() {
+        use crate::encode::{DISPLAY_FORMAT, DISPLAY_NAME};
+        let sdr = env();
+        let mut g = FrameGraph::<LibraryPass>::new();
+        let display = g.image(DISPLAY_NAME, ImageDesc::color_2d(DISPLAY_FORMAT, 64, 32, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+        let target = g.image("target", ImageDesc::color_2d(sdr.color_format, 64, 32, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Transient);
+        g.pass("encode", PassKind::Graphics, LibraryPass::PostEncode).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        // An SDR output has no display and no encode.
+        let message = wire(g, &sdr).unwrap_err().0;
+        assert!(message.contains("does not exist in an SDR graph"), "{message}");
+        // In HDR the tonemap must write the display, not the target.
+        let hdr = LibraryEnv { color_format: vk::Format::A2B10G10R10_UNORM_PACK32, encoding: crate::encode::OutputEncoding::Hdr10Pq, ..env() };
+        let mut g = FrameGraph::<LibraryPass>::new();
+        let scene = g.image(ae_render_abi::module::SCENE_NAME, ImageDesc::color_2d(hdr.scene_format, 64, 32, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+        let out = g.image("target", ImageDesc::color_2d(hdr.color_format, 64, 32, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Transient);
+        g.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).color(out, LoadOp::DontCare).id();
+        let message = wire(g, &hdr).unwrap_err().0;
+        assert!(message.contains("it writes the display"), "{message}");
     }
 
     #[test]
@@ -1078,7 +1203,7 @@ mod tests {
         let shadows = |g: &FrameGraph<LibraryPass>| {
             let mut g = FrameGraph { resources: g.resources.clone(), passes: g.passes.clone(), roots: g.roots.clone(), plan_version: g.plan_version };
             let map = resolve(&mut g, &env(), size).unwrap();
-            check_graph(&g, &map, |i| Some(g.passes[i].record)).map_err(|e| e.0)
+            check_graph(&g, &map, &env(), |i| Some(g.passes[i].record)).map_err(|e| e.0)
         };
         let g = base();
         assert_eq!(shadows(&g), Ok(()));

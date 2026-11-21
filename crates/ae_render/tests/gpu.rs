@@ -5681,3 +5681,388 @@ fn the_curve_places_the_sunlit_ground() {
     assert!((scene - 0.49).abs() < 0.02, "the pre-curve ground is unchanged: {scene:.4}");
     assert_clean(&gpu);
 }
+
+/// Decode an HDR10 readback's pixel `i` to nits: the 10-bit code through
+/// ST.2084's EOTF. (The channels are in BT.2020; compare luminance with
+/// BT.2020's coefficients.)
+fn hdr10_nits(bytes: &[u8], i: usize) -> [f32; 3] {
+    let u = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    let code = |shift: u32| ((u >> shift) & 0x3ff) as f32 / 1023.0;
+    [code(0), code(10), code(20)].map(ae_render::encode::pq_eotf)
+}
+
+/// IEEE half to f32 (the scRGB readback is RGBA16F).
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((bits >> 10) & 0x1f) as i32;
+    let man = (bits & 0x3ff) as f32;
+    match exp {
+        0 => sign * man * 2f32.powi(-24),
+        31 if man == 0.0 => sign * f32::INFINITY,
+        31 => f32::NAN,
+        _ => sign * (1.0 + man / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+fn scrgb_pixel(bytes: &[u8], i: usize) -> [f32; 3] {
+    let half = |k: usize| f16_to_f32(u16::from_le_bytes([bytes[i + 2 * k], bytes[i + 2 * k + 1]]));
+    [half(0), half(1), half(2)]
+}
+
+fn y709(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+fn y2020(c: [f32; 3]) -> f32 {
+    0.2627 * c[0] + 0.6780 * c[1] + 0.0593 * c[2]
+}
+
+fn srgb_linear(v: u8) -> f32 {
+    let v = v as f32 / 255.0;
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Run `post.encode` over a constant display image and return the target's
+/// bytes for each value: a hand-built graph (no scene), so the values the
+/// shader encodes are exact.
+fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncoding, extent: vk::Extent2D, levels: ae_render::encode::DisplayLevels, values: &[[f32; 4]]) -> Vec<Vec<u8>> {
+    use ae_render::encode::{DISPLAY_FORMAT, Encode};
+    use ae_render::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
+    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
+
+    struct Paint {
+        display: ResourceId,
+        target: ResourceId,
+        buffer: ResourceId,
+        encode: Encode,
+        sampler: vk::Sampler,
+        encoding: ae_render::encode::OutputEncoding,
+        levels: ae_render::encode::DisplayLevels,
+        value: [f32; 4],
+    }
+    impl Recorder<u8> for Paint {
+        fn clear_color(&self, _pass: &u8, resource: ResourceId) -> [f32; 4] {
+            if resource == self.display { self.value } else { [0.0; 4] }
+        }
+        fn record(&mut self, pass: &u8, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                // The fill pass draws nothing: the clear is the display's
+                // value.
+                1 => {
+                    self.encode.write(ctx.slot, self.encoding, self.levels);
+                    self.encode.record(ctx, ctx.image(self.display)?, self.sampler)?;
+                }
+                3 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let format = encoding.readback_format();
+    let size = extent.width as u64 * extent.height as u64 * encoding.bytes_per_pixel();
+    let display_desc = ImageDesc::color_2d(DISPLAY_FORMAT, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+    let buffer_desc = BufferDesc { size, usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let mut graph = FrameGraph::<u8>::new();
+    let display = graph.image("display", display_desc, ResourceClass::External);
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    graph.pass("fill", PassKind::Graphics, 0).color(display, LoadOp::Clear).id();
+    graph.pass("encode", PassKind::Graphics, 1).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+    graph.pass("copy", PassKind::Transfer, 2).access(target, Role::TransferSrc).access(buffer, Role::TransferDst).id();
+    graph.pass("host read", PassKind::Transfer, 3).access(buffer, Role::HostRead).root().id();
+
+    let mut image = OwnedImage::new(gpu, display_desc, "display").unwrap();
+    let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
+    let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+    let bindings = [
+        Binding::Image(ImageBinding { image: image.image, view: image.view, format: display_desc.format, extent, range: image.range(), identity: (0xBEEF << 40) | 1 }),
+        Binding::Image(ImageBinding { image: out.image, view: out.view, format: target_desc.format, extent, range: out.range(), identity: (0xBEEF << 40) | 2 }),
+        Binding::Buffer(BufferBinding { buffer: readback.buffer, offset: 0, size, identity: (0xBEEF << 40) | 3 }),
+    ];
+    let sampler_info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST);
+    let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
+    let encode = Encode::new(gpu, encoding, format, 2).unwrap();
+    let mut paint = Paint { display, target, buffer, encode, sampler, encoding, levels, value: [0.0; 4] };
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    executor.set_graph(graph).unwrap();
+    let mut frames = Vec::new();
+    for value in values {
+        paint.value = *value;
+        let token = executor.begin_frame().unwrap();
+        executor.execute(token, &mut paint, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+        executor.wait(token).unwrap();
+        frames.push(readback.mapped().unwrap().to_vec());
+    }
+    paint.encode.destroy(gpu);
+    unsafe { gpu.device.destroy_sampler(sampler, None) };
+    image.destroy(gpu);
+    out.destroy(gpu);
+    readback.destroy(gpu);
+    frames
+}
+
+/// `post.encode` writes ST.2084 (M13 stage 2): display values at 100, 203 and
+/// 1000 nits with a 203-nit paper white and a 1000-nit peak encode to the
+/// standard's 10-bit codes (within 1 LSB), and a value above the peak stops
+/// at the peak's code.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn post_encode_writes_st_2084_codes() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding, pq_code};
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    // Display-linear values: 100, 203 and 1000 nits over the paper white,
+    // then one past the peak (8.0 = 1624 nits).
+    let values: [[f32; 4]; 4] = [[100.0 / 203.0, 100.0 / 203.0, 100.0 / 203.0, 1.0], [1.0; 4], [1000.0 / 203.0; 4], [8.0; 4]];
+    let nits = [100.0f32, 203.0, 1000.0, 1000.0];
+    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, &values);
+    for (frame, want) in frames.iter().zip(nits) {
+        let code = pq_code(want);
+        let mut worst = 0i32;
+        for p in 0..(extent.width * extent.height) as usize {
+            let u = u32::from_le_bytes([frame[p * 4], frame[p * 4 + 1], frame[p * 4 + 2], frame[p * 4 + 3]]);
+            for shift in [0u32, 10, 20] {
+                worst = worst.max((((u >> shift) & 0x3ff) as i32 - code as i32).abs());
+            }
+        }
+        eprintln!("{want:.0} nits: code {code}, worst channel off by {worst} LSB");
+        assert!(worst <= 1, "{want} nits is {} LSB from ST.2084's code {code}", worst);
+    }
+    assert_clean(&gpu);
+}
+
+/// `post.encode` in scRGB (M13 stage 2): the display's light times paper
+/// white / 80, in RGBA16F: at an 80-nit paper white the values are the
+/// display's own, at 203 nits they are 2.5375 times, and a negative display
+/// value (out of gamut, which the gamut map may produce) stays negative.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn post_encode_writes_scrgb_relative_to_80_nits() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let value: [f32; 4] = [0.4, 0.2, -0.1, 1.0];
+    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels { paper_white: 203.0, peak: 1000.0 }, &[value]);
+    let p = scrgb_pixel(&frames[0], 0);
+    let scale = 203.0 / 80.0;
+    eprintln!("scRGB: {p:?} for display {value:?}, scale {scale}");
+    for k in 0..3 {
+        assert!((p[k] - value[k] * scale).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k] * scale);
+    }
+    // Paper white at 80 nits: no scale.
+    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels::FLAT, &[value]);
+    let p = scrgb_pixel(&frames[0], 0);
+    for k in 0..3 {
+        assert!((p[k] - value[k]).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k]);
+    }
+    assert_clean(&gpu);
+}
+
+/// HDR output (M13 stage 2): with the display's peak equal to its paper
+/// white the HDR10 frame carries the SDR frame's light. The curve's peak
+/// anchor is 1 in both, so the display is the SDR frame's linear values;
+/// decoded out of PQ and BT.2020, the luminance matches the sRGB frame's
+/// within the two quantizations (8-bit sRGB, 10-bit PQ).
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let render = |encoding: OutputEncoding, levels: DisplayLevels| -> Vec<u8> {
+        // Straight down at flat, untextured ground under the full sun, as
+        // the curve's gate: one sunlit surface and the sky above it.
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_tone(ToneParams { curve: Curve::Lottes, bloom: 0.0, ..Default::default() })
+            .with_display(encoding, levels);
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let sdr = render(OutputEncoding::Sdr, DisplayLevels::default());
+    let levels = DisplayLevels { paper_white: 203.0, peak: 203.0 };
+    let hdr = render(OutputEncoding::Hdr10Pq, levels);
+    let mut diffs = Vec::new();
+    for p in 0..(extent.width * extent.height) as usize {
+        let s = [srgb_linear(sdr[p * 4]), srgb_linear(sdr[p * 4 + 1]), srgb_linear(sdr[p * 4 + 2])];
+        let h = hdr10_nits(&hdr, p * 4).map(|c| c / levels.paper_white);
+        diffs.push((y709(s) - y2020(h)).abs());
+    }
+    let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+    diffs.sort_by(f32::total_cmp);
+    let p99 = diffs[diffs.len() * 99 / 100];
+    let max = diffs[diffs.len() - 1];
+    eprintln!("HDR10 at peak = paper white: luminance diff mean {mean:.5}, p99 {p99:.5}, max {max:.5}");
+    assert!(mean < 0.0025, "the HDR frame carries the SDR frame's light: mean {mean}");
+    assert!(max < 0.01, "no pixel strays: max {max}");
+    assert_clean(&gpu);
+}
+
+/// scRGB output (M13 stage 2): with the display's peak at its paper white,
+/// the 16F readback holds the SDR frame's linear values (1.0 = 80 nits), and
+/// at a 203-nit paper white the same frame is 2.5375 times: the encode's
+/// scale is exactly paper white / 80.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn scrgb_readback_scales_the_display_by_paper_white() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 160, height: 120 };
+    let render = |encoding: OutputEncoding, levels: DisplayLevels| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_tone(ToneParams { curve: Curve::Lottes, bloom: 0.0, ..Default::default() })
+            .with_display(encoding, levels);
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let sdr = render(OutputEncoding::Sdr, DisplayLevels::default());
+    let flat = render(OutputEncoding::ScRgb, DisplayLevels::FLAT);
+    let scale = |sdr: &[u8], hdr: &[u8], factor: f32| -> (f32, f32) {
+        let (mut sum, mut worst) = (0.0, 0.0f32);
+        for p in 0..(extent.width * extent.height) as usize {
+            let s = [srgb_linear(sdr[p * 4]), srgb_linear(sdr[p * 4 + 1]), srgb_linear(sdr[p * 4 + 2])];
+            let h = scrgb_pixel(hdr, p * 8);
+            for k in 0..3 {
+                let d = (s[k] - h[k] / factor).abs();
+                sum += d;
+                worst = worst.max(d);
+            }
+        }
+        (sum / (3.0 * (extent.width * extent.height) as f32), worst)
+    };
+    let (mean, max) = scale(&sdr, &flat, 1.0);
+    eprintln!("scRGB at 80 nits: channel diff mean {mean:.5}, max {max:.5}");
+    assert!(mean < 0.002 && max < 0.01, "80-nit scRGB is the SDR frame: mean {mean}, max {max}");
+    let levels = DisplayLevels { paper_white: 203.0, peak: 203.0 };
+    let scaled = render(OutputEncoding::ScRgb, levels);
+    let (mean, max) = scale(&sdr, &scaled, 203.0 / 80.0);
+    eprintln!("scRGB at 203 nits (/ 2.5375): channel diff mean {mean:.5}, max {max:.5}");
+    assert!(mean < 0.002 && max < 0.01, "203-nit scRGB over 2.5375 is the SDR frame: mean {mean}, max {max}");
+    assert_clean(&gpu);
+}
+
+/// HDR output (M13 stage 2): an emitter decodes above paper white, and
+/// nothing decodes above the display's peak. A 203-nit paper white and a
+/// 441-nit peak (the reference display's): the explosion's flash is several
+/// scene units, which the curve places above 1.0 (paper white) and below
+/// peak / paper white.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn hdr_emitters_reach_above_paper_white_and_stop_at_peak() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::particles::{ParticleBlend, ParticleFeed, ParticlesSetup, default_effects, explosion};
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::tonemap::ToneParams;
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let n = 65;
+    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 441.0 };
+    let feed = Arc::new(ParticleFeed::default());
+    feed.emit_all(&explosion([128.0, 2.0, 128.0], true, 3.0, 7));
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .with_display(OutputEncoding::Hdr10Pq, levels)
+        .with_particles(ParticlesSetup { feed, capacity: 1024, effects: default_effects(), downscale: 1, blend: ParticleBlend::Sorted })
+        .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
+    {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera = Camera { target: Vec2::new(128.0, 128.0), ground: 0.0, distance: 40.0, yaw: 0.0, pitch: 0.5, fov_y: 0.8 };
+        view.fog = false;
+    }
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+    // The flash lives about 0.2 s: watch the first ten frames. The brightest
+    // pixel is its core; across every frame, no channel is above the peak.
+    let mut best = (0.0f32, 0u32, 0u32);
+    let mut worst_channel = 0.0f32;
+    let mut band = false;
+    for _ in 0..10 {
+        run.frames(&mut app, 1).unwrap();
+        run.wait().unwrap();
+        let pixels = app.readback().unwrap();
+        for p in 0..(extent.width * extent.height) as usize {
+            let nits = hdr10_nits(&pixels, p * 4);
+            worst_channel = worst_channel.max(nits[0].max(nits[1]).max(nits[2]));
+            let y = y2020(nits);
+            band |= y > levels.paper_white && y < levels.peak;
+            if y > best.0 {
+                best = (y, p as u32 % extent.width, p as u32 / extent.width);
+            }
+        }
+    }
+    run.finish().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    let (y, x, py) = best;
+    eprintln!(
+        "explosion: brightest pixel ({x}, {py}) decodes to {y:.1} nits; worst channel {worst_channel:.1}; a gradient band above paper white: {} (paper white {:.0}, peak {:.0})",
+        band, levels.paper_white, levels.peak
+    );
+    assert!(y > levels.paper_white, "the emitter is above paper white: {y}");
+    assert!(band, "some pixel is between paper white and the peak (a gradient, not only a clamp)");
+    assert!(worst_channel <= levels.peak * 1.01, "nothing is above the peak: {worst_channel}");
+    assert_clean(&gpu);
+}

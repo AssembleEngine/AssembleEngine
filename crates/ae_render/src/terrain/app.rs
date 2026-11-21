@@ -44,6 +44,7 @@ use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
 use crate::lights::{Light, LightFrame, LightRenderer, LightStats};
 use crate::tonemap::{ToneParams, Tonemap};
+use crate::encode::{DisplayLevels, Encode, OutputEncoding};
 use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
 use anyhow::{Context as _, Result};
 use ash::vk;
@@ -55,10 +56,6 @@ use std::time::{Duration, Instant};
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// The HDR scene's format ([`ae_render_abi::module::SCENE_FORMAT`]).
 pub const SCENE_FORMAT: vk::Format = vk::Format::from_raw(ae_render_abi::module::SCENE_FORMAT as i32);
-/// Sky / fog colour (linear).
-/// sRGB like the swapchain, so a capture shows what the window shows.
-const READBACK_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
-
 /// The map: heights, error pyramid and how they map to the world. Built
 /// once on the CPU, shared by the main thread (camera ground height) and the
 /// render thread (uploads).
@@ -198,6 +195,8 @@ pub enum PassWork {
     /// dimming), and the glow (the light the bloom shows), each if the graph
     /// has the meter sample it.
     ExposureMeter { scene: ResourceId, depth: Option<ResourceId>, glow: Option<ResourceId> },
+    /// [`LibraryPass::PostEncode`] with the display image it encodes.
+    Encode { display: ResourceId },
 }
 
 /// The render module driving the graph, with its wired declaration.
@@ -285,6 +284,13 @@ pub struct TerrainApp {
     /// included: the eye keeps adapting while the game is paused).
     last_adapt_at: Option<Instant>,
     tone: ToneParams,
+    /// How the output image encodes the display's light (SDR keeps the
+    /// tonemap writing the target).
+    encoding: OutputEncoding,
+    /// The display's paper white and peak, in nits (HDR only).
+    levels: DisplayLevels,
+    /// `post.encode`, for the output's format (HDR only).
+    encode: Option<Encode>,
     /// The configured bloom strength, kept while [`TerrainView::bloom`] is
     /// switched off.
     tone_bloom: f32,
@@ -360,6 +366,9 @@ impl TerrainApp {
             last_adapt_at: None,
             tone_bloom: tone.bloom,
             tone,
+            encoding: OutputEncoding::Sdr,
+            levels: DisplayLevels::default(),
+            encode: None,
             lights: None,
             fixed_lights: Vec::new(),
             frame_lights: Vec::new(),
@@ -427,6 +436,17 @@ impl TerrainApp {
     pub fn with_tone(mut self, tone: ToneParams) -> Self {
         self.tone = tone;
         self.tone_bloom = tone.bloom;
+        self
+    }
+
+    /// The output's encoding and the display's levels (M13): SDR (the
+    /// default) keeps the tonemap writing the sRGB target; HDR adds the
+    /// display intermediate and `post.encode`. An HDR app reads back (the
+    /// swapchain needs the client, M13 stage 5).
+    pub fn with_display(mut self, encoding: OutputEncoding, levels: DisplayLevels) -> Self {
+        assert!(levels.paper_white > 0.0 && levels.peak >= levels.paper_white, "display levels: paper white {:.3} nits, peak {:.3}", levels.paper_white, levels.peak);
+        self.encoding = encoding;
+        self.levels = levels;
         self
     }
 
@@ -568,11 +588,12 @@ impl TerrainApp {
         self.stats.clone()
     }
 
-    /// The last offscreen frame (RGBA8, sRGB-encoded, row-major), after
-    /// `run_headless`.
+    /// The last offscreen frame (row-major, after `run_headless`): sRGB 8-bit
+    /// for an SDR output, 10-10-10-2 packed for HDR10 and 16-bit float for
+    /// scRGB ([`OutputEncoding::readback_format`]).
     pub fn readback(&mut self) -> Option<Vec<u8>> {
         let offscreen = self.offscreen.as_mut()?;
-        let bytes = (offscreen.extent.width * offscreen.extent.height * 4) as usize;
+        let bytes = (offscreen.extent.width as u64 * offscreen.extent.height as u64 * self.encoding.bytes_per_pixel()) as usize;
         offscreen.buffer.mapped().map(|data| data[..bytes].to_vec())
     }
 
@@ -659,6 +680,9 @@ impl RenderApp for TerrainApp {
         if let Some(mut old) = self.tonemap.take() {
             old.destroy(gpu);
         }
+        if let Some(mut old) = self.encode.take() {
+            old.destroy(gpu);
+        }
         if let Some(mut old) = self.bloom.take() {
             old.destroy(gpu);
         }
@@ -688,9 +712,14 @@ impl RenderApp for TerrainApp {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
-        let output = if self.output == TerrainOutput::Readback { READBACK_FORMAT } else { format };
+        anyhow::ensure!(!self.encoding.uses_display() || self.output == TerrainOutput::Readback, "an HDR output needs the swapchain's pair (M13 stage 5); render to readback instead");
+        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { format };
         self.output_format = output;
-        self.tonemap = Some(Tonemap::new(gpu, output, frames_in_flight).context("tonemap")?);
+        // In HDR the tonemap writes the display intermediate, paper-white
+        // units; `post.encode` maps it to the output.
+        let tonemap_out = if self.encoding.uses_display() { crate::encode::DISPLAY_FORMAT } else { output };
+        self.tonemap = Some(Tonemap::new(gpu, tonemap_out, frames_in_flight).context("tonemap")?);
+        self.encode = if self.encoding.uses_display() { Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?) } else { None };
         self.bloom = Some(Bloom::new(gpu, frames_in_flight).context("bloom")?);
         self.exposure = Some(Exposure::new(gpu, frames_in_flight).context("exposure")?);
         self.last_adapt_at = None;
@@ -823,8 +852,18 @@ impl RenderApp for TerrainApp {
         if let Some(exposure) = &mut self.exposure {
             exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 } });
         }
+        // HDR: the curve's peak anchor displays at the display's peak over
+        // its paper white, so emitters land above paper white and the
+        // shoulder ends at what the display shows.
+        let mut tone = self.tone;
+        if self.encoding.uses_display() {
+            tone.lottes.peak_out = self.levels.headroom();
+        }
         if let Some(tonemap) = &mut self.tonemap {
-            tonemap.write(slot, self.tone, has_bloom, has_exposure);
+            tonemap.write(slot, tone, has_bloom, has_exposure);
+        }
+        if let Some(encode) = &mut self.encode {
+            encode.write(slot, self.encoding, self.levels);
         }
         if let Some(bloom) = &mut self.bloom {
             bloom.write(slot, self.tone.ev100, has_exposure);
@@ -997,7 +1036,7 @@ impl RenderApp for TerrainApp {
             LibraryResource::UnitPalette => Binding::Buffer(units()?.palette()),
             LibraryResource::ReadbackTarget => {
                 let o = offscreen()?;
-                Binding::Image(ImageBinding { image: o.image.image, view: o.image.view, format: READBACK_FORMAT, extent: o.extent, range: o.image.range(), identity: (0xAE7 << 40) | 10 })
+                Binding::Image(ImageBinding { image: o.image.image, view: o.image.view, format: self.output_format, extent: o.extent, range: o.image.range(), identity: (0xAE7 << 40) | 10 })
             }
             LibraryResource::ReadbackBuffer => {
                 let o = offscreen()?;
@@ -1044,6 +1083,9 @@ impl RenderApp for TerrainApp {
         if let Some(mut tonemap) = self.tonemap.take() {
             tonemap.destroy(gpu);
         }
+        if let Some(mut encode) = self.encode.take() {
+            encode.destroy(gpu);
+        }
         if let Some(mut bloom) = self.bloom.take() {
             bloom.destroy(gpu);
         }
@@ -1073,9 +1115,9 @@ impl TerrainApp {
     /// Create the offscreen target and readback buffer for `extent`
     /// (readback output only; call before `run_headless`).
     pub fn create_offscreen(&mut self, gpu: &GpuDevice, extent: vk::Extent2D) -> Result<()> {
-        let desc = ImageDesc::color_2d(READBACK_FORMAT, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+        let desc = ImageDesc::color_2d(self.encoding.readback_format(), extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
         let image = OwnedImage::new(gpu, desc, "terrain offscreen")?;
-        let size = extent.width as u64 * extent.height as u64 * 4;
+        let size = extent.width as u64 * extent.height as u64 * self.encoding.bytes_per_pixel();
         let buffer = OwnedBuffer::new(gpu, BufferDesc { size, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "terrain readback")?;
         self.offscreen = Some(Offscreen { image, buffer, extent });
         Ok(())
@@ -1126,6 +1168,7 @@ impl TerrainApp {
             units: self.unit_renderer.as_ref(),
             particles: self.particle_renderer.as_ref(),
             tonemap: self.tonemap.as_ref(),
+            encode: self.encode.as_ref(),
             bloom: self.bloom.as_ref(),
             exposure: self.exposure.as_ref(),
             lights: self.lights.as_ref(),
@@ -1144,6 +1187,7 @@ struct SceneRecorder<'a> {
     units: Option<&'a UnitRenderer>,
     particles: Option<&'a ParticleRenderer>,
     tonemap: Option<&'a Tonemap>,
+    encode: Option<&'a Encode>,
     bloom: Option<&'a Bloom>,
     exposure: Option<&'a Exposure>,
     lights: Option<&'a LightRenderer>,
@@ -1185,6 +1229,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
                 LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => anyhow::bail!("bloom passes are wired as PassWork::Bloom"),
                 LibraryPass::ExposureMeter => anyhow::bail!("exposure.meter is wired as PassWork::ExposureMeter"),
+                LibraryPass::PostEncode => anyhow::bail!("post.encode is wired as PassWork::Encode"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
             PassWork::Fullscreen { sampled } => {
@@ -1199,6 +1244,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
                 self.tonemap.context("tonemap not created")?.record(ctx, ctx.image(*scene)?, bloom, exposure, self.sampler)?
             }
+            PassWork::Encode { display } => self.encode.context("encode not created")?.record(ctx, ctx.image(*display)?, self.sampler)?,
             PassWork::Bloom { pass: bloom_pass, input, output, exposure } => {
                 let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
                 self.bloom.context("bloom not created")?.record(ctx, *bloom_pass, ctx.image(*input)?, ctx.image(*output)?, exposure, self.sampler)?
@@ -1248,8 +1294,16 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             ResourceClass::External,
         ),
     };
-    // The HDR scene the draws write; `post.tonemap` turns it into the target.
+    // The HDR scene the draws write; `post.tonemap` turns it into the target
+    // (SDR) or into the display, which `post.encode` maps to the target (HDR).
     let scene = graph.image(ae_render_abi::module::SCENE_NAME, ImageDesc::color_2d(env.scene_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+    let display = env.encoding.uses_display().then(|| {
+        graph.image(
+            crate::encode::DISPLAY_NAME,
+            ImageDesc::color_2d(crate::encode::DISPLAY_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED),
+            ResourceClass::Transient,
+        )
+    });
     // The glow (the bloom's input) is the second colour attachment of every
     // scene draw; the bloom reads it at a quarter of the size.
     let glow = graph.image(
@@ -1415,7 +1469,11 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     graph.pass("bloom downsample", PassKind::Graphics, LibraryPass::BloomDownsample).sampled(glow, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
     graph.pass("bloom blur x", PassKind::Graphics, LibraryPass::BloomBlurX).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
     graph.pass("bloom blur y", PassKind::Graphics, LibraryPass::BloomBlurY).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
-    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(display.unwrap_or(target), LoadOp::DontCare).id();
+    if let Some(display) = display {
+        // The display's light, in the output's encoding (PQ or scRGB).
+        graph.pass("encode", PassKind::Graphics, LibraryPass::PostEncode).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+    }
     match output {
         TerrainOutput::Present => {
             graph.pass("present", PassKind::Present, LibraryPass::Present).present(target).root().id();
@@ -1557,6 +1615,8 @@ impl TerrainApp {
             water: self.water && renderer.has_water(),
             shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
             particles: self.particle_renderer.is_some(),
+            encoding: self.encoding,
+            levels: self.levels,
         })
     }
 
@@ -1660,6 +1720,10 @@ impl TerrainApp {
                             let glow = find((format(ae_render_abi::module::GLOW_FORMAT), w, h));
                             PassWork::ExposureMeter { scene, depth, glow }
                         }
+                        LibraryPass::PostEncode => {
+                            let display = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).context("post.encode display")?;
+                            PassWork::Encode { display }
+                        }
                         lib => PassWork::Library(lib),
                     }
                 }
@@ -1681,9 +1745,10 @@ impl TerrainApp {
             };
             passes.push(ScenePass { program, work });
         }
-        library::check_graph(&graph, &resources, |i| match &passes[i].work {
+        library::check_graph(&graph, &resources, env, |i| match &passes[i].work {
             PassWork::Library(lib) => Some(*lib),
             PassWork::ExposureMeter { .. } => Some(LibraryPass::ExposureMeter),
+            PassWork::Encode { .. } => Some(LibraryPass::PostEncode),
             PassWork::Bloom { pass, .. } => Some(match pass {
                 BloomPass::Downsample => LibraryPass::BloomDownsample,
                 BloomPass::BlurX => LibraryPass::BloomBlurX,

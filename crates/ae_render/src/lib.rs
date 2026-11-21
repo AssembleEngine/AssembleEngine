@@ -20,6 +20,7 @@ pub mod decals;
 pub mod demo;
 pub mod device;
 pub mod display;
+pub mod encode;
 pub mod executor;
 pub mod exposure;
 pub mod fullscreen;

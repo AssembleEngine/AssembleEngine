@@ -11,7 +11,12 @@
 //! its edge stays orange. `b` and `c` are solved on the CPU from two anchors:
 //! the pre-curve key ([`crate::lighting::KEY_LUMINANCE`], the automatic
 //! exposure's target) displaying at [`Lottes::MID_OUT`], and a peak scene
-//! value displaying at 1.
+//! value displaying at [`Lottes::peak_out`] (1 in SDR; the display's
+//! peak / paper white in HDR, [`crate::encode`]).
+//!
+//! The pass writes the target in SDR. In HDR it writes the display
+//! intermediate instead ([`crate::encode::DISPLAY_FORMAT`], paper-white
+//! units), which `post.encode` maps to the output.
 
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
@@ -35,7 +40,7 @@ pub enum Curve {
 ///
 /// `f(x) = x^a / ((x^a)^d · b + c)`: `a` (contrast) shapes the toe, `d`
 /// (shoulder) how fast the shoulder compresses. `b` and `c` are solved so
-/// that `mid` displays as `mid_out` and `peak` displays as 1.
+/// that `mid` displays as `mid_out` and `peak` displays as `peak_out`.
 ///
 /// The mid anchor is the metered key: the reference scene's sunlit ground at
 /// [`crate::lighting::DEFAULT_EV100`] meters at
@@ -47,8 +52,27 @@ pub enum Curve {
 /// of x, which the solved denominator still lifts a little (its slope at zero
 /// is `1 / c`, about 1.29).
 ///
-/// In SDR the display's peak is paper white, hence [`Self::PEAK`] in scene
-/// units rather than a ratio; HDR output passes `peak / paper white`.
+/// [`Self::PEAK`] is in scene units and [`Self::peak_out`] is what it
+/// displays at, in paper-white units: 1 in SDR, where the display's peak is
+/// paper white, and `peak / paper white` in HDR ([`crate::encode`]). The mid
+/// anchor keeps its place (0.40 of paper white) either way, so the metered
+/// key displays where SDR shows it; the curve above it is deliberately
+/// different in HDR, or the extra display range would go unused. Below it
+/// the curves differ too: with `a = 1` the solved toe is flatter in HDR
+/// (slope `1 / c` at zero: 1.29 in SDR, 0.95 at 441/203 nits), so the darks
+/// display about 20% darker (docs/lighting.md).
+///
+/// Which anchor moves for HDR is a choice. The scene's peak (16) is a
+/// property of the content, chosen in stage 1 as the top of its range (about
+/// ten times the sunlit ground, above any emitter); it cannot change with
+/// the display. Mapping it to the display's peak spends the display's whole
+/// range on the content's whole range. The alternative — moving the scene's
+/// peak to `16 × headroom` — would leave the content's brightest value below
+/// the display's peak and reserve the top of the range for scene light the
+/// content does not have; scaling both anchors with the headroom would
+/// instead brighten every midtone. At `peak_out == 1` the curve is the SDR
+/// one exactly (the GPU test
+/// `hdr10_readback_matches_the_sdr_frame_at_paper_white_peak`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lottes {
     /// `a`: the toe's contrast.
@@ -59,8 +83,11 @@ pub struct Lottes {
     pub mid: f32,
     /// What the mid anchor displays as.
     pub mid_out: f32,
-    /// The scene value that displays as white.
+    /// The scene value that displays as [`Self::peak_out`].
     pub peak: f32,
+    /// What [`Self::peak`] displays at, in paper-white units: 1 in SDR, the
+    /// display's peak / paper white in HDR ([`crate::encode`]).
+    pub peak_out: f32,
 }
 
 impl Lottes {
@@ -80,17 +107,21 @@ impl Lottes {
 
     /// `b`, `c` solved from the anchors, or `None` when the anchors do not
     /// describe a monotone curve (`mid` at or above `peak`, `mid_out` at or
-    /// above 1, a non-positive `b` or `c`).
+    /// above `peak_out`, a non-positive `b` or `c`).
     pub fn solve(&self) -> Option<(f32, f32)> {
         let a = self.contrast;
         let d = self.shoulder;
-        if !(self.mid > 0.0 && self.mid < self.peak && self.mid_out > 0.0 && self.mid_out < 1.0) {
+        if !(self.mid > 0.0 && self.mid < self.peak && self.mid_out > 0.0 && self.peak_out > self.mid_out) {
             return None;
         }
         let m = self.mid.powf(a);
         let p = self.peak.powf(a);
-        let b = (m / self.mid_out - p) / (m.powf(d) - p.powf(d));
-        let c = p - p.powf(d) * b;
+        let b = (p / self.peak_out - m / self.mid_out) / (p.powf(d) - m.powf(d));
+        // From the peak anchor, not the mid one: algebraically the same, but
+        // with `peak_out == 1` it is the SDR solver's expression bit for bit
+        // (the mid anchor is then hit to within float rounding), so an SDR
+        // capture stays byte-identical.
+        let c = p / self.peak_out - p.powf(d) * b;
         (b > 0.0 && c > 0.0 && b.is_finite() && c.is_finite()).then_some((b, c))
     }
 
@@ -127,6 +158,7 @@ impl Default for Lottes {
             mid: crate::lighting::KEY_LUMINANCE,
             mid_out: Self::MID_OUT,
             peak: Self::PEAK,
+            peak_out: 1.0,
         }
     }
 }
@@ -259,6 +291,26 @@ mod tests {
         assert!(lottes.map(lottes.mid * 2.0) < lottes.mid_out * 2.0, "shoulder");
         // The shadow lift, in absolute terms: a 5% grey stays below 7%.
         assert!(lottes.map(0.05) < 0.07, "shadows stay dark: {}", lottes.map(0.05));
+    }
+
+    #[test]
+    fn the_headroom_scales_the_peak() {
+        // HDR: the same scene's peak displays at the display's peak / paper
+        // white, and the key stays at 0.40 of paper white.
+        let lottes = Lottes { peak_out: 441.0 / 203.0, ..Lottes::default() };
+        assert!((lottes.map(lottes.mid) - lottes.mid_out).abs() < 1e-5, "{}", lottes.map(lottes.mid));
+        assert!((lottes.map(lottes.peak) - 441.0 / 203.0).abs() < 1e-5, "{}", lottes.map(lottes.peak));
+        // An emitter between the key and the peak lands between them, above
+        // paper white once it is bright enough.
+        let emitter = lottes.map(4.2);
+        assert!(emitter > 1.0 && emitter < 441.0 / 203.0, "{emitter}");
+        // Monotone across the range the display can show.
+        let mut last = -1.0;
+        for i in 0..4000 {
+            let y = lottes.map(i as f32 * 0.05);
+            assert!(y >= last - 1e-6);
+            last = y;
+        }
     }
 
     #[test]

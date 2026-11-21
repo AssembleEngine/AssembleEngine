@@ -8,8 +8,9 @@
 // bloom.downsample applies the same scale). The curve maps the max channel
 // and scales the others with it (hue kept); above paper white a share of the
 // luminance-mapped grey joins in, so a fireball's core whitens while its edge
-// stays orange. The output's format encodes (an sRGB swapchain or readback
-// image).
+// stays orange. In SDR the output's format encodes (an sRGB attachment). In
+// HDR the target is the display intermediate (RGBA16F, paper-white units,
+// up to the peak) and post.encode encodes that.
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Tonemap {
