@@ -1974,43 +1974,77 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     two decals a frame, rebuilding it cost the CPU frame 1.7 ms (one `Vec` per cell), 73 µs as a
     counting sort with the hash. With each decal's words and buckets computed at placement, it is
     12 µs for 1024 decals.
-- **Projection.** Three ways around the centre, weighted by the heightmap's normal (not the
-  tileset's detail normal) in the decal's frame with constant-overlap weights (`docs/antitiling.md`,
-  blend zone 0.8). The side projections put `-sign(n) dy` (the height relative to the centre) in
-  place of the coordinate the face hides, so a decal across a cliff's edge or into its foot
-  continues onto the face as if unfolded. Every atlas sample uses explicit gradients (the loop is
-  non-uniform control flow).
-  - The extent: square in plan, rounded in the vertical, `length(max(|u|, |v|), dy / h) < 1`,
-    fading over its last 15 %.
+- **Projection: unfolded over the ground** (replaced the first version's three projections, below).
+  A point's offset from the centre is the plan ray from the centre to it, read every `stride`
+  (one heightmap cell, or an eighth of the larger half-size if that is longer, so at most 12
+  steps). Each segment is flattened along the ground's slope, isometrically: `d' = d + dh G /
+  (1 + sqrt(1 + |G|^2))`, with `dh` the segment's own rise and `G` the slope at its start, middle
+  and end averaged by steepness, so that across a fold the face's slope is used. The sum, turned
+  into the decal's frame, is the uv.
+  - Continuous in the point (a new step starts where the last segment has become that step), exact
+    over a planar slope and over a fold at any angle (a cliff's edge or foot), and the plan offset
+    on flat ground. There is one image, nothing to blend, so no seams.
+  - Over a ridge or a valley within one segment, the rise and the steepest slope can disagree
+    along the ray. The gain along the ray is held at 0 or more, so no point unfolds nearer the
+    centre than it is in plan.
+  - Not exact across a crease between two sloped facets. On the scripted map with seed 8, eight-pixel
+    differences of the unfolded coordinate against the levelled tangent plane put the rate down
+    the facet below a crease at roughly 0.85 to 0.9 of the ideal, about 1 on the plateau above it.
+    Measured through lighting and the tonemap, so approximate.
+  - The extent is the square in unfolded metres, faded over its last 15 %. Unfolding never
+    shortens the distance from the centre, but on a slope across the decal's axes it can bring a
+    point past the plan square's corner back inside. So the early-out is the bounding circle in
+    plan, which is also what the binning lists.
+  - Gradients and the normal map's frame come from the tangent plane at the point, levelled by the
+    smallest rotation that takes the heightmap's normal to up.
+  - Every atlas sample uses explicit gradients (the loop is non-uniform control flow).
+- **Why not three projections.** The first version projected three ways around the centre (from
+  above, and along the decal's x and z with `-sign(n) dy` in place of the hidden coordinate),
+  blended by the heightmap's normal. The side projections agree with the top one only where the
+  edge passes through the centre, and every decal in the first test was centred on an edge. On
+  real ground a scar on a slope's edge was cut along a line (sharp blend) or smeared down the
+  slope (soft blend). Two other attempts failed:
+  - Unfolding u along the decal's rows and v along its columns: a fold diagonal to the axes adds
+    its drop to both, so the map folds over itself (fingers down the slope), and T and B collapse
+    on a shared drop (NaN normals).
+  - A radial scale (uv = plan offset times arc length over plan length): it stretches a face
+    beside the centre along the edge instead of unfolding across it.
 - **GPU test** `decals_wrap_over_cliffs`. A step map with 2 m cells along x: a 30 m plateau ends
   in a 20 m cliff facing +x down to ground at 10 m, with a 6 m step up to 36 m behind it. The atlas
-  has eight black and white stripes across the decal's x. Three decals of half-size 12 m are
-  centred on corner samples: E on the cliff's top edge, F at its foot, L on the low step's edge.
+  has eight black and white stripes across the decal's x. Four decals of half-size 12 m: E on the
+  cliff's top edge, F at its foot, L on the low step's edge (all three centred on corner samples),
+  and G 4.5 m back from the top edge. That is a stripe and a half, so projections around the
+  centre would put G's face stripes in opposite phase. A separate frame has only R, like G but
+  turned by 0.6 rad, so the cliff crosses its axes diagonally.
+  - R's expected coordinate: the ground unfolded in world (x by its length along the ground from
+    R's centre), then turned into R's frame.
   - Sampled along x and then onto the face, by the unfolded coordinate, the stripes match the
     atlas everywhere at full opacity. Samples within 0.5 m of a stripe boundary, near the unit and
     in the plateau's last 2.5 m (where the heightmap normal already leans) are left out. Counts:
-    - E: plateau 153 of 153, face 179 of 179.
-    - F: ground 150 of 150, face 182 of 182.
+    - E: plateau 153 of 153, face 189 of 189.
+    - F: ground 150 of 150, face 192 of 192.
+    - G: plateau 180 of 180, face 150 of 150.
+    - R: plateau 793 of 793, face 440 of 440.
   - The test checks phase, not only stripe count, so it also catches stretching: a face at 1.5x
     the flat ground's texel size would put its third stripe 3 m off.
-  - Ground beyond every decal's 3D extent is byte-identical (34,785 points).
+  - Ground beyond every decal's unfolded square is byte-identical (33,087 points).
+  - L no longer prints again at the foot of its step. The ground there is within the first
+    version's 3D extent but past the unfolded footprint (6 m down the face, then along the
+    ground), and is unchanged at all 78 points; the first version painted all 78.
   - A unit standing in F's footprint is unchanged, and the ground beside it is painted.
   - Decals made but none placed are byte-identical to no decals.
   - Mutations, each caught:
-    - top-down projection only (E face 87 of 179);
-    - a box instead of the rounded extent (ground outside changes);
-    - the side sign flipped (E face 0 of 179);
+    - the first version's three projections (G face 78 of 150);
+    - unfolding u along rows and v along columns (R plateau 753 of 793, just under the 95 % bar;
+      the test stops at the first failing segment, so R's face was not reached);
+    - a segment's slope across the ray taken at its middle only (G face 130 of 150);
     - the specialization forced off (no stripes).
-  - All 22 GPU tests pass with validation, run with `--test-threads=1`. Run in parallel, 7 to 8
-    fail allocating with out of memory, as they did before this change.
+  - All 38 GPU tests pass, run with `--test-threads=1`.
+  - Cost: `battle`'s terrain pass 420 µs before, 423 µs after (`bench-diff`: 27 of 28 metrics
+    unchanged, none regressed).
 - **Where it departs from the plan:**
-  - The 3D fade bounds a decal but cannot stop the top projection from printing again at the foot
-    of a cliff lower than its half-size. That is Recoil's far-side copy, kept smaller. The ground
-    at the foot of L's 6 m step, within its 3D extent but past its unfolded footprint (6 m down
-    the face, then along the ground), is painted at all 78 test points. The test measures and
-    prints this; it does not assert it.
-  - Within one cell either side of a step, the heightmap normal leans gradually, so the
-    projections blend and a stripe smears there. Real cliffs span several cells.
+  - The plan projected each decal three ways around its centre. It is unfolded over the ground
+    instead (Projection, above), and its extent is the unfolded square, not a 3D distance.
   - The plan had a decal seen once stay as last seen under the fog. Decals now have a time to live
     (below), and they end under the fog too.
 - **Client:** every explosion (deaths the observer sees, X, `--explode`) leaves a scorch mark of
