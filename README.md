@@ -172,6 +172,7 @@ cargo run --release -p ae-client -- --game skirmish                     # units 
 cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12 --capture boom.ppm   # explosions, a second in
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo run --release -p ae-client -- --probe-display                      # the display's HDR state and the surface's colour spaces, then exit
+cargo run --release -p ae-client -- --working-space bt2020               # light the scene in BT.2020 (SDR maps it back to BT.709; --display-gamut bt709|p3|bt2020 for HDR output)
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle

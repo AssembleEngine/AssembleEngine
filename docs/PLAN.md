@@ -3255,7 +3255,9 @@ Steps (commit and stop for compaction after each):
   unlit sky through the whole HDR10 chain decodes to the same light in either working
   space, worst channel 1.04% apart. 54 GPU tests pass with validation (5 new), 64 lib tests (6 new), module 1, golden 2,
   graph_file 2; a `--working-space bt2020` client capture renders with 0 validation
-  errors and warnings.
+  errors and warnings. Re-checked after the review fixes: the release explosion capture (`--map land
+  --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12`) is byte-identical between
+  75d276d and stage 3, and repeats byte for byte.
   The levels stay at PQ's reference 203 nits in the tests and defaults: SDL reports 248
   nits of SDR white on the reference machine, but that is the compositor's reference,
   not necessarily the one the WSI attaches to the swapchain; stage 5 measures what is
