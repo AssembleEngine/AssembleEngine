@@ -545,11 +545,16 @@ fn terrain_renders_offscreen() {
     }
     // The capture is sRGB-encoded, like the swapchain.
     let encode = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-    // The tonemap's ACES fit (the default curve).
-    let aces = |x: f32| ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0);
-    // The clear colour: the sky's radiance at the default exposure, curved.
+    // The clear colour: the sky's radiance at the default exposure, through
+    // the default curve (the CPU mirror of the tonemap shader).
     let exposure = ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100);
-    let sky: Vec<u8> = ae_render::lighting::sky_radiance().iter().map(|&c| (encode(aces(c * exposure)) * 255.0).round() as u8).collect();
+    let curve = ae_render::tonemap::Lottes::default();
+    let sky_radiance = ae_render::lighting::sky_radiance();
+    let sky: Vec<u8> = curve
+        .map_rgb([sky_radiance[0] * exposure, sky_radiance[1] * exposure, sky_radiance[2] * exposure])
+        .iter()
+        .map(|&c| (encode(c) * 255.0).round() as u8)
+        .collect();
     let is_sky = |p: &[u8]| p[..3].iter().zip(&sky).all(|(a, b)| a.abs_diff(*b) <= 2);
     let sky_pixels = pixels.chunks(4).filter(|p| is_sky(p)).count();
     let total = (extent.width * extent.height) as usize;
@@ -816,7 +821,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0, auto: false });
+            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -2235,8 +2240,10 @@ fn water_covers_the_low_ground_only() {
     assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
     let moved = changed(&on, &later, &water);
     // Under the physical sky the reflection is fainter at this angle; the
-    // waves still move a fifteenth of the water pixels.
-    assert!(moved * 15 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
+    // waves still move at least a twentieth of the water pixels (105 of
+    // 1678 measured, 6.3%; it was over a fifteenth under ACES's brighter
+    // midtones).
+    assert!(moved * 20 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
     assert_clean(&gpu);
 }
 
@@ -3191,7 +3198,7 @@ fn particles_light_by_illuminance() {
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
     let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0, auto: false };
+    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {
@@ -4100,7 +4107,10 @@ fn decals_relit_modulated_and_glowing() {
     let (d, l) = (luma(&dark, centre), luma(&lit, centre));
     println!("glow: centre {d:.0} without, {l:.0} with (rgb {:?}); sunlit ground {:.0}", &lit[centre..centre + 3], luma(&dark, sunny));
     assert!(luma(&dark, sunny) > d + 20.0, "the glowing decal is not in shadow");
-    assert!(l > d + 60.0 && lit[centre] > lit[centre + 2] + 30, "no glow: {d} -> {l}, {:?}", &lit[centre..centre + 3]);
+    // 25 codes, from 60: Lottes' curve compresses the glow's added light
+    // (the test measured 60+ codes under Narkowicz's ACES fit at 0.596
+    // ground; now 95 -> 129, a doubling in linear terms).
+    assert!(l > d + 25.0 && lit[centre] > lit[centre + 2] + 30, "no glow: {d} -> {l}, {:?}", &lit[centre..centre + 3]);
     // Away from the centre the glow is held back.
     let rim = pixel(&east, Vec3::new(glow_at.0 + 5.0, 10.0, glow_at.1)).unwrap();
     assert!(luma(&lit, rim) - luma(&dark, rim) < (l - d) * 0.25, "glow not held to the centre");
@@ -5522,7 +5532,10 @@ fn scar_normal_maps_relight_the_ground() {
         pixels
     };
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
-    for (name, distance, min_mean) in [("close", 50.0f32, 3.0f32), ("gameplay", 250.0, 1.0)] {
+    // The normals' relight is measured in 8-bit luma: the tone curve's
+    // compressed midtones shrink it (3.0 was under ACES at 0.596 ground,
+    // 2.93 now), so "close" asks for 2.5.
+    for (name, distance, min_mean) in [("close", 50.0f32, 2.5f32), ("gameplay", 250.0, 1.0)] {
         let camera = Camera { target: Vec2::from(centre), ground: 50.0, distance, yaw: 0.4, pitch: 0.9, fov_y: 0.8 };
         let none = render(&atlas, camera, false);
         let mapped = render(&atlas, camera, true);
@@ -5608,5 +5621,63 @@ fn mips_are_made_on_the_gpu() {
     assert_eq!(levels.len(), 3);
     assert_eq!(levels[1].len(), 4);
     assert!((levels[2][0] as i32 - 120).abs() <= 1, "R8 mean: {:?}", levels);
+    assert_clean(&gpu);
+}
+
+/// The tone curve at the reference exposure (M13, stage 1): sunlit untextured
+/// ground displays at a mean of 0.35-0.45 linear, down from 0.596 with
+/// Narkowicz's ACES fit, while the scene it is stored from is unchanged (the
+/// clamp curve reads the same pre-curve value as before the curve changed:
+/// about 0.49). The curve's mid anchor is the automatic exposure's key.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn the_curve_places_the_sunlit_ground() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::tonemap::{Curve, ToneParams};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let render = |curve: Curve| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ToneParams { curve, bloom: 0.0, auto: false, ..Default::default() });
+        {
+            // Straight down at flat, untextured ground under the full sun:
+            // the frame is one sunlit surface, no sky.
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(512.0, 512.0);
+            view.camera.pitch = 1.55;
+            view.camera.distance = 100.0;
+            view.fog = false;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        run_headless(&gpu, &mut app, target, 4, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let linear = |v: u8| -> f32 {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let mean = |pixels: &[u8]| -> f32 {
+        let total = (extent.width * extent.height) as f32;
+        pixels.chunks(4).map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0).sum::<f32>() / total
+    };
+    let scene = mean(&render(Curve::Clamp));
+    let shown = mean(&render(Curve::Lottes));
+    eprintln!("sunlit ground: scene {scene:.4}, displayed {shown:.4} (was 0.596 with ACES)");
+    assert!((0.35..=0.45).contains(&shown), "the sunlit ground displays at 0.35-0.45 linear: {shown:.4}");
+    // The curve moves the display, not the scene it is stored from.
+    assert!((scene - 0.49).abs() < 0.02, "the pre-curve ground is unchanged: {scene:.4}");
     assert_clean(&gpu);
 }

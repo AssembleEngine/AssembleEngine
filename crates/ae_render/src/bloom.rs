@@ -1,7 +1,7 @@
 //! The bloom (M12 step 4): the glow target at a quarter of the size, the
 //! brightest 2×2 mean per 4×4 block, then an 11-tap Gaussian along x and
 //! along y (RA3-graphics' three passes). `post.tonemap` adds the result to
-//! the scene before the tone curve, so ACES rolls it off with the rest.
+//! the scene before the tone curve, so the curve rolls it off with the rest.
 //!
 //! The glow holds only light sources (glowing decals, the water's glints,
 //! emissive models and particles), not lit surfaces: a white sail or

@@ -44,8 +44,10 @@ pub const MIN_VISIBLE_ILLUMINANCE: f32 = 0.002;
 /// ([`SUN_ILLUMINANCE`]), meters at [`DEFAULT_EV100`], so eye adaptation
 /// settles on the calibrated look instead of moving it (the GPU test
 /// `auto_exposure_holds_the_key_across_sunlight` pins auto against manual
-/// there). A white Lambertian surface under the full sun stores about 1.6
-/// at that EV; the terrain's albedo is well below it.
+/// there). The tone curve's mid anchor is this value: it displays at
+/// [`crate::tonemap::Lottes::MID_OUT`]. A white Lambertian surface under the
+/// full sun stores about 1.6 at that EV; the terrain's albedo is well below
+/// it.
 pub const KEY_LUMINANCE: f32 = 0.5;
 /// The brightest auto-exposure (the lowest EV100), four EV above the
 /// reference sun's: an overcast dusk still gets the display's range. Night
