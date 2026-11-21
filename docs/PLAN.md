@@ -3785,6 +3785,30 @@ From M12 (2026-11-19):
   - test: a lamp billboard or in-scattering adds a halo with bloom on and none with it off,
     while the ground it lights changes by 0.0; plus an occlusion case.
 
+From the M12 automatic exposure (2026-11-21):
+
+- **ACES makes everything overly bright; a fireball becomes fully white.** Seen in the client
+  (`ae-client`, explosion on the fox scenes): the whole image reads too bright, and an
+  explosion's core and its bloom clip to a flat white disc with no colour or shape left. What
+  is known:
+  - the curve is Narkowicz's fit, per channel in the input's primaries and pre-exposed
+    (`aces(1.0) = 0.803`, about 232 in sRGB), and the EV14 calibration relies on that; sunlit
+    untextured ground displays at a mean of 0.596 linear (about 200 of 255 luma in the GPU
+    tests), high for a mid-tone;
+  - per channel, a hot emitter's three channels all reach the fit's 1.0 shoulder, so its hue
+    goes to white; the bloom adds 0.3 of the clamped glow on top before the curve;
+  - automatic exposure targets `KEY_LUMINANCE` 0.5, calibrated to match manual EV14, so it
+    keeps the bright look rather than correcting it, and an explosion darkens the frame only
+    slowly (1.5/s) and by its share of a centre-weighted mean.
+
+  Decide before changing (each moves every capture and the GPU tests' thresholds): a lower
+  calibration (EV14's look, or the key below 0.5); a curve with a longer shoulder that keeps
+  hue (on luminance or max channel, or a fit such as Hill's ACES or AgX); a cap or
+  desaturation on emitters and the bloom's contribution; or explosion emission levels set
+  against the display rather than the sun. Gate: a fireball keeps an orange-to-yellow
+  gradient and no clipped disc at the default exposure, and sunlit ground sits nearer a
+  mid-grey.
+
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
