@@ -2368,22 +2368,33 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
   A second compute pass walks a tile in packets of 8x4 pixels (one 32-lane subgroup per
   packet): for each 32-rank word one lane classifies one candidate against the packet's ray
   rectangle, the ballot collects the hits, and all lanes shade the same hits for their own
-  pixels, front to back. It writes the colour and the per-particle glow into its own RGBA16F
+  pixels, front to back. Every lane classifies its candidate while any pixel of the packet
+  is live (one whose own pixel is saturated or off the screen still does). The blend's
+  pipeline pins 32-lane, full subgroups (`subgroupSizeControl`, `computeFullSubgroups`;
+  `GpuDevice::compute_subgroups_32`), with a 256-wide workgroup per tile. It writes the colour and the per-particle glow into its own RGBA16F
   targets, then composites them over the scene: the depth-aware upsample at half resolution,
   one to one at full. A puff is the draw's sphere and soft edge (`particles_frag.glsl`), with
-  an explicit mip from its screen diameter.
-- **Correctness.** The order test runs seven blends with Packets: in the cluster it is 0.84
-  (max 26) from the exact per-pixel reference (sorted 0.75, max 26); crossing it pops 57
-  (sorted 64, reference 58) and is 1.04 from the volume (sorted 0.94); emitted in reverse
-  the frame changes by 1 (float rounding, as the sort). The new GPU test
-  `particles_packets_both_resolutions` checks blue in front, a buried puff, an explosion and
-  the per-particle glow at both resolutions (a fire in front of smoke blooms 9.5 luma at
-  full and 7.3 at half).
+  an explicit mip from its screen diameter (the projection's vertical scale taken from a
+  projected point, not `viewProj[1][1]`, which the camera's pitch scales). The scene depth
+  (full) or the half depth is made visible to the compute stage before the blend samples it.
+- **Correctness.** The order test runs seven blends with Packets: in the cluster it is 0.75
+  (max 26) from the exact per-pixel reference (sorted 0.74, max 26), and 0.86 from the volume
+  (sorted 0.86); crossing it pops 63 with 81 pixel-frames over 40 (sorted 64 and 80,
+  reference 64 and 58) and is 0.94 from the volume (sorted 0.93); emitted in reverse the
+  frame changes by 1 (float rounding, as the sort). The test asserts the packets' cluster
+  error within 0.05 of the sorted draw's: before the lane fix above, a saturated lane stopped
+  classifying its rank for the whole packet, which measured 0.84 and popped 57. The new GPU
+  test `particles_packets_both_resolutions` checks blue in front, a buried puff, an
+  explosion and the per-particle glow at both resolutions (a fire in front of smoke blooms
+  9.2 luma at full and 7.3 at half).
 - **Cost** (`bench battle`, about 40k live particles, 1280x720; three runs each, medians;
   the machine was shared with other workflows, so the packet draw's per-run spread was
   ±100-170% while its median stayed within 1%):
   - sorted: 69 µs sim + 152 µs draw at half, 69 + 383 at full.
-  - packets: 69 µs sim (the same sort) + 274 µs draw at half, 69 + 681 at full.
+  - packets: 69 µs sim (the same sort) + 274 µs draw at half, 69 + 681 at full. Rerun
+    after the lane, mip and subgroup fixes (three runs each, same scene, the machine again
+    shared): 70 + 274 at half and 70 + 689 at full, sorted 70 + 152 and 70 + 382; the
+    ratios below are unchanged.
   - Packets cost 1.8 times the sorted draw at either resolution; full resolution costs
     2.5 times half for both. The 8 MiB tile masks and the bin/pack pass are fixed; the
     blend's per-pixel depth and texture work and the four times the tiles dominate full.
@@ -2396,7 +2407,7 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
   `bench-diff` of the sorted half path before and after (`m12-packets-sorted` against
   `m12-pkt-sorted-half-r1`): 0 regressions; against `m12-pkt-packets-half`:
   `pass/particles` +81% (expected, the comparison mode).
-- Validation clean: 41 GPU tests; client captures of the crossing map with explosions at
+- Validation clean (synchronization validation on): 41 GPU tests; client captures of the crossing map with explosions at
   both resolutions report 0 errors and 0 warnings.
 
 ### M0 risk spikes
