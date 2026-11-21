@@ -49,15 +49,15 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 | Normal array | `R8G8_UNORM` 2D array with the same shape. Tangent-space normal x and y (z is reconstructed); x runs along the texture's u axis, y along v. |
 | Size | Square, a power of two (`--tileset-size`, default 512). |
 | Material table | Per gameplay material id (8 slots): a **ground** layer for flat ground and a **cliff** layer for steep slopes. |
-| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `roughness`: the layer's GGX specular response (0 mirror, 1 matte; the procedural sets use 0.45 for wet beds and mud to 0.95 for forest floor). `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. `anti_tiling`: `Off`, `Shifted(amount)` or `Rotated(amount)` (see "Anti-tiling" below). |
-| Per-tileset settings | `cliff_slope`: the slope range over which ground turns to cliff, as 1 − n.y; default 0.18..0.42, about 35°..55°. `blend_depth`: the sharpness of the height blend, default 0.22. `detail_tilt`: how much detail normals move the cliff mask, default 0.35. `warp`: boundary meander, default 2 cells with 40 m features. `macro_variation`: anti-tiling brightness, default ±22 % with 150 m features. |
+| Per-layer settings | `tile_size`: world metres per repeat. `normal_strength`. `roughness`: the layer's GGX specular response (0 mirror, 1 matte; the procedural sets use 0.45 for wet beds and mud to 0.95 for forest floor). `projection`: `ByOrientation` (planar on ground, duoplanar on cliffs) or `Triplanar`. `directional`: the texture has a direction (strata, ripples), so anti-tiling shifts its copies instead of rotating them. |
+| Per-tileset settings | `anti_tiling`: the degree of anti-tiling, 0..1 (0 samples each layer once, 1 uses 8 versions; see "Anti-tiling" below). `cliff_slope`: the slope range over which ground turns to cliff, as 1 − n.y; default 0.18..0.42, about 35°..55°. `blend_depth`: the sharpness of the height blend, default 0.22. `detail_tilt`: how much detail normals move the cliff mask, default 0.35. `warp`: boundary meander, default 2 cells with 40 m features. `macro_variation`: anti-tiling brightness, default ±22 % with 150 m features. |
 
 **Memory.** One 512² layer is 512² × (4 + 2) bytes × 4/3 for mips = 2.0 MB. A 7-layer set is
 14.0 MB, and the client prints the size at start-up. Generation of a procedural set is
 multithreaded (layers in parallel, rows within each) and takes about 0.06 s on a 24-thread CPU.
 
 **GPU side.** The renderer uploads both arrays once with `upload::image_layers` (2D-array views).
-It uploads the table (`TilesetUbo`, 416 bytes, std140 with only 16-byte members, size asserted)
+It uploads the table (`TilesetUbo`, 560 bytes, std140 with only 16-byte members, size asserted)
 as a device-local uniform buffer. They are bound at set 0, bindings 10, 11 and 12 of the terrain
 pipeline, sampled with a trilinear REPEAT sampler. Without a tileset the bindings hold 1×1
 placeholders and the shader takes the palette path.
@@ -121,26 +121,31 @@ existing terrain uniforms:
 against visible tiling), and the blended normal replaces the geometric one for lighting. Water
 tint, fog and the LOD/wireframe overlays then apply as before.
 
-**Anti-tiling** (`docs/antitiling.md`, after Quílez's "texture repetition", technique 3). A
-layer whose `anti_tiling` is not `Off` picks, per pixel, among `amount` versions of its texture,
-each offset (and rotated, for `Rotated`) by a seed. The index is a smooth tiling noise (one fetch
-from a generated 256² `R8_UNORM` texture at binding 20, 16 features, values spread evenly over
-0..1) read at 1/48 of the layer's uv, so its features span about 3 repeats. Two versions blend only
-in the middle fifth of each index step, the transition pushed by their colour difference so it
-follows the texture. The blend is re-centred on the layer's mean albedo and height (from its last
-mip, in the table) and scaled to keep the contrast. Normals rotate back into the uv frame.
-`Shifted` keeps a texture's direction (strata, ripples). The path is a specialization constant,
-compiled in only when some layer uses it.
+**Anti-tiling** (`docs/antitiling.md`, after Quílez's "texture repetition", technique 3). The
+tileset's `anti_tiling` degree (0..1) picks, per pixel, among `degree × 8` versions of a layer's
+texture, each offset (and rotated, unless the layer is `directional`) by a seed; the degree also
+scales each version's rotation and offset toward zero. The index is a smooth tiling noise (one
+fetch from a generated 256² `R8_UNORM` texture at binding 20, 16 features, values spread evenly
+over 0..1) read at 1/48 of the layer's uv, so its features span about 3 repeats. Two versions
+blend only in the middle fifth of each index step, the transition pushed by their colour
+difference so it follows the texture. The blend is re-centred on the layer's mean albedo and
+height (from its last mip, in the table) and scaled to keep the contrast. Normals rotate back into
+the uv frame. `directional` keeps a texture's direction (strata, ripples).
 
-Defaults: every ground layer on with 8 versions (temperate: sand shifted, the rest rotated;
-desert: dune sand shifted, the rest rotated). Off for the rocks: rotating breaks their strata, and
-shifting barely changed the cliffs for about 105 µs in the cliffs bench.
+The degree is continuous: 0 samples once, 0.5 uses about 4 versions at half their rotation and
+offset, 1 uses 8 at full. It is a tileset property, not a compile-time switch; the shader always
+carries the path.
+
+Defaults: both procedural sets use degree 1 for every layer (temperate: sand and rock
+directional, the rest rotated; desert: dune sand and red rock directional, the rest rotated).
 
 Measured from above (GPU test `anti_tiling_breaks_the_repeat_and_keeps_the_contrast`), the image's
-correlation with itself one repeat away, above its correlation at 1.5 repeats: mud 0.83 → 0.02,
-grass 0.40 → 0.10. Mean and standard deviation of luminance stay within 1 %. Cost of the terrain
-pass (bench, 1280×720, against no anti-tiling): close +49 µs (155.7 → 205.1), overview +62 µs
-(200.7 → 263.2), cliffs +136 µs (376.5 → 512.6).
+correlation with itself one repeat away, above its correlation at 1.5 repeats: mud 0.56 → 0.02,
+grass 0.41 → 0.11; at degree 0.1 the same measure is 0.21 and 0.25, so the knob is continuous.
+Mean and standard deviation of luminance stay within 1 %. Cost of the terrain pass (bench,
+1280×720, RTX 3060 Ti, against the same tileset at degree 0): close +45 µs (186.0 → 231.3),
+overview +57 µs (239.6 → 297.0), cliffs +228 µs (503.0 → 730.7). The cliffs increase is mostly
+the rock layer, which is anti-tiled too now that the degree belongs to the tileset.
 
 **Cost control.** Where several corners share a layer, which is the case inside any material,
 the shader samples it once. The cliff layer is sampled only where the cliff mask is above 0.
@@ -156,7 +161,6 @@ Taps are reused by constant index: a runtime index into the tap array cost 2–3
 
 **`ae-client`:**
 - `--tileset temperate|desert|none` (default temperate) and `--tileset-size N` (default 512).
-- `--no-anti-tiling` turns anti-tiling off on every layer (to compare the look and the cost).
 - `--weights` starts in the weights view.
 - **M** toggles between the tileset and the palette; **B** toggles the weights view.
 
@@ -204,7 +208,8 @@ overrides its result.
 The M and B keys were not exercised in these runs (there is no key injection); the paths they
 switch are the ones `--tileset none` and `--weights` run.
 
-**GPU time of the terrain draw pass** (1280×720, RTX 3060 Ti, three runs each):
+**GPU time of the terrain draw pass** (1280×720, RTX 3060 Ti, three runs each; the tileset
+columns without anti-tiling, measured before it became a tileset degree):
 
 | View | Palette | Temperate | Desert |
 |---|---|---|---|
@@ -212,7 +217,9 @@ switch are the ones `--tileset none` and `--weights` run.
 | Water map close-up | 0.05 ms | 0.17–0.18 ms | 0.18 ms |
 | Generated map, cliffs | 0.08 ms | 0.34–0.38 ms | 0.34–0.36 ms |
 
-Cliffs cost the most: the duoplanar or triplanar cliff tap plus the four ground taps.
+Cliffs cost the most: the duoplanar or triplanar cliff tap plus the four ground taps. With the
+default degree 1 the temperate columns are 0.23 ms (close), 0.30 ms (overview) and 0.73 ms
+(cliffs) in the current build.
 
 ## Not done
 

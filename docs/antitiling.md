@@ -1,9 +1,10 @@
 # Anti-tiling
 
 Implemented for the terrain's material tilesets: `layerTexel` in
-`crates/ae_render/shaders/terrain.frag`, the per-layer `AntiTiling` setting in
-`crates/ae_render/src/terrain/tileset.rs`, defaults and costs in `docs/tilesets.md`. The example
-it started from is kept verbatim at the end, in an older GLSL dialect (`texture2D`).
+`crates/ae_render/shaders/terrain.frag`, the `Tileset::anti_tiling` degree and the
+per-layer `directional` flag in `crates/ae_render/src/terrain/tileset.rs`, defaults and costs in
+`docs/tilesets.md`. The example it started from is kept verbatim at the end, in an older GLSL
+dialect (`texture2D`).
 
 What the example does:
 - Hides a texture's repetition by sampling it twice per position: rotated and offset by two
@@ -16,9 +17,15 @@ What the example does:
 
 How the implementation works (Íñigo Quílez, "texture repetition", 2015, technique 3; the
 example above is a variant of it):
-- A smooth noise times the layer's amount (8 by default) is an index into versions of the
-  texture, each moved by a seed: offset, and rotated for `Rotated` layers. Each pixel shows the
-  two versions its index lies between, mostly just one.
+- The tileset has one `anti_tiling` degree in 0..1 (the example's `randomness`): 0 samples each
+  layer once, 1 uses 8 versions. The degree is continuous, not a switch, and it is the only
+  control; the shader always carries the path, so no specialization constant or second pipeline
+  exists.
+- A smooth noise times the degree's number of versions is an index into versions of the texture,
+  each moved by a seed: offset, and rotated unless the layer is `directional`. The degree also
+  fades each version's transform in (rotation and offset scaled toward zero), so small degrees
+  sample nearly the plain uv. Each pixel shows the two versions its index lies between, mostly
+  just one.
 - The noise is one fetch from a generated tiling texture (`tileset::anti_tiling_noise`: 256²
   `R8_UNORM`, gradient noise with octaves offset from one another so their lattice zeros do not
   line up into a grid, values ranked onto 0..1 so every version covers about the same share).
@@ -34,17 +41,21 @@ example above is a variant of it):
   does not jump where the version changes. The tangent normals rotate back into the uv frame
   (the example used them as sampled, which tilts rotated copies the wrong way).
 - Seeds come from a 16-entry table (golden-ratio angles, R2-sequence offsets).
-- Per layer: `Off`, `Shifted` (textures with a direction: strata, ripples) or `Rotated`. The path is
-  a specialization constant, compiled in only when a layer uses it; an untaken path measured free.
+- A layer's `directional` flag shifts its copies instead of rotating them, for textures with a
+  direction (strata, ripples). Others rotate.
 - Not adopted: the example's constant-overlap triplanar weights and RNM. The tileset keeps its
   pow-4 weights and whiteout blend.
 
-Measurements (terrain pass, `ae-client --bench close,cliffs,overview`, 1280×720):
-- Defaults (every ground layer, rocks off): close +49 µs (+32 %), overview +62 µs (+31 %),
-  cliffs +136 µs (+36 %).
-- With Quílez's band (0.2..0.8): +46 %, +43 %, +51 %. One version only (no blend, an experiment):
-  +17 %, +20 %, +17 %, so the noise fetch and a moved sample cost about half, the second
-  version the rest. Branch-free (always two versions): no faster than with the early returns.
+Measurements (terrain pass, `ae-client --bench close,cliffs,overview`, 1280×720, RTX 3060 Ti):
+- Defaults (every layer at degree 1, so the cliffs include the shifted rock): close +45 µs
+  (+24 %, 186.0 → 231.3), overview +57 µs (+24 %, 239.6 → 297.0), cliffs +228 µs (+45 %,
+  503.0 → 730.7). Against the same tileset at degree 0.
+- Earlier, with rocks off: close +49 µs (+32 %), overview +62 µs (+31 %), cliffs +136 µs
+  (+36 %). Turning the rock layer on is most of the cliffs increase.
+- With Quílez's band (0.2..0.8) on the ground layers: +46 %, +43 %, +51 %. One version only (no
+  blend, an experiment): +17 %, +20 %, +17 %, so the noise fetch and a moved sample cost about
+  half, the second version the rest. Branch-free (always two versions): no faster than with the
+  early returns.
 - The first implementation, the example as given (a value noise of 8 features per repeat
   computed per call, two seeds crossfaded everywhere): on grass and forest floor it cost too much
   to leave on, and with them off it did nothing where tiling shows most. Its noise was about a
