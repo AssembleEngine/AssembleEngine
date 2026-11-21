@@ -32,7 +32,7 @@ use crate::executor::{BufferBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, spirv};
 use crate::shadow::{Cascades, ShadowMap};
-use crate::upload;
+use crate::upload::{self, MipFilter};
 use ae_framegraph::BufferDesc;
 use anyhow::{Context as _, Result};
 use ash::vk;
@@ -367,11 +367,15 @@ impl TerrainRenderer {
         let (decal_atlas, decal_surface) = match decals {
             Some((atlas, _)) => {
                 atlas.validate().map_err(anyhow::Error::msg)?;
-                let upload = |mips: Vec<Vec<Vec<u8>>>, format, name| {
-                    let layers: Vec<Vec<&[u8]>> = mips.iter().map(|l| l.iter().map(Vec::as_slice).collect()).collect();
-                    upload::image_layers(gpu, format, atlas.size, atlas.size, &layers, vk::ImageViewType::TYPE_2D_ARRAY, name)
-                };
-                (upload(atlas.mips(), vk::Format::R8G8B8A8_SRGB, "decal atlas")?, upload(atlas.surface_mips(), vk::Format::R8G8B8A8_UNORM, "decal surface")?)
+                // Mip 0 of each layer; the mips are made on the GPU.
+                let colour: Vec<&[u8]> = atlas.colour.iter().map(|l| l.as_flattened()).collect();
+                let surface = atlas.surface_layers();
+                let surface: Vec<&[u8]> = surface.iter().map(|l| l.as_flattened()).collect();
+                let array = vk::ImageViewType::TYPE_2D_ARRAY;
+                (
+                    upload::image_mipped(gpu, vk::Format::R8G8B8A8_SRGB, atlas.size, atlas.size, &colour, MipFilter::Coverage, array, "decal atlas")?,
+                    upload::image_mipped(gpu, vk::Format::R8G8B8A8_UNORM, atlas.size, atlas.size, &surface, MipFilter::Normal, array, "decal surface")?,
+                )
             }
             None => {
                 let one = |format, texel: [u8; 4], name| upload::image_layers(gpu, format, 1, 1, &[vec![&texel[..]]], vk::ImageViewType::TYPE_2D_ARRAY, name);
@@ -410,11 +414,13 @@ impl TerrainRenderer {
         let (tile_albedo, tile_normal, tile_table) = match tileset {
             Some(t) => {
                 t.validate().map_err(anyhow::Error::msg)?;
-                let albedo: Vec<Vec<&[u8]>> = t.layers.iter().map(|l| l.albedo.iter().map(Vec::as_slice).collect()).collect();
-                let normal: Vec<Vec<&[u8]>> = t.layers.iter().map(|l| l.normal.iter().map(Vec::as_slice).collect()).collect();
+                // Mip 0 of each layer; the mips are made on the GPU (a box on
+                // power-of-two sides never crosses the tile edge, so they tile).
+                let albedo: Vec<&[u8]> = t.layers.iter().map(|l| l.albedo.as_slice()).collect();
+                let normal: Vec<&[u8]> = t.layers.iter().map(|l| l.normal.as_slice()).collect();
                 (
-                    upload::image_layers(gpu, vk::Format::R8G8B8A8_SRGB, t.size, t.size, &albedo, array, "tileset albedo")?,
-                    upload::image_layers(gpu, vk::Format::R8G8_UNORM, t.size, t.size, &normal, array, "tileset normals")?,
+                    upload::image_mipped(gpu, vk::Format::R8G8B8A8_SRGB, t.size, t.size, &albedo, MipFilter::Average, array, "tileset albedo")?,
+                    upload::image_mipped(gpu, vk::Format::R8G8_UNORM, t.size, t.size, &normal, MipFilter::Normal, array, "tileset normals")?,
                     t.ubo(),
                 )
             }
@@ -426,9 +432,9 @@ impl TerrainRenderer {
         };
         let tile_noise = match tileset {
             Some(t) if t.anti_tiling > 0.0 => {
-                let mips = super::tileset::anti_tiling_noise();
-                let mips: Vec<&[u8]> = mips.iter().map(Vec::as_slice).collect();
-                upload::image(gpu, vk::Format::R8_UNORM, super::tileset::NOISE_SIZE, super::tileset::NOISE_SIZE, &mips, "anti-tiling noise")?
+                let noise = super::tileset::anti_tiling_noise();
+                let size = super::tileset::NOISE_SIZE;
+                upload::image_mipped(gpu, vk::Format::R8_UNORM, size, size, &[&noise], MipFilter::Average, vk::ImageViewType::TYPE_2D, "anti-tiling noise")?
             }
             _ => upload::image(gpu, vk::Format::R8_UNORM, 1, 1, &[&[128u8][..]], "anti-tiling noise")?,
         };

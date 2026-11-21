@@ -358,7 +358,14 @@ impl Textures<'_> {
                 ensure!(!compressed || self.gpu.texture_compression_bc, "texture {} is block-compressed and the device has no textureCompressionBC", r.texture);
                 let levels: Vec<&[u8]> = tex.levels.iter().map(Vec::as_slice).collect();
                 let format = vk::Format::from_raw(tex.format.0 as i32);
-                self.images.push(upload::image(self.gpu, format, tex.width, tex.height, &levels, "model texture")?);
+                // An uncompressed texture with level 0 alone (PNG and JPEG from
+                // ae_gltf) gets its mips on the GPU; others bring theirs.
+                let image = if levels.len() == 1 && !compressed && tex.width.max(tex.height) > 1 {
+                    upload::image_mipped(self.gpu, format, tex.width, tex.height, &levels, upload::MipFilter::Average, vk::ImageViewType::TYPE_2D, "model texture")?
+                } else {
+                    upload::image(self.gpu, format, tex.width, tex.height, &levels, "model texture")?
+                };
+                self.images.push(image);
                 self.image_of.push((m, r.texture, self.images.len() - 1));
                 self.images.len() - 1
             }

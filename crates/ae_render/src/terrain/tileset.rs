@@ -12,7 +12,8 @@
 //!
 //! GPU layout (see [`Tileset::ubo`] and `shaders/terrain.frag`):
 //! - albedo: `R8G8B8A8_SRGB` 2D array, one layer per tileset layer, full
-//!   mip chain; RGB = albedo, A = height (linear in an sRGB format);
+//!   mip chain (made on the GPU from mip 0, `upload::image_mipped`); RGB =
+//!   albedo, A = height (linear in an sRGB format);
 //! - normals: `R8G8_UNORM` 2D array, same shape; tangent-space x, y (z is
 //!   reconstructed), y along the texture's v axis.
 
@@ -46,24 +47,32 @@ pub struct LayerSettings {
     pub directional: bool,
 }
 
-/// One layer's textures: per mip, tightly packed, mip 0 `size` square.
+/// One layer's textures: mip 0, `size` square, tightly packed (the GPU
+/// makes the mips).
 #[derive(Clone, Debug)]
 pub struct Layer {
     pub settings: LayerSettings,
     /// `R8G8B8A8_SRGB` texels (A = height).
-    pub albedo: Vec<Vec<u8>>,
+    pub albedo: Vec<u8>,
     /// `R8G8_UNORM` texels (tangent-space normal x, y).
-    pub normal: Vec<Vec<u8>>,
+    pub normal: Vec<u8>,
 }
 
 impl Layer {
-    /// The mean albedo (linear light) and height: the last mip's one texel
-    /// (the mips average albedo in linear light, height linearly).
+    /// The mean albedo (linear light) and height over mip 0.
     pub fn mean(&self) -> [f32; 4] {
-        match self.albedo.last() {
-            Some(t) if t.len() == 4 => [srgb_decode(t[0]), srgb_decode(t[1]), srgb_decode(t[2]), t[3] as f32 / 255.0],
-            _ => [0.0; 4],
+        let texels = self.albedo.len() / 4;
+        if texels == 0 {
+            return [0.0; 4];
         }
+        let mut sum = [0.0f64; 4];
+        for t in self.albedo.as_chunks::<4>().0 {
+            for c in 0..3 {
+                sum[c] += srgb_decode(t[c]) as f64;
+            }
+            sum[3] += t[3] as f64 / 255.0;
+        }
+        sum.map(|c| (c / texels as f64) as f32)
     }
 }
 
@@ -149,17 +158,11 @@ impl Tileset {
         if self.layers.is_empty() || self.layers.len() > MAX_LAYERS {
             return Err(format!("tileset `{}`: {} layers (1..={MAX_LAYERS})", self.name, self.layers.len()));
         }
-        let mips = self.mip_count();
+        let side = self.size as usize;
         for l in &self.layers {
             let s = &l.settings;
-            if l.albedo.len() != mips || l.normal.len() != mips {
-                return Err(format!("layer `{}`: {} albedo and {} normal mips, expected {mips}", s.name, l.albedo.len(), l.normal.len()));
-            }
-            for m in 0..mips {
-                let side = (self.size >> m) as usize;
-                if l.albedo[m].len() != side * side * 4 || l.normal[m].len() != side * side * 2 {
-                    return Err(format!("layer `{}`: mip {m} has the wrong size", s.name));
-                }
+            if l.albedo.len() != side * side * 4 || l.normal.len() != side * side * 2 {
+                return Err(format!("layer `{}`: {} albedo and {} normal bytes, not {side}² texels", s.name, l.albedo.len(), l.normal.len()));
             }
             if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) || !(0.0..=1.0).contains(&s.roughness) {
                 return Err(format!("layer `{}`: tile size {}, normal strength {} or roughness {} out of range", s.name, s.tile_size, s.normal_strength, s.roughness));
@@ -181,10 +184,6 @@ impl Tileset {
             return Err(format!("tileset `{}`: cliff slope {a}..{b} or blend depth {} out of range", self.name, self.blend_depth));
         }
         Ok(())
-    }
-
-    pub fn mip_count(&self) -> usize {
-        self.size.trailing_zeros() as usize + 1
     }
 
     pub fn ubo(&self) -> TilesetUbo {
@@ -209,23 +208,24 @@ impl Tileset {
         u
     }
 
-    /// Texture bytes (both arrays, every mip).
+    /// Texture bytes on the GPU (both arrays, every mip: a third more than
+    /// mip 0).
     pub fn bytes(&self) -> usize {
-        self.layers.iter().map(|l| l.albedo.iter().chain(&l.normal).map(Vec::len).sum::<usize>()).sum()
+        self.layers.iter().map(|l| (l.albedo.len() + l.normal.len()) * 4 / 3).sum()
     }
 }
 
 /// Side of the anti-tiling index noise ([`anti_tiling_noise`]).
 pub const NOISE_SIZE: u32 = 256;
 
-/// The anti-tiling index: a smooth noise that tiles, `R8_UNORM`, per mip
-/// (mip 0 [`NOISE_SIZE`] square), 16 features across. Its values are
+/// The anti-tiling index: a smooth noise that tiles, `R8_UNORM`, mip 0
+/// ([`NOISE_SIZE`] square; the GPU makes the mips), 16 features across. Its values are
 /// equalised (ranked onto 0..1), so each of a layer's versions covers about
 /// the same share of the ground. The octaves of the gradient noise are
 /// offset from one another by fractions of a cell: gradient noise is 0 at
 /// its lattice points, and with aligned octaves the sum would be too, a
 /// regular grid of one version.
-pub fn anti_tiling_noise() -> Vec<Vec<u8>> {
+pub fn anti_tiling_noise() -> Vec<u8> {
     let n = NOISE_SIZE as usize;
     let mut v: Vec<(f32, usize)> = (0..n * n)
         .map(|i| {
@@ -245,22 +245,7 @@ pub fn anti_tiling_noise() -> Vec<Vec<u8>> {
     for (rank, &(_, i)) in v.iter().enumerate() {
         mip[i] = ((rank as f32 + 0.5) / (n * n) as f32 * 255.0).round() as u8;
     }
-    let mut mips = vec![mip];
-    let mut side = n;
-    while side > 1 {
-        let half = side / 2;
-        let prev = mips.last().unwrap();
-        let next = (0..half * half)
-            .map(|i| {
-                let (x, y) = (i % half * 2, i / half * 2);
-                let sum: u32 = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().map(|&(a, b)| prev[b * side + a] as u32).sum();
-                ((sum + 2) / 4) as u8
-            })
-            .collect();
-        mips.push(next);
-        side = half;
-    }
-    mips
+    mip
 }
 
 /// A procedural tileset by name (`temperate`, `desert`) with `size`-texel
@@ -450,6 +435,7 @@ fn unorm(x: f32) -> u8 {
     ((x * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+#[cfg(test)]
 fn snorm(b: u8) -> f32 {
     b as f32 / 255.0 * 2.0 - 1.0
 }
@@ -491,53 +477,9 @@ fn generate(recipe: Recipe, size: u32, seed: u32, bump: f32) -> (Vec<u8>, Vec<u8
     (albedo, normal)
 }
 
-/// The next mip (2x2 box): albedo averaged in linear light, height
-/// linearly, normals as vectors renormalised. Sizes are powers of two, so
-/// boxes never cross the tile edge and the mips tile like mip 0.
-fn downsample(albedo: &[u8], normal: &[u8], size: usize) -> (Vec<u8>, Vec<u8>) {
-    let half = size / 2;
-    let mut a = vec![0u8; half * half * 4];
-    let mut nm = vec![0u8; half * half * 2];
-    for y in 0..half {
-        for x in 0..half {
-            let taps = [(2 * x, 2 * y), (2 * x + 1, 2 * y), (2 * x, 2 * y + 1), (2 * x + 1, 2 * y + 1)];
-            let mut lin = [0.0f32; 4];
-            let mut v = [0.0f32; 3];
-            for (tx, ty) in taps {
-                let i = ty * size + tx;
-                for c in 0..3 {
-                    lin[c] += srgb_decode(albedo[i * 4 + c]) * 0.25;
-                }
-                lin[3] += albedo[i * 4 + 3] as f32 * 0.25;
-                let (nx, ny) = (snorm(normal[i * 2]), snorm(normal[i * 2 + 1]));
-                v[0] += nx;
-                v[1] += ny;
-                v[2] += (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
-            }
-            let o = y * half + x;
-            a[o * 4..o * 4 + 4].copy_from_slice(&[srgb_encode(lin[0]), srgb_encode(lin[1]), srgb_encode(lin[2]), lin[3].round() as u8]);
-            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
-            nm[o * 2] = unorm(v[0] / len);
-            nm[o * 2 + 1] = unorm(v[1] / len);
-        }
-    }
-    (a, nm)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump: f32, projection: Projection, directional: bool) -> Layer {
-    let (mut a, mut n) = generate(recipe, size, seed, bump);
-    let (mut albedo, mut normal) = (Vec::new(), Vec::new());
-    let mut side = size as usize;
-    loop {
-        albedo.push(a.clone());
-        normal.push(n.clone());
-        if side == 1 {
-            break;
-        }
-        (a, n) = downsample(&a, &n, side);
-        side /= 2;
-    }
+    let (albedo, normal) = generate(recipe, size, seed, bump);
     Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, roughness: 0.85, projection, directional }, albedo, normal }
 }
 
@@ -622,39 +564,36 @@ mod tests {
     }
 
     /// Every layer of both sets tiles: the step across the wrap edge is
-    /// like a step inside, for albedo, height and normals, at every mip
-    /// down to 8 texels; normals are unit vectors; generation is
+    /// like a step inside, for albedo, height and normals (the GPU's 2x2
+    /// box mips of a power-of-two tile never cross its edge, so they tile
+    /// as mip 0 does); normals are unit vectors; generation is
     /// deterministic; the tables are valid.
     #[test]
     fn procedural_layers_tile_and_validate() {
         for name in NAMES {
             let t = by_name(name, 128).unwrap();
             t.validate().unwrap();
-            assert_eq!(t.mip_count(), 8);
             assert_eq!(t.layers.len(), 7);
             let again = by_name(name, 128).unwrap();
             for (a, b) in t.layers.iter().zip(&again.layers) {
                 assert!(a.albedo == b.albedo && a.normal == b.normal, "{name}: deterministic");
             }
             for l in &t.layers {
-                for mip in 0..t.mip_count() - 3 {
-                    let side = 128 >> mip;
-                    for (img, comps, channels) in [(&l.albedo[mip], 4, 0..4), (&l.normal[mip], 2, 0..2)] {
-                        for c in channels {
-                            for vertical in [false, true] {
-                                let (inner, edge) = neighbour_diffs(img, side, comps, c, vertical);
-                                assert!(edge <= inner * 2.5 + 1.0, "{name} `{}` mip {mip} channel {c} ({}): edge step {edge:.2} vs inside {inner:.2}", l.settings.name, if vertical { "v" } else { "u" });
-                            }
+                for (img, comps, channels) in [(&l.albedo, 4, 0..4), (&l.normal, 2, 0..2)] {
+                    for c in channels {
+                        for vertical in [false, true] {
+                            let (inner, edge) = neighbour_diffs(img, 128, comps, c, vertical);
+                            assert!(edge <= inner * 2.5 + 1.0, "{name} `{}` channel {c} ({}): edge step {edge:.2} vs inside {inner:.2}", l.settings.name, if vertical { "v" } else { "u" });
                         }
                     }
                 }
                 // Heights use the range; normals are tilted somewhere.
-                let h: Vec<u8> = l.albedo[0].chunks(4).map(|p| p[3]).collect();
+                let h: Vec<u8> = l.albedo.chunks(4).map(|p| p[3]).collect();
                 let (lo, hi) = (*h.iter().min().unwrap(), *h.iter().max().unwrap());
                 assert!(hi - lo > 80, "{name} `{}`: heights {lo}..{hi}", l.settings.name);
-                let tilt = l.normal[0].chunks(2).map(|p| snorm(p[0]).abs() + snorm(p[1]).abs()).fold(0.0f32, f32::max);
+                let tilt = l.normal.chunks(2).map(|p| snorm(p[0]).abs() + snorm(p[1]).abs()).fold(0.0f32, f32::max);
                 assert!(tilt > 0.2, "{name} `{}`: normals tilt", l.settings.name);
-                for p in l.normal.iter().flat_map(|m| m.chunks(2)) {
+                for p in l.normal.chunks(2) {
                     let (x, y) = (snorm(p[0]), snorm(p[1]));
                     assert!(x * x + y * y <= 1.0 + 0.02, "a unit normal's x, y");
                 }
@@ -667,7 +606,7 @@ mod tests {
     #[test]
     fn the_tiling_measure_sees_a_seam() {
         let t = temperate(64);
-        let mut img = t.layers[3].albedo[0].clone();
+        let mut img = t.layers[3].albedo.clone();
         for y in 0..64 {
             let i = (y * 64 + 63) * 4;
             img[i] = img[i].wrapping_add(90);
@@ -683,7 +622,7 @@ mod tests {
         assert!(t.validate().unwrap_err().contains("material 2"));
         let mut t = temperate(16);
         t.layers[0].normal.pop();
-        assert!(t.validate().unwrap_err().contains("mips"));
+        assert!(t.validate().unwrap_err().contains("normal bytes"));
         let mut t = temperate(16);
         t.cliff_slope = (0.5, 0.2);
         assert!(t.validate().is_err());
@@ -699,7 +638,7 @@ mod tests {
     }
 
     /// The table's anti-tiling: the tileset's degree, each layer's
-    /// directional flag, and means from the last mip; out-of-range degrees
+    /// directional flag, and means over mip 0; out-of-range degrees
     /// rejected.
     #[test]
     fn anti_tiling_in_the_table() {
@@ -711,10 +650,11 @@ mod tests {
         let u = t.ubo();
         assert_eq!(u.anti_tiling[0], 0.5, "the tileset's degree");
         assert_eq!((u.layers[0][2], u.layers[1][2]), (1.0, 2.0), "triplanar, directional");
-        // The last mip is the mean: its decoded texel.
-        let top = t.layers[4].albedo.last().unwrap();
-        assert_eq!(top.len(), 4);
-        assert_eq!(u.means[4], [srgb_decode(top[0]), srgb_decode(top[1]), srgb_decode(top[2]), top[3] as f32 / 255.0]);
+        // The mean over mip 0, colour in linear light.
+        let texels = t.layers[4].albedo.chunks(4);
+        let n = texels.len() as f32;
+        let red = texels.map(|p| srgb_decode(p[0])).sum::<f32>() / n;
+        assert!((u.means[4][0] - red).abs() < 1e-4, "{} vs {red}", u.means[4][0]);
         assert!(u.means[4][..3].iter().all(|&c| c > 0.0 && c < 1.0));
         for bad in [-0.1, 1.1, f32::NAN] {
             let mut t = temperate(16);

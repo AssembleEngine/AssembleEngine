@@ -45,7 +45,7 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 | Part | Contents |
 |---|---|
 | Layers | 1 to 8 (`MAX_LAYERS`). Both procedural sets have 7. |
-| Albedo array | `R8G8B8A8_SRGB` 2D array, one array layer per tileset layer, full mip chain. RGB is albedo; A is the layer's height (0..1, linear: alpha is never sRGB-encoded). |
+| Albedo array | `R8G8B8A8_SRGB` 2D array, one array layer per tileset layer, full mip chain (made on the GPU from mip 0, `upload::image_mipped`). RGB is albedo; A is the layer's height (0..1, linear: alpha is never sRGB-encoded). |
 | Normal array | `R8G8_UNORM` 2D array with the same shape. Tangent-space normal x and y (z is reconstructed); x runs along the texture's u axis, y along v. |
 | Size | Square, a power of two (`--tileset-size`, default 512). |
 | Material table | Per gameplay material id (8 slots): a **ground** layer for flat ground and a **cliff** layer for steep slopes. |
@@ -56,7 +56,8 @@ The blend-weight debug view (`--weights` or B) shows each pixel's mix of layers 
 14.0 MB, and the client prints the size at start-up. Generation of a procedural set is
 multithreaded (layers in parallel, rows within each) and takes about 0.06 s on a 24-thread CPU.
 
-**GPU side.** The renderer uploads both arrays once with `upload::image_layers` (2D-array views).
+**GPU side.** The renderer uploads both arrays once with `upload::image_mipped` (2D-array views;
+mip 0 from the CPU, the mips on the GPU).
 It uploads the table (`TilesetUbo`, 560 bytes, std140 with only 16-byte members, size asserted)
 as a device-local uniform buffer. They are bound at set 0, bindings 10, 11 and 12 of the terrain
 pipeline, sampled with a trilinear REPEAT sampler. Without a tileset the bindings hold 1×1
@@ -65,8 +66,9 @@ placeholders and the shader takes the palette path.
 ### The procedural placeholder sets
 
 No texture source has been chosen yet, so the layers are generated. They use periodic gradient
-noise and periodic cellular noise, so every layer tiles exactly, at every mip. Mips are 2×2 boxes:
-albedo is averaged in linear light, normals as vectors and then renormalised.
+noise and periodic cellular noise, so every layer tiles exactly. A `Layer` holds mip 0 only; the
+GPU makes the mips as 2×2 boxes, which never cross a power-of-two tile's edge, so every mip tiles
+too. Albedo is averaged in linear light, and normals as vectors, then renormalised.
 
 | Slot (material) | `temperate` | `desert` |
 |---|---|---|
@@ -78,8 +80,8 @@ albedo is averaged in linear light, normals as vectors and then renormalised.
 | 5 road | gravel | gravel |
 | 6 mud | mud | salt pan |
 
-To make another set, add a function like `temperate()`. To use real textures, fill the `Layer`
-mips from image files. The renderer takes any `Tileset` that passes `validate()`.
+To make another set, add a function like `temperate()`. To use real textures, fill each `Layer`'s
+mip 0 from image files. The renderer takes any `Tileset` that passes `validate()`.
 
 ## The shader: projection and blending
 
@@ -129,8 +131,8 @@ fetch from a generated 256² `R8_UNORM` texture at binding 20, 16 features, valu
 over 0..1) read at 1/48 of the layer's uv, so its features span about 3 repeats. Two versions
 blend only in the middle fifth of each index step, the transition pushed by their colour
 difference so it follows the texture. The blend is re-centred on the layer's mean albedo and
-height (from its last mip, in the table) and scaled to keep the contrast. Normals rotate back into
-the uv frame. `directional` keeps a texture's direction (strata, ripples).
+height (averaged over mip 0 on the CPU, in the table) and scaled to keep the contrast. Normals
+rotate back into the uv frame. `directional` keeps a texture's direction (strata, ripples).
 
 The degree is continuous: 0 samples once, 0.5 uses about 4 versions at half their rotation and
 offset, 1 uses 8 at full. It is a tileset property, not a compile-time switch; the shader always
@@ -186,7 +188,8 @@ overrides its result.
 
 **`cargo test -p ae_render --lib tileset`:**
 - Every layer of both sets tiles. Across the wrap edge, the albedo, height and normal steps are
-  no larger than 2.5× the average step inside, at mips 0–4. The measure does fail on a
+  no larger than 2.5× the average step inside (mip 0; the GPU's box mips of a power-of-two tile
+  stay within the tile). The measure does fail on a
   deliberately broken edge (`the_tiling_measure_sees_a_seam`).
 - Normals are unit vectors, generation is deterministic, and broken tables are rejected.
 

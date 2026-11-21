@@ -315,11 +315,12 @@ fn material_textures_transform_and_tangents() {
     assert_eq!(base.transform, Some(UvTransform { offset: [0.5, 0.0], rotation: 0.25, scale: [2.0, 3.0] }));
     assert_eq!(base.sampler, Sampler { mag: Filter::Nearest, min: Filter::Linear, mip: None, wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::MirroredRepeat });
     let base_img = ktx::read(&m.textures[base.texture as usize]).unwrap();
-    assert_eq!((base_img.format, base_img.width, base_img.height, base_img.levels.len()), (ktx::Format::RGBA8_SRGB, 4, 2, 3));
+    // Level 0 only: the renderer makes the mips on the GPU.
+    assert_eq!((base_img.format, base_img.width, base_img.height, base_img.levels.len()), (ktx::Format::RGBA8_SRGB, 4, 2, 1));
     assert_eq!(&base_img.levels[0][4..8], &[60, 0, 255, 255]);
     let n = mat.normal_texture.unwrap();
     let n_img = ktx::read(&m.textures[n.texture as usize]).unwrap();
-    assert_eq!((n_img.format, n_img.levels.len()), (ktx::Format::RGBA8_UNORM, 2));
+    assert_eq!((n_img.format, n_img.levels.len()), (ktx::Format::RGBA8_UNORM, 1));
     // Tangents generated along +U (= +X here), handedness from the UVs.
     for v in &m.vertices {
         assert!(Vec3::from_slice(&v.tangent[..3]).abs_diff_eq(Vec3::X, 1e-4), "{:?}", v.tangent);

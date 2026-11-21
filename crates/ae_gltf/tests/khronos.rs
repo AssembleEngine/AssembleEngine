@@ -88,7 +88,7 @@ fn fox_textured_skin_and_clips() {
     assert_eq!(m.clips.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Survey", "Walk", "Run"]);
     assert_eq!(m.joints.len(), 24, "the skin's joints only");
     let tex = ktx::read(&m.textures[0]).unwrap();
-    assert_eq!((tex.format, tex.width, tex.height, tex.levels.len()), (ktx::Format::RGBA8_SRGB, 1024, 1024, 11));
+    assert_eq!((tex.format, tex.width, tex.height, tex.levels.len()), (ktx::Format::RGBA8_SRGB, 1024, 1024, 1), "level 0; the GPU makes the mips");
     // Standing on the ground, longer than wide, and long along the
     // engine's forward axis (glTF +Z): the axis turn applied.
     let b = m.bounds;

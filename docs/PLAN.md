@@ -920,11 +920,12 @@ Terrain edits on screen (`TerrainChanged` reaching the render heightfield):
 Material tilesets (the proposal above; full write-up with captures, texture formats, settings and
 numbers in [docs/tilesets.md](tilesets.md)):
 - `ae_render::terrain::tileset`: a tileset is up to 8 tileable layers (albedo + height in an
-  `R8G8B8A8_SRGB` array, normals in an `R8G8_UNORM` array, full mips), a table from the 8 gameplay
-  material ids to a ground and a cliff layer, and per-layer (tile size, normal strength, projection,
-  directional) and per-set (anti-tiling degree, cliff slope range, blend depth, detail tilt, boundary
-  warp, macro variation) settings. Two procedural placeholder sets, `temperate` and `desert`, 7 layers
-  each, from periodic gradient and cellular noise (14 MB at 512², generated in 0.06 s on 24 threads).
+  `R8G8B8A8_SRGB` array, normals in an `R8G8_UNORM` array, full mips made on the GPU from mip 0), a
+  table from the 8 gameplay material ids to a ground and a cliff layer, and per-layer (tile size,
+  normal strength, projection, directional) and per-set (anti-tiling degree, cliff slope range,
+  blend depth, detail tilt, boundary warp, macro variation) settings. Two procedural placeholder
+  sets, `temperate` and `desert`, 7 layers each, from periodic gradient and cellular noise (14 MB at
+  512², generated in 0.06 s on 24 threads).
 - Shader (`terrain.frag`, `tileset()`): ground layers planar, cliff layers duoplanar, `Triplanar`
   layers triplanar, with sign-matched uv/tangent flips and whiteout normal blending; every sample
   uses `textureGrad`. Two-level blending: broad masks (bilinear material cells looked up through a
@@ -936,7 +937,7 @@ numbers in [docs/tilesets.md](tilesets.md)):
   before (water and generated maps). `ae-client --tileset temperate|desert|none` (default
   temperate), `--tileset-size`, `--weights`; M toggles tileset/palette, B the weights view.
 - Plumbing: `OwnedImage::with_view` (2D-array views), `upload::image_layers` (layers × mips, 16-byte
-  staging offsets), a trilinear REPEAT sampler, bindings 10–12 (pool sizes raised).
+  staging offsets; the tileset now goes through `upload::image_mipped`, mips on the GPU), a trilinear REPEAT sampler, bindings 10–12 (pool sizes raised).
 - Checked: tiling, unit normals, determinism and table validation (unit tests; the tiling measure
   fails on a broken edge); GPU test `tileset_boundaries_are_irregular_and_bounded` (a material
   boundary meanders 15 px and frays in 66 of 232 rows inside its allowed band, the palette's is
@@ -1698,8 +1699,8 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
     the scene; this is also its depth test.
   - The depth buffer is now declared with sampled usage in every graph (native, both modules,
     both graph files). The existing goldens and bench scenes are unchanged.
-- **Look.** A 128² puff texture generated at start, mipmapped: a radial falloff broken up by four
-  octaves of value noise.
+- **Look.** A 128² puff texture generated at start (mip 0; the GPU makes the mips): a radial
+  falloff broken up by four octaves of value noise.
   - Each particle gets a random rotation and brightness.
   - Smoke and dust are lit by the sun (past the hills) and the sky, and fogged. Emissive
     particles fade in the fog.
@@ -1957,10 +1958,11 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
     fade-out) is placed through a `DecalFeed`; the app stamps its start time. `TerrainApp::with_decals` keeps a ring of
     `DecalsSetup::capacity` (the oldest goes first) across renderer re-creation.
   - The centre's height is read from the height texture on the GPU, so a decal follows terrain edits.
-  - Atlas: a texture array (`DecalAtlas`, straight linear RGBA, mips made with alpha-weighted
-    colour); `default_atlas` generates a scorch mark and a crater. Each layer also carries its
-    `LayerMaterial` (GGX roughness, metallic; M12 step 3), blended into the ground by the
-    decal's coverage.
+  - Atlas: two texture arrays (`DecalAtlas`: mip 0 of each layer as the GPU takes it, sRGB colour
+    with straight alpha and the packed surface; the GPU makes the mips, the colour's weighted by
+    alpha); `default_atlas(size)` generates a scorch mark and a crater. Each layer also carries its
+    `LayerMaterial` (metallic; roughness comes from the layer's surface texture; M12 step 3),
+    blended into the ground by the decal's coverage.
   - Specialization constant 1 (`DECALS`): the terrain pipeline with decals is built only with
     `with_decals`. Each frame it is used only while some decal's box (its square in plan, the map's
     height range) meets the view frustum. Decals never expire, so without this gate the first death
@@ -2105,8 +2107,9 @@ Decals (`cargo test -p ae_render --test gpu decals -- --ignored --nocapture`, `c
 
 M7 goal (after decals, before the stretch goal): decals that look like Recoil's scars.
 - **Textures.** Recoil's scars, `~/RecoilEngine/cont/base/bitmaps/bitmaps/scars/`:
-  - `scarN.tga`, each with a `scarN_normal.tga` (the bundled set is now one 512² scar);
-  - RGBA, 8-bit alpha. In the normal maps, rgb is the tangent-space normal and alpha is the glow
+  - `scarN.tga`, each with a `scarN_normal.tga` (the bundled set is now ten 512² scars);
+  - RGBA, 8-bit alpha. In the normal maps, rg is the tangent normal x/y (z rebuilt),
+    b is roughness (linear, taken as the layer's roughness), and alpha is the glow
     (heat) mask (`normVal.w`).
   - Load them into the decal atlas, replacing or joining the generated scorch and crater. The
     licence must allow it, or use them only as a reference for our own; check before shipping.
@@ -2151,23 +2154,56 @@ M7 goal (after decals, before the stretch goal): decals that look like Recoil's 
 
 Recoil's scars (results):
 - **Licence.** Recoil is GPL; the scars' rights holder (this repository's owner) allowed their
-  use, so they are in `assets/decals/scars` (one scar, the old `scar2`; the client discovers
-  every `NAME.tga` with a matching `NAME_normal.tga`) and the client uses them by default
-  (`--scars DIR` for another set, `--scars generated` for the engine's). The generated scorch
-  and crater gained their own normal maps (from generated heights) and, for the scorch, a glow
-  mask.
+  use, so they are in `assets/decals/scars` (ten scars: the old `scar2` plus nine more 512²
+  scars, `scar2`–`scar10`; the client discovers every `NAME.tga` with a matching
+  `NAME_normal.tga`) and the client uses them by default (`--scars DIR` for another set,
+  `--scars generated` for the engine's). The generated scorch and crater gained their own
+  normal maps (from generated heights) and, for the scorch, a glow mask.
 - **Textures.**
   - `read_tga` reads 32-bit TGA, raw or run-length, either row order.
-  - `DecalAtlas::add_layer` resamples to the atlas's size (box when shrinking, bilinear when
-    growing). The client's atlas with scars is 512² (the generated layers grown).
-  - The atlas gained `normals` (empty: flat), a second array (binding 19, UNORM; mips average
-    and renormalize the normal, average the mask).
+  - `DecalAtlas::add_layer` stores a source of the atlas's size byte for byte; any other square
+    is resampled (box when shrinking by a whole factor, bilinear otherwise; colour in linear
+    light). Only the atlas needs power-of-two mips. The client's atlas with scars is 512²
+    (`default_atlas(512)` generates its layers at that size, the relief scaled to keep its
+    slopes).
+  - The normal map is already the atlas's surface layout (rg the normal's x/y, b roughness, a
+    glow): `add_layer` only flips green (`255 - g`) for a green-up map. Nothing rebuilds z on
+    the CPU; the shader does. The surface is a second array (binding 19, UNORM; its mips
+    renormalize the normal and average roughness and the mask).
   - Handedness differs per file: the old scar1's normal map had green down the image, the old
     scar2's up (its own curl, measured where alpha > 0.3: +0.80 and -0.41, -0.81 on a 4x
     downsample). `normal_green_up` measures it and `add_layer` flips to the atlas's convention
     (green toward the decal's +z, down the rows). A unit test loads every bundled scar pair:
-    after loading, its curl is positive (0.73 for the current single scar), as the generated
-    layers'.
+    after loading, its curl is positive (0.02 to 0.73 across the bundled set; a baked map can
+    carry little tangential signal), as the generated layers'.
+- **Mips on the GPU** (2026-11-21): every texture the engine mips is uploaded as mip 0 and its
+  chain made by one compute shader (`upload::image_mipped`, `shaders/mipgen.comp`). Each level
+  is a 2x2 box of the one above, clamped at an odd edge, with every layer in one dispatch. sRGB
+  images are read through their sRGB view (linear) and written through a UNORM storage view
+  (`MUTABLE_FORMAT | EXTENDED_USAGE`), encoding sRGB in the shader. Filters: `Average`,
+  `Coverage` (rgb weighted by alpha) and `Normal` (rg a tangent normal's x/y, z rebuilt, summed
+  and renormalized; b, a averaged).
+  - Users: the decal atlas (Coverage) and surface (Normal), the tileset albedo (Average) and
+    normals (Normal, RG8), the anti-tiling noise and the particle puff (R8), and model textures
+    that arrive with level 0 alone. `ae_gltf` now stores PNG/JPEG as level 0 only. BC and Basis
+    textures keep the levels they bring (a compute shader cannot write them). The terrain
+    pyramid and error levels are data reductions, not filtered mips, and stay as they are.
+  - The device now requires `shaderStorageImageExtendedFormats` and
+    `shaderStorageImageWriteWithoutFormat`: one formatless shader writes R8, RG8 and RGBA8.
+  - The tileset's per-layer mean, which the anti-tiling blend needs, is now averaged over mip 0
+    on the CPU instead of read from the last mip.
+  - GPU `mips_are_made_on_the_gpu` (with `upload::read_image`): coverage leaves no colour from
+    a transparent texel, black and white average to sRGB 188, a normal mip is the renormalized
+    sum (185, not the plain 179), and RG8 and R8 work. All 40 GPU tests pass.
+- **Do the scars' normal maps show?** GPU `scar_normal_maps_relight_the_ground`: `scar1`, loaded
+  as the client loads it, with Modulate blend on flat sunlit ground, against the same atlas with
+  that layer's normals made flat (roughness and glow kept). Over the scar's footprint:
+  - close (50 m): mean |Δluma| 4.6, and 36 % of pixels change by more than 2;
+  - at gameplay distance (250 m): mean 2.4, and 32 %.
+
+  They relight the ground, but subtly. The scars are mostly gentle (median tilt 0.15, p90 0.63),
+  dark under Modulate, and rough (blue about 0.93). The same numbers before and after the GPU
+  mips.
 - **Record**: 16 words, adding glow, glow end, 1 / glow life and the blend.
 - **Shading** (`terrain_decals.glsl`; `applyDecals` returns albedo, normal and glow):
   - **Relit by its normal map.** Each projection's tangents are the world gradients of its u
@@ -2324,6 +2360,58 @@ Volumetric smoke, first two steps (`cargo test -p ae_render --test gpu particles
     - the slices' thickness at the battle's range checked (a test at that scale);
     - dust on the ground checked in play: the scene's depth falls inside a slice, so a buried
       puff fades by where the ground lies in it, and that shifts as the frame's range moves.
+
+Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
+`--particle-blend packets`; the M12 TODO):
+- **The port.** The radix sort's front-to-back ranks are marked in a bitset per tile (a
+  word-of-words summary, under an 8 MiB budget; the 65,536-slot pool fits 16-pixel tiles at
+  half resolution and 32-pixel tiles at 1280x720 full). A compute pass packs each rank's puff
+  (centre in the camera's axes, depth,
+  1/radius, premultiplied colour, angle, mip) and marks the tiles its screen bounds cover.
+  A second compute pass walks a tile in packets of 8x4 pixels (one 32-lane subgroup per
+  packet): for each 32-rank word one lane classifies one candidate against the packet's ray
+  rectangle, the ballot collects the hits, and all lanes shade the same hits for their own
+  pixels, front to back. Every lane classifies its candidate while any pixel of the packet
+  is live (one whose own pixel is saturated or off the screen still does). The blend's
+  pipeline pins 32-lane, full subgroups (`subgroupSizeControl`, `computeFullSubgroups`;
+  `GpuDevice::compute_subgroups_32`), with a 256-wide workgroup per tile. It writes the colour and the per-particle glow into its own RGBA16F
+  targets, then composites them over the scene: the depth-aware upsample at half resolution,
+  one to one at full. A puff is the draw's sphere and soft edge (`particles_frag.glsl`), with
+  an explicit mip from its screen diameter (the projection's vertical scale taken from a
+  projected point, not `viewProj[1][1]`, which the camera's pitch scales). The scene depth
+  (full) or the half depth is made visible to the compute stage before the blend samples it.
+- **Correctness.** The order test runs seven blends with Packets: in the cluster it is 0.75
+  (max 26) from the exact per-pixel reference (sorted 0.74, max 26), and 0.86 from the volume
+  (sorted 0.86); crossing it pops 63 with 81 pixel-frames over 40 (sorted 64 and 80,
+  reference 64 and 58) and is 0.94 from the volume (sorted 0.93); emitted in reverse the
+  frame changes by 1 (float rounding, as the sort). The test asserts the packets' cluster
+  error within 0.05 of the sorted draw's: before the lane fix above, a saturated lane stopped
+  classifying its rank for the whole packet, which measured 0.84 and popped 57. The new GPU
+  test `particles_packets_both_resolutions` checks blue in front, a buried puff, an
+  explosion and the per-particle glow at both resolutions (a fire in front of smoke blooms
+  9.2 luma at full and 7.3 at half).
+- **Cost** (`bench battle`, about 40k live particles, 1280x720; three runs each, medians;
+  the machine was shared with other workflows, so the packet draw's per-run spread was
+  ±100-170% while its median stayed within 1%):
+  - sorted: 69 µs sim + 152 µs draw at half, 69 + 383 at full.
+  - packets: 69 µs sim (the same sort) + 274 µs draw at half, 69 + 681 at full. Rerun
+    after the lane, mip and subgroup fixes (three runs each, same scene, the machine again
+    shared): 70 + 274 at half and 70 + 689 at full, sorted 70 + 152 and 70 + 382; the
+    ratios below are unchanged.
+  - Packets cost 1.8 times the sorted draw at either resolution; full resolution costs
+    2.5 times half for both. The 8 MiB tile masks and the bin/pack pass are fixed; the
+    blend's per-pixel depth and texture work and the four times the tiles dominate full.
+  - The earlier unloaded numbers for the sorted path were 58 + 85 µs (half) and 58 + 171
+    (full); the 1.8 ratio is the comparable part.
+- **Decision:** half resolution. The packet blend is 2.5 times cheaper there and carries the
+  per-particle glow and the depth-aware composite. The sorted draw stays the default,
+  though: the packets are 1.8 times its cost at either resolution for the same order, so
+  `Packets` remains a comparison blend (like the moments, slices and froxels).
+  `bench-diff` of the sorted half path before and after (`m12-packets-sorted` against
+  `m12-pkt-sorted-half-r1`): 0 regressions; against `m12-pkt-packets-half`:
+  `pass/particles` +81% (expected, the comparison mode).
+- Validation clean (synchronization validation on): 41 GPU tests; client captures of the crossing map with explosions at
+  both resolutions report 0 errors and 0 warnings.
 
 ### M0 risk spikes
 
@@ -2720,19 +2808,21 @@ Steps (commit and stop for compaction after each):
     0.14/255). A first version of the shared BRDF itself multiplied the specular by the
     cosine twice (the terrain test found it).
   - **Decals paint a material, not only a colour**: the channel allocation is albedo RGBA (RGB
-    colour, A coverage) and surface RGBA (R normal x, G normal y, B roughness, A glow); normal
-    z is reconstructed in the shader and metallic stays a per-layer factor. Each `DecalAtlas`
-    layer carries a `LayerMaterial` (roughness and metallic factors; one `vec4` per layer,
-    binding 21), and roughness is factor × texture as in glTF, blended into the ground by the
-    decal's coverage. The default scorch is 0.95/0 (soot is a matte dielectric, so it takes the
-    gloss off rock and wet ground), the crater 0.9/0; the default atlas generates a per-texel
-    roughness map, custom atlas layers write 1 and use their factor. Custom layers default to
-    0.9/0 until `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
+    colour, A coverage) and surface RGBA (R/G the tangent normal x and y, B roughness, A glow);
+    the normal's z is reconstructed in the shader and metallic stays a per-layer factor, but
+    roughness comes strictly from the texture, with no layer factor. Each `DecalAtlas` layer
+    carries a `LayerMaterial` (metallic; one `vec4` per layer, binding 21), blended into the
+    ground by the decal's coverage. The default atlas generates per-texel roughness maps: the
+    scorch 0.855 to 0.95 (char and cinders rougher than the burnt ring), the crater 0.81 to
+    0.9 (the pit rougher than its rim). A scar takes its roughness from the normal map's blue;
+    a layer added without a normal map writes 1. Layers default to metallic 0 until
+    `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
     `mix(0.04, albedo, metallic)`, so a painted metal decal works. GPU
     `decals_carry_their_roughness_and_metallic`: three identical grey layers under a light at
-    the view's mirror read 199 (final roughness 0.15), 136 (0.95) and 249 (metallic 0.15); the
-    albedo and normals are the same, so only the layer's material can explain the difference.
-    CPU tests cover the surface packing, the defaults, the range checks and `resized`.
+    the view's mirror read 199 (roughness texture 0.15), 136 (0.95) and 249 (metallic 1.0);
+    the albedo and normals are the same, so only the layers' roughness textures and metallic
+    factor explain the difference. CPU tests cover the surface packing, the defaults and the
+    range checks.
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth
@@ -3362,12 +3452,12 @@ From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
 
 From M12 (2026-11-19):
 
-- **Particle half resolution with blend mode 8.** Take care of the half-resolution sorted
-  particle draw as we switch to Mode 8 of the particle renderer: decide whether to stay at
-  half resolution or go to full resolution. Mode 8's tile bins walk pixels in packets, so its
-  cost balance differs from the sorted draw's; measure both at the scenes' fill rates before
-  choosing. The half-resolution path also carries the extra per-particle glow target and the
-  depth-aware composite (M12 step 4), which full resolution would not need.
+- **Particle half resolution with blend mode 8 — done (2026-11-21).** Mode 8 is
+  `ParticleBlend::Packets` (`--particle-blend packets`); it measured 2.5 times cheaper at half
+  resolution than at full (274 against 681 µs draw in `bench battle`), but 1.8 times the
+  sorted draw at either, so the sorted half-resolution draw stays the default and `Packets`
+  stays a comparison blend. Write-up above ("Packets, blend mode 8, and the half/full
+  decision").
 - **Automatic exposure (eye adaptation), as AAA games do.** A compute pass reduces the HDR
   scene's log luminance (a histogram, or a mip chain of averages), skipping the darkest and
   brightest few percent; the exposure eases toward the target key over time (faster when the

@@ -34,9 +34,9 @@ example above is a variant of it):
   the transition pushed by up to 0.05 by the versions' colour difference (Quílez's
   `f - 0.1*sum(cola-colb)`), so it follows the texture's features. Outside the band one version
   is sampled. The band is narrow because the second version is most of the cost.
-- The blend is re-centred on the layer's mean (its last mip: albedo averaged in linear light,
-  height linearly; in the tileset table) and scaled by `1/|weights|`: the example's
-  variance-preserving blend. The normals' mean is taken as flat.
+- The blend is re-centred on the layer's mean (albedo averaged over mip 0 in linear light, height
+  linearly; in the tileset table) and scaled by `1/|weights|`: the example's variance-preserving
+  blend. The normals' mean is taken as flat.
 - Sampled with `textureGrad`, the gradients rotated with the uv (the offset has none), so the mip
   does not jump where the version changes. The tangent normals rotate back into the uv frame
   (the example used them as sampled, which tilts rotated copies the wrong way).

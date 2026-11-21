@@ -152,6 +152,26 @@ pub fn compute_pipeline(device: &ash::Device, code: &[u8], layout: vk::PipelineL
     Ok(pipelines[0])
 }
 
+/// A compute pipeline whose subgroups are pinned to 32 lanes, all of them
+/// active (`REQUIRE_FULL_SUBGROUPS`): for shaders written against a 32-bit
+/// ballot. Needs [`crate::device::GpuDevice::compute_subgroups_32`] and a
+/// workgroup X size that is a multiple of 32.
+pub fn compute_pipeline_subgroup32(device: &ash::Device, code: &[u8], layout: vk::PipelineLayout) -> Result<vk::Pipeline> {
+    let module = shader_module(device, code)?;
+    let mut size = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default().required_subgroup_size(32);
+    let stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(module)
+        .name(c"main")
+        .flags(vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS)
+        .push_next(&mut size);
+    let info = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
+    let result = unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) };
+    unsafe { device.destroy_shader_module(module, None) };
+    let pipelines = result.map_err(|(_, err)| err).context("vkCreateComputePipelines")?;
+    Ok(pipelines[0])
+}
+
 pub fn pipeline_layout(
     device: &ash::Device,
     sets: &[vk::DescriptorSetLayout],
