@@ -422,6 +422,8 @@ impl TerrainApp {
     }
 
     /// Lights listed every frame besides the bursts' (fixed in the world).
+    /// Their colours are BT.709 (the `Light` constructors normalise them
+    /// there); the app converts them into the working space each frame.
     pub fn with_lights(mut self, lights: Vec<Light>) -> Self {
         self.fixed_lights = lights;
         self
@@ -777,28 +779,13 @@ impl RenderApp for TerrainApp {
         let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, &lights, color, DEPTH_FORMAT, frames_in_flight)
             .context("terrain renderer")?;
         if let Some(setup) = &self.units {
-            // The team colours are authored in BT.709 (M13 stage 4 adds a
-            // gamut tag); the scene lights in the working space.
-            let mut setup = setup.clone();
-            for class in &mut setup.classes {
-                class.color = self.working.from_709(class.color);
-            }
-            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, &setup, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+            // The looks' colours carry their own gamut tags; the renderer
+            // converts them into the working space at upload (stage 4).
+            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, setup, self.working, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
         }
         if let Some(setup) = &self.particles {
-            // The effects' colours are authored in BT.709; their burst
-            // lights stay authored (the app converts all host lights
-            // together, and `Light::point` normalises in BT.709).
-            let mut setup = setup.clone();
-            for effect in &mut setup.effects {
-                let colour = |c: [f32; 4]| {
-                    let w = self.working.from_709([c[0], c[1], c[2]]);
-                    [w[0], w[1], w[2], c[3]]
-                };
-                effect.color_start = colour(effect.color_start);
-                effect.color_end = colour(effect.color_end);
-            }
-            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, &setup, color, frames_in_flight).context("particle renderer")?);
+            // So do the effects' colours and their bursts' light tints.
+            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, setup, self.working, color, frames_in_flight).context("particle renderer")?);
         }
         self.renderer = Some(terrain);
         self.lights = Some(lights);
@@ -1000,18 +987,19 @@ impl RenderApp for TerrainApp {
             // view (by their bounding spheres).
             let mut list = std::mem::take(&mut self.frame_lights);
             list.clear();
-            list.extend_from_slice(&self.fixed_lights);
+            // The app's lights are authored in BT.709 and normalised to
+            // unit luminance there (the `Light` constructors); the cluster
+            // lives in the working space.
+            list.extend(self.fixed_lights.iter().map(|light| {
+                let mut light = *light;
+                light.color = self.working.from_709(light.color);
+                light
+            }));
             if let Some(particles) = self.particle_renderer.as_mut() {
                 let source = &self.source;
+                // The bursts' lights are already in the working space: their
+                // effect's gamut was converted and normalised at upload.
                 particles.lights(&|p| source.height_at(p), &mut list);
-            }
-            // Every host light (the app's and the bursts') is authored in
-            // BT.709 and normalised to unit luminance there; the cluster
-            // lives in the working space.
-            if self.working.is_wide() {
-                for light in &mut list {
-                    light.color = self.working.from_709(light.color);
-                }
             }
             let planes = super::renderer::frustum_planes(params.view_proj);
             // Auto-exposure may reach MIN_EV100 (the largest exposure, the

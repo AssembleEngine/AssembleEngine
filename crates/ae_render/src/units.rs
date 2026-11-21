@@ -324,8 +324,12 @@ impl UnitFeed {
 /// How one class of units looks.
 #[derive(Clone, Copy, Debug)]
 pub struct UnitClass {
-    /// Linear RGB.
+    /// Linear RGB, authored in [`Self::gamut`].
     pub color: [f32; 3],
+    /// The gamut the colour is authored in (M13 stage 4): `srgb` (BT.709)
+    /// unless a look says otherwise. The renderer converts it into the
+    /// scene's working space at upload.
+    pub gamut: crate::colorspace::Gamut,
     /// Sits on the water surface where the ground is below it (ships,
     /// hovercraft); otherwise on the ground, under water or not.
     pub floats: bool,
@@ -551,7 +555,8 @@ impl UnitRenderer {
     /// Units over `terrain` (its height texture places them), drawn into a
     /// pass with a `color_format` target and a `depth_format` reverse-Z
     /// depth buffer.
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &UnitsSetup, color_format: vk::Format, depth_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &UnitsSetup, working: crate::colorspace::WorkingSpace, color_format: vk::Format, depth_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         ensure!(setup.capacity > 0, "unit capacity 0");
         let device = &gpu.device;
         let capacity = setup.capacity;
@@ -561,7 +566,10 @@ impl UnitRenderer {
         };
         let mut classes = [[0.8, 0.8, 0.8, 0.0]; MAX_CLASSES];
         for (slot, class) in classes.iter_mut().zip(&setup.classes) {
-            *slot = [class.color[0], class.color[1], class.color[2], class.floats as u32 as f32];
+            // The look's colour is authored in its own gamut: the upload
+            // brings it into the scene's working space (M13 stage 4).
+            let c = working.from_gamut(class.gamut, class.color);
+            *slot = [c[0], c[1], c[2], class.floats as u32 as f32];
         }
         if let Some(set) = &model_set {
             for c in &set.classes {

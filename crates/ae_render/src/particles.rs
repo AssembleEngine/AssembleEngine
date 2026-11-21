@@ -56,13 +56,16 @@ use crate::executor::{BufferBinding, ImageBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
+use crate::colorspace::Gamut;
 use crate::upload;
 use ae_framegraph::{BufferDesc, ImageDesc};
 use anyhow::{Context as _, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Vec3};
 use gpu_allocator::MemoryLocation;
-use std::sync::{Arc, Mutex};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Most slots a pool can have (the sort key's slot bits).
 pub const MAX_CAPACITY: u32 = 1 << 16;
@@ -88,8 +91,18 @@ const IDENTITY_INDIRECT: u64 = (0xAE7 << 40) | (5 << 32) | 2;
 /// One effect: how its particles start, move and look. Sizes in world
 /// units (metres), times in seconds; a burst's `scale` multiplies sizes,
 /// speeds and the spawn spread.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Effects are authored in the catalogue (`assets/effects.json`); each has
+/// a [`Gamut`] tag for its colours (M13 stage 4), `srgb` unless it says
+/// otherwise. The particle renderer converts the particle colours and the
+/// burst light's tint into the working space at upload, once.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectDef {
+    /// The gamut the colours (`color_start`, `color_end` and the light's
+    /// tint) are authored in; `srgb` (BT.709) by default.
+    #[serde(default)]
+    pub gamut: Gamut,
     /// Linear colour and opacity at birth and at death (interpolated over
     /// the life). For an emissive effect the colour is the light it adds
     /// (may exceed 1) and the opacity scales it.
@@ -120,12 +133,15 @@ pub struct EffectDef {
     pub fade_in: f32,
     /// The light a burst of it gives (one per burst, client-side:
     /// [`ParticleRenderer::lights`]).
+    #[serde(default)]
     pub light: Option<EffectLight>,
 }
 
 /// A burst's light: a point light over the burst that fades out over its
-/// life. Lengths are multiplied by the burst's scale.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// life. Lengths are multiplied by the burst's scale. Its tint is authored
+/// in the effect's [`EffectDef::gamut`].
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectLight {
     /// The linear tint (unit luminance).
     pub color: [f32; 3],
@@ -169,94 +185,47 @@ pub mod effect {
     pub const DUST: u32 = 4;
 }
 
-/// The engine's effects, indexed by [`effect`].
+/// The engine's effects, indexed by [`effect`], from the bundled catalogue
+/// (`assets/effects.json`).
 pub fn default_effects() -> Vec<EffectDef> {
-    vec![
-        // FLASH: a short bright ball.
-        EffectDef {
-            // Tints (unit-less) and emission in cd/m² at birth and death: a
-            // full flash about 87 000 cd/m², a fire about 20 000.
-            color_start: [1.352, 0.946, 0.496, 1.0],
-            color_end: [1.881, 0.784, 0.235, 0.0],
-            size: [14.0, 26.0],
-            life: [0.12, 0.2],
-            speed: [0.0, 1.0],
-            up: 0.0,
-            spread: 1.0,
-            gravity: 0.0,
-            drag: 0.0,
-            emissive: true,
-            emission: [87_268.0, 12_543.0],
-            fade_in: 0.0,
-            // About 32.5 million candela: the flash's old brightness at a
-            // quarter of its range. Tuning targets, not measurements.
-            light: Some(EffectLight { color: [1.402, 0.935, 0.467], intensity: 32_500_000.0, range: 70.0, size: 16.0, height: 6.0, life: 0.3, flicker: 0.0 }),
-        },
-        // FIRE: rising flames that cool from yellow to dark red.
-        EffectDef {
-            color_start: [1.849, 0.827, 0.214, 0.9],
-            color_end: [3.030, 0.485, 0.121, 0.0],
-            size: [5.0, 11.0],
-            life: [0.35, 0.9],
-            speed: [3.0, 14.0],
-            up: 0.55,
-            spread: 3.0,
-            gravity: -9.0,
-            drag: 2.0,
-            emissive: true,
-            emission: [20_205.0, 3_244.0],
-            fade_in: 0.08,
-            light: Some(EffectLight { color: [1.885, 0.814, 0.240], intensity: 3_170_000.0, range: 40.0, size: 10.0, height: 4.0, life: 1.2, flicker: 0.35 }),
-        },
-        // SPARKS: small, fast, falling.
-        EffectDef {
-            color_start: [1.332, 0.959, 0.426, 1.0],
-            color_end: [2.540, 0.635, 0.079, 0.0],
-            size: [0.9, 0.5],
-            life: [0.5, 1.3],
-            speed: [25.0, 60.0],
-            up: 0.35,
-            spread: 0.5,
-            gravity: 22.0,
-            drag: 0.6,
-            emissive: true,
-            emission: [73_800.0, 12_386.0],
-            fade_in: 0.0,
-            light: None,
-        },
-        // SMOKE: dark, rising, spreading, thinning.
-        EffectDef {
-            color_start: [0.09, 0.085, 0.08, 0.8],
-            color_end: [0.36, 0.36, 0.36, 0.0],
-            size: [7.0, 30.0],
-            life: [2.5, 5.5],
-            speed: [3.0, 10.0],
-            up: 0.45,
-            spread: 6.0,
-            gravity: -2.5,
-            drag: 0.7,
-            emissive: false,
-            emission: [0.0, 0.0],
-            fade_in: 0.1,
-            light: None,
-        },
-        // DUST: low, brown, short.
-        EffectDef {
-            color_start: [0.42, 0.36, 0.27, 0.45],
-            color_end: [0.55, 0.5, 0.42, 0.0],
-            size: [4.0, 15.0],
-            life: [1.2, 2.8],
-            speed: [2.0, 7.0],
-            up: 0.25,
-            spread: 2.0,
-            gravity: -0.4,
-            drag: 1.2,
-            emissive: false,
-            emission: [0.0, 0.0],
-            fade_in: 0.05,
-            light: None,
-        },
-    ]
+    static EFFECTS: OnceLock<Vec<EffectDef>> = OnceLock::new();
+    EFFECTS.get_or_init(|| parse_effects(EFFECTS_JSON).expect("the bundled effects catalogue is valid")).clone()
+}
+
+/// The catalogue's effect names, in [`effect`] index order.
+pub const EFFECT_NAMES: [&str; 5] = ["flash", "fire", "sparks", "smoke", "dust"];
+
+/// The effects catalogue's file version.
+pub const EFFECTS_VERSION: u32 = 1;
+
+/// The bundled effects catalogue.
+const EFFECTS_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects.json"));
+
+/// One effects catalogue file (`assets/effects.json`): a version and named
+/// definitions. Each definition's colours carry a [`Gamut`] tag.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectsFile {
+    version: u32,
+    effects: BTreeMap<String, EffectDef>,
+}
+
+/// Parse an effects catalogue into the engine's effect table, in
+/// [`EFFECT_NAMES`] order. Every name must be present and the file must have
+/// no other effects; an unknown `gamut` tag is an error (not a silent
+/// BT.709 default), so a typo cannot quietly author a colour in the wrong
+/// space.
+pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
+    let file: EffectsFile = serde_json::from_str(text).context("parsing the effects catalogue")?;
+    ensure!(file.version == EFFECTS_VERSION, "effects catalogue version {}; this engine reads {EFFECTS_VERSION}", file.version);
+    ensure!(
+        file.effects.len() == EFFECT_NAMES.len(),
+        "the effects catalogue has {} effects; the engine's table has {} ({})",
+        file.effects.len(),
+        EFFECT_NAMES.len(),
+        EFFECT_NAMES.join(", ")
+    );
+    EFFECT_NAMES.iter().map(|name| file.effects.get(*name).copied().with_context(|| format!("the effects catalogue has no `{name}`"))).collect()
 }
 
 /// `count` particles of effect `effect` from `pos` (world space).
@@ -636,9 +605,27 @@ pub struct ParticleRenderer {
 }
 
 impl ParticleRenderer {
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &ParticlesSetup, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &ParticlesSetup, working: crate::colorspace::WorkingSpace, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         ensure!((1..=MAX_CAPACITY).contains(&setup.capacity), "particle capacity {} (1..={MAX_CAPACITY})", setup.capacity);
         ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
+        // The authored colours (and the bursts' light tints) enter the
+        // working space here, once, at upload (M13 stage 4). Nothing maps
+        // them to the output: the tonemap or post.encode does that.
+        let mut effects = setup.effects.clone();
+        for def in &mut effects {
+            let gamut = def.gamut;
+            let colour = |c: [f32; 4]| {
+                let w = working.from_gamut(gamut, [c[0], c[1], c[2]]);
+                [w[0], w[1], w[2], c[3]]
+            };
+            def.color_start = colour(def.color_start);
+            def.color_end = colour(def.color_end);
+            if let Some(light) = &mut def.light {
+                // A tint whose scalar is an illuminance: unit luminance in
+                // the working space.
+                light.color = working.unit_tint_from(gamut, light.color);
+            }
+        }
         ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
         ensure!(setup.blend.needs_sort() || setup.downscale == 2, "{:?} particles need downscale 2", setup.blend);
         ensure!(setup.blend != ParticleBlend::Packets || gpu.compute_subgroups_32, "the packets' blend needs pinned, full 32-lane compute subgroups (subgroupSizeControl, computeFullSubgroups)");
@@ -906,7 +893,7 @@ impl ParticleRenderer {
         Ok(Self {
             capacity,
             info: *terrain.info(),
-            effects: setup.effects.clone(),
+            effects,
             feed: setup.feed.clone(),
             shadows: terrain.has_shadows(),
             set_layout,
@@ -1159,7 +1146,9 @@ impl ParticleRenderer {
             // the burst's scale.
             let color = glam::Vec3::from(l.color);
             let intensity = l.intensity * fade;
-            out.push(crate::lights::Light::point(pos, color, intensity, l.range * scale, l.size * scale));
+            // The tint was converted to the working space and normalised
+            // there at upload; keep it as it is.
+            out.push(crate::lights::Light::point_raw(pos, color, intensity, l.range * scale, l.size * scale));
         }
     }
 
@@ -1834,4 +1823,71 @@ fn puff_texels() -> Vec<u8> {
             ((ball * (0.35 + 1.3 * noise) - 0.04).clamp(0.0, 1.0) * 255.0).round() as u8
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::colorspace::{self, Gamut, WorkingSpace};
+
+    #[test]
+    fn the_bundled_catalogue_is_the_engine_table() {
+        let effects = default_effects();
+        assert_eq!(effects.len(), EFFECT_NAMES.len());
+        // The file's order is the engine's (the `effect` indices).
+        assert_eq!(effects[effect::FLASH as usize].gamut, Gamut::Bt709);
+        assert_eq!(effects[effect::FIRE as usize].gamut, Gamut::P3);
+        assert_eq!(effects[effect::SPARKS as usize].gamut, Gamut::Bt709);
+        assert_eq!(effects[effect::SMOKE as usize].gamut, Gamut::Bt709);
+        assert_eq!(effects[effect::DUST as usize].gamut, Gamut::Bt709);
+        // Parsing the same text gives the same table.
+        assert_eq!(parse_effects(EFFECTS_JSON).unwrap(), effects);
+        // The re-authored fire is a wider red than BT.709 can show: its
+        // death colour has a negative blue channel once expressed in 709.
+        let fire = effects[effect::FIRE as usize];
+        let end = WorkingSpace::Bt709.from_gamut(fire.gamut, [fire.color_end[0], fire.color_end[1], fire.color_end[2]]);
+        assert!(end[2] < -0.01, "the fire's end is outside BT.709: {end:?}");
+        // Luminance is kept by the conversion (the tint's scale).
+        let (wide_y, narrow_y) = (Gamut::P3.luminance([fire.color_end[0], fire.color_end[1], fire.color_end[2]]), Gamut::Bt709.luminance(end));
+        assert!((wide_y - narrow_y).abs() < 1e-3, "{wide_y} vs {narrow_y}");
+        // The burst's light tint is unit luminance in its own gamut.
+        let light = fire.light.unwrap().color;
+        assert!((Gamut::P3.luminance(colorspace::unit_tint_in(Gamut::P3, light)) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn emissive_colours_are_unit_luminance_tints_in_their_gamut() {
+        // An emissive effect's colours are tints: its brightness is the
+        // `emission` scalar (cd/m²), so re-authoring a colour in another
+        // gamut must not change its luminance there.
+        for (name, def) in EFFECT_NAMES.iter().zip(default_effects()) {
+            if !def.emissive {
+                continue;
+            }
+            for (k, c) in [def.color_start, def.color_end].into_iter().enumerate() {
+                let y = def.gamut.luminance([c[0], c[1], c[2]]);
+                // The flash's death tint was tuned at 0.978 before the
+                // catalogue (kept: it is the SDR frame's look); every other
+                // tint is unit luminance.
+                let tolerance = if (*name, k) == ("flash", 1) { 0.025 } else { 1e-3 };
+                assert!((y - 1.0).abs() < tolerance, "{name}: {c:?} has luminance {y} in {:?}", def.gamut);
+            }
+        }
+    }
+
+    #[test]
+    fn the_catalogue_rejects_an_unknown_gamut_tag() {
+        // A typo in the tag is an error, not a silent BT.709 default.
+        let text = EFFECTS_JSON.replacen("\"gamut\": \"p3\"", "\"gamut\": \"wide\"", 1);
+        let error = format!("{:#}", parse_effects(&text).unwrap_err());
+        assert!(error.contains("wide"), "{error}");
+        // A missing effect and a wrong version are errors too.
+        let missing = EFFECTS_JSON.replacen("\"smoke\":", "\"smoke-typo\":", 1);
+        assert!(format!("{:#}", parse_effects(&missing).unwrap_err()).contains("smoke"));
+        let version = EFFECTS_JSON.replacen("\"version\": 1", "\"version\": 2", 1);
+        assert!(format!("{:#}", parse_effects(&version).unwrap_err()).contains("version 2"));
+        // An unknown field is rejected as well (the catalogue is strict).
+        let field = EFFECTS_JSON.replacen("\"gamut\": \"p3\",", "\"gamut\": \"p3\", \"colour\": 1,", 1);
+        assert!(parse_effects(&field).is_err());
+    }
 }

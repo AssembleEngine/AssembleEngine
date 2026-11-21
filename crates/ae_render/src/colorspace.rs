@@ -1,13 +1,17 @@
-//! Colour spaces and gamut mapping (M13 stage 3).
+//! Colour spaces and gamut mapping (M13 stages 3 and 4).
 //!
 //! The scene is lit in the *working space*, [`WorkingSpace`]: BT.709 (the
 //! default, sRGB's primaries) or BT.2020. White is D65 in both, so a
-//! conversion is a linear 3x3 matrix that keeps luminance and white. Colours
-//! the engine authors (the sun and sky tints, light, particle and team
-//! colours, the fog and the sky) are BT.709; when the working space is wider
-//! they are converted on the host ([`WorkingSpace::from_709`]) and the
-//! shaders convert the textures and literals they sample, so every colour
-//! enters the lighting in the working space.
+//! conversion is a linear 3x3 matrix that keeps luminance and white. Every
+//! colour the engine authors carries a *gamut tag* ([`Gamut`]): BT.709
+//! unless the author says otherwise (`srgb` is the default, and effects and
+//! unit looks can be `p3` or `bt2020`). The host converts a
+//! tagged colour into the working space once, at upload
+//! ([`WorkingSpace::from_gamut`]), and the shaders convert the textures and
+//! literals they sample, so every colour enters the lighting in the working
+//! space. Nothing maps to the *output* there: SDR's `post.tonemap` and
+//! HDR's `post.encode` are the only places that do, and anything that writes
+//! the HDR display intermediate keeps the colour in the working space.
 //!
 //! The output gamut ([`Gamut`]) is separate from the range: the display's
 //! primaries. `post.encode` maps the display intermediate from the working
@@ -27,17 +31,27 @@
 use std::str::FromStr;
 
 use anyhow::bail;
+use serde::{Deserialize, Serialize};
 
 /// A set of RGB primaries with D65 white: BT.709/sRGB, Display P3 or
 /// BT.2020.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// As an authored colour's tag it is written `srgb` (the default), `p3` or
+/// `bt2020`; a catalogue's parser rejects any other tag (serde's enum
+/// deserialiser knows only these variants and aliases).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Gamut {
     /// BT.709 / sRGB: the default working space and the SDR output's gamut.
     #[default]
+    #[serde(rename = "srgb", alias = "bt709")]
     Bt709,
-    /// Display P3: the default output gamut for HDR10 (M13 stage 3).
+    /// Display P3: the default output gamut for HDR10 (M13 stage 3), and a
+    /// wider gamut authors can tag.
+    #[serde(alias = "display-p3")]
     P3,
     /// BT.2020: HDR10's container primaries and the wide working space.
+    #[serde(alias = "rec2020")]
     Bt2020,
 }
 
@@ -86,6 +100,15 @@ const P3_TO_XYZ: [[f32; 3]; 3] = [[0.486_571_0, 0.265_667_7, 0.198_217_3], [0.22
 const XYZ_TO_P3: [[f32; 3]; 3] = [[2.493_496_9, -0.931_383_6, -0.402_710_8], [-0.829_489_0, 1.762_664_1, 0.023_624_7], [0.035_845_8, -0.076_172_4, 0.956_884_5]];
 
 impl Gamut {
+    /// The catalogue tag: `srgb` (the default), `p3` or `bt2020`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Bt709 => "srgb",
+            Self::P3 => "p3",
+            Self::Bt2020 => "bt2020",
+        }
+    }
+
     /// The R, G and B primaries' chromaticities (`x`, `y`).
     pub fn primaries(self) -> [[f32; 2]; 3] {
         match self {
@@ -155,19 +178,36 @@ impl WorkingSpace {
         self != Self::Bt709
     }
 
-    /// A colour authored in BT.709 (every host colour before M13 stage 4)
-    /// in this working space.
-    pub fn from_709(self, c: [f32; 3]) -> [f32; 3] {
-        convert(Gamut::Bt709, self.gamut(), c)
+    /// A colour authored in `gamut` in this working space (M13 stage 4: the
+    /// gamut tag's conversion at upload).
+    pub fn from_gamut(self, gamut: Gamut, c: [f32; 3]) -> [f32; 3] {
+        convert(gamut, self.gamut(), c)
     }
 
-    /// `c` scaled to unit luminance in this space (a tint whose scalar is
-    /// an illuminance).
-    pub fn unit_tint(self, c: [f32; 3]) -> [f32; 3] {
-        let c = self.from_709(c);
-        let y = self.gamut().luminance(c).max(1e-6);
-        [c[0] / y, c[1] / y, c[2] / y]
+    /// A colour authored in BT.709 in this working space.
+    pub fn from_709(self, c: [f32; 3]) -> [f32; 3] {
+        self.from_gamut(Gamut::Bt709, c)
     }
+
+    /// `c` (authored in BT.709) scaled to unit luminance here (a tint whose
+    /// scalar is an illuminance).
+    pub fn unit_tint(self, c: [f32; 3]) -> [f32; 3] {
+        unit_tint_in(self.gamut(), self.from_709(c))
+    }
+
+    /// `c` authored in `gamut`, converted into this working space and scaled
+    /// to unit luminance there (a tagged tint whose scalar is an
+    /// illuminance).
+    pub fn unit_tint_from(self, gamut: Gamut, c: [f32; 3]) -> [f32; 3] {
+        unit_tint_in(self.gamut(), self.from_gamut(gamut, c))
+    }
+}
+
+/// `c` scaled to unit luminance in `gamut` (a tint whose scalar is an
+/// illuminance).
+pub fn unit_tint_in(gamut: Gamut, c: [f32; 3]) -> [f32; 3] {
+    let y = gamut.luminance(c).max(1e-6);
+    [c[0] / y, c[1] / y, c[2] / y]
 }
 
 /// Multiply row-major 3x3 `a` by `b`.
@@ -337,10 +377,36 @@ mod tests {
         let wide = WorkingSpace::Bt2020.from_709(c);
         assert!(close(wide, convert(Gamut::Bt709, Gamut::Bt2020, c), 0.0));
         assert!((WorkingSpace::Bt2020.gamut().luminance(wide) - Gamut::Bt709.luminance(c)).abs() < 2e-4);
-        // A tint normalised in either space has unit luminance there.
+        // A BT.709 tint normalised in either space has unit luminance there
+        // and is the same physical colour as the tagged conversion.
         for space in [WorkingSpace::Bt709, WorkingSpace::Bt2020] {
             let tint = space.unit_tint([1.0, 0.95, 0.85]);
             assert!((space.gamut().luminance(tint) - 1.0).abs() < 1e-5, "{space:?}: {tint:?}");
+            assert_eq!(tint, space.unit_tint_from(Gamut::Bt709, [1.0, 0.95, 0.85]), "{space:?}");
         }
+        // A tagged tint is normalised in its own gamut before the
+        // conversion, so its light is the same in any working space.
+        let p3 = [1.95, 0.72, 0.20];
+        let tint = WorkingSpace::Bt709.unit_tint_from(Gamut::P3, p3);
+        assert!((Gamut::Bt709.luminance(tint) - 1.0).abs() < 1e-5, "{tint:?}");
+        let wide = WorkingSpace::Bt2020.unit_tint_from(Gamut::P3, p3);
+        assert!((Gamut::Bt2020.luminance(wide) - 1.0).abs() < 1e-5, "{wide:?}");
+    }
+
+    #[test]
+    fn a_gamut_tag_is_one_of_three_and_nothing_else() {
+        // The catalogue's tags: `srgb` is the default, and the aliases the
+        // CLI and docs use resolve to the same variants.
+        for (text, want) in [("\"srgb\"", Gamut::Bt709), ("\"bt709\"", Gamut::Bt709), ("\"p3\"", Gamut::P3), ("\"display-p3\"", Gamut::P3), ("\"bt2020\"", Gamut::Bt2020), ("\"rec2020\"", Gamut::Bt2020)] {
+            let got: Gamut = serde_json::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(got, want, "{text}");
+            assert_eq!(serde_json::to_string(&want).unwrap(), format!("\"{}\"", want.tag()));
+        }
+        // An unknown tag is an error, not a default (a typo must not quietly
+        // author in BT.709).
+        let error = serde_json::from_str::<Gamut>("\"wide\"").unwrap_err().to_string();
+        assert!(error.contains("wide"), "{error}");
+        assert_eq!(serde_json::from_str::<Gamut>("\"bt709\"").unwrap(), Gamut::Bt709);
+        assert_eq!(Gamut::default(), Gamut::Bt709);
     }
 }

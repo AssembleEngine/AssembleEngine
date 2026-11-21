@@ -225,16 +225,16 @@ impl SimOptions {
             return own;
         }
         let tint = |c: [f32; 3]| std::array::from_fn(|k| c[k] * 0.35 + ENEMY_TINT[k] * 0.65);
-        let enemy = own.iter().map(|c| UnitClass { color: tint(c.color), floats: c.floats });
-        own.iter().copied().chain(enemy).chain([UnitClass { color: [0.6, 0.6, 0.6], floats: false }, UnitClass { color: [1.0, 1.0, 1.0], floats: false }]).collect()
+        let enemy = own.iter().map(|c| UnitClass { color: tint(c.color), gamut: ae_render::colorspace::Gamut::Bt709, floats: c.floats });
+        own.iter().copied().chain(enemy).chain([UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.6, 0.6, 0.6], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 1.0, 1.0], floats: false }]).collect()
     }
 
     fn own_classes(&self) -> Vec<UnitClass> {
         const COLORS: [[f32; 3]; 5] = [[0.95, 0.75, 0.10], [0.80, 0.12, 0.08], [0.92, 0.92, 0.96], [0.10, 0.80, 0.90], [0.75, 0.20, 0.85]];
         if self.skirmish() {
-            return SKIRMISH_LOOKS.iter().map(|&color| UnitClass { color, floats: false }).collect();
+            return SKIRMISH_LOOKS.iter().map(|&color| UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color, floats: false }).collect();
         }
-        self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], floats: p.medium.on_surface() }).collect()
+        self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], gamut: ae_render::colorspace::Gamut::Bt709, floats: p.medium.on_surface() }).collect()
     }
 }
 

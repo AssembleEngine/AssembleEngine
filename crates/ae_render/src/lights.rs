@@ -87,7 +87,13 @@ impl Light {
     /// A point light of `intensity` candela and a linear `color` tint;
     /// `range` 0: no authored cutoff. `radius` regularises the near field.
     pub fn point(position: Vec3, color: Vec3, intensity: f32, range: f32, radius: f32) -> Self {
-        let color = Vec3::from_array(crate::lighting::unit_tint(color.to_array()));
+        Self::point_raw(position, Vec3::from_array(crate::lighting::unit_tint(color.to_array())), intensity, range, radius)
+    }
+
+    /// [`Self::point`] with a tint already in the scene's working space,
+    /// normalised to unit luminance there (the bursts' lights, converted
+    /// from their effect's gamut at upload).
+    pub fn point_raw(position: Vec3, color: Vec3, intensity: f32, range: f32, radius: f32) -> Self {
         Self { position: position.to_array(), range, color: color.to_array(), kind: POINT, direction: [0.0, -1.0, 0.0], half_length: 0.0, profile: [0.0, 0.0, radius.max(1e-3), intensity.max(0.0)] }
     }
 

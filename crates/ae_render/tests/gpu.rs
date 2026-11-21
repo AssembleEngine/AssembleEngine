@@ -594,7 +594,7 @@ fn units_render_over_terrain() {
     let red = [1.0, 0.02, 0.02];
     let blue = [0.02, 0.02, 1.0];
     let magenta = [1.0, 0.02, 1.0];
-    let classes = vec![UnitClass { color: red, floats: false }, UnitClass { color: blue, floats: true }, UnitClass { color: magenta, floats: false }];
+    let classes = vec![UnitClass { color: red, gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: blue, gamut: ae_render::colorspace::Gamut::Bt709, floats: true }, UnitClass { color: magenta, gamut: ae_render::colorspace::Gamut::Bt709, floats: false }];
     // (x, y, prev_x, prev_y, class): the red unit moved from (420, 512).
     let units = [(560.0f32, 512.0f32, 420.0f32, 512.0f32, 0u32), (512.0, 600.0, 512.0, 600.0, 1), (470.0, 440.0, 470.0, 440.0, 2), (512.0, -4000.0, 512.0, -4000.0, 0)];
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
@@ -684,7 +684,7 @@ fn terrain_edits_reach_the_heightfield() {
     }
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-    let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: false }];
+    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: false }];
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
     let camera = {
         let view = app.view();
@@ -1187,7 +1187,7 @@ fn model_lights_light_the_ground() {
     let mut render = |point: Arc<Model>, spot: Arc<Model>, unculled: bool| -> (Vec<u8>, ae_render::lights::LightStats) {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [0.5; 3], floats: false }];
+        let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }];
         let setup = UnitsSetup { feed, capacity: 16, classes, min_pixels: 8.0, models: vec![Some(point), Some(spot)], rigs: Vec::new() };
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
         if unculled {
@@ -1499,7 +1499,7 @@ fn cull_on_gpu(
     let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() };
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(stream.clone()));
-    let classes = vec![UnitClass { color: [1.0, 0.0, 0.0], floats: false }];
+    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.0, 0.0], floats: false }];
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels, models: Vec::new(), rigs: Vec::new() });
     let cam = {
         let view = app.view();
@@ -1644,7 +1644,7 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
     }
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-    let classes = vec![UnitClass { color: [1.0, 0.8, 0.1], floats: false }, UnitClass { color: [0.9, 0.9, 0.95], floats: true }, UnitClass { color: [0.8, 0.1, 0.1], floats: false }];
+    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.8, 0.1], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.9, 0.9, 0.95], floats: true }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.8, 0.1, 0.1], floats: false }];
     let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new(), rigs: Vec::new() });
     if let Some(wasm) = module {
         app = app.with_module(wasm);
@@ -2134,7 +2134,7 @@ fn water_covers_the_low_ground_only() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [1.0, 0.02, 0.02], floats: false }, UnitClass { color: [0.02, 0.02, 1.0], floats: true }];
+        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: true }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.water {
             app = app.with_water();
@@ -2363,7 +2363,7 @@ fn hills_shade_away_from_the_sun() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.shadows {
             app = app.with_shadows();
@@ -2588,7 +2588,7 @@ fn units_cast_shadows() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if shadows {
             app = app.with_shadows();
@@ -2743,7 +2743,7 @@ fn particles_cast_coloured_shadows() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() })
             .with_tone(ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() });
         if shadows {
@@ -2901,6 +2901,7 @@ fn particles_sort_blend_and_soften() {
     let index = |(x, y): (u32, u32)| (y * extent.width + x) as usize * 4;
 
     let still = |color: [f32; 4], size: f32, emissive: bool, life: f32| EffectDef {
+        gamut: ae_render::colorspace::Gamut::Bt709,
         color_start: color,
         color_end: color,
         size: [size, size],
@@ -3066,6 +3067,7 @@ fn particles_packets_both_resolutions() {
     };
     let still = |color: [f32; 4], size: f32, emissive: bool| -> ae_render::particles::EffectDef {
         ae_render::particles::EffectDef {
+            gamut: ae_render::colorspace::Gamut::Bt709,
             color_start: color,
             color_end: color,
             size: [size, size],
@@ -3283,6 +3285,7 @@ fn render_particles_lit(
 /// Particles that hold still: one colour and size over a long life.
 fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::particles::EffectDef {
     ae_render::particles::EffectDef {
+        gamut: ae_render::colorspace::Gamut::Bt709,
         color_start: color,
         color_end: color,
         size: [size, size],
@@ -3723,7 +3726,7 @@ fn decals_wrap_over_cliffs() {
         }
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.45, 0.45, 0.45], floats: false }];
+        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
@@ -4484,7 +4487,7 @@ fn units_draw_models() {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [0.5; 3], floats: false }, UnitClass { color: [1.0, 0.02, 1.0], floats: false }];
+    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 1.0], floats: false }];
     let models = vec![Some(Arc::new(blocks)), Some(Arc::new(fox))];
     let extent = vk::Extent2D { width: 320, height: 240 };
     let mut camera = None;
@@ -4666,7 +4669,7 @@ fn units_model_shadows_culled() {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], floats: false }; 2];
+    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }; 2];
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
         let feed = Arc::new(UnitFeed::default());
@@ -4960,7 +4963,7 @@ fn units_pose_models() {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], floats: false }; 4];
+    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }; 4];
     let setup_models: Vec<_> = models.iter().map(|m| Some(Arc::new(m.clone()))).collect();
     let setup_rigs: Vec<_> = rigs.iter().map(|r| Some(Arc::new(r.clone()))).collect();
     // Frame, counts and poses; `behind`: drawn a tick behind the stream
@@ -5139,7 +5142,7 @@ fn speculars_follow_material_and_lights() {
     let render = |model: Arc<Model>, light: Option<Light>, sun: f32| -> Vec<u8> {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let setup = UnitsSetup { feed, capacity: 4, classes: vec![UnitClass { color: [0.5; 3], floats: false }], min_pixels: 8.0, models: vec![Some(model)], rigs: Vec::new() };
+        let setup = UnitsSetup { feed, capacity: 4, classes: vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }], min_pixels: 8.0, models: vec![Some(model)], rigs: Vec::new() };
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup).with_tone(ToneParams { sun_illuminance: sun, ..Default::default() });
         if let Some(l) = light {
             app = app.with_lights(vec![l]);
@@ -5417,7 +5420,7 @@ fn lights_clusters_match_the_unculled_reference() {
         let listed = lights.len();
         let units = Arc::new(UnitFeed::default());
         units.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let setup = UnitsSetup { feed: units, capacity: 64, classes: vec![UnitClass { color: [0.7, 0.7, 0.7], floats: false }], min_pixels: 8.0, models: Vec::new(), rigs: Vec::new() };
+        let setup = UnitsSetup { feed: units, capacity: 64, classes: vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.7, 0.7, 0.7], floats: false }], min_pixels: 8.0, models: Vec::new(), rigs: Vec::new() };
         let particles = Arc::new(ParticleFeed::default());
         let effects = vec![still_effect([0.4, 0.4, 0.4, 0.6], 30.0, false)];
         for k in 0..12 {
@@ -6378,5 +6381,41 @@ fn auto_exposure_meters_bt2020_in_its_own_space() {
     let wide = mean(&render(WorkingSpace::Bt2020));
     eprintln!("auto-exposed ground: BT.709 {narrow:.4}, BT.2020 {wide:.4}, ratio {:.4}", wide / narrow);
     assert!((wide / narrow - 1.0).abs() < 0.05, "the meter settles the wide scene at the same key: {:.4} against {:.4}", wide, narrow);
+    assert_clean(&gpu);
+}
+
+/// M13 stage 4: a colour authored in P3 and uploaded into the default
+/// BT.709 working space keeps its wide gamut through `post.encode`. The
+/// fire's death tint (`assets/effects.json`, tagged `p3`) has a negative
+/// blue channel in BT.709; the display intermediate keeps the colour in the
+/// working space, and only `post.encode` maps it to P3, where it decodes
+/// back as the authored colour instead of being clipped to BT.709.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn p3_authored_effect_survives_post_encode() {
+    use ae_render::colorspace::{self, Gamut, WorkingSpace};
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::particles::{default_effects, effect};
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let fire = default_effects()[effect::FIRE as usize];
+    let authored = [fire.color_end[0], fire.color_end[1], fire.color_end[2]];
+    // The upload (ParticleRenderer::new): from the effect's gamut into the
+    // working space.
+    let display = colorspace::convert(Gamut::P3, Gamut::Bt709, authored);
+    assert!(display[2] < -0.01, "the display value is outside BT.709: {display:?}");
+    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, WorkingSpace::Bt709, Gamut::P3, &[[display[0], display[1], display[2], 1.0]]);
+    let nits = hdr10_nits(&frames[0], 0);
+    let p3 = colorspace::convert(Gamut::Bt2020, Gamut::P3, nits.map(|n| n / levels.paper_white));
+    let back = colorspace::convert(Gamut::P3, Gamut::Bt709, p3);
+    eprintln!("P3 fire end: authored {authored:.4?} -> display (709) {display:.4?} -> decoded P3 {p3:.4?} (709 {back:.4?})");
+    // The decoded P3 colour is the authored one within the 10-bit PQ's
+    // quantization, and it is still outside BT.709.
+    for k in 0..3 {
+        assert!((p3[k] - authored[k]).abs() < 0.02, "P3 channel {k}: {} vs {}", p3[k], authored[k]);
+    }
+    assert!(back.iter().any(|v| *v < -0.01), "still outside BT.709: {back:?}");
     assert_clean(&gpu);
 }
