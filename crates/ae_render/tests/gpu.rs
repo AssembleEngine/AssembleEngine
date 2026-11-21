@@ -1154,7 +1154,7 @@ fn tileset_boundaries_are_irregular_and_bounded() {
 }
 
 /// Anti-tiling on flat fields of mud (temperate layer 6, 20 m repeats) and
-/// grass (layer 0, 24 m), both `AntiTiling::Rotated`, from straight above,
+/// grass (layer 0, 24 m), from straight above,
 /// about 20 repeats across: without it the image correlates with itself
 /// shifted by one repeat (above its correlation at 1.5 repeats, the broad
 /// variation's share); with it much less, while the mean and the
@@ -1176,9 +1176,15 @@ fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
             let period = (project(256.0 + repeat, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0).abs();
             (luma, period)
         };
-        assert!(matches!(on.layers[layer].settings.anti_tiling, tileset::AntiTiling::Rotated(_)), "layer {layer} is anti-tiled by default");
-        let (luma_off, period) = shot(on.clone().without_anti_tiling());
-        let (luma_on, _) = shot(on.clone());
+        assert!(on.anti_tiling > 0.0, "tileset anti-tiling is on by default");
+        let at_degree = |degree: f32| {
+            let mut t = on.clone();
+            t.anti_tiling = degree;
+            shot(t)
+        };
+        let (luma_off, period) = at_degree(0.0);
+        let (luma_soft, _) = at_degree(0.1);
+        let (luma_on, _) = at_degree(1.0);
         // A margin inside the map (it spans the view and more).
         let (w, h, m) = (320usize, 240usize, 8usize);
         let stats = |l: &[f64]| {
@@ -1204,12 +1210,14 @@ fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
         let q = (period * 1.5).round() as usize;
         let base = |l: &[f64]| (corr(l, (q, 0)) + corr(l, (0, q))) / 2.0;
         let (c_off, c_on) = (at(&luma_off) - base(&luma_off), at(&luma_on) - base(&luma_on));
-        eprintln!("layer {layer}: period {period:.1} px; correlation at one repeat above the baseline {c_off:.3} off, {c_on:.3} on (baselines {:.3}, {:.3});", base(&luma_off), base(&luma_on));
+        let c_soft = at(&luma_soft) - base(&luma_soft);
+        eprintln!("layer {layer}: period {period:.1} px; correlation at one repeat above the baseline {c_off:.3} off, {c_soft:.3} at degree 0.1, {c_on:.3} on (baselines {:.3}, {:.3}, {:.3});", base(&luma_off), base(&luma_soft), base(&luma_on));
         eprintln!("  mean {mean_off:.1} / {mean_on:.1}; sd {sd_off:.2} / {sd_on:.2}");
-        // Measured above the baseline: mud 0.83 off, 0.02 on; grass 0.40
-        // off, 0.10 on (its low contrast leaves the macro variation a
-        // baseline of 0.4-0.5).
+        // Measured above the baseline: mud 0.56 off, 0.21 at degree 0.1,
+        // 0.02 on; grass 0.41 off, 0.25, 0.11 on (its low contrast leaves
+        // the macro variation a baseline of 0.4-0.5).
         assert!(c_off > 0.3, "without anti-tiling the field repeats: {c_off:.3}");
+        assert!(c_soft < c_off * 0.7 && c_soft > c_on, "a tenth of the degree is partway: {c_soft:.3} against {c_off:.3} off and {c_on:.3} on");
         assert!(c_on < c_off * 0.35, "anti-tiling breaks the repeat: {c_on:.3} against {c_off:.3}");
         assert!((mean_on - mean_off).abs() < mean_off * 0.02, "the mean holds: {mean_on:.1} against {mean_off:.1}");
         assert!((sd_on / sd_off - 1.0).abs() < 0.08, "the contrast holds: sd {sd_on:.2} against {sd_off:.2}");

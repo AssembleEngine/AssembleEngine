@@ -30,21 +30,18 @@ layout(set = 0, binding = 11) uniform sampler2DArray tileNormal; // rg tangent-s
 layout(set = 0, binding = 12) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
-                        // triplanar, bit 1 anti-tiling rotates), w anti-tiling (0 off)
+                        // triplanar, bit 1 directional), w unused
     vec4 means[8];      // per layer: mean albedo (linear) and height
     vec4 roughness[8];  // per layer: x GGX roughness
     vec4 params;        // x, y cliff slope start/end, z blend depth, w detail tilt
     vec4 warp;          // x boundary warp (cells), y 1 / its feature size (world units),
                         // z macro variation, w 1 / its feature size
+    vec4 antiTiling;    // x anti-tiling degree (0..1)
 } tiles;
 
 // One projected layer: albedo (a = height) and the world normal with the
 // layer's detail applied.
 struct Tap { vec4 albedo; vec3 normal; };
-
-// Anti-tiling (docs/antitiling.md) is compiled in only when a layer of the
-// tileset uses it, so tilesets without it pay nothing.
-layout(constant_id = 2) const bool ANTI_TILING = false;
 
 // One texel of a layer: albedo (a = height) and the tangent-space normal's
 // x, y (-1..1, before the layer's strength).
@@ -76,12 +73,12 @@ const vec4 ANTI_TILING_SEEDS[16] = vec4[](
     vec4(0.970873, -0.239594, 0.823165, 0.047604),
     vec4(-0.877735, -0.479146, 0.578043, 0.617445));
 
-// The layer at `uv` (in repeats), anti-tiled when the layer asks for it,
+// The layer at `uv` (in repeats), anti-tiled by the tileset's degree,
 // after Quilez's "texture repetition", technique 3: a smooth noise (one
 // fetch, features of about 3 repeats, values spread evenly over 0..1)
-// times the layer's amount is an index into versions of the texture, each
-// offset (and rotated, if the texture has no direction to keep) by a seed
-// from the table. Each pixel shows the two versions its index lies
+// times the degree's number of versions is an index into versions of the
+// texture, each offset (and rotated, unless the texture is directional) by
+// a seed from the table. Each pixel shows the two versions its index lies
 // between, mostly just one: they blend only in the middle of each step,
 // where the transition is pushed by the versions' difference so it
 // follows the texture's features. Blending flattens the contrast, so it is
@@ -89,9 +86,12 @@ const vec4 ANTI_TILING_SEEDS[16] = vec4[](
 // the variance (the normals' mean is taken as flat: a tileable height
 // field has no mean slope). The gradients rotate with the uv (the offset
 // has none), so mips do not jump where the version changes; the normals
-// rotate back into the uv's frame.
+// rotate back into the uv's frame. The degree (0..1) scales both the
+// number of versions and each version's transform, so it is a continuous
+// control, not a switch.
 layout(set = 0, binding = 20) uniform sampler2D antiTilingNoise;
 const float ANTI_TILING_NOISE_SCALE = 1.0 / 48.0; // 16 features per texture
+const float ANTI_TILING_VERSIONS = 8.0;          // at degree 1
 // The part of each index step where two versions blend (Quilez: 0.2..0.8;
 // narrower, since the second version is most of the cost), and how far
 // the versions' difference may push it.
@@ -100,24 +100,27 @@ const float ANTI_TILING_PUSH = 0.05;
 
 Texel version(float l, uint seed, bool rotates, vec2 uv, vec2 gx, vec2 gy) {
     vec4 h = ANTI_TILING_SEEDS[seed & 15u];
-    h.xy = rotates ? h.xy : vec2(1.0, 0.0);
-    mat2 r = mat2(h.x, h.y, -h.y, h.x);
-    Texel t = texel(l, r * uv + h.zw, r * gx, r * gy);
+    // The degree fades the transform in: at 0 a version is the plain uv, at
+    // 1 the seed's full rotation and offset.
+    float degree = tiles.antiTiling.x;
+    vec2 c = rotates ? normalize(mix(vec2(1.0, 0.0), h.xy, degree)) : vec2(1.0, 0.0);
+    mat2 r = mat2(c.x, c.y, -c.y, c.x);
+    Texel t = texel(l, r * uv + h.zw * degree, r * gx, r * gy);
     t.normal = t.normal * r; // transpose(r) * normal
     return t;
 }
 
 Texel layerTexel(uint layer, vec2 uv, vec2 gx, vec2 gy) {
     float l = float(layer);
-    float amount = tiles.layers[layer].w;
-    if (!ANTI_TILING || amount <= 0.0) {
+    float amount = tiles.antiTiling.x * ANTI_TILING_VERSIONS;
+    if (amount <= 0.0) {
         return texel(l, uv, gx, gy);
     }
     float s = ANTI_TILING_NOISE_SCALE;
     float index = textureGrad(antiTilingNoise, uv * s, gx * s, gy * s).r * amount;
     uint i = uint(index);
     float f = fract(index);
-    bool rotates = (uint(tiles.layers[layer].z) & 2u) != 0u;
+    bool rotates = (uint(tiles.layers[layer].z) & 2u) == 0u;
     // Near either end of a step only one version shows.
     if (f < ANTI_TILING_BAND.x - ANTI_TILING_PUSH) {
         return version(l, i, rotates, uv, gx, gy);
