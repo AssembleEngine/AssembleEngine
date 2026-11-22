@@ -76,6 +76,9 @@ pub struct ExposureFrame {
     /// when the frame shades by the fog of war: the meter undoes its
     /// dimming.
     pub vision: Option<[f32; 4]>,
+    /// The display-linear luminance the metered mean maps to
+    /// ([`crate::tonemap::ToneParams::key`]).
+    pub key: f32,
     /// The bloom's strength this frame (0 with the bloom off): the meter
     /// adds the glow at it, so the light the bloom shows counts.
     pub bloom: f32,
@@ -370,7 +373,7 @@ impl Exposure {
             ],
             rates: [
                 if frame.auto { 1.0 } else { 0.0 },
-                crate::lighting::KEY_LUMINANCE,
+                frame.key,
                 crate::lighting::TOWARD_BRIGHTER_PER_SECOND,
                 crate::lighting::TOWARD_DARKER_PER_SECOND,
             ],

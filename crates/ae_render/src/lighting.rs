@@ -49,6 +49,14 @@ pub const MIN_VISIBLE_ILLUMINANCE: f32 = 0.002;
 /// full sun stores about 1.6 at that EV; the terrain's albedo is well below
 /// it.
 pub const KEY_LUMINANCE: f32 = 0.5;
+/// Auto-exposure's key with no tone curve ([`crate::tonemap::Curve::None`]).
+/// With no shoulder, white is only one stop above a 0.5 key: the default
+/// map adapted about half an EV brighter than its start at
+/// [`DEFAULT_EV100`] and its road and lights clipped (mean sRGB luma 150 at
+/// 0.5 s, 186 at 10 s). At 0.32 the same map settles at its start's look
+/// (153 at 10 s; `ae-client --capture`, crossing water map, 10,000 units,
+/// default camera, 1280×720), and white is 1.6 stops above the key.
+pub const KEY_LUMINANCE_NO_CURVE: f32 = 0.32;
 /// The brightest auto-exposure (the lowest EV100), four EV above the
 /// reference sun's: an overcast dusk still gets the display's range. Night
 /// scenes are meant to stay dark, so the bound sits far above a real
@@ -81,15 +89,16 @@ pub const METER_LOW_PERCENTILE: f32 = 0.02;
 pub const METER_HIGH_PERCENTILE: f32 = 0.02;
 
 /// The EV100 that maps `mean_log2` (the metered mean log2 luminance of the
-/// scene as stored, i.e. exposed at `scene_ev100`) to [`KEY_LUMINANCE`].
+/// scene as stored, i.e. exposed at `scene_ev100`) to `key` (the curve's,
+/// [`crate::tonemap::ToneParams::key`]).
 ///
 /// The stored luminance is `R * 2^-scene_ev100 / 1.2`; the display's is
 /// `R * 2^-ev100 / 1.2`, so the display is the stored scene times
 /// `2^(scene_ev100 - ev100)`. Making its mean equal the key gives
 /// `ev100 = scene_ev100 + (mean_log2 - log2(key))` (a brighter scene needs
 /// less exposure, a higher EV).
-pub fn target_ev100(scene_ev100: f32, mean_log2: f32) -> f32 {
-    scene_ev100 + (mean_log2 - KEY_LUMINANCE.log2())
+pub fn target_ev100(scene_ev100: f32, mean_log2: f32, key: f32) -> f32 {
+    scene_ev100 + (mean_log2 - key.log2())
 }
 
 /// Ease an EV100 toward `target` over `dt` seconds, exponentially in EV
@@ -183,12 +192,12 @@ mod tests {
     fn the_meter_targets_the_key() {
         let key = KEY_LUMINANCE.log2();
         // A scene stored at the key needs no change.
-        assert!((target_ev100(14.0, key) - 14.0).abs() < 1e-6);
+        assert!((target_ev100(14.0, key, KEY_LUMINANCE) - 14.0).abs() < 1e-6);
         // Four times the stored light needs two EV less exposure.
-        assert!((target_ev100(14.0, key + 2.0) - 16.0).abs() < 1e-5);
+        assert!((target_ev100(14.0, key + 2.0, KEY_LUMINANCE) - 16.0).abs() < 1e-5);
         // The stored scene's own exposure cancels: the same physical scene
         // stored one EV down meters one EV lower and targets the same EV.
-        assert!((target_ev100(15.0, key + 2.0 - 1.0) - 16.0).abs() < 1e-5);
+        assert!((target_ev100(15.0, key + 2.0 - 1.0, KEY_LUMINANCE) - 16.0).abs() < 1e-5);
     }
 
     #[test]

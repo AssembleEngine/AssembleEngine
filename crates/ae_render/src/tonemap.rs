@@ -203,6 +203,17 @@ pub struct ToneParams {
 }
 
 impl ToneParams {
+    /// Auto-exposure's key for this curve: Lottes' mid anchor
+    /// ([`crate::lighting::KEY_LUMINANCE`]), or with no curve the lower
+    /// [`crate::lighting::KEY_LUMINANCE_NO_CURVE`], which leaves room above
+    /// the mean before white.
+    pub fn key(&self) -> f32 {
+        match self.curve {
+            Curve::None => crate::lighting::KEY_LUMINANCE_NO_CURVE,
+            Curve::Lottes => crate::lighting::KEY_LUMINANCE,
+        }
+    }
+
     /// The frame's exposure factor.
     pub fn exposure(&self) -> f32 {
         crate::lighting::exposure(self.ev100)

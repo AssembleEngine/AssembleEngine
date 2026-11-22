@@ -1047,7 +1047,9 @@ fn auto_exposure_holds_the_key_across_sunlight() {
                 sun_illuminance: sun,
                 auto,
                 bloom: 0.0,
-                ..Default::default()
+                // The key it pins is Lottes' (the reference scene settles
+                // at its manual look under that key).
+                ..lottes_tone()
             });
         if fog {
             app = app.with_vision(Arc::new(ae_render::terrain::app::VisionFeed::new(grid)));

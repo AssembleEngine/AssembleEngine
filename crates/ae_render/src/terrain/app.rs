@@ -997,7 +997,7 @@ impl RenderApp for TerrainApp {
         // by it this frame.
         let vision = if params.vision { self.renderer.as_ref().and_then(|r| r.vision_uniform()) } else { None };
         if let Some(exposure) = &mut self.exposure {
-            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
+            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, key: self.tone.key(), bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
         }
         // HDR: the curve's peak anchor displays at the display's peak over
         // its paper white, so emitters land above paper white and the
