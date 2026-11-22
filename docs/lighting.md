@@ -214,16 +214,16 @@ Materials:
   (grass and scrub 0.92-0.95, sand 0.75-0.78, rock 0.50-0.52, wet beds and
   mud 0.45-0.48, gravel 0.82), blended with the same weights as the albedo.
   The palette path (no tileset) uses 0.85. Decals paint their own material:
-  each atlas layer has a `LayerMaterial` (roughness, metallic; default
-  0.9/0), blended into the ground by the decal's coverage, so soot (the
-  default scorch is 0.95) takes the gloss off whatever it lands on and a
-  custom layer can be glossier or metallic
+  each atlas layer has a `LayerMaterial` (a metallic factor, default 0),
+  blended into the ground by the decal's coverage, so soot (the default
+  scorch's texture runs 0.855 to 0.95) takes the gloss off whatever it
+  lands on and a custom layer can be metallic
   (`DecalAtlas::set_layer_material`). The layer's surface texture is RGBA8:
   normal x and y, roughness, glow (normal z is reconstructed in the shader);
-  the material's roughness factor multiplies that texture, as glTF's
-  metallic-roughness does. The default atlas generates a per-texel
-  roughness map (charred centre rougher than the burnt ring); custom layers
-  write 1 and let their factor set it.
+  roughness is that texture as is, with no layer factor. The default atlas
+  generates a per-texel roughness map (charred centre rougher than the
+  burnt ring); a custom layer takes its roughness from its texture too, and
+  is fully rough where it has none.
 - **Darts**: 0.04 and roughness 0.7, so the flat blocks keep a slight sheen.
 - **Water**: `F0 = 0.06` (raised from water's 0.02, as before) and roughness
   0.22 to 0.43 from the unresolved wave slope — the old hand-tuned Phong
@@ -247,11 +247,15 @@ arrays are packed for the surface they paint:
 | `decalSurface` | `R8G8B8A8_UNORM` | normal.x | normal.y | roughness | glow |
 
 Normal z is `sqrt(1 - x² - y²)` (it points out of the ground). Per layer,
-`LayerMaterial` supplies the roughness and metallic factors in a storage
-buffer (one `vec4`: x roughness, y metallic, z specular scale reserved).
-Roughness is factor × texture, as glTF's metallic-roughness; metallic stays a
-factor because it is uniform per material. A third array would be needed for
-per-texel metallic.
+`LayerMaterial` supplies the metallic factor in a storage buffer (one
+`vec4`: x metallic, y..w reserved). Roughness is the surface texture as is;
+metallic stays a factor because it is uniform per material. A third array
+would be needed for per-texel metallic.
+
+Each decal blends by its coverage — `texture alpha × decal opacity × its
+edge and lifetime fades` — so albedo, normal, roughness and metallic all
+`mix` from the ground toward the layer's, and the glow already under it is
+scaled by `1 - coverage`.
 
 ## Culling
 

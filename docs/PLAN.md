@@ -3012,10 +3012,10 @@ Steps (commit and stop for compaction after each):
     `DecalAtlas::set_layer_material` says otherwise. The terrain's `F0` becomes
     `mix(0.04, albedo, metallic)`, so a painted metal decal works. GPU
     `decals_carry_their_roughness_and_metallic`: three identical grey layers under a light at
-    the view's mirror read 199 (roughness texture 0.15), 136 (0.95) and 249 (metallic 1.0);
-    the albedo and normals are the same, so only the layers' roughness textures and metallic
-    factor explain the difference. CPU tests cover the surface packing, the defaults and the
-    range checks.
+    the view's mirror read 180.1 (roughness texture 0.15), 114.1 (0.95) and 255 (metallic 1.0,
+    clipped); the albedo and normals are the same, so only the layers' roughness textures and
+    metallic factor explain the difference. CPU tests cover the surface packing, the defaults and
+    the range checks.
   - **Tests**: GPU `speculars_follow_material_and_lights` (a smooth metal's white sun
     highlight is wider than a dielectric's and a rough metal has none; with the sun off a
     clustered light at the mirror lights the metal and the same light at the opposite azimuth

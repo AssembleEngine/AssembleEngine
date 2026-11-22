@@ -28,10 +28,11 @@ vec4 decalFloats(uint at) {
 }
 
 // One projection: the atlas at `uv` (decal space, -1..1) with its
-// gradients, premultiplied; the surface's normal in the frame T, B, N (the
-// world directions of +u, +v and out of the ground; w the glow mask); and
-// the roughness texture. The normal's z is rebuilt (it points out of the
-// ground). Explicit gradients: this runs in non-uniform control flow.
+// gradients, rgb the colour and a the coverage; the surface's normal in the
+// frame T, B, N (the world directions of +u, +v and out of the ground; w the
+// glow mask); and the roughness texture. The normal's z is rebuilt (it points
+// out of the ground). Explicit gradients: this runs in non-uniform control
+// flow.
 vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, out vec4 m, out float roughness) {
     vec3 at = vec3(uv * 0.5 + 0.5, layer);
     vec4 t = textureGrad(decalAtlas, at, gx * 0.5, gy * 0.5);
@@ -44,7 +45,7 @@ vec4 decalTap(vec2 uv, vec2 gx, vec2 gy, float layer, vec3 T, vec3 B, vec3 N, ou
     vec3 tn = vec3(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
     m = vec4(tn.x * T + tn.y * B + tn.z * N, sm.w);
     roughness = sm.z;
-    return vec4(t.rgb * t.a, t.a);
+    return t;
 }
 
 // One segment of the ground flattened into the plane: plan vector `d`
@@ -191,10 +192,8 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         vec3 T = levelBy(vec3(ax.x, 0.0, ax.y), hn, -1.0);
         vec3 B = levelBy(vec3(az.x, 0.0, az.y), hn, -1.0);
         vec4 m;
-        float sr;
-        vec4 s = decalTap(q, qx, qy, b.z, T, B, hn, m, sr);
-        vec4 sn = vec4(m.xyz * s.a, m.w);
-        sr *= s.a;
+        float layerRough;
+        vec4 s = decalTap(q, qx, qy, b.z, T, B, hn, m, layerRough);
         // The fade-in leaves the glow alone (the explosion's flash covers
         // it; Recoil's scars fade in alpha only, over 6 frames).
         float fadeIn = f.y > 0.0 ? clamp((time - f.x) * f.y, 0.0, 1.0) : 1.0;
@@ -202,17 +201,16 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
         if (f.w > 0.0) shown *= clamp((f.z - time) * f.w, 0.0, 1.0);
         float opacity = shown * fadeIn;
         float cover = s.a * opacity;
-        float keep = 1.0 - cover;
         vec3 colour = g.w > 0.5 ? o.albedo * MODULATE * s.rgb : s.rgb;
-        o.albedo = o.albedo * keep + colour * opacity;
-        o.normal = o.normal * keep + sn.xyz * opacity;
+        o.albedo = mix(o.albedo, colour, cover);
+        o.normal = mix(o.normal, m.xyz, cover);
         // The layer's material replaces the ground's by the same coverage:
         // soot (a rough dielectric) takes the gloss off what it lands on.
-        // `sr` is the coverage-weighted texture roughness, used as is;
-        // `mat.x` is the layer's metallic factor, uniform across the layer.
-        o.roughness = o.roughness * keep + sr * opacity;
-        o.metallic = o.metallic * keep + mat.x * cover;
-        o.glow *= keep;
+        // `layerRough` is the texture's roughness, used as is; `mat.x` is the
+        // layer's metallic factor, uniform across the layer.
+        o.roughness = mix(o.roughness, layerRough, cover);
+        o.metallic = mix(o.metallic, mat.x, cover);
+        o.glow *= 1.0 - cover;
         // Recoil's decay: the glow less the time since placement over the
         // glow life (a weaker glow ends sooner).
         float heat = g.z > 0.0 ? g.x - (time - f.x) * g.z : 0.0;
@@ -222,7 +220,7 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
             // Recoil's half-diagonal sqrt(hx^2 + hz^2 + height^2), the
             // height there the smaller half.
             heat *= pow(smoothstep(0.9, 0.1, length(q) * 0.57735), 7.0);
-            vec3 e = blackBody(sn.w * mix(1.0, 3700.0, heat)) * heat;
+            vec3 e = blackBody(m.w * mix(1.0, 3700.0, heat)) * heat;
             o.glow += pow(min(e, vec3(16.0)), vec3(2.2)) * s.a * shown;
         }
     }
