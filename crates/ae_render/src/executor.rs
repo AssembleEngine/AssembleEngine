@@ -310,6 +310,15 @@ impl<R> Executor<R> {
     /// Install the declarations for the next frames. Rebakes and
     /// re-realizes only when the topology signature changed; otherwise only
     /// the per-frame payloads are replaced. Returns whether it rebaked.
+    /// Forget every external resource's access state (its last layout and
+    /// accesses). Call it when the app has replaced the objects it binds
+    /// (a rebuild after the device went idle): a new image under a reused
+    /// identity starts undefined, instead of inheriting the old image's
+    /// layout.
+    pub fn forget_external_states(&mut self) {
+        self.external_states.clear();
+    }
+
     pub fn set_graph(&mut self, graph: FrameGraph<R>) -> Result<bool> {
         let signature = graph.signature();
         if self.baked.as_ref().is_some_and(|baked| baked.signature == signature) {

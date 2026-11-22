@@ -532,7 +532,7 @@ fn terrain_renders_offscreen() {
     }
     let extent = vk::Extent2D { width: 320, height: 200 };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(&gpu, &mut app, target, 24, config).unwrap();
     let leaves = app.stats().lock().unwrap().leaves;
@@ -618,7 +618,7 @@ fn units_render_over_terrain() {
     };
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(&gpu, &mut app, target, 12, config).unwrap();
     let pixels = app.readback().unwrap();
@@ -697,7 +697,7 @@ fn terrain_edits_reach_the_heightfield() {
     };
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let step = |run: &mut Headless<_>, app: &mut TerrainApp| {
@@ -835,7 +835,7 @@ fn photometric_sun_exposure_and_inverse_square() {
             camera.set(Some(view.camera));
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target_info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target_info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target_info, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -955,7 +955,7 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         // 10 s: the exposure settles.
         run_headless(&gpu, &mut app, target, 600, config).unwrap();
@@ -1060,6 +1060,7 @@ fn auto_exposure_holds_the_key_across_sunlight() {
         let target = TargetInfo {
             extent,
             format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
         };
         let config = ExecutorConfig {
             frames_in_flight: 2,
@@ -1203,7 +1204,7 @@ fn model_lights_light_the_ground() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -1289,7 +1290,7 @@ fn tileset_scene(
     };
     let extent = vk::Extent2D { width: 320, height: 240 };
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     run_headless(gpu, &mut app, target, 16, ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 }).unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
@@ -1509,7 +1510,7 @@ fn cull_on_gpu(
     };
     let extent = vk::Extent2D { width: 320, height: 200 };
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(gpu, &mut app, target, 4, config).unwrap();
     let counts = app.last_unit_counts().unwrap();
@@ -1666,7 +1667,7 @@ const SCENE_EXTENT: vk::Extent2D = vk::Extent2D { width: 320, height: 200 };
 fn scene_pixels(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize) -> (Vec<u8>, (u32, u32)) {
     use ae_render::thread::{TargetInfo, run_headless};
     let mut app = scene_app(gpu, module);
-    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(gpu, &mut app, target, frames, config).unwrap();
     let status = app.module_status().lock().unwrap().clone();
@@ -1730,7 +1731,7 @@ fn render_modules_reload_while_running() {
     let default = ae_render::module::build("default").expect("build render/default");
     let post = ae_render::module::build("post").expect("build render/post");
     let mut app = scene_app(&gpu, Some(default.clone()));
-    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let status = app.module_status();
@@ -2160,7 +2161,7 @@ fn water_covers_the_low_ground_only() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, r.frames, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -2268,7 +2269,7 @@ fn pause_holds_the_water_clock() {
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, Some(water));
     let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
     let extent = vk::Extent2D { width: 320, height: 240 };
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
 
     let render = |pause_at: Option<usize>, frames: usize| -> Vec<u8> {
@@ -2379,7 +2380,7 @@ fn hills_shade_away_from_the_sun() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 12).unwrap();
@@ -2601,7 +2602,7 @@ fn units_cast_shadows() {
             view.shadows = view_shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
@@ -2762,7 +2763,7 @@ fn particles_cast_coloured_shadows() {
             view.shadows = view_shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
@@ -3271,7 +3272,7 @@ fn render_particles_lit(
         view.fog = false;
     }
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(gpu, &mut app, target, config).unwrap();
     run.frames(&mut app, 8).unwrap();
@@ -3752,7 +3753,7 @@ fn decals_wrap_over_cliffs() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
@@ -4036,7 +4037,7 @@ fn decals_relit_modulated_and_glowing() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
@@ -4194,7 +4195,7 @@ fn decals_carry_their_roughness_and_metallic() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -4277,7 +4278,7 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
             view.bloom = view_bloom;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -4511,7 +4512,7 @@ fn units_draw_models() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -4686,7 +4687,7 @@ fn units_model_shadows_culled() {
             view.shadows = shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, info, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -4989,7 +4990,7 @@ fn units_pose_models() {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 32, classes: classes.clone(), min_pixels: 6.0, models: setup_models.clone(), rigs: setup_rigs.clone() });
         set_view(&app);
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 6, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5154,7 +5155,7 @@ fn speculars_follow_material_and_lights() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5256,7 +5257,7 @@ fn lights_glint_on_water() {
             view.time = Some(1.0);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5331,7 +5332,7 @@ fn lights_specular_on_the_ground() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5443,7 +5444,7 @@ fn lights_clusters_match_the_unculled_reference() {
         }
         let extent = vk::Extent2D { width: 320, height: 200 };
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5527,7 +5528,7 @@ fn scar_normal_maps_relight_the_ground() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5661,7 +5662,7 @@ fn the_curve_places_the_sunlit_ground() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5905,7 +5906,7 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -5970,7 +5971,7 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -6027,7 +6028,7 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -6099,7 +6100,7 @@ fn hdr_emitters_reach_above_paper_white_and_stop_at_peak() {
         view.fog = false;
     }
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     // The flash lives about 0.2 s: watch the first ten frames. The brightest
@@ -6170,7 +6171,7 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -6227,7 +6228,7 @@ fn bt2020_lit_content_differs_from_bt709_by_measured_numbers() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -6361,7 +6362,7 @@ fn auto_exposure_meters_bt2020_in_its_own_space() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB };
+        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
         let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
         // 10 s at the readback clock: adaptation has settled.
         run_headless(&gpu, &mut app, target, 600, config).unwrap();

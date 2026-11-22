@@ -46,6 +46,10 @@ pub struct WindowEvents {
     /// Mouse clicks (released within a few pixels of where pressed, so
     /// not a drag), in order; at most four per batch.
     pub clicks: [Option<Click>; 4],
+    /// SDL's HDR state for the window changed (`SDL_EVENT_WINDOW_HDR_STATE_CHANGED`).
+    pub hdr_changed: bool,
+    /// The window moved to another display, or the display list changed.
+    pub display_changed: bool,
 }
 
 /// A click: the button (`LEFT`, `RIGHT`, ...) and where, as fractions of
@@ -85,6 +89,7 @@ pub mod keys {
     pub const X: u32 = 1 << 15;
     pub const PAUSE: u32 = 1 << 16;
     pub const Z: u32 = 1 << 17;
+    pub const U: u32 = 1 << 18;
 }
 
 /// Movement keys currently held (WASD or arrows pan, Q/E orbit, R/F tilt,
@@ -246,6 +251,7 @@ impl SdlWindow {
                         sdl::SDLK_X => keys::X,
                         sdl::SDLK_PAUSE => keys::PAUSE,
                         sdl::SDLK_Z => keys::Z,
+                        sdl::SDLK_U => keys::U,
                         sdl::SDLK_EQUALS | sdl::SDLK_PLUS | sdl::SDLK_KP_PLUS => keys::PLUS,
                         sdl::SDLK_MINUS | sdl::SDLK_KP_MINUS => keys::MINUS,
                         sdl::SDLK_LEFTBRACKET => keys::LBRACKET,
@@ -278,6 +284,16 @@ impl SdlWindow {
                         events.drag.0 += event.motion.xrel;
                         events.drag.1 += event.motion.yrel;
                     }
+                } else if kind == sdl::SDL_EVENT_WINDOW_HDR_STATE_CHANGED {
+                    events.hdr_changed = true;
+                } else if kind == sdl::SDL_EVENT_WINDOW_DISPLAY_CHANGED
+                    || kind == sdl::SDL_EVENT_DISPLAY_ADDED
+                    || kind == sdl::SDL_EVENT_DISPLAY_REMOVED
+                    || kind == sdl::SDL_EVENT_DISPLAY_MOVED
+                    || kind == sdl::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED
+                    || kind == sdl::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED
+                {
+                    events.display_changed = true;
                 } else if kind == sdl::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED {
                     let (width, height) = (event.window.data1.max(0) as u32, event.window.data2.max(0) as u32);
                     events.resized = Some((width, height));

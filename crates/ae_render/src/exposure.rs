@@ -54,6 +54,8 @@ use gpu_allocator::MemoryLocation;
 const _: () = assert!(ae_render_abi::module::EXPOSURE_BINS == 128);
 
 /// The exposure image's unique identity in the executor's external state.
+/// An app rebuild makes a new image under it; the render thread then has the
+/// executor forget the external states (`Executor::forget_external_states`).
 const IDENTITY_EXPOSURE: u64 = (0xAE7 << 40) | 12;
 const IDENTITY_HISTOGRAM: u64 = (0xAE7 << 40) | 13;
 

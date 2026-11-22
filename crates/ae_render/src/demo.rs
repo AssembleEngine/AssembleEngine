@@ -531,7 +531,8 @@ mod gpu {
     impl crate::thread::RenderApp for DemoApp {
         type Pass = DemoPass;
 
-        fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
+        fn create(&mut self, gpu: &Arc<GpuDevice>, target: crate::thread::TargetInfo, frames_in_flight: usize) -> Result<()> {
+            let format = target.format;
             self.renderer = Some(DemoRenderer::new(gpu.clone(), format, frames_in_flight)?);
             self.staging = (0..frames_in_flight)
                 .map(|slot| {

@@ -391,7 +391,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     }
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(gpu, extent)?;
-    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB, color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: true, record_threads: b.record_threads, ..ExecutorConfig::default() };
     let mut headless = Headless::new(gpu, &mut app, target, config)?;
     let view = app.view();

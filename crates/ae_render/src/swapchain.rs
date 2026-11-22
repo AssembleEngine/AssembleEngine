@@ -3,8 +3,10 @@
 //! event forwarded from the main thread, or by `OUT_OF_DATE`/`SUBOPTIMAL`);
 //! a 0×0 extent (minimized) skips frames without recreating.
 
+use crate::colorspace::Gamut;
 use crate::device::GpuDevice;
-use anyhow::{Context as _, Result};
+use crate::encode::{DisplayLevels, OutputEncoding};
+use anyhow::{Context as _, Result, bail};
 use ash::vk;
 
 /// How long `acquire` waits for an image before giving the frame up.
@@ -27,6 +29,156 @@ pub enum PresentPolicy {
     Fifo,
 }
 
+/// What the client asks the swapchain to encode (`--hdr`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HdrRequest {
+    /// An sRGB 8-bit swapchain: the SDR path, unchanged.
+    #[default]
+    Off,
+    /// HDR10 when the surface offers it and SDL says the window is
+    /// HDR-capable, else scRGB when offered, else SDR.
+    Auto,
+    /// HDR10 (PQ) only: an error when the pair is not offered.
+    Hdr10,
+    /// scRGB only: an error when the pair is not offered.
+    ScRgb,
+}
+
+impl HdrRequest {
+    /// The request's command-line spelling.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Hdr10 => "hdr10",
+            Self::ScRgb => "scrgb",
+        }
+    }
+
+    /// The HDR mode a toggle turns on (an explicit mode stays explicit; Off
+    /// and Auto both turn on Auto).
+    pub fn toggled_on(self) -> Self {
+        match self {
+            Self::Hdr10 => Self::Hdr10,
+            Self::ScRgb => Self::ScRgb,
+            Self::Off | Self::Auto => Self::Auto,
+        }
+    }
+}
+
+/// What the surface is asked for: a format and the colour space it stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetFormat {
+    pub format: vk::Format,
+    pub color_space: vk::ColorSpaceKHR,
+}
+
+impl TargetFormat {
+    /// The encoding this pair carries.
+    pub fn encoding(self) -> OutputEncoding {
+        match self.color_space {
+            vk::ColorSpaceKHR::HDR10_ST2084_EXT => OutputEncoding::Hdr10Pq,
+            vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT => OutputEncoding::ScRgb,
+            _ => OutputEncoding::Sdr,
+        }
+    }
+
+    /// The pair as one line (the swapchain report and errors).
+    pub fn describe(self) -> String {
+        format!("{:?} + {:?}", self.format, self.color_space)
+    }
+}
+
+/// The HDR10 pair (M13 stage 5): 10-bit, ST.2084 in BT.2020.
+const HDR10: TargetFormat = TargetFormat { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
+/// The scRGB pair: extended linear sRGB in half floats.
+const SCRGB: TargetFormat = TargetFormat { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT };
+
+fn offered(formats: &[vk::SurfaceFormatKHR], want: TargetFormat) -> bool {
+    formats.iter().any(|f| f.format == want.format && f.color_space == want.color_space)
+}
+
+/// The surface's pairs, compactly, for an error that names what it does
+/// offer.
+fn offered_summary(formats: &[vk::SurfaceFormatKHR]) -> String {
+    let mut spaces: Vec<String> = Vec::new();
+    for f in formats {
+        let name = format!("{:?}", f.color_space);
+        if !spaces.contains(&name) {
+            spaces.push(name);
+        }
+    }
+    let mut format_names: Vec<String> = Vec::new();
+    for f in formats {
+        let name = format!("{:?}", f.format);
+        if !format_names.contains(&name) {
+            format_names.push(name);
+        }
+    }
+    format!("{} pair(s): colour spaces [{}] over formats [{}]", formats.len(), spaces.join(", "), format_names.join(", "))
+}
+
+/// The static HDR10 metadata for an output gamut and display levels (what
+/// `VK_EXT_hdr_metadata` carries): the primaries with D65 white, the
+/// luminance range from 0 to the peak, and the content light levels. We do
+/// not measure a frame average, so `maxFALL` is the conservative peak (no
+/// frame can average above it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrMetadataValues {
+    /// R, G, B primaries (`x`, `y`).
+    pub primaries: [[f32; 2]; 3],
+    pub white: [f32; 2],
+    pub max_luminance: f32,
+    pub min_luminance: f32,
+    pub max_cll: f32,
+    pub max_fall: f32,
+}
+
+/// [`HdrMetadataValues`] for `levels` and the output `gamut`.
+pub fn hdr_metadata_values(levels: DisplayLevels, gamut: Gamut) -> HdrMetadataValues {
+    HdrMetadataValues {
+        primaries: gamut.primaries(),
+        white: [0.3127, 0.3290],
+        max_luminance: levels.peak,
+        min_luminance: 0.0,
+        max_cll: levels.peak,
+        max_fall: levels.peak,
+    }
+}
+
+/// Resolve a request against the surface's pairs. An explicit HDR mode that
+/// is not offered is an error naming what is; Auto falls back to scRGB and
+/// then SDR, and Off is always SDR.
+pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest, hdr_capable: bool) -> Result<TargetFormat> {
+    let sdr = || {
+        let chosen = choose_format(formats);
+        TargetFormat { format: chosen.format, color_space: chosen.color_space }
+    };
+    match request {
+        HdrRequest::Off => Ok(sdr()),
+        HdrRequest::Auto if !hdr_capable => Ok(sdr()),
+        HdrRequest::Auto if offered(formats, HDR10) => Ok(HDR10),
+        HdrRequest::Auto if offered(formats, SCRGB) => Ok(SCRGB),
+        HdrRequest::Auto => Ok(sdr()),
+        other @ (HdrRequest::Hdr10 | HdrRequest::ScRgb) => {
+            let want = if other == HdrRequest::Hdr10 { HDR10 } else { SCRGB };
+            if offered(formats, want) {
+                Ok(want)
+            } else {
+                bail!("--hdr {}: the surface does not offer {}; it offers {}", if other == HdrRequest::Hdr10 { "hdr10" } else { "scrgb" }, want.describe(), offered_summary(formats))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SwapchainOptions {
+    pub present: PresentPolicy,
+    pub hdr: HdrRequest,
+    /// SDL reports the window's display HDR-capable (Auto needs it).
+    pub hdr_capable: bool,
+}
+
 pub struct Swapchain {
     pub loader: ash::khr::swapchain::Device,
     pub surface: vk::SurfaceKHR,
@@ -41,6 +193,7 @@ pub struct Swapchain {
     /// Bumped on every (re)creation.
     pub generation: u64,
     policy: PresentPolicy,
+    options: SwapchainOptions,
 }
 
 /// Prefer an sRGB BGRA/RGBA format with the sRGB non-linear colour space,
@@ -64,7 +217,7 @@ fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
 }
 
 impl Swapchain {
-    pub fn new(gpu: &GpuDevice, surface: vk::SurfaceKHR, size: (u32, u32), policy: PresentPolicy) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, surface: vk::SurfaceKHR, size: (u32, u32), options: SwapchainOptions) -> Result<Self> {
         let loader = ash::khr::swapchain::Device::new(&gpu.instance.instance, &gpu.device);
         let mut swapchain = Self {
             loader,
@@ -77,7 +230,8 @@ impl Swapchain {
             present_mode: vk::PresentModeKHR::FIFO,
             render_finished: Vec::new(),
             generation: 0,
-            policy,
+            policy: options.present,
+            options,
         };
         swapchain.recreate(gpu, size)?;
         Ok(swapchain)
@@ -101,7 +255,8 @@ impl Swapchain {
             return Ok(false);
         }
         let formats = unsafe { surface_loader.get_physical_device_surface_formats(gpu.physical, self.surface) }?;
-        let format = choose_format(&formats);
+        let target = resolve_target(&formats, self.options.hdr, self.options.hdr_capable)?;
+        let format = vk::SurfaceFormatKHR { format: target.format, color_space: target.color_space };
         let modes = unsafe { surface_loader.get_physical_device_surface_present_modes(gpu.physical, self.surface) }?;
         let present_mode = match self.policy {
             PresentPolicy::Mailbox if modes.contains(&vk::PresentModeKHR::MAILBOX) => vk::PresentModeKHR::MAILBOX,
@@ -170,6 +325,18 @@ impl Swapchain {
         self.handle != vk::SwapchainKHR::null() && !self.images.is_empty()
     }
 
+    /// The pair this swapchain stores (its encoding).
+    pub fn target(&self) -> TargetFormat {
+        TargetFormat { format: self.format.format, color_space: self.format.color_space }
+    }
+
+    /// Ask for a pair next recreate. The swapchain keeps presenting in the
+    /// old one until the caller recreates it.
+    pub fn set_options(&mut self, options: SwapchainOptions) {
+        self.policy = options.present;
+        self.options = options;
+    }
+
     /// The requested present policy (not the mode the surface gave us).
     pub fn policy(&self) -> PresentPolicy {
         self.policy
@@ -178,6 +345,49 @@ impl Swapchain {
     /// Change the policy; the caller recreates the swapchain.
     pub fn set_policy(&mut self, policy: PresentPolicy) {
         self.policy = policy;
+        self.options.present = policy;
+    }
+
+    /// `VK_EXT_hdr_metadata`: tell the compositor what the swapchain's
+    /// signal means (M13 stage 5). The primaries are the output gamut's
+    /// (D65 white), the luminance range is from 0 to the peak, and the
+    /// content light levels are bounded by the peak (we do not measure a
+    /// frame average, so the conservative `maxFALL = peak` is stated).
+    pub fn set_hdr_metadata(&self, gpu: &GpuDevice, levels: DisplayLevels, gamut: Gamut) -> Result<()> {
+        let Some(loader) = &gpu.hdr_metadata else {
+            return Ok(());
+        };
+        if self.handle == vk::SwapchainKHR::null() {
+            return Ok(());
+        }
+        let values = hdr_metadata_values(levels, gamut);
+        let [red, green, blue] = values.primaries;
+        let xy = |p: [f32; 2]| vk::XYColorEXT { x: p[0], y: p[1] };
+        let metadata = vk::HdrMetadataEXT::default()
+            .display_primary_red(xy(red))
+            .display_primary_green(xy(green))
+            .display_primary_blue(xy(blue))
+            .white_point(xy(values.white))
+            .max_luminance(values.max_luminance)
+            .min_luminance(values.min_luminance)
+            .max_content_light_level(values.max_cll)
+            .max_frame_average_light_level(values.max_fall);
+        unsafe { loader.set_hdr_metadata(&[self.handle], &[metadata]) };
+        println!(
+            "[render] vkSetHdrMetadataEXT: {} | {} primaries R {:.5}/{:.5} G {:.5}/{:.5} B {:.5}/{:.5}, white 0.31270/0.32900 | max {:.1} nits, min 0, maxCLL {:.1}, maxFALL {:.1}",
+            self.target().describe(),
+            gamut.tag(),
+            red[0],
+            red[1],
+            green[0],
+            green[1],
+            blue[0],
+            blue[1],
+            values.max_luminance,
+            values.max_cll,
+            values.max_fall
+        );
+        Ok(())
     }
 
     /// Acquire the next image, waiting at most `ACQUIRE_TIMEOUT` so a stuck
@@ -224,5 +434,81 @@ pub fn color_range() -> vk::ImageSubresourceRange {
         level_count: 1,
         base_array_layer: 0,
         layer_count: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pairs() -> Vec<vk::SurfaceFormatKHR> {
+        vec![
+            vk::SurfaceFormatKHR { format: vk::Format::B8G8R8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR },
+            vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT },
+            vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT },
+        ]
+    }
+
+    #[test]
+    fn the_metadata_states_the_output_gamut_and_the_peak() {
+        let values = hdr_metadata_values(DisplayLevels { paper_white: 203.0, peak: 441.0 }, Gamut::P3);
+        // Display P3's primaries and D65 white.
+        assert_eq!(values.primaries, [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
+        assert_eq!(values.white, [0.3127, 0.3290]);
+        assert_eq!(values.max_luminance, 441.0);
+        assert_eq!(values.min_luminance, 0.0);
+        // A conservative bound: no frame average can exceed the peak.
+        assert_eq!(values.max_cll, 441.0);
+        assert_eq!(values.max_fall, 441.0);
+        // BT.2020 for scRGB's default output gamut.
+        assert_eq!(hdr_metadata_values(DisplayLevels::default(), Gamut::Bt2020).primaries[0], [0.708, 0.292]);
+    }
+
+    #[test]
+    fn the_three_targets_are_the_three_encodings() {
+        let sdr = TargetFormat { format: vk::Format::B8G8R8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
+        let hdr10 = TargetFormat { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
+        let scrgb = TargetFormat { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT };
+        assert_eq!(sdr.encoding(), OutputEncoding::Sdr);
+        assert_eq!(hdr10.encoding(), OutputEncoding::Hdr10Pq);
+        assert_eq!(scrgb.encoding(), OutputEncoding::ScRgb);
+        // The HDR target formats are the readback's (the same pass writes
+        // both); SDR's capture is RGBA where the swapchain may be BGRA.
+        assert_eq!(hdr10.format, OutputEncoding::Hdr10Pq.readback_format());
+        assert_eq!(scrgb.format, OutputEncoding::ScRgb.readback_format());
+        assert_eq!(sdr.format, vk::Format::B8G8R8A8_SRGB);
+    }
+
+    #[test]
+    fn auto_prefers_hdr10_then_scrgb_then_sdr() {
+        let all = pairs();
+        // HDR-capable and both offered: HDR10.
+        assert_eq!(resolve_target(&all, HdrRequest::Auto, true).unwrap(), HDR10);
+        // No HDR10 pair: scRGB.
+        let no_hdr10: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::HDR10_ST2084_EXT).collect();
+        assert_eq!(resolve_target(&no_hdr10, HdrRequest::Auto, true).unwrap(), SCRGB);
+        // Neither: SDR.
+        let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
+        assert_eq!(resolve_target(&sdr_only, HdrRequest::Auto, true).unwrap().encoding(), OutputEncoding::Sdr);
+        // Not HDR-capable: SDR even when the pairs are offered.
+        assert_eq!(resolve_target(&all, HdrRequest::Auto, false).unwrap().encoding(), OutputEncoding::Sdr);
+        // Off is always SDR.
+        assert_eq!(resolve_target(&all, HdrRequest::Off, true).unwrap().encoding(), OutputEncoding::Sdr);
+    }
+
+    #[test]
+    fn an_explicit_mode_is_offered_or_an_error() {
+        let all = pairs();
+        assert_eq!(resolve_target(&all, HdrRequest::Hdr10, false).unwrap(), HDR10);
+        assert_eq!(resolve_target(&all, HdrRequest::ScRgb, false).unwrap(), SCRGB);
+        // An explicit mode the surface does not offer names what it does,
+        // and never falls back silently.
+        let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
+        let error = resolve_target(&sdr_only, HdrRequest::Hdr10, true).unwrap_err().to_string();
+        assert!(error.contains("A2B10G10R10_UNORM_PACK32 + HDR10_ST2084_EXT"), "{error}");
+        assert!(error.contains("SRGB_NONLINEAR") && error.contains("B8G8R8A8_SRGB"), "{error}");
+        let no_scrgb: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT).collect();
+        let error = resolve_target(&no_scrgb, HdrRequest::ScRgb, true).unwrap_err();
+        assert!(error.to_string().contains("EXTENDED_SRGB_LINEAR_EXT"), "{error}");
     }
 }

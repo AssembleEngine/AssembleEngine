@@ -4,10 +4,11 @@
 //! the HDR output path is chosen from its report rather than guessed, because
 //! neither Vulkan nor SDL reports the display's primaries.
 //!
-//! The numbers here are the ones the output pass needs later: SDL's SDR white
-//! level is in scRGB units (1.0 = 80 nits) and its headroom is a multiple of
-//! SDR white, so paper white is `sdr_white_level × 80` nits and peak is
-//! `paper_white × headroom`.
+//! The numbers here are the ones the client uses for the swapchain (M13
+//! stage 5): SDL's SDR white level is in scRGB units (1.0 = 80 nits) and its
+//! headroom is a multiple of SDR white, so the display's peak is
+//! `sdr_white_level × 80 × headroom` nits. The encode's paper white is the
+//! WSI's own reference (203 nits here), not that SDR white.
 
 use crate::device::GpuInstance;
 use crate::window::{SdlWindow, SurfaceSource as _};
@@ -85,7 +86,7 @@ pub fn hdr_state(window: &SdlWindow) -> HdrState {
 /// Pump events until the window's HDR state looks settled (or the timeout
 /// passes) and return it. A window that is not HDR still reports SDR white
 /// once the compositor has described its surface, hence the wait either way.
-fn settled_hdr_state(window: &mut SdlWindow) -> HdrState {
+pub fn settled_hdr_state(window: &mut SdlWindow) -> HdrState {
     let started = Instant::now();
     let mut state = hdr_state(window);
     while started.elapsed() < HDR_STATE_TIMEOUT && state.sdr_white_level == 0.0 {

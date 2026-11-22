@@ -34,6 +34,17 @@ use crate::pipeline::spirv;
 use anyhow::Result;
 use ash::vk;
 
+/// The paper white the WSI's HDR10 description implies (M13 stage 5): the
+/// NVIDIA Wayland WSI sends `st2084_pq` with no `set_luminances`, so the
+/// protocol's default reference white for PQ, 203 nits, applies.
+pub const HDR10_REFERENCE_NITS: f32 = 203.0;
+
+/// The paper white the WSI's scRGB description carries (M13 stage 5): the
+/// NVIDIA Wayland WSI sends `set_luminances(0, 80, 203)` — 1.0 in the
+/// signal is 80 nits, and the reference white is 203 nits, so paper white
+/// is 203 (`sc_rgb_scale` 2.5375). The protocol's default would be 80.
+pub const SCRGB_REFERENCE_NITS: f32 = 203.0;
+
 /// The display intermediate: linear light in paper-white units, sampled by
 /// the encode pass (and, with the module ABI, by the grade and the UI).
 pub const DISPLAY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -109,9 +120,10 @@ impl OutputEncoding {
 /// Paper white is the display-linear 1.0 (`post.tonemap`'s output, and the
 /// SDR white); the peak is the brightest the display shows, so the tone
 /// curve's peak anchor displays at `peak / paper_white`. The defaults are
-/// PQ's protocol reference (203 nits) and a 1000-nit peak; the client takes
-/// them from SDL (paper white = SDR white level × 80, peak = paper white ×
-/// headroom) in M13 stage 5, once the swapchain's own reference is measured.
+/// PQ's protocol reference (203 nits) and a 1000-nit peak; the client uses
+/// the WSI's own reference (203 nits for PQ here, and for scRGB) and SDL's
+/// display peak (441 nits here), with `--paper-white`/`--peak` overrides
+/// (M13 stage 5).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplayLevels {
     /// Paper white (diffuse white) in nits.

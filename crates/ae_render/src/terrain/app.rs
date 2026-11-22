@@ -203,8 +203,9 @@ pub enum PassWork {
 /// The render module driving the graph, with its wired declaration.
 struct ModuleState {
     module: RenderModule,
-    /// Target the declaration is for.
-    declared_for: (vk::Extent2D, vk::Format),
+    /// Target the declaration is for: size and the (format, colour space)
+    /// pair (a colour-space change redeclares too).
+    declared_for: (vk::Extent2D, vk::Format, vk::ColorSpaceKHR),
     graph: FrameGraph<ScenePass>,
     resources: ResourceMap,
     /// By payload: the fullscreen programs and where their uniform blocks
@@ -234,6 +235,56 @@ pub struct ModuleStatus {
     pub active: bool,
     /// Every error so far, oldest first (failed reloads, traps).
     pub errors: Vec<String>,
+}
+
+/// The window's HDR settings, kept up to date by the main thread (M13 stage
+/// 5): the user's overrides and SDL's headroom. The reference and the
+/// derived peak come from the encoding the swapchain's colour space selects.
+#[derive(Clone, Copy, Debug)]
+pub struct HdrSettings {
+    /// `--paper-white` (nits); `None` is the encoding's reference.
+    pub paper_white: Option<f32>,
+    /// `--peak` (nits of the signal, the same frame as the paper white);
+    /// `None` is the paper white times SDL's headroom.
+    pub peak: Option<f32>,
+    /// SDL's headroom above SDR white (1.0 when not HDR).
+    pub headroom: f32,
+    /// SDL's peak for the display in the panel's nits (`SDR white ×
+    /// headroom`, the compositor's advertised maximum; 0 when SDL reports
+    /// none). For the log only: the signal's peak is relative to the
+    /// signal's reference, see [`Self::levels`].
+    pub display_peak: f32,
+}
+
+impl Default for HdrSettings {
+    fn default() -> Self {
+        Self { paper_white: None, peak: None, headroom: 1.0, display_peak: 0.0 }
+    }
+}
+
+impl HdrSettings {
+    /// The levels for `encoding` (the swapchain's), in the signal's nits.
+    /// The paper white is the WSI's measured reference (203 nits for both PQ
+    /// and scRGB here) unless overridden; the peak is the paper white times
+    /// SDL's headroom.
+    pub fn levels(&self, encoding: OutputEncoding) -> DisplayLevels {
+        let reference = match encoding {
+            OutputEncoding::Hdr10Pq => crate::encode::HDR10_REFERENCE_NITS,
+            OutputEncoding::ScRgb => crate::encode::SCRGB_REFERENCE_NITS,
+            OutputEncoding::Sdr => crate::encode::SCRGB_REFERENCE_NITS,
+        };
+        let paper_white = self.paper_white.unwrap_or(reference).max(1.0);
+        // The compositor maps the signal's reference white onto its own
+        // (KWin 6.8's `ColorDescription::toOther` scales by
+        // `other.referenceLuminance() / referenceLuminance()`): signal 203
+        // shows at the desktop's 248 here. So the signal's peak is the
+        // headroom over the signal's paper white (203 × 1.778 = 361, which
+        // shows at 441), not SDL's absolute 441: that would land at 539 and
+        // KWin's perceptual tonemapper would compress it again on top of
+        // the curve's shoulder.
+        let peak = self.peak.unwrap_or(paper_white * self.headroom).max(paper_white);
+        DisplayLevels { paper_white, peak }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +341,9 @@ pub struct TerrainApp {
     encoding: OutputEncoding,
     /// The display's paper white and peak, in nits (HDR only).
     levels: DisplayLevels,
+    /// The window's HDR settings (the client keeps them current); `None`
+    /// keeps [`Self::with_display`]'s levels.
+    hdr: Option<Arc<Mutex<HdrSettings>>>,
     /// The scene's working space (M13 stage 3): BT.709 unless set.
     working: WorkingSpace,
     /// The output gamut; `None` is the encoding's default (P3 for HDR10).
@@ -310,6 +364,9 @@ pub struct TerrainApp {
     unculled_lights: bool,
     /// The output's format (the swapchain's or the readback image's).
     output_format: vk::Format,
+    /// The backbuffer's colour space (the graph's redeclare key; an
+    /// offscreen app has none, so `SRGB_NONLINEAR`).
+    output_space: vk::ColorSpaceKHR,
     decals: Option<DecalsSetup>,
     /// The live decals (kept across renderer re-creation).
     decal_set: Option<DecalSet>,
@@ -373,6 +430,7 @@ impl TerrainApp {
             tone,
             encoding: OutputEncoding::Sdr,
             levels: DisplayLevels::default(),
+            hdr: None,
             working: WorkingSpace::Bt709,
             display_gamut: None,
             encode: None,
@@ -382,6 +440,7 @@ impl TerrainApp {
             light_stats: Arc::default(),
             unculled_lights: false,
             output_format: vk::Format::UNDEFINED,
+            output_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
             decals: None,
             decal_set: None,
             decals_written: Vec::new(),
@@ -450,12 +509,21 @@ impl TerrainApp {
 
     /// The output's encoding and the display's levels (M13): SDR (the
     /// default) keeps the tonemap writing the sRGB target; HDR adds the
-    /// display intermediate and `post.encode`. An HDR app reads back (the
-    /// swapchain needs the client, M13 stage 5).
+    /// display intermediate and `post.encode`. An offscreen app uses this
+    /// encoding directly; a present-path app derives it from the swapchain's
+    /// colour space and takes levels from [`Self::with_hdr`] (M13 stage 5).
     pub fn with_display(mut self, encoding: OutputEncoding, levels: DisplayLevels) -> Self {
         assert!(levels.paper_white > 0.0 && levels.peak >= levels.paper_white, "display levels: paper white {:.3} nits, peak {:.3}", levels.paper_white, levels.peak);
         self.encoding = encoding;
         self.levels = levels;
+        self
+    }
+
+    /// Take the display's levels and HDR mode from the client (M13 stage
+    /// 5): a present-path app derives its encoding from the swapchain's
+    /// colour space and its levels from these settings.
+    pub fn with_hdr(mut self, settings: Arc<Mutex<HdrSettings>>) -> Self {
+        self.hdr = Some(settings);
         self
     }
 
@@ -478,6 +546,16 @@ impl TerrainApp {
     /// The output gamut in effect.
     pub fn gamut(&self) -> Gamut {
         self.display_gamut.unwrap_or_else(|| self.encoding.default_gamut())
+    }
+
+    /// The backbuffer's colour space (the module redeclare key).
+    fn output_format_space(&self) -> vk::ColorSpaceKHR {
+        self.output_space
+    }
+
+    /// The window's HDR settings (defaults when the client gave none).
+    fn hdr_settings(&self) -> HdrSettings {
+        self.hdr.as_ref().map(|h| *h.lock().unwrap_or_else(|p| p.into_inner())).unwrap_or_default()
     }
 
     /// Shade by the sun's shadows: the hills' over the terrain, the units
@@ -708,7 +786,7 @@ pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32
 impl RenderApp for TerrainApp {
     type Pass = ScenePass;
 
-    fn create(&mut self, gpu: &Arc<GpuDevice>, format: vk::Format, frames_in_flight: usize) -> Result<()> {
+    fn create(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()> {
         if let Some(mut old) = self.tonemap.take() {
             old.destroy(gpu);
         }
@@ -744,9 +822,18 @@ impl RenderApp for TerrainApp {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
-        anyhow::ensure!(!self.encoding.uses_display() || self.output == TerrainOutput::Readback, "an HDR output needs the swapchain's pair (M13 stage 5); render to readback instead");
-        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { format };
+        // The client's present path follows the swapchain's colour space
+        // (M13 stage 5): HDR10, scRGB or SDR. An offscreen app keeps the
+        // encoding it was given (the capture path stays SDR).
+        if self.output == TerrainOutput::Present {
+            self.encoding = target.target().encoding();
+        }
+        if self.hdr.is_some() && self.encoding.uses_display() {
+            self.levels = self.hdr_settings().levels(self.encoding);
+        }
+        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { target.format };
         self.output_format = output;
+        self.output_space = if self.output == TerrainOutput::Present { target.color_space } else { vk::ColorSpaceKHR::SRGB_NONLINEAR };
         // In HDR the tonemap writes the display intermediate, paper-white
         // units; `post.encode` maps it to the output.
         let tonemap_out = if self.encoding.uses_display() { crate::encode::DISPLAY_FORMAT } else { output };
@@ -792,6 +879,10 @@ impl RenderApp for TerrainApp {
         Ok(())
     }
 
+    fn hdr_metadata(&self) -> Option<(DisplayLevels, Gamut)> {
+        self.encoding.uses_display().then(|| (self.levels, self.gamut()))
+    }
+
     fn declare(&mut self, target: TargetInfo) -> Result<(FrameGraph<ScenePass>, Option<ResourceId>)> {
         self.extent = target.extent;
         let env = self.env(target)?;
@@ -812,13 +903,13 @@ impl RenderApp for TerrainApp {
         }
         let (graph, resources, glow) = match self.module.take() {
             Some(mut state) => {
-                if state.declared_for != (env.extent, env.color_format) {
+                if state.declared_for != (env.extent, env.color_format, self.output_format_space()) {
                     let declared = self.declare_module(&mut state.module, &env);
                     match declared {
                         Ok(d) => {
                             let old = std::mem::replace(&mut state.programs, d.programs);
                             self.retire(old);
-                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, (env.extent, env.color_format));
+                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, (env.extent, env.color_format, self.output_format_space()));
                         }
                         Err(error) => {
                             self.module = Some(state);
@@ -847,6 +938,9 @@ impl RenderApp for TerrainApp {
 
     fn prepare(&mut self, slot: usize) -> Result<()> {
         self.apply_edits()?;
+        if self.hdr.is_some() && self.encoding.uses_display() {
+            self.levels = self.hdr_settings().levels(self.encoding);
+        }
         let view = *self.view.lock().unwrap_or_else(|p| p.into_inner());
         // Freeze the clocks at the frame the pause begins; afterwards the
         // wall clock skips the paused interval, so resuming neither jumps
@@ -1564,7 +1658,7 @@ impl TerrainApp {
         let d = self.declare_module(&mut module, env)?;
         Ok(ModuleState {
             module,
-            declared_for: (env.extent, env.color_format),
+            declared_for: (env.extent, env.color_format, self.output_format_space()),
             graph: d.graph,
             resources: d.resources,
             programs: d.programs,
@@ -1814,5 +1908,32 @@ impl TerrainApp {
             plan_version: graph.plan_version,
         };
         Ok((graph, Wiring { resources, glow }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_peak_is_the_headroom_over_the_signal_reference() {
+        // The compositor maps the signal's 203-nit reference onto its own
+        // 248, so the signal's peak is 203 × SDL's headroom (it shows at the
+        // panel's 441), not the panel's absolute 441 (which would show at
+        // 539 and be tone-mapped again).
+        let hdr = HdrSettings { paper_white: None, peak: None, headroom: 441.0 / 248.0, display_peak: 441.0 };
+        for encoding in [OutputEncoding::Hdr10Pq, OutputEncoding::ScRgb] {
+            let levels = hdr.levels(encoding);
+            assert_eq!(levels.paper_white, 203.0, "{encoding:?}");
+            assert!((levels.peak - 203.0 * 441.0 / 248.0).abs() < 1e-3, "{encoding:?}: {levels:?}");
+            assert!((levels.headroom() - 441.0 / 248.0).abs() < 1e-5);
+        }
+        // KDE's SDR mode (SDR white 155, peak 200): the headroom is above 1,
+        // so no floor at the paper white is needed.
+        let sdr_mode = HdrSettings { headroom: 200.0 / 155.0, display_peak: 200.0, ..hdr };
+        assert!((sdr_mode.levels(OutputEncoding::Hdr10Pq).peak - 203.0 * 200.0 / 155.0).abs() < 1e-3);
+        // Overrides are in the signal's nits and taken as given.
+        let forced = HdrSettings { paper_white: Some(100.0), peak: Some(400.0), ..hdr };
+        assert_eq!(forced.levels(OutputEncoding::Hdr10Pq), DisplayLevels { paper_white: 100.0, peak: 400.0 });
     }
 }

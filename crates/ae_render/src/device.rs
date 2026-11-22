@@ -130,10 +130,21 @@ impl GpuInstance {
         let has_debug_utils = available
             .iter()
             .any(|ext| ext.extension_name_as_c_str().ok() == Some(ash::ext::debug_utils::NAME));
+        // HDR swapchain colour spaces (PQ, extended linear) require this
+        // instance extension (M13 stage 5). It only widens the offered
+        // pairs; SDR creates the same swapchain as before.
+        let has_swapchain_colorspace = available
+            .iter()
+            .any(|ext| ext.extension_name_as_c_str().ok() == Some(ash::ext::swapchain_colorspace::NAME));
 
         let mut extension_names: Vec<*const c_char> = extensions.to_vec();
         if has_debug_utils {
             extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
+        }
+        // Only with a surface: the extension requires VK_KHR_surface.
+        let has_surface = extension_names.iter().any(|name| unsafe { CStr::from_ptr(*name) } == ash::khr::surface::NAME);
+        if has_swapchain_colorspace && has_surface && !extension_names.iter().any(|name| unsafe { CStr::from_ptr(*name) } == ash::ext::swapchain_colorspace::NAME) {
+            extension_names.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
         }
         if sync_validation {
             extension_names.push(ash::ext::validation_features::NAME.as_ptr());
@@ -222,6 +233,8 @@ pub struct GpuDevice {
     pub queue: vk::Queue,
     pub allocator: Mutex<Option<Allocator>>,
     pub debug_utils: Option<ash::ext::debug_utils::Device>,
+    /// `VK_EXT_hdr_metadata` was enabled (the swapchain sets its metadata).
+    pub hdr_metadata: Option<ash::ext::hdr_metadata::Device>,
     /// Nanoseconds per timestamp tick (0 if timestamps are unsupported).
     pub timestamp_period: f32,
     pub device_name: String,
@@ -345,11 +358,19 @@ impl GpuDevice {
                 && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
                 && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::BALLOT)
         };
-        let extensions: Vec<*const c_char> = if surface.is_some() {
+        let has_hdr_metadata = unsafe { vk_instance.enumerate_device_extension_properties(physical) }?
+            .iter()
+            .any(|ext| ext.extension_name_as_c_str().ok() == Some(ash::ext::hdr_metadata::NAME));
+        let mut extensions: Vec<*const c_char> = if surface.is_some() {
             vec![ash::khr::swapchain::NAME.as_ptr()]
         } else {
             Vec::new()
         };
+        // The metadata extension requires VK_KHR_swapchain, so only with a
+        // surface (a headless device never sets metadata).
+        if has_hdr_metadata && surface.is_some() {
+            extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
+        }
         // `discard` compiles to OpDemoteToHelperInvocation for Vulkan 1.3
         // targets (a required 1.3 feature, but it must be enabled).
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
@@ -397,6 +418,7 @@ impl GpuDevice {
                 return Err(err);
             }
         };
+        let hdr_metadata = (has_hdr_metadata && surface.is_some()).then(|| ash::ext::hdr_metadata::Device::new(&instance.instance, &device));
         let debug_utils = instance
             .debug_utils_enabled
             .then(|| ash::ext::debug_utils::Device::new(vk_instance, &device));
@@ -413,6 +435,7 @@ impl GpuDevice {
             queue,
             allocator: Mutex::new(Some(allocator)),
             debug_utils,
+            hdr_metadata,
             timestamp_period,
             device_name,
             fill_mode_non_solid,

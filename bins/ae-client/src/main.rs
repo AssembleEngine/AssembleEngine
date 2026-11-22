@@ -65,11 +65,30 @@
 //! G fog, C freeze the LOD, P print the camera, V v-sync (on by default;
 //! `--mailbox` starts it off), N toggle render module flag bit 0, M tileset,
 //! B blend weights, O water surface, H shadows, Z bloom, X explosion,
-//! Esc quits.
+//! U HDR/SDR, Esc quits.
+//!
+//! `--hdr off|auto|hdr10|scrgb` picks the swapchain's encoding (M13 stage 5;
+//! auto by default: HDR10 when the surface offers the pair and SDL reports
+//! the window HDR-capable, else scRGB, else SDR). An explicit `hdr10` or
+//! `scrgb` the surface does not offer is an error naming what it does; it
+//! never falls back silently. `--paper-white` and `--peak` (nits) override
+//! the levels, both in the signal's nits; the defaults are the reference the
+//! Wayland WSI's image description carries (203 nits for PQ, and
+//! `set_luminances(0, 80, 203)` for scRGB) and that reference times SDL's
+//! headroom (203 × 1.778 = 361 here). The compositor maps the signal's
+//! reference onto its own (248 here), so 361 shows at the panel's 441. The swapchain is
+//! recreated on `SDL_EVENT_WINDOW_HDR_STATE_CHANGED` and display changes,
+//! and `vkSetHdrMetadataEXT` is called after every recreate. `AE_HDR_TOGGLE_SECONDS=N`
+//! flips HDR and SDR every N seconds through the `U` key's path (a test
+//! hook: a Wayland session has no synthetic keyboard). A render module
+//! has no HDR support until M13 stage 6: with `--render-module` the client
+//! falls back to SDR and says so once.
 //!
 //! `--capture` renders 1280x720 offscreen (no window; 60 frames so the
 //! subdivision settles) and writes a binary PPM; with units it first runs
-//! `--ticks` sim ticks (default 300) and shows that tick.
+//! `--ticks` sim ticks (default 300) and shows that tick. It always uses the
+//! SDR readback: a capture shows neither the HDR encoding nor the display's
+//! levels.
 //!
 //! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
 //! (see `bench.rs`; `--bench list` names them).
@@ -115,13 +134,13 @@ use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_services::nav::{GroundFeed, Map};
 use ae_render::demo::DemoApp;
 use ae_render::particles::{ParticleFeed, ParticlesSetup};
-use ae_render::swapchain::PresentPolicy;
-use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view};
+use ae_render::swapchain::{HdrRequest, PresentPolicy};
+use ae_render::terrain::app::{HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view};
 use ae_render::terrain::edit::TerrainEditor;
 use ae_render::terrain::tileset::{self, Tileset};
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
-use ae_render::thread::{GpuRenderConfig, GpuRenderThread};
+use ae_render::thread::{GpuRenderConfig, GpuRenderThread, HdrControl};
 use ae_render::units::{UnitFeed, UnitsSetup};
 use ae_render::window::{SdlWindow, keys};
 use anyhow::{Context, Result, bail};
@@ -194,6 +213,12 @@ struct Options {
     /// The output gamut (M13 stage 3); `None` is the encoding's default
     /// (P3 for HDR10). Only an HDR output maps a gamut.
     display_gamut: Option<ae_render::colorspace::Gamut>,
+    /// The swapchain's encoding (`--hdr off|auto|hdr10|scrgb`, M13 stage 5).
+    hdr: HdrRequest,
+    /// `--paper-white` and `--peak` (nits); `None` takes the encoding's
+    /// measured reference and SDL's headroom.
+    paper_white: Option<f32>,
+    peak: Option<f32>,
     /// `--bench`: scenes to measure instead of opening a window.
     bench: Option<bench::BenchOptions>,
     /// Threads recording render passes (1: the render thread alone).
@@ -219,11 +244,11 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false, working_space: Default::default(), display_gamut: None }
+        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false, working_space: Default::default(), display_gamut: None, hdr: HdrRequest::Auto, paper_white: None, peak: None }
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|lottes] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|lottes] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
 
 fn parse() -> Result<Options> {
@@ -258,6 +283,17 @@ fn parse() -> Result<Options> {
             "--probe-display" => o.probe_display = true,
             "--working-space" => o.working_space = value("--working-space", &mut args)?.parse().context("--working-space")?,
             "--display-gamut" => o.display_gamut = Some(value("--display-gamut", &mut args)?.parse().context("--display-gamut")?),
+            "--hdr" => {
+                o.hdr = match value("--hdr", &mut args)?.as_str() {
+                    "off" => HdrRequest::Off,
+                    "auto" => HdrRequest::Auto,
+                    "hdr10" => HdrRequest::Hdr10,
+                    "scrgb" => HdrRequest::ScRgb,
+                    other => bail!("--hdr {other:?}: expected off, auto, hdr10 or scrgb"),
+                }
+            }
+            "--paper-white" => o.paper_white = Some(value("--paper-white", &mut args)?.parse().context("--paper-white")?),
+            "--peak" => o.peak = Some(value("--peak", &mut args)?.parse().context("--peak")?),
             "--capture" => o.capture = Some(value("--capture", &mut args)?),
             "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
             "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
@@ -805,7 +841,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
     }
     let extent = ash::vk::Extent2D { width: 1280, height: 720 };
     app.create_offscreen(&gpu, extent)?;
-    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB };
+    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB, color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let executor = run_headless(&gpu, &mut app, target, o.capture_frames as usize, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, record_threads: o.record_threads, ..ExecutorConfig::default() })?;
     let pixels = app.readback().context("no readback")?;
     let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
@@ -858,7 +894,34 @@ fn run(o: Options) -> Result<ExitCode> {
         return capture(source.context("--capture needs a terrain map")?, nav, &o, path);
     }
     let mut window = SdlWindow::new("AssembleEngine", 1280, 720)?;
-    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false, record_threads: o.record_threads };
+    // SDL owns the window's HDR state and delivers it once the window is
+    // mapped; read it before the swapchain is created (M13 stage 5).
+    let display_state = ae_render::display::settled_hdr_state(&mut window);
+    let mut hdr_capable = display_state.enabled && display_state.headroom > 1.0 && display_state.sdr_white_level > 0.0;
+    let mut headroom = if hdr_capable { display_state.headroom } else { 1.0 };
+    let mut display_peak = if hdr_capable { display_state.peak_nits() } else { 0.0 };
+    let mut hdr_request = o.hdr;
+    // A module graph has no HDR support until stage 6: HDR stays off for
+    // the whole run, including the toggle key.
+    let module_blocks_hdr = o.render_module.is_some();
+    if module_blocks_hdr && hdr_request != HdrRequest::Off {
+        // M13 stage 6 adds HDR to the module ABI; until then a module graph
+        // samples and writes an SDR target (and check_graph would reject an
+        // HDR one), so fall back once, clearly.
+        eprintln!("--render-module {} with --hdr {}: render modules have no HDR support until M13 stage 6; falling back to SDR", o.render_module.as_deref().unwrap_or(""), match hdr_request { HdrRequest::Auto => "auto", HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb", HdrRequest::Off => "off" });
+        hdr_request = HdrRequest::Off;
+    }
+    let hdr_settings = Arc::new(Mutex::new(HdrSettings { paper_white: o.paper_white, peak: o.peak, headroom, display_peak }));
+    println!(
+        "[hdr] --hdr {} | SDL HDR {} | SDR white {:.1} nits | headroom {:.3}x | paper white {} | peak {}",
+        match hdr_request { HdrRequest::Off => "off", HdrRequest::Auto => "auto", HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb" },
+        if display_state.enabled { "enabled" } else { "off" },
+        display_state.paper_white_nits(),
+        headroom,
+        o.paper_white.map(|n| format!("{n:.1} nits (--paper-white)")).unwrap_or_else(|| "the WSI's reference".into()),
+        o.peak.map(|n| format!("{n:.1} nits (--peak)")).unwrap_or_else(|| format!("paper white × headroom (the panel's {display_peak:.1} nits)")),
+    );
+    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false, record_threads: o.record_threads, hdr: HdrControl { request: hdr_request, capable: hdr_capable, headroom } };
     type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
@@ -873,6 +936,7 @@ fn run(o: Options) -> Result<ExitCode> {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
             let (mut app, feed) = effects(with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o), &o);
+            app = app.with_hdr(hdr_settings.clone());
             effects_feed = feed;
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
@@ -911,6 +975,13 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut step = 0;
     let mut last_boom = Instant::now();
     let mut module_errors = 0;
+    // A test hook for the runtime HDR toggle (the U key path), since a
+    // Wayland session has no synthetic keyboard here: flip every N seconds.
+    let hdr_toggle_seconds: Option<f32> = std::env::var("AE_HDR_TOGGLE_SECONDS").ok().and_then(|s| s.parse().ok());
+    let mut next_hdr_toggle = 0.0f32;
+    // SDL's HDR properties arrive with the compositor's surface description
+    // after the event: read them until the SDR white level is there.
+    let mut hdr_settle: Option<Instant> = None;
     loop {
         let events = window.pump();
         if events.pressed & keys::PAUSE != 0 {
@@ -919,6 +990,44 @@ fn run(o: Options) -> Result<ExitCode> {
                 view.lock().unwrap_or_else(|p| p.into_inner()).paused = paused;
             }
             println!("simulation {}", if paused { "paused" } else { "running" });
+        }
+        let hdr_toggle_due = hdr_toggle_seconds.is_some_and(|_| started.elapsed().as_secs_f32() >= next_hdr_toggle);
+        if hdr_toggle_due {
+            next_hdr_toggle += hdr_toggle_seconds.unwrap_or(1.0);
+        }
+        if (events.pressed & keys::U != 0 || hdr_toggle_due) && module_blocks_hdr {
+            println!("HDR stays off: render modules have no HDR support until M13 stage 6");
+        } else if events.pressed & keys::U != 0 || hdr_toggle_due {
+            hdr_request = if hdr_request == HdrRequest::Off { o.hdr.toggled_on() } else { HdrRequest::Off };
+            println!("HDR {}", if hdr_request == HdrRequest::Off { "off (SDR)" } else { match hdr_request { HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb", _ => "auto" } });
+            thread.set_hdr(HdrControl { request: hdr_request, capable: hdr_capable, headroom });
+        }
+        if events.hdr_changed || events.display_changed {
+            // The compositor's HDR switch or a display change: re-read SDL
+            // and recreate the swapchain for the new state.
+            hdr_settle = Some(Instant::now());
+        }
+        if let Some(since) = hdr_settle {
+            let state = ae_render::display::hdr_state(&window);
+            if state.sdr_white_level > 0.0 || since.elapsed().as_millis() > 800 {
+                hdr_capable = state.enabled && state.headroom > 1.0 && state.sdr_white_level > 0.0;
+                headroom = if hdr_capable { state.headroom } else { 1.0 };
+                display_peak = if hdr_capable { state.peak_nits() } else { 0.0 };
+                if let Ok(mut settings) = hdr_settings.lock() {
+                    settings.headroom = headroom;
+                    settings.display_peak = display_peak;
+                }
+                println!(
+                    "[hdr] window state changed: HDR {} | SDR white {:.1} nits | headroom {:.3}x | peak {:.1} nits | {}",
+                    if state.enabled { "enabled" } else { "off" },
+                    state.paper_white_nits(),
+                    headroom,
+                    display_peak,
+                    if hdr_capable { "capable" } else { "SDR only" }
+                );
+                thread.set_hdr(HdrControl { request: hdr_request, capable: hdr_capable, headroom });
+                hdr_settle = None;
+            }
         }
         if events.pressed & keys::V != 0 {
             vsync = !vsync;
