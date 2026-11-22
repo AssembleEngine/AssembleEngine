@@ -16,7 +16,8 @@
 //! * Validation reports nothing.
 //!
 //! Ignored by default: needs a Vulkan 1.3 GPU. Run with
-//! `cargo test -p ae-client -- --ignored --test-threads=1`.
+//! `cargo test -p ae-client -- --ignored --test-threads=1`; with
+//! `AE_TEST_CAPTURE_DIR=<dir>` the frames it keeps are saved there as PPM.
 
 use super::*;
 use ae_render::particles::{EFFECT_NAMES, ParticleFeed, ParticlesSetup};
@@ -232,6 +233,22 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     })
 }
 
+/// With `AE_TEST_CAPTURE_DIR` set, save the scene's kept frames there as
+/// PPM (`duel-<name>-<tick>.ppm`), as the renderer's GPU tests do.
+fn save_frames(scene: &Scene, name: &str) -> Result<()> {
+    let Some(dir) = std::env::var_os("AE_TEST_CAPTURE_DIR") else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir)?;
+    let (w, h) = scene.extent;
+    for (tick, rgba) in &scene.frames {
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        ppm.extend(rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]));
+        std::fs::write(std::path::Path::new(&dir).join(format!("duel-{name}-{tick}.ppm")), ppm)?;
+    }
+    Ok(())
+}
+
 fn project(scene: &Scene, p: Vec3) -> (f32, f32) {
     let clip = scene.view_proj * p.extend(1.0);
     (
@@ -288,6 +305,7 @@ fn the_duel_death_sequence_is_drawn_where_the_sim_puts_it() -> Result<()> {
     // walks backwards.
     for backwards in [false, true] {
         let scene = scene(true, backwards)?;
+        save_frames(&scene, if backwards { "backwards" } else { "forwards" })?;
         assert_eq!(scene.validation, (0, 0), "validation messages");
         assert!(!scene.flashes.is_empty(), "no flash was drawn");
         let mut checked = 0;
@@ -317,6 +335,7 @@ fn the_duel_death_sequence_is_drawn_where_the_sim_puts_it() -> Result<()> {
 
     // The corpse holds still, and its despawn leaves nothing: particles off.
     let scene = scene(false, false)?;
+    save_frames(&scene, "death")?;
     assert_eq!(scene.validation, (0, 0), "validation messages");
     let smoke = scene.smoke.context("no smoke effect")?;
     let w = scene.extent.0 as usize;

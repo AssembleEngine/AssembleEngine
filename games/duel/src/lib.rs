@@ -28,8 +28,9 @@
 //! * `firer` (after the service): when aimed, fires 3 shots
 //!   [`SHOT_EVERY`] ticks apart, emitting a `"flash"` at the head, a [`Hit`]
 //!   on the target, and posting `FIRED`.
-//! * `damage`: each [`Hit`] takes one of B's [`HP`], posting `HIT`; the
-//!   last one kills it (`life::kill`).
+//! * `damage`: each [`Hit`] takes one of B's [`HP`], sets off a small
+//!   impact (fire and sparks) at B's chest and posts `HIT`; the last one
+//!   kills it (`life::kill`).
 //! * `host(spatial)`: the index, without dying units.
 //! * `check` (from the tick after the kill, while the target is dying): a
 //!   spatial query at the target's place finds A, and not the dying B.
@@ -91,6 +92,18 @@ pub const STAGGER: u64 = 2;
 pub const FLASH_OFFSET: [f32; 3] = [0.3, 0.0, 0.0];
 pub const FLASH: &str = "flash";
 pub const SMOKE: &str = "smoke";
+pub const FIRE: &str = "fire";
+pub const SPARKS: &str = "sparks";
+/// Effect scales for a Fox-sized unit (about 2 m long). The catalogue's
+/// effects are sized for a small vehicle's explosion at scale 1 (a flash 14
+/// to 26 m across, smoke up to 30 m).
+/// The muzzle flash: about 0.7 to 1.3 m across.
+pub const FLASH_SCALE: f32 = 0.05;
+/// The impact on B, at its chest: fire about 0.5 to 1 m, and sparks.
+pub const IMPACT_FIRE_SCALE: f32 = 0.1;
+pub const IMPACT_SPARKS_SCALE: f32 = 0.15;
+/// B's death smoke: about 1 to 4.5 m.
+pub const SMOKE_SCALE: f32 = 0.15;
 
 const DT: f32 = 1.0 / 30.0;
 
@@ -411,7 +424,7 @@ fn firer(run: &Run) {
             &orientations[i],
             name_id(FLASH),
             2,
-            1.0,
+            FLASH_SCALE,
         );
         let target = pairs[i].target;
         if let Some(h) = run.get_of::<Health>(target) {
@@ -432,17 +445,26 @@ fn firer(run: &Run) {
     }
 }
 
-/// Hits on B: one hit point each, `HIT` posted; the last kills it.
+/// Hits on B: one hit point each, an impact (fire and sparks) at its chest,
+/// `HIT` posted; the last kills it.
 #[system(
     serial,
-    read(B),
+    read(B, Body, Anim, Orientation),
     write(Health, Callins),
     get(Dying),
     reads_events(Hit),
+    emits(Effect),
     without(Dying)
 )]
 fn damage(run: &Run) {
-    let (health, posts, ids) = (run.write::<Health>(), run.write::<Callins>(), run.entities());
+    let (bodies, anims, orientations, health, posts, ids) = (
+        run.read::<Body>(),
+        run.read::<Anim>(),
+        run.read::<Orientation>(),
+        run.write::<Health>(),
+        run.write::<Callins>(),
+        run.entities(),
+    );
     let mut hits: Vec<u64> = run.events::<Hit>().iter().map(|h| h.target.0).collect();
     hits.sort_unstable();
     for i in run.rows() {
@@ -451,6 +473,20 @@ fn damage(run: &Run) {
         let n = hits[from..].iter().take_while(|&&h| h == e).count() as u32;
         if n == 0 {
             continue;
+        }
+        let chest = names().spine2;
+        for (effect, count, scale) in [(FIRE, 6, IMPACT_FIRE_SCALE), (SPARKS, 12, IMPACT_SPARKS_SCALE)] {
+            anims[i].effect_at(
+                ids[i],
+                run.tick(),
+                chest,
+                [0.0; 3],
+                &bodies[i],
+                &orientations[i],
+                name_id(effect),
+                count * n,
+                scale,
+            );
         }
         let h = &mut health[i];
         h.hits += n;
@@ -641,7 +677,7 @@ async fn death(u: Unit) -> Fate {
         a.turn(n.root, Axis::FORWARD, deg(90.0), deg(360.0)).ramp(deg(720.0));
     });
     u.turned(n.root).await;
-    u.effect_at(n.spine, [0.0, 0.2, 0.0], name_id(SMOKE), 8, 1.0);
+    u.effect_at(n.spine, [0.0, 0.2, 0.0], name_id(SMOKE), 8, SMOKE_SCALE);
     u.ended(0).await;
     u.sleep(1500).await;
     if u.param() & STUCK != 0 {
