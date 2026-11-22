@@ -1,7 +1,7 @@
 {
   "suite": "anim",
-  "commit": "af5c466-dirty",
-  "machine": "local",
+  "commit": "06fa4c4",
+  "machine": "rtx3060ti",
   "records": [
     {
       "metric": "units10000/digest",
@@ -13,16 +13,16 @@
     {
       "metric": "units10000/tick_1t",
       "kind": "time",
-      "value": 653050.0,
+      "value": 654905.0,
       "unit": "ns",
-      "spread": 0.03126866243013552
+      "spread": 0.03200616883364763
     },
     {
       "metric": "units10000/tick_8t",
       "kind": "time",
-      "value": 150334.0,
+      "value": 156844.0,
       "unit": "ns",
-      "spread": 0.31238442401585803
+      "spread": 0.27576445385223536
     },
     {
       "metric": "units50000/digest",
@@ -34,16 +34,16 @@
     {
       "metric": "units50000/tick_1t",
       "kind": "time",
-      "value": 3266549.0,
+      "value": 3335746.0,
       "unit": "ns",
-      "spread": 0.052794248609159086
+      "spread": 0.044557649173528203
     },
     {
       "metric": "units50000/tick_8t",
       "kind": "time",
-      "value": 651370.0,
+      "value": 685405.0,
       "unit": "ns",
-      "spread": 0.21295577014599998
+      "spread": 0.2533451025306206
     },
     {
       "metric": "bones",

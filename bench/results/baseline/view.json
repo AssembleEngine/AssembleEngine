@@ -1,28 +1,28 @@
 {
   "suite": "view",
-  "commit": "c624b82-dirty",
-  "machine": "local",
+  "commit": "06fa4c4",
+  "machine": "rtx3060ti",
   "records": [
     {
       "metric": "units10000_allies2/frame_prepare",
       "kind": "time",
-      "value": 9510.0,
+      "value": 9600.0,
       "unit": "ns",
-      "spread": 0.1398527865404837
+      "spread": 0.044895833333333336
     },
     {
       "metric": "units10000_allies2/build_1_observer",
       "kind": "time",
-      "value": 520592.0,
+      "value": 417879.0,
       "unit": "ns",
-      "spread": 0.12989442788210345
+      "spread": 0.05597553358747388
     },
     {
       "metric": "units10000_allies2/tick_2_observers",
       "kind": "time",
-      "value": 1069804.0,
+      "value": 865810.0,
       "unit": "ns",
-      "spread": 0.14935820019368035
+      "spread": 0.09998845012185122
     },
     {
       "metric": "units10000_allies2/rows_own_observer1",
@@ -55,23 +55,23 @@
     {
       "metric": "units10000_allies2_ghosts/frame_prepare",
       "kind": "time",
-      "value": 9740.0,
+      "value": 9630.0,
       "unit": "ns",
-      "spread": 0.1406570841889117
+      "spread": 0.010384215991692628
     },
     {
       "metric": "units10000_allies2_ghosts/build_1_observer",
       "kind": "time",
-      "value": 577393.0,
+      "value": 473161.0,
       "unit": "ns",
-      "spread": 0.13015571716318003
+      "spread": 0.18378945010260778
     },
     {
       "metric": "units10000_allies2_ghosts/tick_2_observers",
       "kind": "time",
-      "value": 1122705.0,
+      "value": 947742.0,
       "unit": "ns",
-      "spread": 0.1581840287519874
+      "spread": 0.04606844478771649
     },
     {
       "metric": "units10000_allies2_ghosts/rows_own_observer1",
@@ -104,23 +104,23 @@
     {
       "metric": "units10000_allies2_contact/frame_prepare",
       "kind": "time",
-      "value": 10430.0,
+      "value": 9570.0,
       "unit": "ns",
-      "spread": 0.28475551294343243
+      "spread": 0.3406478578892372
     },
     {
       "metric": "units10000_allies2_contact/build_1_observer",
       "kind": "time",
-      "value": 659845.0,
+      "value": 508571.0,
       "unit": "ns",
-      "spread": 0.07312323348665217
+      "spread": 0.03651407571410875
     },
     {
       "metric": "units10000_allies2_contact/tick_2_observers",
       "kind": "time",
-      "value": 1377191.0,
+      "value": 1073595.0,
       "unit": "ns",
-      "spread": 0.1359608071792511
+      "spread": 0.018181902859085594
     },
     {
       "metric": "units10000_allies2_contact/rows_own_observer1",
@@ -153,23 +153,23 @@
     {
       "metric": "units50000_allies8/frame_prepare",
       "kind": "time",
-      "value": 47751.0,
+      "value": 48191.0,
       "unit": "ns",
-      "spread": 0.07664760947414714
+      "spread": 0.1132991637442676
     },
     {
       "metric": "units50000_allies8/build_1_observer",
       "kind": "time",
-      "value": 1262678.0,
+      "value": 1264689.0,
       "unit": "ns",
-      "spread": 0.05507500724650307
+      "spread": 0.1401174518004031
     },
     {
       "metric": "units50000_allies8/tick_2_observers",
       "kind": "time",
-      "value": 3246822.0,
+      "value": 2797913.0,
       "unit": "ns",
-      "spread": 0.16297536483367428
+      "spread": 0.10392996494172621
     },
     {
       "metric": "units50000_allies8/rows_own_observer1",

@@ -1,21 +1,21 @@
 {
   "suite": "sensors",
-  "commit": "b0cbe01-dirty",
-  "machine": "local",
+  "commit": "06fa4c4",
+  "machine": "rtx3060ti",
   "records": [
     {
       "metric": "units10000_allies2/stamp_1t",
       "kind": "time",
-      "value": 1249189.0,
+      "value": 1228618.0,
       "unit": "ns",
-      "spread": 0.1153404328728479
+      "spread": 0.01903032512953579
     },
     {
       "metric": "units10000_allies2/stamp_8t",
       "kind": "time",
-      "value": 798999.0,
+      "value": 778037.0,
       "unit": "ns",
-      "spread": 0.3006824789517884
+      "spread": 0.3097731855940013
     },
     {
       "metric": "units10000_allies2/stamped_cells",
@@ -41,16 +41,16 @@
     {
       "metric": "units10000_allies8/stamp_1t",
       "kind": "time",
-      "value": 1247689.0,
+      "value": 1260059.0,
       "unit": "ns",
-      "spread": 0.06996214601555356
+      "spread": 0.013754117862735
     },
     {
       "metric": "units10000_allies8/stamp_8t",
       "kind": "time",
-      "value": 327678.0,
+      "value": 326438.0,
       "unit": "ns",
-      "spread": 0.4048272999713133
+      "spread": 0.2752528810984015
     },
     {
       "metric": "units10000_allies8/stamped_cells",
@@ -76,16 +76,16 @@
     {
       "metric": "units50000_allies8/stamp_1t",
       "kind": "time",
-      "value": 6319737.0,
+      "value": 6180411.0,
       "unit": "ns",
-      "spread": 0.05711440207084567
+      "spread": 0.010378274195680513
     },
     {
       "metric": "units50000_allies8/stamp_8t",
       "kind": "time",
-      "value": 1421183.0,
+      "value": 1459143.0,
       "unit": "ns",
-      "spread": 0.33786711493171534
+      "spread": 0.38900368229844506
     },
     {
       "metric": "units50000_allies8/stamped_cells",

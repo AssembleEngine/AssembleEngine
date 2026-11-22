@@ -1,35 +1,35 @@
 {
   "suite": "spatial",
-  "commit": "349fe80-dirty",
-  "machine": "local",
+  "commit": "06fa4c4",
+  "machine": "rtx3060ti",
   "records": [
     {
       "metric": "units50000_queries10000/rebuild",
       "kind": "time",
-      "value": 450291.0,
+      "value": 478411.0,
       "unit": "ns",
-      "spread": 0.08705703644976248
+      "spread": 0.03195996747566423
     },
     {
       "metric": "units50000_queries10000/radius160_1t",
       "kind": "time",
-      "value": 12505850.0,
+      "value": 11874861.0,
       "unit": "ns",
-      "spread": 0.017714509609502754
+      "spread": 0.023946132927366477
     },
     {
       "metric": "units50000_queries10000/nearest8_1t",
       "kind": "time",
-      "value": 9652342.0,
+      "value": 9711462.0,
       "unit": "ns",
-      "spread": 0.064985782725063
+      "spread": 0.03385041304800451
     },
     {
       "metric": "units50000_queries10000/sweep360_1t",
       "kind": "time",
-      "value": 6048535.0,
+      "value": 5982877.0,
       "unit": "ns",
-      "spread": 0.045549211503281374
+      "spread": 0.0600794567563398
     },
     {
       "metric": "units50000_queries10000/radius_hits",
@@ -55,23 +55,23 @@
     {
       "metric": "units50000_queries10000/radius160_8t",
       "kind": "time",
-      "value": 1975808.0,
+      "value": 1973676.0,
       "unit": "ns",
-      "spread": 0.19812198351256802
+      "spread": 0.19345525810720707
     },
     {
       "metric": "units50000_queries10000/nearest8_8t",
       "kind": "time",
-      "value": 1550917.0,
+      "value": 1429423.0,
       "unit": "ns",
-      "spread": 0.2226411858274814
+      "spread": 0.21782075704672446
     },
     {
       "metric": "units50000_queries10000/sweep360_8t",
       "kind": "time",
-      "value": 962203.0,
+      "value": 941491.0,
       "unit": "ns",
-      "spread": 0.22143456214541007
+      "spread": 0.20424411916842541
     }
   ]
 }

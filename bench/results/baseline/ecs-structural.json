@@ -1,7 +1,7 @@
 {
   "suite": "ecs-structural",
-  "commit": "90d0d1c-dirty",
-  "machine": "local",
+  "commit": "06fa4c4",
+  "machine": "rtx3060ti",
   "records": [
     {
       "metric": "50k_5000cmd/digest_low32",
@@ -27,23 +27,23 @@
     {
       "metric": "50k_5000cmd/populate",
       "kind": "time",
-      "value": 13074085.0,
+      "value": 12633357.0,
       "unit": "ns",
-      "spread": 0.055066721686450715
+      "spread": 0.08084660316335555
     },
     {
       "metric": "50k_5000cmd/apply_tick_commands",
       "kind": "time",
-      "value": 418160.0,
+      "value": 424940.0,
       "unit": "ns",
-      "spread": 0.03233451310503157
+      "spread": 0.02419400385936838
     },
     {
       "metric": "50k_5000cmd/digest_scan",
       "kind": "time",
-      "value": 23461.0,
+      "value": 23031.0,
       "unit": "ns",
-      "spread": 0.015344614466561528
+      "spread": 0.011723329425556858
     }
   ]
 }
