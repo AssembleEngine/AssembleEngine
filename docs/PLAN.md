@@ -2538,7 +2538,7 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M16 (M11, M12 done; M14 in design)
+## Planned milestones M11–M16 (M11, M12, M13 done; M14 in design)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
@@ -3062,7 +3062,7 @@ Steps (commit and stop for compaction after each):
   - Open: no spot metering on a selection or the cursor; the meter includes the sky; one
     adaptation curve (two rates), no per-scene look or min/max override beyond the constants.
 
-### M13 — HDR output on a supporting display (priority: lower)
+### M13 — HDR output on a supporting display (priority: lower; done)
 
 - After M12 (needs the HDR scene target). Split into stages; each ends at a review that
   commits its code and docs before the next starts.
@@ -3463,6 +3463,57 @@ Steps (commit and stop for compaction after each):
   paper white), 73 lib tests, 3 ABI tests (1 new), module 3 (1 new), golden 1 (16
   cases), graph_file 2; `cargo test --workspace` is clean. Not built: HDR captures
   (stage 5's line stands), benchmarks (stage 7).
+- **Stage 7 is done** (2026-11-22); M13 is complete. `ae-client --bench` gained
+  `--bench-output sdr|hdr10|scrgb` (the readback rendered in that encoding through
+  `TerrainApp::with_display`, at fixed 203/361 signal nits so a run does not depend on the
+  display) and `--bench-size WxH`. The readback's `copy` and `host read` passes are reported
+  (`pass/copy`, `pass/host read`, with the host bus's 50% `bench-diff` tolerance) but stay
+  out of `gpu_total`, which therefore remains comparable with older records.
+  Measured on the reference machine (RTX 3060 Ti, KWin Wayland; release; 300 frames after
+  60 warm-up frames and at least 1 s; two runs per configuration; scenes `overview`, `army`,
+  `battle` (2 explosions a frame) and `close`; medians over the scenes, with the largest
+  between-run change in brackets):
+
+  | 2560×1440 | SDR | HDR10 | scRGB |
+  |---|---|---|---|
+  | `pass/tonemap` | 62 µs (2%) | 77 µs (1%) | 78 µs (0%) |
+  | `pass/encode` | — | 68 µs (3%) | 84 µs (0%) |
+  | `pass/copy` | 661 µs (0.2–7%) | 662 µs (2%) | 1 325 µs (6%) |
+  | `gpu_total` (`army`) | 1.41 ms | 1.50 ms (+6%) | 1.52 ms (+7%) |
+
+  | 3840×1600 | SDR | HDR10 | scRGB |
+  |---|---|---|---|
+  | `pass/tonemap` | 108 µs (1%) | 128 µs (1%) | 128 µs (1%) |
+  | `pass/encode` | — | 112 µs (0%) | 136 µs (1%) |
+  | `pass/copy` | 1 101 µs (2%) | 1 088 µs (0.3%) | 2 342 µs (1–2%) |
+  | `gpu_total` (`army`) | 2.13 ms | 2.27 ms (+7%) | 2.27 ms (+6%) |
+
+  The HDR tail adds 1.6–8% of `gpu_total` across these scenes (1.6–4.3% in `battle`, whose
+  particles dominate); HDR10 and scRGB totals are within run noise of each other. Bytes per
+  frame: 1440p is 3,686,400 px, 14.75 MB at 4 B/px (SDR and HDR10) against 29.49 MB at
+  8 B/px (scRGB); 1600p is 6,144,000 px, 24.58 against 49.15 MB. The copy moves twice that
+  (the image is read and the buffer written): 44.6 GB/s at 1440p for all three encodings and
+  42.0–45.2 GB/s at 1600p, so doubling the target's bytes doubles the copy time
+  (661 → 1 325 µs at 1440p, 1 101 → 2 342 µs at 1600p). The encode is fill-bound on the
+  target and scales with pixels (68 → 112 µs for HDR10 and 84 → 136 µs for scRGB at 1.67×
+  the pixels).
+  `bench/results/baseline` was re-recorded at 06fa4c4 with `AE_BENCH_MACHINE=rtx3060ti` and
+  the default settings (SDR, 1280×720; both `ae-tool bench all` and `ae-client --bench all`),
+  closing stage 1's TODO. `ae-tool bench-diff` against 2804be3 (the last pre-M13 commit,
+  built in a worktree with its own `CARGO_TARGET_DIR`) flags 5 of 504 metrics: `pass/tonemap`
+  +13.3% (`lights-low`, `orbit`) and +23.1% (`palette`) from the Lottes curve, verified in
+  isolation (e.g. `army` 16.4 → 17.4 µs, `army-model-lights` 17.4 → 19.5 µs at 1280×720);
+  `pass/water` 5.1 → 178.2 µs, the known bimodality in the M14 TODO (it flips on either
+  binary); and `pass/units` in `army-model-lights` +37% in that one run, while three isolated
+  repeats give 3.18–3.21 ms on the parent and 3.18–3.23 ms here. A full-suite timing is not
+  stable enough for the light scenes: two full runs of the *same* binary, diffed against
+  each other, flag 11 metrics, all `pass/terrain`/`gpu_total` in them (up to +215% on
+  `lights-200`'s terrain, a GPU power-state effect), which is why the stage tables above come
+  from repeated fixed-subset runs. `--hdr off` remains byte-identical to ba9600f: the two
+  standard land captures (`--map land --units 0 --camera 6000,6000,350,0.6,0.45`, with and
+  without `--explode 12 --capture-frames 10`) compare equal with `cmp`. 58 GPU tests pass
+  with validation (unchanged), 73 lib tests, 3 ABI, module 3, golden 1 (16 cases),
+  graph_file 2; `cargo test --workspace` is clean.
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -4286,9 +4337,6 @@ From M12 (2026-11-19):
 
 From M13 stage 1 (2026-11-21):
 
-- **Re-record `bench/results/baseline`.** It is from 785e1d3 (2026-11-14) and has no exposure
-  passes, so `ae-tool bench-diff` against it flags M4–M12's own growth (26 regressions) and
-  cannot judge a stage; stage 1 was measured against its parent commit instead.
 - **Look check: the curve's toe.** The solved Lottes curve has slope `1 / c` ≈ 1.29 at zero,
   which lifts the darks; with the lowered midtones the far ground reads greyer and flatter in
   the stage 1 captures. If it reads muddy on the display, try `contrast` (`a`) above 1, which
@@ -4385,6 +4433,38 @@ From M13 stage 6 (2026-11-22):
   luminance row (a shader constant), so it keeps luminance only in the default BT.709 working
   space. Pass the working space's row in the grade's uniform (the module has
   `DeclareEnv::working_space`), and measure a saturated patch's luminance before and after.
+
+From M13 stage 7 (2026-11-22):
+
+- **Bound the top channel in gamut compression.** `colorspace::compress` scales a colour toward
+  its luminance until the lowest channel reaches 0 (`t = y / (y - lo)`), so compressing wide
+  colour into a narrower output gamut raises the top channel — the further the negative, the
+  larger the raise — and it can leave the output gamut's own maximum. Conditions for a fix: cap
+  or soft-limit the top channel when the source's was inside the output gamut, and measure a
+  saturated P3/BT.2020 patch's per-channel values, luminance and hue against stage 3's
+  synthetic patches (`post.encode`'s out-of-gamut test).
+- **Look checks waiting on the user's display** (nothing here changes the curve or the grade
+  until they report):
+  - the HDR curve's toe: with `a = 1`, HDR's slope at zero is 1.00 at headroom 1.778 against
+    SDR's 1.29, so scene 0.1 displays at 0.095 instead of 0.115 and the far ground/foliage may
+    read crushed or muddy; if so, solve `a` per output so HDR meets SDR at the anchors and
+    deepen the toe without moving paper white.
+  - the post module's grade above paper white: whether the +12% contrast and +15% saturation
+    around 0.18 read right on the display where only the explosion core reaches it, and
+    whether the HDR vignette (a multiply in linear light, not the SDR black blend) darkens the
+    corners smoothly on a bright sky.
+  - HDR darks against SDR and whether the P3 fire reads redder in HDR than in SDR.
+  Record any result here as reported, with the display and settings used.
+- **Query the compositor's target primaries instead of `--display-gamut`.** SDL does not expose
+  them; KWin does over `wp_color_management` (the probe's reference machine reports about 96% of
+  P3) or they can come from the EDID in sysfs. Conditions: the queried primaries drive the
+  output gamut and the `vkSetHdrMetadataEXT` primaries, `--display-gamut` stays the override,
+  and a run reports the queried values beside the chosen ones.
+- **HDR captures.** `--capture` still writes the SDR readback (8-bit sRGB), so a capture shows
+  neither the encoding nor the display's levels. Conditions: a capture option selects
+  `sdr|hdr10|scrgb` (the readback already supports all three), writes the packed 10-bit or 16F
+  pixels (or a PNG beside the raw), and a test decodes a known display value through the chosen
+  encoding.
 
 Pie in the sky, some time:
 

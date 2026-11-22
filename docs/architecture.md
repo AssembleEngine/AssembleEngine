@@ -233,6 +233,45 @@ Render modules wire these; the engine owns their implementations.
 | `readback.copy` | transfer | an image | `readback.buffer` |
 | `host.read` / `present` | transfer / present | — | — |
 
+### The output chain
+
+An SDR graph ends at the target: `post.tonemap` maps the scene (and bloom, exposure) from the
+working space to BT.709 and writes the 8-bit sRGB image. An HDR graph adds the display
+intermediate and the encode:
+
+```
+scene (RGBA16F, scene light) ─▸ post.tonemap ─▸ display (RGBA16F, linear light in units of
+                                               paper white, in the working space, up to
+                                               peak / paper white)
+                                                  │
+                                   module passes that change colour on the display
+                                   (post's grade, its multiplying vignette; the UI will
+                                   write it too)
+                                                  │
+                                                  ▼
+                                            post.encode ─▸ target (A2B10G10R10 PQ in BT.2020,
+                                                            or RGBA16F scRGB)
+```
+
+Only `post.encode` maps the display to the target: it compresses out-of-gamut colour toward the
+achromatic axis when the output gamut is narrower than the working space, re-expresses it in the
+container's primaries, and stops values at the display's peak before writing PQ or scRGB. The
+levels (`DisplayLevels {paper_white, peak}`) are signal nits, relative to the reference the
+swapchain's image description carries (203 on Wayland), and the client applies them to the
+`vkSetHdrMetadataEXT` call after every recreate.
+
+### The render module ABI (contract version 2)
+
+`ae_render_declare` reads a `DeclareInput` the host writes at `ae_render_declare_input`: the
+target's size/format and scene flags, and the output's display spec — the encoding (`Sdr`,
+`Hdr10Pq`, `ScRgb`), the levels, the working space and the output gamut. A module built for
+contract 1 is refused at load by number. The display rule follows from the encoding: an HDR
+module declares `display` (`display_spec()`), has `post.tonemap` write it, runs its colour
+passes on it and ends in `post.encode`; an SDR module has neither and lets `post.tonemap` write
+the target. `library::check_graph` enforces that on module graphs and names the encoding and the
+missing or extra pass. A module stays loaded across a swapchain pair change and redeclares for
+the new display spec.
+
 ### Draw sources are data
 
 ```
@@ -594,6 +633,9 @@ Two rules keep this from tangling:
 | what an observer may see | `crates/ae_view/src/lib.rs`, `ae_services/src/view.rs` |
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
 | how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
+| the working space, the gamut map and its compression | `crates/ae_render/src/colorspace.rs`, `encode.rs` |
+| the tone curve, the display intermediate and the encode | `crates/ae_render/src/tonemap.rs`, `encode.rs`, `library.rs` |
+| HDR levels, the swapchain's colour space and its metadata | `crates/ae_render/src/swapchain.rs`, `display.rs`, `bins/ae-client/src/main.rs` |
 | a particle effect's look, or the gamut an authored colour is in | `assets/effects.json` (parsed by `crates/ae_render/src/particles.rs`), `colorspace.rs` |
 | graph validation | `crates/ae_framegraph/src/{descriptor,bake,barriers}.rs` |
 | the render module contract | `crates/ae_render_abi/src/`, `ae_render/src/module.rs` |
@@ -602,8 +644,8 @@ Two rules keep this from tangling:
 ## Not built yet
 
 Named here so the diagrams are not read as promises: RmlUi UI and the widget sandbox (M8),
-`ae-editor` with the inspector/archetype/schedule views, lights and an HDR scene target (M12/M13),
-the second navigation hierarchy level, async compute and runtime multi-module sims, querying the
+`ae-editor` with the inspector/archetype/schedule views, the second navigation hierarchy level,
+async compute and runtime multi-module sims, querying the
 compositor's colour-management target primaries (an own `wp_color_management` client on SDL's
 `wl_display`, or the EDID from sysfs; the display gamut is a setting for now), and the per-worker
 bump arenas that would remove wasi-libc's heap lock from allocation-heavy guest systems.

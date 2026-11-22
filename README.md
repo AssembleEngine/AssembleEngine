@@ -76,6 +76,19 @@ explosion leaves a scar (Recoil's, in `assets/decals/scars`), a decal the terrai
 and wraps over cliff edges, relit by its normal map, its centre glowing like hot metal for up to two
 seconds (`--no-decals`; `--scars generated` for the engine's own scorch mark). Details: [docs/PLAN.md](docs/PLAN.md) "M7 progress".
 
+M13 (HDR output) is done. `--hdr auto|hdr10|scrgb|off` picks the swapchain pair the surface offers
+(auto: HDR10, then scRGB, then SDR; an explicit mode the surface lacks is an error naming what it
+offers), recreating on SDL's HDR state and the `U` key, with `vkSetHdrMetadataEXT` after every
+recreate; `--probe-display` prints the display's state and the surface's pairs and exits. The levels
+are signal nits, measured from what the WSI's own image description carries: 203 nit paper white and
+203 × SDL's headroom as the peak (361 here, shown at the panel's 441), overridable by
+`--paper-white`/`--peak`. The scene is lit in BT.709 or BT.2020 (`--working-space`), tone-mapped by
+a Lottes curve whose white point stays at 16 scene units, and encoded by `post.encode` into HDR10's
+10-bit PQ in BT.2020 or scRGB's 16F, mapped to the output gamut (`--display-gamut bt709|p3|bt2020`;
+P3 by default for HDR10). Render modules declare the same tail (the render ABI's display spec).
+SDR at the defaults is unchanged. Details: [docs/PLAN.md](docs/PLAN.md) "M13 progress";
+[docs/lighting.md](docs/lighting.md) for the colour and curve numbers.
+
 | Crate | What it is | Origin |
 |---|---|---|
 | `crates/ae_ecs` | Storage and query layer; flecs behind `flecs_backend`; the column arena | ecs_sim (`flecs.rs`, vendored flecs 4.1.6 + patch) |
@@ -129,6 +142,7 @@ cargo build --release -p ae-tool
 ./target/release/ae-tool bench-diff bench/results/baseline bench/results/mychange   # exit 1 on regression
 cargo bench -p ae_framegraph -p ae_nav     # criterion micro benches
 ./target/release/ae-client --bench all --label mychange          # GPU scenes (needs a GPU): bench/results/mychange/gpu-*.json
+./target/release/ae-client --bench battle --bench-output hdr10 --bench-size 2560x1440 --label hdr-check   # the readback in HDR10 at 1440p (sdr|hdr10|scrgb)
 
 # Profiling
 cargo run --release -p ae-tool --features tracy -- bench nav --quick --no-save   # attach Tracy

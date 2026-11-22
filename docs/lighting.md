@@ -493,13 +493,11 @@ the output is mapped to (the *output gamut*, the display's primaries).
 - **The levels stay 203 nits of paper white** in the tests and defaults:
   PQ's protocol reference. SDL reports 248 nits of SDR white on the
   reference machine, and KWin sends 248 too, but that is the compositor's
-  own reference, not necessarily the one the Vulkan WSI attaches to the
-  swapchain. If the NVIDIA WSI sends PQ without its luminances, the
-  protocol's default for PQ is 203, and encoding at 248 would be about 22%
-  bright and push the peak past the panel's. M13 stage 5 measures what the
-  WSI actually sends before the client chooses; until then 203 is correct
-  for the tests and the headless readback, and nothing builds a gamut
-  decision on 248.
+  own reference, not the one the Vulkan WSI attaches to the swapchain; the
+  NVIDIA WSI sends PQ without its luminances (M13 stage 5 measured it), so
+  the protocol's default 203 applies and encoding at 248 would be about 22%
+  bright and push the peak past the panel's. The client therefore sends 203
+  of paper white (or `--paper-white`) and builds nothing on 248.
 
 ## Authored colour gamut (M13 stage 4)
 
@@ -567,7 +565,7 @@ changes.
   different, or the extra display range would go unused. Below it the
   HDR curve is not the SDR one either: with `a = 1` the solved toe is
   flatter (slope at zero `1 / c`: 1.29 in SDR, 1.00 at the reference panel's
-  headroom 1.778, which the client sends as 361/203 nits; 0.95 at 441/203),
+  headroom 1.778, which the client sends as 361/203 nits),
   so the darks display about 17% darker than in SDR (scene 0.1: 0.115 SDR,
   0.095 HDR; 0.25: 0.247 against 0.222) and the range from the key to paper
   white brighter (scene 1.0: 0.579 against 0.667). An emitter between the two anchors (a
