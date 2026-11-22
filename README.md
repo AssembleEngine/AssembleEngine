@@ -82,8 +82,9 @@ offers), recreating on SDL's HDR state and the `U` key, with `vkSetHdrMetadataEX
 recreate; `--probe-display` prints the display's state and the surface's pairs and exits. The levels
 are signal nits, measured from what the WSI's own image description carries: 203 nit paper white and
 203 × SDL's headroom as the peak (361 here, shown at the panel's 441), overridable by
-`--paper-white`/`--peak`. The scene is lit in BT.709 or BT.2020 (`--working-space`), tone-mapped by
-a Lottes curve whose white point stays at 16 scene units, and encoded by `post.encode` into HDR10's
+`--paper-white`/`--peak`. The scene is lit in BT.709 or BT.2020 (`--working-space`), passed as is by
+default (`--tonemap none`: SDR saturates at white, HDR clips at the peak) or tone-mapped by a Lottes
+curve whose white point stays at 16 scene units (`--tonemap lottes`), and encoded by `post.encode` into HDR10's
 10-bit PQ in BT.2020 or scRGB's 16F, mapped to the output gamut (`--display-gamut bt709|p3|bt2020`;
 P3 by default for HDR10). Render modules declare the same tail (the render ABI's display spec).
 SDR at the defaults is unchanged. Details: [docs/PLAN.md](docs/PLAN.md) "M13 progress";

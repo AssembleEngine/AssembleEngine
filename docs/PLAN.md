@@ -3196,8 +3196,19 @@ Steps (commit and stop for compaction after each):
     mid-grey, no clamp to 1); new HDR `.dot` goldens.
   - **7. Measure and document.** Bench at 1440p and 3840×1600: tonemap and encode passes
     and the bandwidth of a 10-bit against a 16F swapchain, compared with `bench-diff`.
-- **Stage 1 is done** (2026-11-21). Lottes 2016 (`x^a / ((x^a)^d * b + c)`) is the
-  default curve (`Clamp` stays for exact linear reads). `a` and `d` are 1 (with these
+- **Since 2026-11-22 the default is no curve** (the user's decision): `Curve::None` passes
+  the exposed colour as is, replacing `Clamp` (`--tonemap none|lottes`). The output is the
+  only clip: an SDR target saturates at 1, in HDR `post.encode` clips at the peak, so `U`
+  now shows highlights up to the peak (with `Clamp` HDR stopped at paper white and looked
+  the same as SDR). The exposure key (0.5) now displays at 0.5 instead of Lottes'
+  0.40, about 0.3 EV brighter mid-tones. Four GPU tests tuned under Lottes (the water's
+  waves, decals over cliffs, the particles' emission order, the ground specular) pin
+  it (`lottes_tone()`); under no curve the specular saturates at 255 and the waves change
+  34 of 1678 water pixels against 105. The sky test expects the pass-through. The GPU
+  bench now runs the default as well, so its tonemap pass differs from the baseline
+  (recorded under Lottes).
+- **Stage 1 is done** (2026-11-21). Lottes 2016 (`x^a / ((x^a)^d * b + c)`) was then the
+  default curve (`Clamp` stayed for exact linear reads). `a` and `d` are 1 (with these
   anchors a larger shoulder exponent makes the curve fall again past the peak, so values
   above it would display darker than white), and `b`, `c` are solved on the CPU from two
   anchors: the automatic exposure's key (0.5 pre-curve) displays at 0.40 linear, and 16.0
@@ -4244,6 +4255,27 @@ visibility policy's details; whether the underwater pass runs always or only nea
 surface; how the copy layer exposes submerged state to the renderer (a view field or a mask).
 
 ## TODO (open, not a priority now)
+
+- **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
+  pre-commit hook is local, and several notes above wait on it (the `glslc`/SDL3 gating of
+  `cargo test --workspace`, clippy on the wasm guests, the cross-platform digest runs). Scope,
+  as a `.gitlab-ci.yml`:
+  - `fmt` (`cargo fmt --all -- --check`, guest crates included) and `clippy`
+    (`cargo clippy --workspace --all-targets -- -D warnings`) on the pinned toolchain
+    (`rust-toolchain.toml`), with `target/` cached;
+  - `test` on a runner that has `glslc`, SDL3 and a Vulkan driver: `cargo test --workspace`
+    and the `ae_sim` digest/sandbox tests;
+  - digest and `ae-headless --replay --verify` jobs on Linux x86-64, Windows x86-64 and Linux
+    aarch64 (the determinism targets);
+  - a GPU runner for `ae_render --test gpu -- --ignored --test-threads=1` with the validation
+    layers, which must report zero messages;
+  - `ae-client --bench` on one pinned machine (nightly, `AE_BENCH_MACHINE` set) with
+    `ae-tool bench-diff` against `bench/results/baseline`, while the deterministic counter
+    benches run on every merge request.
+  Conditions: a `default-members` split (or checked-in SPIR-V) so the headless runners need no
+  `glslc`, SDL3 or GPU; a named machine for the wall-time bench, since those numbers compare
+  only within one machine; and the guest crates built through `ae_sim::build::game` so their
+  format and clippy checks join the same jobs.
 
 From the M14 hybrid animation work (2026-11-18); each needs a decision before it is done.
 

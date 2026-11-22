@@ -20,8 +20,10 @@ eased EV (Automatic exposure below).
 - Camera exposure is EV100 with `exposure = 1 / (1.2 * 2^EV100)`; the default
   is EV14 (≈ 5.086e-5), which keeps the old terrain look: a fully lit
   Lambertian surface gets `100000 * exposure / pi ≈ 1.62`, the old `1.6` sun
-  coefficient. The default tone curve is Lottes 2016 (Colour below);
-  `Clamp` stays for migration captures and debugging.
+  coefficient. The default is no tone curve (`--tonemap none`, since
+  2026-11-22): the exposed colour passes as is, an SDR target saturates at 1
+  and in HDR `post.encode` clips at the display's peak. Lottes 2016 (Colour
+  below) is `--tonemap lottes`.
 - The exposure is applied by the scene passes before they store into the
   RGBA16F scene; `post.tonemap` only curves. Every pass that writes the
   scene (terrain, units, water, the particle modes' final writes) uses the
