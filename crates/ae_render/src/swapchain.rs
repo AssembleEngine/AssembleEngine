@@ -35,8 +35,9 @@ pub enum HdrRequest {
     /// An sRGB 8-bit swapchain: the SDR path, unchanged.
     #[default]
     Off,
-    /// HDR10 when the surface offers it and SDL says the window is
-    /// HDR-capable, else scRGB when offered, else SDR.
+    /// HDR whenever the surface offers it: HDR10 first, else scRGB, else
+    /// SDR. SDL's window HDR state does not gate it (it only supplies the
+    /// levels); a compositor with HDR off maps the signal to SDR itself.
     Auto,
     /// HDR10 (PQ) only: an error when the pair is not offered.
     Hdr10,
@@ -147,16 +148,16 @@ pub fn hdr_metadata_values(levels: DisplayLevels, gamut: Gamut) -> HdrMetadataVa
 }
 
 /// Resolve a request against the surface's pairs. An explicit HDR mode that
-/// is not offered is an error naming what is; Auto falls back to scRGB and
-/// then SDR, and Off is always SDR.
-pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest, hdr_capable: bool) -> Result<TargetFormat> {
+/// is not offered is an error naming what is; Auto takes HDR10, then scRGB
+/// (HDR10 first: half scRGB's bytes per pixel and the signal HDR displays
+/// take natively), then SDR; Off is always SDR.
+pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest) -> Result<TargetFormat> {
     let sdr = || {
         let chosen = choose_format(formats);
         TargetFormat { format: chosen.format, color_space: chosen.color_space }
     };
     match request {
         HdrRequest::Off => Ok(sdr()),
-        HdrRequest::Auto if !hdr_capable => Ok(sdr()),
         HdrRequest::Auto if offered(formats, HDR10) => Ok(HDR10),
         HdrRequest::Auto if offered(formats, SCRGB) => Ok(SCRGB),
         HdrRequest::Auto => Ok(sdr()),
@@ -175,8 +176,6 @@ pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest, hdr
 pub struct SwapchainOptions {
     pub present: PresentPolicy,
     pub hdr: HdrRequest,
-    /// SDL reports the window's display HDR-capable (Auto needs it).
-    pub hdr_capable: bool,
 }
 
 pub struct Swapchain {
@@ -255,7 +254,7 @@ impl Swapchain {
             return Ok(false);
         }
         let formats = unsafe { surface_loader.get_physical_device_surface_formats(gpu.physical, self.surface) }?;
-        let target = resolve_target(&formats, self.options.hdr, self.options.hdr_capable)?;
+        let target = resolve_target(&formats, self.options.hdr)?;
         let format = vk::SurfaceFormatKHR { format: target.format, color_space: target.color_space };
         let modes = unsafe { surface_loader.get_physical_device_surface_present_modes(gpu.physical, self.surface) }?;
         let present_mode = match self.policy {
@@ -482,33 +481,31 @@ mod tests {
     #[test]
     fn auto_prefers_hdr10_then_scrgb_then_sdr() {
         let all = pairs();
-        // HDR-capable and both offered: HDR10.
-        assert_eq!(resolve_target(&all, HdrRequest::Auto, true).unwrap(), HDR10);
+        // Both offered: HDR10.
+        assert_eq!(resolve_target(&all, HdrRequest::Auto).unwrap(), HDR10);
         // No HDR10 pair: scRGB.
         let no_hdr10: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::HDR10_ST2084_EXT).collect();
-        assert_eq!(resolve_target(&no_hdr10, HdrRequest::Auto, true).unwrap(), SCRGB);
+        assert_eq!(resolve_target(&no_hdr10, HdrRequest::Auto).unwrap(), SCRGB);
         // Neither: SDR.
         let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
-        assert_eq!(resolve_target(&sdr_only, HdrRequest::Auto, true).unwrap().encoding(), OutputEncoding::Sdr);
-        // Not HDR-capable: SDR even when the pairs are offered.
-        assert_eq!(resolve_target(&all, HdrRequest::Auto, false).unwrap().encoding(), OutputEncoding::Sdr);
+        assert_eq!(resolve_target(&sdr_only, HdrRequest::Auto).unwrap().encoding(), OutputEncoding::Sdr);
         // Off is always SDR.
-        assert_eq!(resolve_target(&all, HdrRequest::Off, true).unwrap().encoding(), OutputEncoding::Sdr);
+        assert_eq!(resolve_target(&all, HdrRequest::Off).unwrap().encoding(), OutputEncoding::Sdr);
     }
 
     #[test]
     fn an_explicit_mode_is_offered_or_an_error() {
         let all = pairs();
-        assert_eq!(resolve_target(&all, HdrRequest::Hdr10, false).unwrap(), HDR10);
-        assert_eq!(resolve_target(&all, HdrRequest::ScRgb, false).unwrap(), SCRGB);
+        assert_eq!(resolve_target(&all, HdrRequest::Hdr10).unwrap(), HDR10);
+        assert_eq!(resolve_target(&all, HdrRequest::ScRgb).unwrap(), SCRGB);
         // An explicit mode the surface does not offer names what it does,
         // and never falls back silently.
         let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
-        let error = resolve_target(&sdr_only, HdrRequest::Hdr10, true).unwrap_err().to_string();
+        let error = resolve_target(&sdr_only, HdrRequest::Hdr10).unwrap_err().to_string();
         assert!(error.contains("A2B10G10R10_UNORM_PACK32 + HDR10_ST2084_EXT"), "{error}");
         assert!(error.contains("SRGB_NONLINEAR") && error.contains("B8G8R8A8_SRGB"), "{error}");
         let no_scrgb: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT).collect();
-        let error = resolve_target(&no_scrgb, HdrRequest::ScRgb, true).unwrap_err();
+        let error = resolve_target(&no_scrgb, HdrRequest::ScRgb).unwrap_err();
         assert!(error.to_string().contains("EXTENDED_SRGB_LINEAR_EXT"), "{error}");
     }
 }

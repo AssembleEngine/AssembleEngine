@@ -68,8 +68,8 @@
 //! U HDR/SDR, Esc quits.
 //!
 //! `--hdr off|auto|hdr10|scrgb` picks the swapchain's encoding (M13 stage 5;
-//! auto by default: HDR10 when the surface offers the pair and SDL reports
-//! the window HDR-capable, else scRGB, else SDR). An explicit `hdr10` or
+//! auto by default: HDR10 whenever the surface offers the pair, else scRGB,
+//! else SDR; SDL's window HDR state only supplies the levels). An explicit `hdr10` or
 //! `scrgb` the surface does not offer is an error naming what it does; it
 //! never falls back silently. `--paper-white` and `--peak` (nits) override
 //! the levels, both in the signal's nits; the defaults are the reference the

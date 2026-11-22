@@ -277,7 +277,7 @@ fn render_main<A: RenderApp>(
 ) -> Result<()> {
     let gpu = Arc::new(GpuDevice::new(instance, Some(surface))?);
     let mut hdr = config.hdr;
-    let mut swapchain = Swapchain::new(&gpu, surface, initial_size, SwapchainOptions { present: config.present, hdr: hdr.request, hdr_capable: hdr.capable })?;
+    let mut swapchain = Swapchain::new(&gpu, surface, initial_size, SwapchainOptions { present: config.present, hdr: hdr.request})?;
     let mut executor: Executor<A::Pass> = Executor::new(
         gpu.clone(),
         ExecutorConfig {
@@ -342,7 +342,7 @@ fn render_main<A: RenderApp>(
                 continue;
             }
             if dirty || !swapchain.ready() {
-                swapchain.set_options(SwapchainOptions { present: swapchain.policy(), hdr: hdr.request, hdr_capable: hdr.capable });
+                swapchain.set_options(SwapchainOptions { present: swapchain.policy(), hdr: hdr.request});
                 if !swapchain.recreate(&gpu, size)? {
                     std::thread::sleep(Duration::from_millis(16));
                     continue;
