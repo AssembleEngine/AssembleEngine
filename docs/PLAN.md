@@ -5046,8 +5046,11 @@ is used.
   has `STORAGE`.
 - The descriptor's image layout is the one the role transitions to:
   - `SHADER_READ_ONLY_OPTIMAL` for `Sampled`,
-  - `GENERAL` for storage,
-  - the read-only depth layout for a sampled depth image.
+  - `GENERAL` for storage.
+
+  A sampled depth image is in `SHADER_READ_ONLY_OPTIMAL` too: `Sampled` always transitions to it.
+  `DepthRead` is an attachment role and reads through no descriptor. Its
+  `DEPTH_STENCIL_READ_ONLY_OPTIMAL` would be wrong for a depth image that another pass samples.
 
   A frame-graph unit test pins this against `barriers.rs`.
 - Externals:
@@ -5115,6 +5118,17 @@ set at index 2 next to their old sets. How handles reach a shader:
   `graph_handles_survive_resize_and_rebake` checks that a resize and a topology rebake keep a
   surviving name's index. Library-owned externals still return bindings with no handles: they
   register when step C moves their descriptors. C–G are not built.
+
+  Review fixes (2026-11-22, after `bc14e45`):
+  - `set_graph` runs every frame. The same-signature path no longer calls `wait_idle` each frame.
+    It re-keys, waiting for idle first, only when the graph's resource names differ from the
+    registry's.
+  - The descriptor layout comes from `Sampled` accesses only, not from `DepthRead`.
+  - A retiring index stops resolving at once and cannot be retired, or freed, twice.
+  - A graph image whose view kind changes (its layer count) under the same name gets a new entry.
+
+  Still not built from this step's design: the unit test that pins the descriptor layouts against
+  `barriers.rs`, and the debug assertion that `set_graph` runs with no frame open.
 
 **C. Sampled images and samplers.**
 
