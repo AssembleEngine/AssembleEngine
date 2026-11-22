@@ -350,7 +350,8 @@ repo carries them in `.githooks/` and the setup is one idempotent command,
 1. Collects the staged paths. A commit touching no Rust, manifest or build input returns at once,
    so a docs-only commit stays instant.
 2. With any staged `.rs` file, runs the formatter check over the workspace and the guest crates.
-   It fails with the file names and `cargo fmt --all` as the fix.
+   It fails with the file names and `tools/fmt.sh` as the fix: `cargo fmt --all` is not the
+   command here, because `--all` follows the `flecs_ecs_sys` path dependency into `vendor/`.
 3. With any staged `.rs`, `Cargo.toml`, `Cargo.lock`, `build.rs` or `.cargo/` file, runs
    `cargo clippy --workspace --all-targets -- -D warnings` and prints the first diagnostics.
    Warm, incremental runs reuse `target/`; the first cold run after a dependency change is the
@@ -364,7 +365,7 @@ repo carries them in `.githooks/` and the setup is one idempotent command,
 
 Partial staging is the known rough edge: the formatter and clippy read the working tree, not the
 index, so an unstaged edit elsewhere can fail the check. The message says which command to run
-(`cargo fmt --all`, or stage all with `git add -A`); no attempt is made to format a temporary
+(`tools/fmt.sh`, or stage all with `git add -A`); no attempt is made to format a temporary
 index copy, because the simple check is the one people can reason about.
 
 **Steps** (each its own commit):
@@ -382,14 +383,19 @@ index copy, because the simple check is the one people can reason about.
    on code commits.
 
 **Exit criteria:**
-- `cargo fmt --all -- --check` exits 0, guests included, from a fresh checkout.
+- `tools/fmt.sh --check` exits 0, guests included, from a fresh checkout. (`cargo fmt --all --
+  --check` cannot be the gate: `--all` formats local path dependencies, so it follows
+  `flecs_ecs_sys` into `vendor/`, which stays unformatted. The wrapper names the workspace
+  packages with `cargo fmt -p …` instead, which does not follow them, and then formats each guest
+  manifest.)
 - `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - The hook refuses both a misformatted and a warning-producing commit, and does not fire on a
   docs-only one.
 - `cargo test --workspace` is green, and the pinned digests (`ae_sim --test sandbox`, the crossing
   and skirmish goldens, the replay tests) are unchanged: formatting cannot move bits, and any
   clippy fix that would is not taken.
-- README and CLAUDE.md state the toolchain pin, the format, the two commands and the hook setup.
+- README and CLAUDE.md state the toolchain pin, the format, the two commands (`tools/fmt.sh
+  --check`, `cargo clippy --workspace --all-targets -- -D warnings`) and the hook setup.
 
 **Not in M17:** CI (still none; the hook is local), pedantic/nursery lints, formatting of
 `vendor/`, and clippy on the wasm guest crates. These are revisited when CI exists.
