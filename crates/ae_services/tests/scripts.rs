@@ -53,8 +53,14 @@ fn target(tick: u64, units: u32) -> glam::Vec3 {
 
 /// Where the head is in the world and where its rest forward points, by
 /// the model's bone matrices (`Rig::globals`, not `bone_frame`'s chain),
-/// the unit's facing and fit, in glam.
-fn head_in_world(rig: &Rig, head: u16, a: &Anim, b: &ae_sdk::nav::Body, facing: [f32; 4]) -> (glam::Vec3, glam::Vec3) {
+/// the unit's orientation and fit, in glam.
+fn head_in_world(
+    rig: &Rig,
+    head: u16,
+    a: &Anim,
+    b: &ae_sdk::nav::Body,
+    orientation: [f32; 4],
+) -> (glam::Vec3, glam::Vec3) {
     let affine = |ch: Option<&Anim>| {
         let mut pose = rig.rest_pose();
         if let Some(a) = ch {
@@ -70,7 +76,7 @@ fn head_in_world(rig: &Rig, head: u16, a: &Anim, b: &ae_sdk::nav::Body, facing: 
     };
     let ((now, at), (rest, _)) = (affine(Some(a)), affine(None));
     let carried = (now * rest.inverse() * glam::Vec3::X).normalize();
-    let q = glam::Quat::from_array(facing);
+    let q = glam::Quat::from_array(orientation);
     let pos = glam::Vec3::new(b.x, 0.0, b.y) + q * (at * (b.radius / rig.footprint()));
     (pos, q * carried)
 }
@@ -129,7 +135,7 @@ struct Weapons {
 struct Outcome {
     digest: u128,
     bodies: Vec<(u64, ae_sdk::nav::Body)>,
-    facings: Vec<(u64, [f32; 4])>,
+    orientations: Vec<(u64, [f32; 4])>,
     weapons: Vec<(u64, Weapons)>,
     logs: Vec<(u64, Log)>,
     scripts: Vec<(u64, Script)>,
@@ -145,7 +151,7 @@ fn run(rt: &mut Runtime, workers: usize, param: u64) -> Result<Outcome> {
     Ok(Outcome {
         digest: rt.digest(&world)?.total,
         bodies: rows("Body")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
-        facings: rows("Facing")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
+        orientations: rows("Orientation")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         weapons: rows("Weapons")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         logs: rows("Log")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
         scripts: rows("Script")?.into_iter().map(|(e, b)| (e, decode(&b))).collect(),
@@ -343,9 +349,9 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         let last = (TICKS - 1) / 6 * 6;
         let at = target(last, UNITS as u32);
         let (mut looked, mut worst) = (0, 0.0f32);
-        ensure!([r.bodies.len(), r.facings.len(), r.weapons.len()] == [r.anims.len(); 3]);
+        ensure!([r.bodies.len(), r.orientations.len(), r.weapons.len()] == [r.anims.len(); 3]);
         for (((e, a), (eb, b)), ((ef, f), (ew, wp))) in
-            r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons))
+            r.anims.iter().zip(&r.bodies).zip(r.orientations.iter().zip(&r.weapons))
         {
             ensure!([eb, ef, ew] == [e; 3], "rows out of step: {e} {eb} {ef} {ew}");
             ensure!(

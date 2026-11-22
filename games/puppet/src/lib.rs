@@ -34,7 +34,7 @@
 //! * `check` ([`AIM`]): answered aims measured.
 //! * `churn`: the despawns of [`CHURN`].
 
-use ae_sdk::aim::{Facing, Weapons, rotation};
+use ae_sdk::aim::{Orientation, Weapons, rotation};
 use ae_sdk::anim::{self, Anim, Axis, deg, model_id};
 use ae_sdk::nav::Body;
 use ae_sdk::script::{self, Callins, Either, Script, ScriptAlloc, Unit, callin, join, race};
@@ -131,17 +131,17 @@ pub fn pause_ms(index: u32) -> u32 {
 fn spawn(i: u32, aim: bool) {
     let (x, y) = ((i % 100) as f32 * STEP, (i / 100) as f32 * STEP);
     let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
-    let facing = if aim {
+    let orientation = if aim {
         // Its own way round, every third one tilted forward or back.
         let way = deg((i * 37 % 360) as f32);
-        let f = Facing::along(libm::cosf(way), libm::sinf(way));
+        let f = Orientation::along(libm::cosf(way), libm::sinf(way));
         match i % 3 {
             0 => f.then(rotation(Axis::RIGHT.v, deg(15.0))),
             1 => f.then(rotation(Axis::FORWARD.v, deg(-10.0))),
             _ => f,
         }
     } else {
-        Facing::along(dir, 0.0)
+        Orientation::along(dir, 0.0)
     };
     Spawn::new()
         .with(&Body {
@@ -152,7 +152,7 @@ fn spawn(i: u32, aim: bool) {
             radius: STEP / 4.0,
         })
         .with(&Walker { dir, reserved: 0 })
-        .with(&facing)
+        .with(&orientation)
         .with(&Weapons::default())
         .with(&Anim::new(model_id(MODEL)))
         .with(&Script::default())
@@ -172,15 +172,15 @@ fn start(run: &Run) {
     }
 }
 
-#[system(write(Body, Walker, Facing, Callins))]
+#[system(write(Body, Walker, Orientation, Callins))]
 fn steer(run: &Run) {
     if run.param() & AIM != 0 {
         return;
     }
-    let (bodies, walkers, facings, posts, ids) = (
+    let (bodies, walkers, orientations, posts, ids) = (
         run.write::<Body>(),
         run.write::<Walker>(),
-        run.write::<Facing>(),
+        run.write::<Orientation>(),
         run.write::<Callins>(),
         run.entities(),
     );
@@ -189,7 +189,7 @@ fn steer(run: &Run) {
         let walking = cycle(run.tick(), ids[i]) < WALK_TICKS;
         if walking && b.vx == 0.0 {
             b.vx = w.dir * WALK_SPEED * b.radius;
-            facings[i] = Facing::along(w.dir, 0.0);
+            orientations[i] = Orientation::along(w.dir, 0.0);
             posts[i].post(callin::STARTED_MOVING);
         } else if !walking && b.vx != 0.0 {
             w.dir = -w.dir;
@@ -255,22 +255,24 @@ pub fn target(tick: u64, units: u32) -> [f32; 3] {
     ]
 }
 
-#[system(read(Body, Anim, Facing), write(Weapons, Callins))]
+#[system(read(Body, Anim, Orientation), write(Weapons, Callins))]
 fn aimer(run: &Run) {
     if run.param() & AIM == 0 || run.tick() % AIM_EVERY != 0 {
         return;
     }
-    let (bodies, anims, facings, weapons, posts) = (
+    let (bodies, anims, orientations, weapons, posts) = (
         run.read::<Body>(),
         run.read::<Anim>(),
-        run.read::<Facing>(),
+        run.read::<Orientation>(),
         run.write::<Weapons>(),
         run.write::<Callins>(),
     );
     let t = target(run.tick(), run.param() as u32);
     for i in run.rows() {
         // From the bone the script named (the root before its first poll).
-        let from = anims[i].bone_world(weapons[i].aim_from[0], &bodies[i], &facings[i]).pos;
+        let from = anims[i]
+            .bone_world(weapons[i].aim_from[0], &bodies[i], &orientations[i])
+            .pos;
         weapons[i].ask(0, [t[0] - from[0], t[1] - from[1], t[2] - from[2]]);
         posts[i].post(callin::AIM);
     }
@@ -356,20 +358,20 @@ async fn unit(u: Unit) {
     }
 }
 
-#[system(read(Body, Facing), write(Script, Callins, Anim, Weapons, Log))]
+#[system(read(Body, Orientation), write(Script, Callins, Anim, Weapons, Log))]
 fn scripts(run: &Run) {
     script::resume(run, unit);
 }
 
-#[system(read(Body, Anim, Facing, Weapons), write(Log))]
+#[system(read(Body, Anim, Orientation, Weapons), write(Log))]
 fn check(run: &Run) {
     if run.param() & AIM == 0 {
         return;
     }
-    let (bodies, anims, facings, weapons, logs) = (
+    let (bodies, anims, orientations, weapons, logs) = (
         run.read::<Body>(),
         run.read::<Anim>(),
-        run.read::<Facing>(),
+        run.read::<Orientation>(),
         run.read::<Weapons>(),
         run.write::<Log>(),
     );
@@ -379,7 +381,9 @@ fn check(run: &Run) {
         if !w.is_aimed(0) || l.checked == w.aimed[0] {
             continue;
         }
-        let f = anims[i].bone_world(head, &bodies[i], &facings[i]).dir(Axis::FORWARD);
+        let f = anims[i]
+            .bone_world(head, &bodies[i], &orientations[i])
+            .dir(Axis::FORWARD);
         let d = w.dir(0);
         // The angle between them by atan2 (acos is coarse near 0).
         let cos = f[0] * d[0] + f[1] * d[1] + f[2] * d[2];

@@ -1,4 +1,4 @@
-//! Aiming in the world (feature `aim`, M14): a unit's [`Facing`] (its
+//! Aiming in the world (feature `aim`, M14): a unit's [`Orientation`] (its
 //! frame's orientation, synced), where its bones are in the world
 //! ([`Anim::bone_world`]), and its [`Weapons`] (aim-from and fire-from
 //! bones, aim requests and answers). Opt-in, as `nav`: every component
@@ -16,27 +16,27 @@ use crate::{Component, abi};
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 #[component(id = 0xAE00_0000_0000_0012)]
-pub struct Facing {
+pub struct Orientation {
     #[field(view = "los")]
     pub rot: [f32; 4],
 }
 
-const _: () = assert!(<Facing as Component>::ID == abi::engine::FACING);
+const _: () = assert!(<Orientation as Component>::ID == abi::engine::ORIENTATION);
 
-impl Default for Facing {
+impl Default for Orientation {
     fn default() -> Self {
         Self::IDENTITY
     }
 }
 
-impl Facing {
-    pub const IDENTITY: Facing = Facing {
+impl Orientation {
+    pub const IDENTITY: Orientation = Orientation {
         rot: [0.0, 0.0, 0.0, 1.0],
     };
 
-    /// Upright, facing ground direction `(dx, dy)` (nav; need not be unit
-    /// length; zero: [`Facing::IDENTITY`]).
-    pub fn along(dx: f32, dy: f32) -> Facing {
+    /// Upright, turned to the ground direction `(dx, dy)` (nav; need not be
+    /// unit length; zero: [`Orientation::IDENTITY`]).
+    pub fn along(dx: f32, dy: f32) -> Orientation {
         let len = libm::sqrtf(dx * dx + dy * dy);
         if len == 0.0 {
             return Self::IDENTITY;
@@ -44,22 +44,22 @@ impl Facing {
         // The shortest turn from +x to (dx, 0, dy), about up.
         let (c, s) = (dx / len, dy / len);
         if c <= -1.0 + 1e-6 {
-            return Facing {
+            return Orientation {
                 rot: [0.0, 1.0, 0.0, 0.0],
             };
         }
         // Half-way vector: (1 + c, 0, s) normalised; the axis +x × it.
         let q = [0.0, -s, 0.0, 1.0 + c];
         let n = libm::sqrtf(q[1] * q[1] + q[3] * q[3]);
-        Facing {
+        Orientation {
             rot: [0.0, q[1] / n, 0.0, q[3] / n],
         }
     }
 
     /// Turned further by `q` (in the unit's frame: a tilt about
     /// [`Axis::RIGHT`] is `rot · q`).
-    pub fn then(self, q: [f32; 4]) -> Facing {
-        Facing {
+    pub fn then(self, q: [f32; 4]) -> Orientation {
+        Orientation {
             rot: qnorm(qmul(self.rot, q)),
         }
     }
@@ -76,7 +76,7 @@ impl Facing {
 }
 
 /// The rotation by `angle` radians about `axis` (a unit vector), as
-/// [`Facing::then`] takes it.
+/// [`Orientation::then`] takes it.
 pub fn rotation(axis: [f32; 3], angle: f32) -> [f32; 4] {
     let a = norm(axis);
     let (s, c) = (libm::sinf(angle * 0.5), libm::cosf(angle * 0.5));
@@ -161,13 +161,13 @@ impl BoneWorld {
 }
 
 impl Anim {
-    /// Where `bone` is in the world for a unit at `body` facing `facing`,
+    /// Where `bone` is in the world for a unit at `body` with `orientation`,
     /// as these channels pose it (commands not yet taken by the engine do
     /// not count, as for [`Anim::bounds`]): the model fitted to the unit's
     /// radius as the renderer draws it, from the unit's ground point (the
     /// sim has no terrain height: heights are above that point). Where
     /// aim directions are measured from, and shots leave from.
-    pub fn bone_world(&self, bone: u16, body: &Body, facing: &Facing) -> BoneWorld {
+    pub fn bone_world(&self, bone: u16, body: &Body, orientation: &Orientation) -> BoneWorld {
         const N: usize = size_of::<Anim>();
         let mut input = [0u8; N + 32];
         // SAFETY: `Anim` is plain data (`repr(C)`, no padding read back).
@@ -177,10 +177,10 @@ impl Anim {
             body.x.to_bits(),
             body.y.to_bits(),
             body.radius.to_bits(),
-            facing.rot[0].to_bits(),
-            facing.rot[1].to_bits(),
-            facing.rot[2].to_bits(),
-            facing.rot[3].to_bits(),
+            orientation.rot[0].to_bits(),
+            orientation.rot[1].to_bits(),
+            orientation.rot[2].to_bits(),
+            orientation.rot[3].to_bits(),
         ];
         for (k, w) in words.iter().enumerate() {
             input[N + 4 * k..N + 4 * k + 4].copy_from_slice(&w.to_le_bytes());

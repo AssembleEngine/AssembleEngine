@@ -356,13 +356,13 @@ pub mod engine {
     /// `Callins { pending: u32, reserved: u32 }`: callins posted to a unit's
     /// script, not yet seen (M14; `ae_sdk::script::Callins`).
     pub const CALLINS: u64 = 0xAE00_0000_0000_0011;
-    /// `Facing { rot: [f32; 4] }`: a unit's orientation, a unit quaternion
-    /// (x, y, z, w) from its frame (forward +x, up +y, right +z) to the
-    /// world's (nav x, up, nav y) (M14; `ae_sdk::anim::Facing`).
-    pub const FACING: u64 = 0xAE00_0000_0000_0012;
+    /// `Orientation { rot: [f32; 4] }`: a unit's orientation, a unit
+    /// quaternion (x, y, z, w) from its frame (forward +x, up +y, right +z)
+    /// to the world's (nav x, up, nav y) (M14; `ae_sdk::aim::Orientation`).
+    pub const ORIENTATION: u64 = 0xAE00_0000_0000_0012;
     /// `Weapons { ... }`: a unit's weapons as aiming sees them: aim-from and
     /// fire-from bones, aim requests and answers (M14;
-    /// `ae_sdk::anim::Weapons`).
+    /// `ae_sdk::aim::Weapons`).
     pub const WEAPONS: u64 = 0xAE00_0000_0000_0013;
 }
 

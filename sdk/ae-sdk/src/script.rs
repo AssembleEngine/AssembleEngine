@@ -358,11 +358,11 @@ impl Unit {
 
 #[cfg(feature = "aim")]
 impl Unit {
-    /// A world direction in its frame, by its `Facing` (a term of the
+    /// A world direction in its frame, by its `Orientation` (a term of the
     /// resuming system): what an aim request gives, as `Anim::dir_in`
     /// takes it.
     pub fn to_unit(&self, dir: [f32; 3]) -> [f32; 3] {
-        self.get::<crate::aim::Facing>().to_unit(dir)
+        self.get::<crate::aim::Orientation>().to_unit(dir)
     }
 }
 
