@@ -310,6 +310,16 @@ pub fn store(ch: &Channels, a: &mut Anim) {
     }
 }
 
+/// A model-space point `p` and rotation `q` of a unit at ground point
+/// `(x, y)` (nav), drawn at `scale` world units a model unit, facing
+/// `facing`: in the world (nav x, height above the ground point, nav y).
+/// Strict scalar f32, the same everywhere.
+pub fn place(facing: [f32; 4], [x, y, scale]: [f32; 3], p: [f32; 3], q: [f32; 4]) -> ([f32; 3], [f32; 4]) {
+    use ae_model::anim::{qmul, qrot};
+    let v = qrot(facing, [p[0] * scale, p[1] * scale, p[2] * scale]);
+    ([x + v[0], v[1], y + v[2]], qmul(facing, q))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,14 +437,4 @@ mod tests {
             ae_model::pose::PlayMode::PingPong as u32
         );
     }
-}
-
-/// A model-space point `p` and rotation `q` of a unit at ground point
-/// `(x, y)` (nav), drawn at `scale` world units a model unit, facing
-/// `facing`: in the world (nav x, height above the ground point, nav y).
-/// Strict scalar f32, the same everywhere.
-pub fn place(facing: [f32; 4], [x, y, scale]: [f32; 3], p: [f32; 3], q: [f32; 4]) -> ([f32; 3], [f32; 4]) {
-    use ae_model::anim::{qmul, qrot};
-    let v = qrot(facing, [p[0] * scale, p[1] * scale, p[2] * scale]);
-    ([x + v[0], v[1], y + v[2]], qmul(facing, q))
 }

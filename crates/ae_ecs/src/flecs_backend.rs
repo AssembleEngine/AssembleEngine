@@ -35,6 +35,12 @@ pub type ColumnFree = unsafe extern "C-unwind" fn(*mut c_void);
 /// `vendor/patches/0001-column-allocator.patch`). Everything else Flecs
 /// allocates (world, tables, queries, entity arrays) stays on the host heap.
 /// Process-wide; must run before [`init`].
+///
+/// # Safety
+///
+/// The three functions must be a real allocator: every pointer Flecs hands back
+/// must come from them, and they must stay valid for the process' lifetime. Call
+/// this before any other Flecs call, [`init`] in particular.
 pub unsafe fn install_column_allocator(malloc: ColumnMalloc, realloc: ColumnRealloc, free: ColumnFree) {
     unsafe { ecs_os_set_api_defaults() };
     let allocator = ecs_column_allocator_t {
@@ -44,7 +50,11 @@ pub unsafe fn install_column_allocator(malloc: ColumnMalloc, realloc: ColumnReal
     };
     unsafe { ecs_column_allocator_set(&allocator) };
 }
-
+///
+/// # Safety
+///
+/// Flecs allows one live world, and every call for it must happen on one thread
+/// at a time. The world must be passed to [`fini`] exactly once.
 pub unsafe fn init() -> Result<World> {
     let world = unsafe { ecs_init() };
     if world.is_null() {
@@ -52,7 +62,11 @@ pub unsafe fn init() -> Result<World> {
     }
     Ok(world)
 }
-
+///
+/// # Safety
+///
+/// `world` must come from [`init`] and must not be touched afterwards: no Flecs
+/// call, no live query, no chunk pointer taken from it.
 pub unsafe fn fini(world: World) {
     if !world.is_null() {
         unsafe { ecs_fini(world) };
@@ -60,6 +74,11 @@ pub unsafe fn fini(world: World) {
 }
 
 /// Register a component with a storage layout `{name, size, align}`.
+///
+/// # Safety
+///
+/// `world` must be a live world, and `size`/`align` the component's real layout:
+/// Flecs sizes its columns from them, so a wrong size writes past column memory.
 pub unsafe fn register_component(world: World, name: &str, size: u32, align: u32) -> Result<ComponentId> {
     let cname = CString::new(name).map_err(|_| anyhow::anyhow!("component name has NUL"))?;
     let mut entity_desc = unsafe { MaybeUninit::<ecs_entity_desc_t>::zeroed().assume_init() };
@@ -80,13 +99,21 @@ pub unsafe fn register_component(world: World, name: &str, size: u32, align: u32
     }
     Ok(ComponentId(component))
 }
-
+///
+/// # Safety
+///
+/// `world` must be a live world.
 pub unsafe fn create_entity(world: World) -> EntityId {
     let desc = unsafe { MaybeUninit::<ecs_entity_desc_t>::zeroed().assume_init() };
     EntityId(unsafe { ecs_entity_init(world, &desc) })
 }
 
 /// The table (archetype) holding exactly `components`, created if needed.
+///
+/// # Safety
+///
+/// `world` must be a live world and every entry of `components` a component
+/// registered in it.
 pub unsafe fn find_table(world: World, components: &[ComponentId]) -> Result<Table> {
     let mut ids: Vec<u64> = components.iter().map(|c| c.0).collect();
     ids.sort_unstable();
@@ -98,22 +125,39 @@ pub unsafe fn find_table(world: World, components: &[ComponentId]) -> Result<Tab
 
 /// Create an entity directly in `table`. Setting its components afterwards
 /// writes in place: no table move.
+///
+/// # Safety
+///
+/// `world` must be a live world and `table` one of its tables (from
+/// [`find_table`] on the same world).
 pub unsafe fn spawn_in_table(world: World, table: Table) -> EntityId {
     EntityId(unsafe { ecs_new_w_table(world, table) })
 }
 
 /// Byte size of a component's values (0 for a tag).
+///
+/// # Safety
+///
+/// `world` must be a live world and `component` registered in it.
 pub unsafe fn component_size(world: World, component: ComponentId) -> Result<usize> {
     let info = unsafe { ecs_get_type_info(world, component.0) };
     ensure!(!info.is_null(), "component {} has no type info", component.0);
     Ok(unsafe { (*info).size } as usize)
 }
-
+///
+/// # Safety
+///
+/// `world` must be a live world; `entity` may be any id, `0` reads as absent.
 pub unsafe fn has_component(world: World, entity: EntityId, component: ComponentId) -> bool {
     unsafe { ecs_has_id(world, entity.0, component.0) }
 }
 
 /// Assign a component value to an entity (structural add when absent).
+///
+/// # Safety
+///
+/// `world` must be a live world and `bytes` exactly the component's size: Flecs
+/// copies that many bytes into the column.
 pub unsafe fn set_component(world: World, entity: EntityId, component: ComponentId, bytes: &[u8]) -> Result<()> {
     ensure!(unsafe { ecs_is_valid(world, entity.0) }, "invalid entity {}", entity.0);
     unsafe { ecs_set_id(world, entity.0, component.0, bytes.len(), bytes.as_ptr().cast()) };
@@ -121,10 +165,19 @@ pub unsafe fn set_component(world: World, entity: EntityId, component: Component
 }
 
 /// Remove a component from an entity (structural).
+///
+/// # Safety
+///
+/// `world` must be a live world, and no chunk pointer from an earlier
+/// [`for_each_chunk`] may be in use, since this is a structural change.
 pub unsafe fn remove_component(world: World, entity: EntityId, component: ComponentId) {
     unsafe { ecs_remove_id(world, entity.0, component.0) };
 }
-
+///
+/// # Safety
+///
+/// `world` must be a live world, and no chunk pointer from an earlier
+/// [`for_each_chunk`] may be in use, since this is a structural change.
 pub unsafe fn delete_entity(world: World, entity: EntityId) -> bool {
     if entity.0 == 0 || !unsafe { ecs_is_valid(world, entity.0) } {
         return false;
@@ -132,12 +185,20 @@ pub unsafe fn delete_entity(world: World, entity: EntityId) -> bool {
     unsafe { ecs_delete(world, entity.0) };
     true
 }
-
+///
+/// # Safety
+///
+/// `world` must be a live world; `entity` may be any id.
 pub unsafe fn entity_alive(world: World, entity: EntityId) -> bool {
     entity.0 != 0 && unsafe { ecs_is_valid(world, entity.0) }
 }
 
 /// Create a cached query from AND terms.
+///
+/// # Safety
+///
+/// `world` must be a live world and every term's component registered in it. The
+/// query must be passed to [`fini_query`] before the world is dropped.
 pub unsafe fn create_query(world: World, terms: &[Term]) -> Result<Query> {
     unsafe { query_with_cache(world, terms, ecs_query_cache_kind_t_EcsQueryCacheAll) }
 }
@@ -146,6 +207,11 @@ pub unsafe fn create_query(world: World, terms: &[Term]) -> Result<Query> {
 /// creating one in the middle of a run changes the ids later spawns get;
 /// an uncached query creates no entity and leaves the world as it was.
 /// For inspection (counts, end-of-tick captures) between ticks.
+///
+/// # Safety
+///
+/// As [`create_query`]: a live world, registered components, and [`fini_query`]
+/// before the world is dropped.
 pub unsafe fn create_query_uncached(world: World, terms: &[Term]) -> Result<Query> {
     unsafe { query_with_cache(world, terms, ecs_query_cache_kind_t_EcsQueryCacheNone) }
 }
@@ -167,7 +233,11 @@ unsafe fn query_with_cache(world: World, terms: &[Term], cache: ecs_query_cache_
     }
     Ok(query)
 }
-
+///
+/// # Safety
+///
+/// `query` must come from [`create_query`] or [`create_query_uncached`] on a
+/// world that is still alive, and must not be used afterwards.
 pub unsafe fn fini_query(query: Query) {
     if !query.is_null() {
         unsafe { ecs_query_fini(query) };
@@ -177,6 +247,12 @@ pub unsafe fn fini_query(query: Query) {
 /// Iterate a query, yielding one chunk (table span) at a time.
 ///
 /// The pointers in a chunk are valid only until the next structural change.
+///
+/// # Safety
+///
+/// `world` and `query` must be live, and `terms` must be the query's own terms in
+/// the same order. The pointers in a [`ChunkView`] are valid only until the next
+/// structural change, so `f` must not make one.
 pub unsafe fn for_each_chunk(
     world: World,
     query: Query,
