@@ -4115,20 +4115,20 @@ Design:
       (254 reused), equal at 8 and 1. Coro's digest changed (the `Script` and slot layouts).
     - Not done then: aiming (below); queries of other units; effects at joints; nothing
       engine-side posts callins yet (nav could post the moves).
-  - Step 5, part 2: facing and aiming — done (2026-11-19).
-    - **A synced facing** (decided with the user, 2026-11-19: an engine component, synced and
-      saved; hybrid phase 4): `Facing { rot }` (`…0012`, `ae_sdk::aim`), a unit quaternion
-      from the unit's frame (forward +x, up +y, right +z) to the world's (nav x, up, nav y:
-      the renderer's frame, so the identity faces +x as the renderer's heading (1, 0) does).
-      A quaternion, not heading and pitch (tilt allowed). `Facing::along(dx, dy)`, `then`
-      (a further turn in the unit's frame), `to_unit`, `to_world`; `anim::rotation(axis,
-      angle)`. Whoever places the unit writes it (the game; nav does not yet). The renderer
-      still draws the heading from the velocity, not from `Facing`: the client's capture is
-      one query over all its components, so `Facing` must be read apart and merged by
-      entity (as the `Anim` rows are), not added to it. **A prerequisite of step 6** (the
-      muzzle flash at the sim's fire-from position is off on a unit whose drawn heading is
-      its velocity's when the two differ).
-    - `Anim::bone_world(bone, &Body, &Facing)` (query `anim:bone_world`;
+  - Step 5, part 2: orientation and aiming — done (2026-11-19).
+    - **A synced orientation** (an engine component, synced and saved; hybrid phase 4;
+      called `Facing` until step 6's A0): `Orientation { rot }` (`…0012`, `ae_sdk::aim`), a
+      unit quaternion from the unit's frame (forward +x, up +y, right +z) to the world's
+      (nav x, up, nav y: the renderer's frame, so the identity faces +x as the renderer's
+      heading (1, 0) does). A quaternion, not heading and pitch (tilt allowed).
+      `Orientation::along(dx, dy)`, `then` (a further turn in the unit's frame), `to_unit`,
+      `to_world`; `anim::rotation(axis, angle)`. Whoever places the unit writes it (the
+      game; nav does not yet). The renderer still draws the heading from the velocity, not
+      from `Orientation`: the client's capture is one query over all its components, so
+      `Orientation` must be read apart and merged by entity (as the `Anim` rows are), not
+      added to it. **A prerequisite of step 6** (the muzzle flash at the sim's fire-from
+      position is off on a unit whose drawn heading is its velocity's when the two differ).
+    - `Anim::bone_world(bone, &Body, &Orientation)` (query `anim:bone_world`;
       `Rig::bone_frame`): the bone's origin in the world, the model fitted to the unit's
       radius as the renderer draws it (`ae_model::footprint`, now shared with the renderer's
       fit), and the rotation from the unit's frame at rest to the world as the bone carries
@@ -4150,8 +4150,15 @@ Design:
       `Rig::globals`, the facing, the fit), units that answered the last request look at the
       target from their head to 1e-5°; digests equal at 8 and 1 workers. Ignoring the facing
       in `bone_world` fails it (180° off).
-    - Not done: queries of other units; effects at joints; the renderer drawing `Facing`;
-      nav writing `Facing` and posting the move callins.
+    - Not done: queries of other units; effects at joints; the renderer drawing `Orientation`;
+      nav writing `Orientation` and posting the move callins.
+  - Step 6, A0: `Facing` renamed `Orientation` — done (2026-11-22). `ae_sdk::aim::Orientation`
+    (same id `…0012`; field `rot` and the methods `along`, `then`, `to_unit`, `to_world` keep
+    their names), `ae_abi::engine::ORIENTATION`, puppet, the scripts test and
+    `Anim::bone_world`'s parameter. The component's schema name changes, so tests read rows
+    by `"Orientation"`; the digest hashes components by id, and puppet's is unchanged
+    (6ecb62f3277556b7 at 1, 2, 4 and 8 workers; churn c234b208cee2bb02 and aim
+    467159c74018fe98 too).
 
 ### M15 — Fully bindless resources (priority: medium)
 

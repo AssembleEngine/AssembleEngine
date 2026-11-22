@@ -621,7 +621,7 @@ rewrite `units.pose` to evaluate layers/masks/manual entries; remove the key tab
 comparison. Add pose parity tests.
 
 **Phase 4 — CPU aim/fire queries.**
-Add `Facing` (or `Body.heading`), the ground-height accessor, `bone_world`/`bone_position`, the
+Add `Orientation` (or `Body.heading`), the ground-height accessor, `bone_world`/`bone_position`, the
 per-tick query cache and the aim parity test. Wire the test game's aiming to the new queries.
 
 **Phase 5 — bounds callout and cull changes.**
