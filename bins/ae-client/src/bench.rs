@@ -7,7 +7,8 @@
 //! fixed camera or camera path. After `--warmup` frames (the subdivision
 //! settles; default 60) and at least a second (GPU clocks) it renders `--frames` frames (default 300) with
 //! per-pass GPU timestamps and reports:
-//! * time `pass/<name>` and `gpu_total`: median GPU time per frame, without
+//! * time `pass/<name>`: median GPU time per frame; `gpu_total`: the sum of
+//!   the passes' medians (the per-frame sums' spread), both without
 //!   the readback copy only offscreen rendering has;
 //! * time `cpu_frame`: the render thread's CPU time per frame (declare,
 //!   prepare, record, submit; the wait for a free frame slot excluded), and
@@ -555,11 +556,20 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         report.info("anim_cells_uploaded", median(&mut uploaded), "");
     }
     let counted: Vec<bool> = names.iter().map(|n| !READBACK_PASSES.contains(&n.as_str())).collect();
-    let mut total: Vec<f64> = gpu_frames.iter().map(|f| f.iter().zip(&counted).filter(|(_, c)| **c).map(|(&ms, _)| ms as f64).sum()).collect();
-    report.time("gpu_total", ns(&mut total));
-    for (p, name) in names.iter().enumerate().filter(|(p, _)| counted[*p]) {
+    let passes: Vec<(&String, Sample)> = names.iter().enumerate().filter(|(p, _)| counted[*p]).map(|(p, name)| {
         let mut times: Vec<f64> = gpu_frames.iter().map(|f| f[p] as f64).collect();
-        let sample = ns(&mut times);
+        (name, ns(&mut times))
+    }).collect();
+    // `gpu_total` is the sum of the passes' medians. The median of each
+    // frame's sum moved 10-13% between runs while every pass agreed within
+    // 2%: single passes spike in some frames (`terrain lod` ±79%), so the
+    // sum's median falls between modes. The per-frame sums still give the
+    // spread.
+    let mut total: Vec<f64> = gpu_frames.iter().map(|f| f.iter().zip(&counted).filter(|(_, c)| **c).map(|(&ms, _)| ms as f64).sum()).collect();
+    let per_frame = ns(&mut total);
+    let summed = Sample { median_ns: passes.iter().map(|(_, s)| s.median_ns).sum(), min_ns: passes.iter().map(|(_, s)| s.min_ns).sum(), ..per_frame };
+    report.time("gpu_total", summed);
+    for (name, sample) in passes {
         // GPU timers tick in about a microsecond: allow a couple of ticks.
         let tolerance = SMALL_PASS_NS / sample.median_ns.max(1.0);
         if tolerance > Thresholds::default().time {
