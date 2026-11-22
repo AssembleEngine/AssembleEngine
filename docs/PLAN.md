@@ -4211,6 +4211,28 @@ Design:
       and the seed exact; the digests and the whole feed are equal at 8, 1, 2 and 4
       workers. An ae-client unit test (`effects_become_bursts_only_where_seen`). No
       existing game's digest changes (none schedules `host(fx)`).
+  - Step 6, C: queries of other units — done (2026-11-22).
+    - `get(T, ..)` in `#[system]`: components read of other entities during
+      the run, a separate list in the system record (version 2) beside
+      `emits`, not a query term (it does not restrict the rows). The
+      scheduler counts each as a read of `T`, so writers of `T` go to another
+      layer. Rejected at load: a `T` the system writes, an event type, or the
+      same `T` twice.
+    - Import `ae_get(entity, component, out, len) -> u32`: 1 when the bytes
+      were copied, 0 when the entity is not alive or lacks the component; a
+      trap when the component is not in the calling system's `get` list or
+      `len` is wrong. Host side: the batch carries the world pointer and
+      `ecs_get_id` reads the column (guest memory) during the layer.
+      Structural changes wait for the layer's sync point, `overlap_hosts`
+      included, so the pointer is read-only for the batch's whole run.
+    - SDK: `Run::get_of::<T>(entity)` and `Unit::get_of::<T>(entity)`, both
+      returning a copy (`Option<T>`).
+    - Test `ae_sim/tests/gets.rs` on `gets_guest`: 64 units; `advance`
+      writes `Position`, `read` gets its target's `Position` in a later
+      layer and records it, and targets despawned mid-run read as `None` (28
+      reads); the digests and every row are equal at 8, 1, 2 and 4 workers.
+      `gets_bad_guest`, whose system gets the component it writes, is
+      rejected when it loads. No existing game's digest changes.
 
 ### M15 — Fully bindless resources (priority: medium)
 
