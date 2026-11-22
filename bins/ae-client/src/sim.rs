@@ -189,8 +189,15 @@ impl SimOptions {
         let mut rigs: Vec<(String, Rig)> = self
             .models
             .iter()
-            .map(|m| (m.name.clone(), Rig::new(&m.model)))
-            .collect();
+            .map(|m| {
+                let mut rig = Rig::new(&m.model);
+                if let Some(json) = &m.rig {
+                    rig.apply_rig_file(json)
+                        .with_context(|| format!("model {}'s rig file", m.name))?;
+                }
+                Ok((m.name.clone(), rig))
+            })
+            .collect::<Result<_>>()?;
         if !self.mounts.is_empty() {
             let mut vfs = ae_vfs::Vfs::new();
             for m in &self.mounts {
@@ -200,7 +207,13 @@ impl SimOptions {
                 let model = ae_model::Model::from_bytes(&vfs.read(&f)?).with_context(|| format!("model {f}"))?;
                 let name = f.trim_start_matches("models/").trim_end_matches(".aemodel").to_string();
                 if !rigs.iter().any(|(n, _)| *n == name) {
-                    rigs.push((name, Rig::new(&model)));
+                    let mut rig = Rig::new(&model);
+                    let rig_file = format!("models/{name}.rig.json");
+                    if vfs.exists(&rig_file) {
+                        rig.apply_rig_file(&vfs.read(&rig_file)?)
+                            .with_context(|| format!("model {name}'s rig file"))?;
+                    }
+                    rigs.push((name, rig));
                 }
             }
         }
@@ -404,12 +417,16 @@ impl Sim {
         let rt = Runtime::with_hosts(&wasm, cfg, plugins)?;
         let world = rt.world_for(o.param(), o.workers)?;
         // The raw capture (no observer) draws units with a body; their
-        // class is their nav agent's profile, but in the scripted game
-        // (whose units have no nav agent, though the SDK declares it).
-        let spec = CaptureSpec::new(
-            &rt.schema,
-            &FIELDS[..if o.game == "scripted" { F_PROFILE } else { FIELDS.len() }],
-        )?;
+        // class is their nav agent's profile when the game runs a nav
+        // service. Its units carry a `NavAgent`; `scripted` and `duel` do
+        // not schedule nav and their units do not (though the SDK declares
+        // `NavAgent` in their schema, so the schema alone cannot say).
+        let has_nav = rt
+            .schema
+            .order
+            .iter()
+            .any(|slot| matches!(slot, ae_sim::schema::Slot::Host(name) if name == "nav" || name == "nav_spawn"));
+        let spec = CaptureSpec::new(&rt.schema, &FIELDS[..if has_nav { FIELDS.len() } else { F_PROFILE }])?;
         // Units drawn with a model whose `Anim` names it are posed.
         // (the layout checked: the service's own check runs only when the
         // game schedules it).

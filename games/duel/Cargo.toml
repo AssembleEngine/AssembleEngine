@@ -1,0 +1,21 @@
+# Duel: the M14 step 6 test game. Pairs of a scripted Fox (A) and a target
+# Fox (B): A walks, stops and runs while it takes the aim in steps, fires
+# three times, and dies. Built for wasm32-wasip1-threads by the tests and
+# the client; not part of the main workspace.
+[package]
+name = "ae_game_duel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "anim", "aim", "fx", "life", "script-checks"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]

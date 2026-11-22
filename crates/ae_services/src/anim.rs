@@ -61,7 +61,14 @@ impl AnimPlugin {
         for f in files {
             let model = ae_model::Model::from_bytes(&vfs.read(&f)?).with_context(|| format!("model {f}"))?;
             let name = f.trim_start_matches("models/").trim_end_matches(".aemodel").to_string();
-            models.push((name, Rig::new(&model)));
+            let mut rig = Rig::new(&model);
+            // Masks from content, next to the model (`models/fox.rig.json`).
+            let rig_file = format!("models/{name}.rig.json");
+            if vfs.exists(&rig_file) {
+                rig.apply_rig_file(&vfs.read(&rig_file)?)
+                    .with_context(|| format!("model {name}'s rig file"))?;
+            }
+            models.push((name, rig));
         }
         Ok(Some(Self::new(models, tick_seconds)))
     }

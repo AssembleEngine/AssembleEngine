@@ -1,0 +1,6 @@
+{
+  "masks": [
+    { "name": "upper", "roots": ["b_Spine01_02"] },
+    { "name": "lower", "roots": ["b_Hip_01"], "minus": ["upper"] }
+  ]
+}

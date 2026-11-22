@@ -83,7 +83,11 @@ fn head_in_world(
 
 fn fox() -> Rig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb");
-    Rig::new(&ae_gltf::convert_file(&path).unwrap().model)
+    let mut rig = Rig::new(&ae_gltf::convert_file(&path).unwrap().model);
+    // The masks from content, as the plugin and the renderer get them.
+    rig.apply_rig_file(&std::fs::read(path.with_extension("rig.json")).unwrap())
+        .unwrap();
+    rig
 }
 
 fn decode<T: Copy>(bytes: &[u8]) -> T {

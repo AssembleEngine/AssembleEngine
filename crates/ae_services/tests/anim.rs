@@ -24,7 +24,11 @@ const TICK: f32 = 1.0 / 30.0;
 
 fn fox() -> Rig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb");
-    Rig::new(&ae_gltf::convert_file(&path).unwrap().model)
+    let mut rig = Rig::new(&ae_gltf::convert_file(&path).unwrap().model);
+    // The masks from content, as the plugin and the renderer get them.
+    rig.apply_rig_file(&std::fs::read(path.with_extension("rig.json")).unwrap())
+        .unwrap();
+    rig
 }
 
 /// The cycle tick the scripted game measures bounds at (its
@@ -36,6 +40,38 @@ fn scripted_measure_tick() -> u64 {
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
     unsafe { bytes.as_ptr().cast::<T>().read_unaligned() }
+}
+
+/// The Fox's rig file: the spine subtree holds the neck, head and arms; the
+/// hip's own children (minus the spine) the tail and the legs; the two do
+/// not overlap.
+#[test]
+fn the_fox_rig_file_separates_upper_and_lower() {
+    let rig = fox();
+    let (upper, lower) = (rig.mask("upper").unwrap(), rig.mask("lower").unwrap());
+    let weights = |k: u16| &rig.masks()[k as usize - 1].weights[..];
+    let (u, l) = (weights(upper), weights(lower));
+    let bone = |name: &str| rig.bone(name).unwrap() as usize;
+    for name in [
+        "b_Spine01_02",
+        "b_Spine02_03",
+        "b_Neck_04",
+        "b_Head_05",
+        "b_RightUpperArm_06",
+    ] {
+        assert_eq!(u[bone(name)], 1.0, "{name} is upper");
+        assert_eq!(l[bone(name)], 0.0, "{name} is not lower");
+    }
+    for name in ["b_Hip_01", "b_Tail01_012", "b_LeftLeg01_015", "b_RightFoot02_022"] {
+        assert_eq!(l[bone(name)], 1.0, "{name} is lower");
+        assert_eq!(u[bone(name)], 0.0, "{name} is not upper");
+    }
+    assert!(u.iter().zip(l).all(|(a, b)| a * b == 0.0), "no bone is both");
+    assert_eq!(
+        (u[bone("b_Root_00")], l[bone("b_Root_00")]),
+        (0.0, 0.0),
+        "the root is neither"
+    );
 }
 
 #[test]

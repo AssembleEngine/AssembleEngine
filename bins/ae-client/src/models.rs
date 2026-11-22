@@ -23,6 +23,8 @@ pub struct ClassModel {
     pub class: Option<u32>,
     pub name: String,
     pub model: Arc<Model>,
+    /// Its rig file (named masks), `<stem>.rig.json` beside the model file.
+    pub rig: Option<Vec<u8>>,
 }
 
 /// `--model [CLASS=]FILE`.
@@ -54,7 +56,15 @@ pub fn parse_arg(text: &str) -> Result<ClassModel> {
         class,
         name,
         model: Arc::new(model),
+        rig: rig_file(Path::new(file)),
     })
+}
+
+/// The rig file of a model file: the same stem beside it (`Fox.glb`:
+/// `Fox.rig.json`).
+pub fn rig_file(path: &Path) -> Option<Vec<u8>> {
+    let rig = path.with_extension("rig.json");
+    rig.is_file().then(|| std::fs::read(&rig).ok()).flatten()
 }
 
 fn clip_names(model: &Model) -> String {
@@ -92,10 +102,12 @@ fn repo_root() -> PathBuf {
 
 /// The Khronos Fox (the bench's model), as model `fox` for every class.
 pub fn fox() -> Result<ClassModel> {
+    let path = repo_root().join("assets/models/khronos/Fox/Fox.glb");
     Ok(ClassModel {
         class: None,
         name: "fox".into(),
-        model: Arc::new(load(&repo_root().join("assets/models/khronos/Fox/Fox.glb"))?),
+        model: Arc::new(load(&path)?),
+        rig: rig_file(&path),
     })
 }
 
@@ -206,11 +218,13 @@ mod tests {
                 class: None,
                 name: "a".into(),
                 model: a.clone(),
+                rig: None,
             },
             ClassModel {
                 class: Some(1),
                 name: "b".into(),
                 model: b.clone(),
+                rig: None,
             },
         ];
         let per = per_class(&given, 4, Some(3));

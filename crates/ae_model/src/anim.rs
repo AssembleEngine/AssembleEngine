@@ -444,6 +444,58 @@ impl Rig {
         self.masks.len() as u16
     }
 
+    /// Apply a model's rig file: named masks built from joint subtrees.
+    ///
+    /// Format: `{"masks": [{"name": "upper", "roots": ["b_Spine01_02"]},
+    /// {"name": "lower", "roots": ["b_Hip_01"], "minus": ["upper"]}]}`.
+    /// Each mask is the union of its roots' subtrees; `minus` takes out the
+    /// weight of masks added before it (so `lower` and `upper` do not
+    /// overlap).
+    pub fn apply_rig_file(&mut self, json: &[u8]) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        #[derive(serde::Deserialize)]
+        struct File {
+            #[serde(default)]
+            masks: Vec<MaskFile>,
+        }
+        #[derive(serde::Deserialize)]
+        struct MaskFile {
+            name: String,
+            #[serde(default)]
+            roots: Vec<String>,
+            #[serde(default)]
+            minus: Vec<String>,
+        }
+        let file: File = serde_json::from_slice(json).context("rig file")?;
+        for m in file.masks {
+            let mut w = vec![0.0f32; self.bones()];
+            for root in &m.roots {
+                let b = self
+                    .bone(root)
+                    .with_context(|| format!("rig mask `{}`: no bone `{root}`", m.name))?;
+                for (w, s) in w.iter_mut().zip(self.subtree(b)) {
+                    if s > 0.0 {
+                        *w = 1.0;
+                    }
+                }
+            }
+            for other in &m.minus {
+                let k = self
+                    .mask(other)
+                    .with_context(|| format!("rig mask `{}`: no mask `{other}`", m.name))?;
+                let weights = &self.masks[k as usize - 1].weights;
+                for (w, o) in w.iter_mut().zip(weights) {
+                    *w = (*w - *o).max(0.0);
+                }
+            }
+            if self.mask(&m.name).is_some() {
+                anyhow::bail!("rig mask `{}` is declared twice", m.name);
+            }
+            self.add_mask(&m.name, w);
+        }
+        Ok(())
+    }
+
     pub fn mask(&self, name: &str) -> Option<u16> {
         self.masks.iter().position(|m| m.name == name).map(|k| k as u16 + 1)
     }
