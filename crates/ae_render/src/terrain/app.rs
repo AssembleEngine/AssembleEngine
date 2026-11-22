@@ -520,7 +520,7 @@ impl TerrainApp {
         self.light_stats.clone()
     }
 
-    /// The camera exposure (EV100) and tone curve (by default EV14, clamped).
+    /// The camera exposure (EV100), the bloom's strength and the sun.
     pub fn with_tone(mut self, tone: ToneParams) -> Self {
         self.tone = tone;
         self.tone_bloom = tone.bloom;
@@ -997,15 +997,9 @@ impl RenderApp for TerrainApp {
         // by it this frame.
         let vision = if params.vision { self.renderer.as_ref().and_then(|r| r.vision_uniform()) } else { None };
         if let Some(exposure) = &mut self.exposure {
-            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, key: self.tone.key(), bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
+            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
         }
-        // HDR: the curve's peak anchor displays at the display's peak over
-        // its paper white, so emitters land above paper white and the
-        // shoulder ends at what the display shows.
-        let mut tone = self.tone;
-        if self.encoding.uses_display() {
-            tone.lottes.peak_out = self.levels.headroom();
-        }
+        let tone = self.tone;
         if let Some(tonemap) = &mut self.tonemap {
             // SDR writes BT.709; HDR writes the display intermediate in the
             // working space, which post.encode maps to the output gamut.

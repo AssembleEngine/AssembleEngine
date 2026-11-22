@@ -20,11 +20,10 @@
 //! space the map is a pure re-expression; stage 3's wider space is where the
 //! compression happens.
 //!
-//! The tone curve's peak anchor is [`crate::tonemap::Lottes::peak_out`]: what
-//! the brightest scene value displays at, in paper-white units. In SDR that
-//! is 1; HDR passes [`DisplayLevels::headroom`] (`peak / paper white`), so a
-//! fireball's core decodes above paper white and the display's peak is where
-//! the curve's shoulder ends.
+//! There is no tone curve: the display intermediate carries the exposed
+//! scene as is, and this pass clips it at the display's peak
+//! ([`DisplayLevels::headroom`], `peak / paper white`), so a fireball's core
+//! decodes above paper white up to what the display shows.
 
 use crate::colorspace::{self, Gamut, WorkingSpace};
 use crate::device::GpuDevice;

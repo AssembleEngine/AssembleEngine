@@ -15,14 +15,6 @@ use gpu_allocator::MemoryLocation;
 use ae_render::units::ATTRIBUTE_COUNT;
 use std::sync::Arc;
 
-/// The tone of the tests tuned under Lottes, the default curve before the
-/// pass-through: their thresholds (a specular below white, the waves'
-/// visible change, rounding against the emission order, decals' footprint)
-/// need a curve that keeps highlights under the output's limit.
-fn lottes_tone() -> ae_render::tonemap::ToneParams {
-    ae_render::tonemap::ToneParams { curve: ae_render::tonemap::Curve::Lottes, ..Default::default() }
-}
-
 fn gpu() -> Arc<GpuDevice> {
     let instance = Arc::new(GpuInstance::new(&[], Some(true)).expect("Vulkan instance"));
     assert!(instance.validation, "these tests need VK_LAYER_KHRONOS_validation");
@@ -812,7 +804,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::{Vec2, Vec3, Vec4};
 
     let gpu = gpu();
@@ -827,7 +819,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, curve: Curve::None, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
+            .with_tone(ToneParams { ev100, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -1047,9 +1039,7 @@ fn auto_exposure_holds_the_key_across_sunlight() {
                 sun_illuminance: sun,
                 auto,
                 bloom: 0.0,
-                // The key it pins is Lottes' (the reference scene settles
-                // at its manual look under that key).
-                ..lottes_tone()
+                ..Default::default()
             });
         if fog {
             app = app.with_vision(Arc::new(ae_render::terrain::app::VisionFeed::new(grid)));
@@ -1112,10 +1102,14 @@ fn auto_exposure_holds_the_key_across_sunlight() {
         "mean auto {bright_auto:.3} / {dim_auto:.3} = {auto_ratio:.3}; manual {bright_manual:.3} / {dim_manual:.3} = {manual_ratio:.3}; \
          fogged auto {fog_auto:.3} ({fog_auto_ratio:.3} of clear), manual {fog_manual:.3} ({fog_manual_ratio:.3})"
     );
-    assert!(
-        (bright_auto / bright_manual - 1.0).abs() < 0.1,
-        "auto settles on the reference look: {bright_auto:.3} vs {bright_manual:.3}"
-    );
+    // The key sits below the untextured reference's look (KEY_LUMINANCE:
+    // it is tuned on the textured default map), so auto settles at the key,
+    // not at the manual frame; the frame's arithmetic mean of display-linear
+    // light reads a little under the meter's trimmed mean log (0.297 against
+    // 0.32 measured).
+    let key = ae_render::lighting::KEY_LUMINANCE;
+    assert!((bright_auto / key - 1.0).abs() < 0.1, "auto settles at the key: {bright_auto:.3} vs {key}");
+    assert!(bright_auto < bright_manual, "the key is below the reference's manual look: {bright_auto:.3} vs {bright_manual:.3}");
     assert!(
         (fog_auto_ratio / fog_manual_ratio - 1.0).abs() < 0.15,
         "the fog of war is not exposed away: auto keeps {fog_auto_ratio:.3} of the clear frame, manual {fog_manual_ratio:.3}"
@@ -2435,7 +2429,7 @@ fn water_covers_the_low_ground_only() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: true }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(lottes_tone()).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.water {
             app = app.with_water();
         }
@@ -2539,11 +2533,12 @@ fn water_covers_the_low_ground_only() {
 
     assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
     let moved = changed(&on, &later, &water);
-    // Under the physical sky the reflection is fainter at this angle; the
-    // waves still move at least a twentieth of the water pixels (105 of
-    // 1678 measured, 6.3%; it was over a fifteenth under ACES's brighter
-    // midtones).
-    assert!(moved * 20 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
+    // At this distance the waves move the water by under one code: every
+    // change is a single code (none saturates), so the count is how many
+    // pixels cross a rounding step. 34 of 1678 measured (2.0%) with no tone
+    // curve; it was 105 under Lottes' curve and over a fifteenth under
+    // ACES's, whose slopes here differed.
+    assert!(moved * 60 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
     assert_clean(&gpu);
 }
 
@@ -3478,7 +3473,7 @@ fn particles_light_by_illuminance() {
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -3500,7 +3495,7 @@ fn particles_light_by_illuminance() {
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
     let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, curve: Curve::None, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
+    let tone = ToneParams { ev100: 14.0, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {
@@ -3539,7 +3534,7 @@ fn render_particles(
     extent: vk::Extent2D,
     particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
 ) -> Vec<u8> {
-    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..lottes_tone() })
+    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() })
 }
 
 /// [`render_particles`] with the host's lights and a tone setting (for the
@@ -3757,7 +3752,9 @@ fn particles_order_independence() {
         // Sorted: depth-key ties fall back to the slot. Moments: float sums
         // in another order (the additive blend rounds differently).
         if *m != ParticleBlend::Sorted {
-            assert!(worst <= 2, "{m:?} depends on the emission order: {worst}");
+            // 3 codes with no tone curve (2 under Lottes, whose shoulder
+            // halved the bright differences): float sums in another order.
+            assert!(worst <= 3, "{m:?} depends on the emission order: {worst}");
         }
     }
 
@@ -4027,7 +4024,7 @@ fn decals_wrap_over_cliffs() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(lottes_tone()).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
             let life = match decals {
@@ -4231,7 +4228,10 @@ fn decals_wrap_over_cliffs() {
             let r = (0..centres.len()).map(|k| extent3(p, k)).fold(f32::MAX, f32::min);
             if r > 1.06 {
                 outside += 1;
-                changed += (rgb(&none, i) != rgb(&on, i)) as usize;
+                // More than one code: a decal's light, not float noise from
+                // the decal path landing on a rounding step (one point, one
+                // channel, 102 -> 101, measured with no tone curve).
+                changed += (0..3).any(|c| none[i + c].abs_diff(on[i + c]) > 1) as usize;
             }
             // L's copy: the foot of the 6 m step (x past 28, its leaning
             // cell), within its 3D extent, past its unfolded footprint
@@ -4245,7 +4245,7 @@ fn decals_wrap_over_cliffs() {
     }
     println!("{changed} of {outside} points outside the decals changed; L's copy past its unfolded footprint: {copy_changed} of {copy} points");
     assert!(outside > 30_000, "{outside} points outside");
-    assert_eq!(changed, 0, "ground outside the decals changes");
+    assert_eq!(changed, 0, "ground outside the decals changes by more than a code");
     assert!(copy > 50, "{copy} points past L's unfolded footprint");
     assert_eq!(copy_changed, 0, "L prints again at the foot of its step");
 
@@ -5622,8 +5622,11 @@ fn lights_specular_on_the_ground() {
     let mirror = Vec3::new(-v.x, v.y, -v.z);
 
     let render = |dir: Vec3| -> Vec<u8> {
-        let l = Light::point(ground + dir * 60.0, Vec3::ONE, 2_000_000_000.0, 100.0, 3.0);
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..lottes_tone() }).with_lights(vec![l]);
+        // Bright enough to light the ground well below white with no tone
+        // curve (the diffuse alone at 2e9 filled the range), so the
+        // specular has room above it.
+        let l = Light::point(ground + dir * 60.0, Vec3::ONE, 125_000_000.0, 100.0, 3.0);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() }).with_lights(vec![l]);
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -5927,64 +5930,6 @@ fn mips_are_made_on_the_gpu() {
     assert_clean(&gpu);
 }
 
-/// The tone curve at the reference exposure (M13, stage 1): sunlit untextured
-/// ground displays at a mean of 0.35-0.45 linear, down from 0.596 with
-/// Narkowicz's ACES fit, while the scene it is stored from is unchanged (the
-/// clamp curve reads the same pre-curve value as before the curve changed:
-/// about 0.49). The curve's mid anchor is the automatic exposure's key.
-#[test]
-#[ignore = "needs a Vulkan GPU"]
-fn the_curve_places_the_sunlit_ground() {
-    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
-    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
-    use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
-    use glam::Vec2;
-
-    let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
-    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
-    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let render = |curve: Curve| -> Vec<u8> {
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ToneParams { curve, bloom: 0.0, auto: false, ..Default::default() });
-        {
-            // Straight down at flat, untextured ground under the full sun:
-            // the frame is one sunlit surface, no sky.
-            let view = app.view();
-            let mut view = view.lock().unwrap();
-            view.camera.target = Vec2::new(512.0, 512.0);
-            view.camera.pitch = 1.55;
-            view.camera.distance = 100.0;
-            view.fog = false;
-        }
-        app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
-        run_headless(&gpu, &mut app, target, 4, config).unwrap();
-        let pixels = app.readback().unwrap();
-        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
-        pixels
-    };
-    let linear = |v: u8| -> f32 {
-        let v = v as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-    };
-    let mean = |pixels: &[u8]| -> f32 {
-        let total = (extent.width * extent.height) as f32;
-        pixels.chunks(4).map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0).sum::<f32>() / total
-    };
-    let scene = mean(&render(Curve::None));
-    let shown = mean(&render(Curve::Lottes));
-    eprintln!("sunlit ground: scene {scene:.4}, displayed {shown:.4} (was 0.596 with ACES)");
-    assert!((0.35..=0.45).contains(&shown), "the sunlit ground displays at 0.35-0.45 linear: {shown:.4}");
-    // The curve moves the display, not the scene it is stored from.
-    assert!((scene - 0.49).abs() < 0.02, "the pre-curve ground is unchanged: {scene:.4}");
-    assert_clean(&gpu);
-}
-
 /// Decode an HDR10 readback's pixel `i` to nits: the 10-bit code through
 /// ST.2084's EOTF. (The channels are in BT.2020; compare luminance with
 /// BT.2020's coefficients.)
@@ -6181,7 +6126,7 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::Vec2;
 
     let gpu = gpu();
@@ -6194,7 +6139,7 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
         // Straight down at flat, untextured ground under the full sun, as
         // the curve's gate: one sunlit surface and the sky above it.
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_tone(ToneParams { curve: Curve::Lottes, bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
             .with_display(encoding, levels);
         {
             let view = app.view();
@@ -6245,7 +6190,7 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::Vec2;
 
     let gpu = gpu();
@@ -6258,7 +6203,7 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { curve: Curve::None, bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
             .with_display(OutputEncoding::Hdr10Pq, levels);
         {
             let view = app.view();
@@ -6305,7 +6250,7 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::Vec2;
 
     let gpu = gpu();
@@ -6316,7 +6261,7 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
     let extent = vk::Extent2D { width: 160, height: 120 };
     let render = |encoding: OutputEncoding, levels: DisplayLevels| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_tone(ToneParams { curve: Curve::Lottes, bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
             .with_display(encoding, levels);
         {
             let view = app.view();
@@ -6447,7 +6392,7 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::tonemap::{Curve, ToneParams};
+    use ae_render::tonemap::ToneParams;
     use glam::Vec2;
 
     let gpu = gpu();
@@ -6459,7 +6404,7 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { curve: Curve::None, bloom: 0.0, ..Default::default() });
+            .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
