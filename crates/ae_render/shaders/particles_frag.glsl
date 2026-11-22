@@ -9,8 +9,14 @@ layout(set = 1, binding = 0) uniform sampler2D depthTex;
 layout(set = 1, binding = 1) uniform sampler2D puffTex;
 
 layout(location = 0) in vec2 inCorner;
-layout(location = 1) in vec4 inColor;   // premultiplied; alpha 0: emissive
-layout(location = 2) in vec2 inDepth;   // centre's view depth, radius
+layout(location = 1) in vec4 inColor;   // premultiplied (alpha: what it covers)
+layout(location = 2) in vec3 inDepth;   // centre's view depth, radius, 1: emissive
+
+// Whether its light is a bloom source (an emissive particle, whatever it
+// covers).
+bool emissive() {
+    return inDepth.z > 0.5;
+}
 
 // How much of the particle covers this pixel (0: none), and its sphere's
 // front view depth here.

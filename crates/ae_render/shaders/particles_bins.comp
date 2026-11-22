@@ -11,8 +11,8 @@ layout(local_size_x = 64) in;
 layout(set = 1, binding = 4, std430) buffer TileMasks { uint masks[]; };
 struct PackedPuff {
     vec4 geom;  // centre in view axes x, y; view depth; 1 / radius
-    vec4 color; // premultiplied; alpha 0: emissive
-    vec4 ext;   // cos(angle), sin(angle), texture lod, alpha
+    vec4 color; // premultiplied (alpha: what it covers)
+    vec4 ext;   // cos(angle), sin(angle), texture lod, 1: emissive (a bloom source)
 };
 layout(set = 1, binding = 5, std430) buffer PackedPuffs { PackedPuff puffs[]; };
 
@@ -53,7 +53,7 @@ void main() {
     float lod = max(0.0, log2(128.0 / max(diameter, 1e-6)));
     float c = cos(f.angle);
     float s = sin(f.angle);
-    puffs[rank] = PackedPuff(vec4(centre, z, 1.0 / radius), f.color, vec4(c, s, lod, f.color.a));
+    puffs[rank] = PackedPuff(vec4(centre, z, 1.0 / radius), f.color, vec4(c, s, lod, f.emissive ? 1.0 : 0.0));
 
     // The quad's screen bounds (the rotated square lies inside the
     // unrotated one), from its four corners.

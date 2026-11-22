@@ -17,7 +17,7 @@ layout(set = 1, binding = 4, std430) readonly buffer TileMasks { uint masks[]; }
 struct PackedPuff {
     vec4 geom;
     vec4 color;
-    vec4 ext;
+    vec4 ext;   // cos(angle), sin(angle), texture lod, 1: emissive
 };
 layout(set = 1, binding = 5, std430) readonly buffer PackedPuffs { PackedPuff puffs[]; };
 
@@ -39,9 +39,6 @@ layout(local_size_x = 256) in;
 const uint PACKET_W = 8u;
 const uint PACKET_H = 4u;
 const float EPS = 0.01;
-// Below this coverage an alpha counts as zero: an emissive puff (alpha 0)
-// adds its light, a medium masks the light behind it.
-const float GLOW_EPS = 0.5 / 255.0;
 
 uvec2 tileOrigin() {
     return gl_WorkGroupID.xy * 16u;
@@ -138,7 +135,9 @@ void main() {
                 float soft = clamp((scene - front) / max(radius, 1e-3), 0.0, 1.0);
                 vec4 c = p.color * (r2 < 1.0 ? shape * soft : 0.0);
                 color += c.rgb * transmittance;
-                if (c.a <= GLOW_EPS) {
+                // An emissive puff adds its light (ext.w 1); a medium only
+                // masks the light behind it.
+                if (p.ext.w > 0.5) {
                     glow += c.rgb * transmittance;
                 }
                 transmittance *= 1.0 - c.a;

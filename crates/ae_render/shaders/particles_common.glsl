@@ -95,9 +95,10 @@ float rand01(inout uint state) {
     return float(state >> 8) * (1.0 / 16777216.0);
 }
 
-// A particle of premultiplied colour c (alpha 0: emissive) as a medium
-// over a chord of length len: its extinction, and its light per metre
-// (scattered, rgb / a times the extinction; or emitted, rgb / len). Over
+// A particle of premultiplied colour c as a medium over a chord of length
+// len: its extinction (from its alpha: what it covers), and its light per
+// metre (rgb / a times the extinction; rgb / len when it covers nothing:
+// a purely additive emissive one). Over
 // the whole chord it gives c, as blended.
 void medium(vec4 c, float len, out float sigma, out vec3 source) {
     float a = min(c.a, 0.999);

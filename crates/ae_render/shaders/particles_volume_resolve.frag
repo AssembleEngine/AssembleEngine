@@ -2,10 +2,11 @@
 // Volume reference, pass 2: the pixel's spans as homogeneous media along
 // the view depth. A particle of opacity a over a chord of length L has
 // extinction -ln(1 - a) / L and scatters its colour (rgb / a) by it; an
-// emissive one (a 0) emits rgb / L per metre. Its back is capped at the
-// scene. Every span's ends split the depth into intervals; in each, the
-// spans covering it sum their extinction and emission, integrated exactly
-// front to back. A lone particle gives its premultiplied colour, as
+// additive one (a 0: emissive, covering nothing) emits rgb / L per metre;
+// an emissive one that covers emits by the same rule as scattering. Its
+// back is capped at the scene. Every span's ends split the depth into
+// intervals; in each, the spans covering it sum their extinction and
+// emission, integrated exactly front to back. A lone particle gives its premultiplied colour, as
 // blended; overlapping ones mix by how much of their thickness overlaps,
 // so their mix changes continuously as they pass through each other. More
 // fragments than the list holds: magenta.

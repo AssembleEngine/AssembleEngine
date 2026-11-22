@@ -3209,6 +3209,7 @@ fn particles_sort_blend_and_soften() {
         emissive,
         // The old additive value (exposed at EV14) as cd/m²: 1 / 5.086e-5.
         emission: if emissive { [19_660.8; 2] } else { [0.0; 2] },
+        cover: 0.0,
         fade_in: 0.0,
         light: None,
     };
@@ -3374,6 +3375,7 @@ fn particles_packets_both_resolutions() {
             drag: 0.0,
             emissive,
             emission: if emissive { [40_000.0; 2] } else { [0.0; 2] },
+            cover: 0.0,
             fade_in: 0.0,
             light: None,
         }
@@ -3548,6 +3550,22 @@ fn render_particles_lit(
     lights: &[ae_render::lights::Light],
     tone: ae_render::tonemap::ToneParams,
 ) -> Vec<u8> {
+    render_particles_frames(gpu, source, camera, extent, particles, lights, tone, 8)
+}
+
+/// [`render_particles_lit`] after `frames` frames (the readback clock is
+/// frame / 60 s, so the bursts are `(frames - 1) / 60` s old).
+#[allow(clippy::too_many_arguments)]
+fn render_particles_frames(
+    gpu: &Arc<GpuDevice>,
+    source: &Arc<ae_render::terrain::app::TerrainSource>,
+    camera: ae_render::terrain::camera::Camera,
+    extent: vk::Extent2D,
+    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+    lights: &[ae_render::lights::Light],
+    tone: ae_render::tonemap::ToneParams,
+    frames: usize,
+) -> Vec<u8> {
     use ae_render::particles::{ParticleFeed, ParticlesSetup};
     use ae_render::terrain::app::{TerrainApp, TerrainOutput};
     use ae_render::thread::{Headless, TargetInfo};
@@ -3569,7 +3587,7 @@ fn render_particles_lit(
     let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     let mut run = Headless::new(gpu, &mut app, target, config).unwrap();
-    run.frames(&mut app, 8).unwrap();
+    run.frames(&mut app, frames).unwrap();
     run.wait().unwrap();
     run.finish().unwrap();
     let pixels = app.readback().unwrap();
@@ -3593,6 +3611,7 @@ fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::partic
         emissive,
         // The old additive value (exposed at EV14) as cd/m²: 1 / 5.086e-5.
         emission: if emissive { [19_660.8; 2] } else { [0.0; 2] },
+        cover: 0.0,
         fade_in: 0.0,
         light: None,
     }
@@ -4701,6 +4720,77 @@ fn half_resolution_fire_in_front_of_smoke_blooms() {
     assert!(full > 2.0, "the full-resolution fire's glow is missing: {full:.1}");
     assert!(occluded > 0.5, "smoke in front removed all of the fire's glow: {occluded:.1}");
     assert!(occluded < half * 0.9, "smoke in front did not take its share: {occluded:.1} of {half:.1}");
+    assert_clean(&gpu);
+}
+
+/// The explosion's fire covers the ground: with its light off (emission 0,
+/// so only what it covers shows), the ground behind the fireball's core is
+/// mostly hidden while it burns. Purely additive fire hid nothing, so
+/// wherever SDR did not clip (an HDR display's headroom, or a fading fire)
+/// the ground and its scorch mark showed through it.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn explosion_fire_covers_the_ground() {
+    use ae_render::particles::{Burst, ParticleBlend, default_effects, effect};
+    use ae_render::terrain::app::{TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::tonemap::ToneParams;
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let (n, scale, ground) = (65usize, 100.0f32, 10.0f32);
+    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let pyramid = build_pyramid(&heightmap, scale, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, 0.0, None);
+    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 80.0, yaw: 0.0, pitch: 0.9, fov_y: 0.8 };
+    let at = Vec3::new(128.0, 1.0, 128.0);
+    // Flash and fire only (the smoke covers by its own opacity), giving no
+    // light and lighting nothing: what is left of the ground is what they
+    // let through.
+    let mut effects = default_effects();
+    for e in [effect::FLASH, effect::FIRE] {
+        effects[e as usize].emission = [0.0; 2];
+        effects[e as usize].light = None;
+    }
+    let bursts = [effect::FLASH, effect::FIRE].map(|effect| Burst { pos: at.to_array(), ground: true, effect, count: if effect == effect::FLASH { 2 } else { 24 }, scale: 1.0, seed: 7 });
+    let tone = ToneParams { bloom: 0.0, ..Default::default() };
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(at.x, ground + 2.0, at.z, 1.0);
+    let (cu, cv) = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32);
+    let linear = |c: u8| -> f32 {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let luma = |p: &[u8], x: i32, y: i32| -> f32 {
+        let i = ((y * extent.width as i32 + x) * 4) as usize;
+        0.2126 * linear(p[i]) + 0.7152 * linear(p[i + 1]) + 0.0722 * linear(p[i + 2])
+    };
+    // The ground's share left within `r` pixels of the burst's centre.
+    let through = |on: &[u8], off: &[u8], r: i32| -> f32 {
+        let (mut sum, mut count) = (0.0f32, 0usize);
+        for y in (cv - r)..=(cv + r) {
+            for x in (cu - r)..=(cu + r) {
+                if (x - cu).pow(2) + (y - cv).pow(2) <= r * r {
+                    sum += luma(on, x, y) / luma(off, x, y).max(1e-4);
+                    count += 1;
+                }
+            }
+        }
+        sum / count as f32
+    };
+    // At 0.6 s the fire has risen off the ground and faded (its opacity
+    // falls to 0 over its life): the scorch mark's fade-in takes over.
+    for (frames, most) in [(7usize, 0.1f32), (19, 0.2), (37, 0.9)] {
+        let bare = render_particles_frames(&gpu, &source, camera, extent, None, &[], tone, frames);
+        let shot = render_particles_frames(&gpu, &source, camera, extent, Some((&bursts, effects.clone(), 2, ParticleBlend::Sorted)), &[], tone, frames);
+        let (core, wide) = (through(&shot, &bare, 6), through(&shot, &bare, 20));
+        let age = (frames - 1) as f32 / 60.0;
+        println!("fire cover at {age:.2} s: ground through the core {core:.3}, within 20 px {wide:.3}");
+        assert!(core <= most, "the fire lets {core:.3} of the ground through its core at {age:.2} s");
+    }
     assert_clean(&gpu);
 }
 

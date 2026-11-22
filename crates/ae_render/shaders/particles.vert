@@ -6,7 +6,9 @@
 
 layout(location = 0) out vec2 outCorner;
 layout(location = 1) out vec4 outColor;   // premultiplied
-layout(location = 2) out vec2 outDepth;   // centre's view depth, radius
+// Centre's view depth, radius, and 1 for an emissive particle (a bloom
+// source); the same at every corner.
+layout(location = 2) out vec3 outDepth;
 
 const vec2 CORNERS[6] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(1, 1), vec2(-1, -1), vec2(1, 1), vec2(-1, 1));
 
@@ -18,5 +20,5 @@ void main() {
     gl_Position = u.viewProj * vec4(world, 1.0);
     outColor = f.color;
     outCorner = c;
-    outDepth = vec2(dot(f.centre - u.camPos.xyz, u.camForward.xyz), f.radius);
+    outDepth = vec3(dot(f.centre - u.camPos.xyz, u.camForward.xyz), f.radius, f.emissive ? 1.0 : 0.0);
 }

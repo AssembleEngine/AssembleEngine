@@ -1,8 +1,9 @@
-// A live particle as drawn: centre, radius, rotation and premultiplied
-// colour (alpha 0: emissive). Colour, opacity and size follow the effect
-// over the particle's life; media (smoke, dust) are lit by the sun (past
-// the hills) and the sky and fogged, emissive particles add their colour
-// and fade in fog. Shared by the draw's vertex shader and the froxels'
+// A live particle as drawn: centre, radius, rotation, premultiplied
+// colour and whether it is emissive. Colour, opacity and size follow the
+// effect over the particle's life; media (smoke, dust) are lit by the sun
+// (past the hills) and the sky and fogged, emissive particles (fire,
+// sparks, flashes) add their colour, cover what is behind them by the
+// effect's cover (alpha; 0: they only add light), and fade in fog. Shared by the draw's vertex shader and the froxels'
 // binning, so both see the same puff. After particles_common.glsl.
 #include "photometry.glsl"
 
@@ -23,6 +24,8 @@ struct Puff {
     // puffs do not line up).
     float angle;
     vec4 color;
+    // Its light is a bloom source (the glow targets), whatever its alpha.
+    bool emissive;
 };
 
 Puff puffOf(uint slot) {
@@ -43,9 +46,13 @@ Puff puffOf(uint slot) {
     float dist = distance(p.posAge.xyz, u.camPos.xyz);
     float fog = u.fog.w > 0.0 ? 1.0 - exp(-pow(dist * u.fog.w, 1.5)) : 0.0;
     float emis = mix(emission.x, emission.y, t);
-    if (physics.z > 0.5) {
-        // Emissive: colour is the tint, emission its luminance (cd/m²).
-        f.color = vec4(color.rgb * color.a * emis * (1.0 - fog), 0.0);
+    f.emissive = physics.z > 0.5;
+    if (f.emissive) {
+        // Emissive: colour is the tint, emission its luminance (cd/m²);
+        // it hides `cover` of its opacity's worth of what is behind it.
+        // Both fade in fog (a far fire leaves the fogged ground, not a
+        // dark blot).
+        f.color = vec4(color.rgb * color.a * emis, color.a * emission.z) * (1.0 - fog);
     } else {
         // Media: albedo times the illuminance it scatters, as radiance; the
         // sun past the hills, half the sky (a volume has no normal), and the

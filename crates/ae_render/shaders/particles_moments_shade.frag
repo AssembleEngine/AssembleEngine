@@ -63,11 +63,13 @@ void main() {
         t = transmittance(b0, texelFetch(moments, at, 0) / b0, warpDepth(front));
     }
     vec4 c = inColor * k * t;
-    if (inColor.a > 0.0) {
+    if (!emissive()) {
         outMedia = c;
         outEmissive = vec4(0.0);
     } else {
-        outMedia = vec4(0.0);
+        // Its light is emitted; what it covers counts in the media's
+        // weights as black (it darkens what is behind, scatters nothing).
+        outMedia = vec4(0.0, 0.0, 0.0, c.a);
         outEmissive = vec4(c.rgb, 0.0);
     }
 }

@@ -129,6 +129,15 @@ pub struct EffectDef {
     /// The emissive radiance at birth and at death (cd/m²); 0 for media,
     /// whose colour is albedo.
     pub emission: [f32; 2],
+    /// How much of what is behind an emissive particle it hides, 0..1, as
+    /// a fraction of its opacity (0, the default: it only adds light). A
+    /// fireball is dense: with cover it occludes the ground and the units
+    /// behind it, so the ground shows through it only where it is thin,
+    /// and an HDR display's headroom (which keeps light above paper white
+    /// that SDR clips) does not reveal the ground under it. Media cover by
+    /// their opacity and leave it 0.
+    #[serde(default)]
+    pub cover: f32,
     /// Fades in over this fraction of the life (0: born at full opacity).
     pub fade_in: f32,
     /// The light a burst of it gives (one per burst, client-side:
@@ -167,7 +176,7 @@ impl EffectDef {
             [self.size[0], self.size[1], self.life[0], self.life[1].max(self.life[0])],
             [self.speed[0], self.speed[1], self.up, self.spread],
             [self.gravity, self.drag, self.emissive as u32 as f32, self.fade_in],
-            [self.emission[0], self.emission[1], 0.0, 0.0],
+            [self.emission[0], self.emission[1], self.cover, 0.0],
         ]
     }
 
@@ -225,7 +234,12 @@ pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
         EFFECT_NAMES.len(),
         EFFECT_NAMES.join(", ")
     );
-    EFFECT_NAMES.iter().map(|name| file.effects.get(*name).copied().with_context(|| format!("the effects catalogue has no `{name}`"))).collect()
+    let effects: Vec<EffectDef> = EFFECT_NAMES.iter().map(|name| file.effects.get(*name).copied().with_context(|| format!("the effects catalogue has no `{name}`"))).collect::<Result<_>>()?;
+    for (name, def) in EFFECT_NAMES.iter().zip(&effects) {
+        ensure!((0.0..=1.0).contains(&def.cover), "effect `{name}`: cover {} is outside 0..1", def.cover);
+        ensure!(def.emissive || def.cover == 0.0, "effect `{name}`: cover is for emissive effects (a medium covers by its opacity)");
+    }
+    Ok(effects)
 }
 
 /// `count` particles of effect `effect` from `pos` (world space).

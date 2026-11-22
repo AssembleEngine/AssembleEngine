@@ -50,6 +50,10 @@ pub const MAX_RADIUS: f32 = GRID_CELL;
 /// Seconds a scorch mark lives (Recoil's scars: 0.5 to 60 s by the
 /// explosion's damage, times the decal level setting).
 pub const SCORCH_LIFE: f32 = 60.0;
+/// Seconds a scorch mark fades in over: about the explosion's fire's
+/// longest life (0.9 s in `assets/effects.json`), so the mark forms as the
+/// fire burns out instead of lying whole under it.
+pub const SCORCH_FADE_IN: f32 = 1.0;
 /// Seconds a scar glows (Recoil's default glow TTL, 60 frames).
 pub const SCAR_GLOW_LIFE: f32 = 2.0;
 /// Most decals one binning cell lists (the newest are kept).
@@ -110,10 +114,11 @@ pub enum Blend {
 
 impl Decal {
     /// A scorch mark of `radius` metres at `pos`, rotated by `seed`: it
-    /// lives [`SCORCH_LIFE`] seconds, fading out over the last third.
+    /// fades in over [`SCORCH_FADE_IN`] and lives [`SCORCH_LIFE`] seconds,
+    /// fading out over the last third.
     pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
         let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
-        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: 0.4, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
+        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: SCORCH_FADE_IN, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
     }
 
     /// An explosion's scar on atlas layer `layer`, as Recoil sets one from

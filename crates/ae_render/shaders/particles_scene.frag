@@ -1,7 +1,7 @@
 #version 460
 // Sorted particles drawn straight into the scene (downscale 1): the scene
 // colour (premultiplied "over") and the glow target. Only emissive
-// particles (alpha 0) give the bloom light; smoke writes black and keeps
+// particles give the bloom light (a covering fire also masks what is behind); smoke writes black and keeps
 // its coverage in the glow's alpha, so a puff hides the glints behind it.
 #include "particles_common.glsl"
 #include "particles_frag.glsl"
@@ -22,5 +22,5 @@ void main() {
         c.rgb *= u.photometry.x;
     }
     outColor = c;
-    outGlow = vec4(c.a > (0.5 / 255.0) ? vec3(0.0) : c.rgb, c.a);
+    outGlow = vec4(emissive() ? c.rgb : vec3(0.0), c.a);
 }
