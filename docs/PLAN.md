@@ -1079,6 +1079,29 @@ GPU bench (`ae-client --bench <scene>[,<scene>...]|all|list [--frames N] [--warm
   `gpu_total`: it follows the host bus (±25 % between runs). Since M13 stage 7 it is reported on
   its own (`pass/copy`, `pass/host read`, 50 % tolerance), and a `--bench-output hdr10|scrgb`
   run writes `gpu-<scene>-hdr10.json` or `gpu-<scene>-scrgb.json`.
+- **Stable as a gate since 2026-11-22.** Three changes, each against a measured cause:
+  - Several scenes run one process each (`--bench all` starts itself per scene with the same
+    arguments). In one process the scenes after the fox and model scenes measured up to 3x
+    slow in some runs and not in others (`lights-200` 0.75–2.3 ms, its terrain 0.30–0.62 ms),
+    at full clocks (1830–1950 MHz, 6801 MHz memory, the 200 W power cap reached from `scorched`
+    on) and with VRAM to spare (5.5 of 8 GB); the same scene in a fresh process right after the
+    heavy ones measured 0.76 ms. The cause inside the process is not known (TODO).
+  - The warm-up spends its time-based second (GPU clocks) with no explosions or ticks, then runs
+    exactly `--warmup` frames with them, so `battle`'s state when measuring starts no longer
+    depends on the frame rate (its light count moved 212–215 and its total 1.24–1.41 ms).
+  - `gpu_total` is the sum of the passes' medians, with the per-frame sums' spread. The median
+    of the per-frame sums moved 10–13% between runs (`lights-1000`, `lights-low`) while every
+    pass agreed within 2%: single passes spike in some frames (`terrain lod` ±79%).
+
+  Not the cause: the clocks between scenes (the GPU drops to P5 for the ~3 s a scene sets up,
+  and is back at full clocks within the warm-up), timestamp attribution (a full barrier before
+  each end timestamp left `near-fox`'s terrain at 265/440/545 µs), and the CBT (309 leaves in
+  every frame). Before, two whole runs of one binary flagged 11–13 metrics against each other;
+  with one process per scene and the fixed warm-up, two pairs flagged 1 and 4 (only `gpu_total`
+  in light scenes, and `cliffs`' exposure meter); with the summed total as well, the final pair
+  flagged 2: `cliffs`' `pass/exposure meter`, which is 19 or 195 µs for a process's lifetime, and
+  its `gpu_total`. A whole run takes 93 s (43 s in
+  one process). The baseline's GPU records were re-recorded this way at 335e770.
 - `ae_bench` gained a per-record `tolerance` that widens `--time-tolerance` for that metric:
   CPU times get 50 % (tens of microseconds; medians move by up to 30 % between runs, once 60 %),
   passes under ~20 µs get 2 µs absolute (the timer ticks in about 1 µs). `Executor::take_gpu_frames`
@@ -4229,7 +4252,17 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
   build once and share.
 - **The eaa0fa7 `gpu_total` rise** in the fox scenes not explained by `pass/water` (all of
   `army-fox`'s, about half of the others'); `pass/water`'s two modes (3–4 vs about 180 µs)
-  not investigated.
+  not investigated. `cliffs`' `pass/exposure meter` has the same kind of two modes (19 or
+  195 µs, fixed for a process's lifetime; 2026-11-22), and so do the fox scenes' water: about
+  175 µs that one pass carries or not. A guess to test first: a layout transition or depth
+  decompression that the consuming pass's barriers pay (the begin timestamp is written before
+  them), depending on where the image's memory landed. A flagged `pass/water` or `cliffs`
+  exposure meter is checked against this before it is called a regression.
+- **Why scenes slow down inside one bench process** (2026-11-22). After the fox and model
+  scenes, later scenes in the same process measured up to 3x slow in some runs, at full clocks
+  and with VRAM to spare; the bench now runs one process per scene instead. Conditions for
+  going back to one process: find the state that carries over (allocations, descriptor pools,
+  the model cache, threads left running) and show two whole one-process runs diffing clean.
 
 From the M14 coroutine spike (2026-11-19):
 
@@ -4440,20 +4473,6 @@ From M13 stage 6 (2026-11-22):
 
 From M13 stage 7 (2026-11-22):
 
-- **The GPU bench is not a stable gate in the terrain-heavy scenes.** A full `ae-client --bench
-  all` at 25297ad (SDR, 1280×720, `rtx3060ti`) against the baseline recorded at 06fa4c4 (no SDR
-  code change between them) flags 12 time metrics: `pass/terrain` +11 to +92% in
-  `army-model-lights`, `lights-200`, `lights-1000`, `lights-low`, `live-fox`, `near-fox` (most
-  near 650 µs in that run), `battle`'s `gpu_total` +12.5% and its readback copy +60%, and
-  `pass/water`'s two modes in `army-fox`/`live-fox`. Three repeats of `lights-200,near-fox,battle`
-  on their own give `pass/terrain` 306/455/466 µs (baseline 349/339/462) and `battle`'s total
-  1.27–1.41 ms (baseline 1.24). The baseline's own `near-fox` terrain spread is ±96%, so a
-  single run's medians move within a run too, not only between runs. The idle GPU sits at P8
-  (210 MHz). Conditions for a fix: find what moves (clocks: pin them with `nvidia-smi -lgc`,
-  or warm each scene until its pass times settle; or the terrain's own LOD/cull work), then
-  show two full runs of one binary diffing clean, and re-record the baseline that way. Until
-  then a flagged `pass/terrain` or light-scene `gpu_total` is checked with repeated subset runs
-  before it is called a regression.
 - **Bound the top channel in gamut compression.** `colorspace::compress` scales a colour toward
   its luminance until the lowest channel reaches 0 (`t = y / (y - lo)`), so compressing wide
   colour into a narrower output gamut raises the top channel — the further the negative, the

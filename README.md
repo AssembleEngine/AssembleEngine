@@ -141,7 +141,7 @@ cargo build --release -p ae-tool
 ./target/release/ae-tool bench all --label mychange            # writes bench/results/mychange/
 ./target/release/ae-tool bench-diff bench/results/baseline bench/results/mychange   # exit 1 on regression
 cargo bench -p ae_framegraph -p ae_nav     # criterion micro benches
-./target/release/ae-client --bench all --label mychange          # GPU scenes (needs a GPU): bench/results/mychange/gpu-*.json
+./target/release/ae-client --bench all --label mychange          # GPU scenes (needs a GPU), one process each, ~1.5 min: bench/results/mychange/gpu-*.json
 ./target/release/ae-client --bench battle --bench-output hdr10 --bench-size 2560x1440 --label hdr-check   # the readback in HDR10 at 1440p (sdr|hdr10|scrgb)
 
 # Profiling
