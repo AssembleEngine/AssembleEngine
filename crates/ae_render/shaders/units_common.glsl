@@ -9,13 +9,17 @@
 #define ATTR_Y 1u
 #define ATTR_PREV_X 2u
 #define ATTR_PREV_Y 3u
-#define ATTR_HEADING_X 4u
-#define ATTR_HEADING_Y 5u
-#define ATTR_RADIUS 6u
-#define ATTR_CLASS 7u
+// The unit's rotation from its frame (forward +x, up +y, right +z) to the
+// world's: a quaternion (x, y, z, w), zero for the identity.
+#define ATTR_ROT_X 4u
+#define ATTR_ROT_Y 5u
+#define ATTR_ROT_Z 6u
+#define ATTR_ROT_W 7u
+#define ATTR_RADIUS 8u
+#define ATTR_CLASS 9u
 // The unit's first animation record cell (ae_render::units::NO_POSE: at rest),
 // POSE_MANUAL set when either record shows a manual joint.
-#define ATTR_POSE 8u
+#define ATTR_POSE 10u
 #define NO_POSE 0xffffffffu
 #define POSE_MANUAL 0x80000000u
 #define MAX_CLASSES 16u
@@ -86,10 +90,16 @@ uint attru(uint a, uint i) { return inst.words[a * u.counts.y + i]; }
 
 struct Unit {
     vec3 pos;      // on the ground (or water surface)
-    vec2 heading;  // unit vector on the ground plane
+    vec4 rot;      // unit frame (forward +x, up +y, right +z) to the world, normalised
     float size;    // drawn radius: the body radius, enlarged to the minimum pixel size
     uint cls;
 };
+
+// v turned by the unit quaternion q (x, y, z, w).
+vec3 rotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
 
 Unit loadUnit(uint i) {
     Unit unit;
@@ -101,8 +111,8 @@ Unit loadUnit(uint i) {
         h = max(h, u.height.z);
     }
     unit.pos = vec3(p.x, h, p.y);
-    vec2 heading = vec2(attrf(ATTR_HEADING_X, i), attrf(ATTR_HEADING_Y, i));
-    unit.heading = dot(heading, heading) > 1e-12 ? normalize(heading) : vec2(1.0, 0.0);
+    vec4 rot = vec4(attrf(ATTR_ROT_X, i), attrf(ATTR_ROT_Y, i), attrf(ATTR_ROT_Z, i), attrf(ATTR_ROT_W, i));
+    unit.rot = dot(rot, rot) > 1e-12 ? normalize(rot) : vec4(0.0, 0.0, 0.0, 1.0);
     float radius = attrf(ATTR_RADIUS, i);
     float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, u.camPos.xyz), 1e-3);
     unit.size = radius * max(1.0, u.sun.w / max(pixels, 1e-6));

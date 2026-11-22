@@ -50,28 +50,22 @@ use std::time::Instant;
 
 /// The attributes of an instance stream, in column order. Positions are on
 /// the ground plane in world units (the nav world's x and y; render world
-/// x and z); `heading` need not be normalised (zero: facing +x); `class`
-/// is a `u32` indexing [`UnitsSetup::classes`]. `pose` (a `u32`) is where
-/// a unit with a model finds its two animation records in the animation
-/// table (what the streams' [`InstanceStream::anim`] wrote; see
-/// [`RECORD_CELLS`]), with [`POSE_MANUAL`] set when either record shows
-/// a manual joint, or [`NO_POSE`] for the rest pose. Every other
-/// attribute is an `f32`.
-pub const ATTRIBUTES: [&str; 9] = [
-    "x",
-    "y",
-    "prev_x",
-    "prev_y",
-    "heading_x",
-    "heading_y",
-    "radius",
-    "class",
-    "pose",
+/// x and z); `rot` is the unit's rotation from its frame (forward +x, up
+/// +y, right +z) to the world's, a quaternion (x, y, z, w; need not be
+/// normalised, zero: the identity); `class` is a `u32` indexing
+/// [`UnitsSetup::classes`]. `pose` (a `u32`) is where a unit with a model
+/// finds its two animation records in the animation table (what the
+/// streams' [`InstanceStream::anim`] wrote; see [`RECORD_CELLS`]), with
+/// [`POSE_MANUAL`] set when either record shows a manual joint, or
+/// [`NO_POSE`] for the rest pose. Every other attribute is an `f32`.
+pub const ATTRIBUTES: [&str; 11] = [
+    "x", "y", "prev_x", "prev_y", "rot_x", "rot_y", "rot_z", "rot_w", "radius", "class", "pose",
 ];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
-const ATTR_CLASS: usize = 7;
+/// The `class` attribute's column.
+pub const ATTR_CLASS: usize = 9;
 /// The `pose` attribute's column.
-pub const ATTR_POSE: usize = 8;
+pub const ATTR_POSE: usize = 10;
 /// The `pose` of a unit drawn at its model's rest pose.
 pub const NO_POSE: u32 = u32::MAX;
 /// Set in a `pose` other than [`NO_POSE`] when either of the unit's
@@ -1818,9 +1812,9 @@ pub fn cull_margins(
                 f(2, r) + (f(0, r) - f(2, r)) * alpha,
                 f(3, r) + (f(1, r) - f(3, r)) * alpha,
             );
-            let class = stream.columns[7][r].min(MAX_CLASSES as u32 - 1);
+            let class = stream.columns[ATTR_CLASS][r].min(MAX_CLASSES as u32 - 1);
             let pos = Vec3::new(x, ground(x, y, class), y);
-            let radius = f(6, r);
+            let radius = f(8, r);
             let pixels = 2.0 * radius * frame.proj_scale / pos.distance(frame.cam_pos).max(1e-3);
             let size = radius * (min_pixels / pixels.max(1e-6)).max(1.0);
             let centre = pos + Vec3::new(0.0, 0.4 * size, 0.0);

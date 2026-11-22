@@ -4,7 +4,7 @@
 // the rows) puts them. The light rides the node's joint: its palette
 // matrix gives its position and its direction (the node's local -Z,
 // glTF's convention). It is placed as the unit's model is drawn (fitted
-// and turned by the unit's heading and size); its range and colour are
+// and turned by the unit's rotation and size); its range and colour are
 // the model's (metres, engine light units).
 #define LIGHT_SET 2
 #define LIGHTS_WRITE

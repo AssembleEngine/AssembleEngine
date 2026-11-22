@@ -4,8 +4,9 @@
 //! units' `Body` and `NavAgent` fields are captured
 //! ([`ae_sim::runtime::Runtime::capture`]) and turned into the renderer's
 //! [`InstanceStream`]: rows matched by entity against the previous capture
-//! for the interpolation start and the heading. Stand-in for M4's copy
-//! layer, which will publish filtered view tables instead.
+//! for the interpolation start, and drawn by their `Orientation` (read
+//! apart from the capture, by entity) or their velocity's turn. Stand-in
+//! for M4's copy layer, which will publish filtered view tables instead.
 //!
 //! The animation service (`ae_services::anim`) runs with the `--model`
 //! models (and the content's); units with an `Anim` drawn with its model
@@ -21,6 +22,7 @@ use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, AnimWrites, InstanceStream, NO_POSE, UnitClass, UnitFeed};
 use ae_sdk::Entity;
+use ae_sdk::aim::Orientation;
 use ae_sdk::anim::{Anim, model_id};
 use ae_sdk::nav::MoveOrder;
 use ae_sensors::{Bits, SensorGrid};
@@ -331,6 +333,8 @@ pub struct Sim {
     last_units: Vec<(u64, f32, f32, f32)>,
     /// The observer's line of sight at the last tick.
     last_los: Option<Bits>,
+    /// The module declares `Orientation` (its units may be drawn by it).
+    has_orientation: bool,
     /// The units' channels after the last tick, by entity (with a poser).
     /// Milliseconds of the last stream's posing (reading the channels
     /// included).
@@ -393,6 +397,8 @@ impl Sim {
         // (the layout checked: the service's own check runs only when the
         // game schedules it).
         let has_anim = ae_sim::host::expect_component(&rt.schema, <Anim as ae_sdk::Component>::SCHEMA).is_ok();
+        let has_orientation =
+            ae_sim::host::expect_component(&rt.schema, <Orientation as ae_sdk::Component>::SCHEMA).is_ok();
         let poser = (has_anim && !o.models.is_empty()).then(|| {
             let names =
                 crate::models::names_per_class(&o.models, o.classes().len(), o.observer.map(|_| o.classes().len() - 2));
@@ -470,6 +476,7 @@ impl Sim {
             effects: None,
             last_units: Vec::new(),
             last_los: None,
+            has_orientation,
             pose_ms: 0.0,
             read_ms: 0.0,
         })
@@ -646,10 +653,27 @@ impl Sim {
                     anims.sort_unstable_by_key(|a| a.0);
                 }
             }
+            // The `Orientation` rows borrowed from the world, by entity.
+            let mut orientations: Vec<(u64, &Orientation)> = Vec::new();
+            if self.has_orientation {
+                for (ids, bytes) in self.rt.chunks(&self.world, "Orientation")? {
+                    anyhow::ensure!(
+                        bytes.len() == ids.len() * size_of::<Orientation>()
+                            && bytes.as_ptr().align_offset(align_of::<Orientation>()) == 0,
+                        "the `Orientation` column is not `Orientation`s"
+                    );
+                    // SAFETY: plain data, aligned, a row per id.
+                    let rows = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<Orientation>(), ids.len()) };
+                    orientations.extend(ids.iter().copied().zip(rows));
+                }
+                if !orientations.is_sorted_by_key(|a| a.0) {
+                    orientations.sort_unstable_by_key(|a| a.0);
+                }
+            }
             self.read_ms = t0.elapsed().as_secs_f64() * 1e3;
             let stream = self
                 .streamer
-                .stream(&self.capture, &anims, Instant::now(), tick_seconds);
+                .stream(&self.capture, &anims, &orientations, Instant::now(), tick_seconds);
             self.pose_ms = t0.elapsed().as_secs_f64() * 1e3;
             return Ok(stream);
         };
@@ -694,9 +718,11 @@ impl Sim {
                 }
             })
             .collect();
+        // The observer path keeps the velocity's turn: `Orientation` is not
+        // a viewed field.
         let stream = self
             .streamer
-            .stream_rows(self.capture.tick, &rows, &[], Instant::now(), tick_seconds);
+            .stream_rows(self.capture.tick, &rows, &[], &[], Instant::now(), tick_seconds);
         // After the rows: the last tick's line of sight decides, then
         // this one's is kept.
         self.emit_deaths();
@@ -880,14 +906,16 @@ pub struct Streamer {
 
 impl Streamer {
     /// The stream of `capture` (rows in entity order), units posed by their
-    /// channels in `anims` (by entity). A unit's previous position is its
-    /// position in the previous capture (its current one if it is new);
-    /// its heading is its velocity, or its last heading while it stands
-    /// still.
+    /// channels in `anims` and turned by their `orientations` (both by
+    /// entity). A unit's previous position is its position in the previous
+    /// capture (its current one if it is new); a unit with an
+    /// `Orientation` is drawn by it, any other by its velocity's turn or
+    /// its last one while it stands still.
     pub fn stream(
         &mut self,
         capture: &Capture,
         anims: &[(u64, &Anim)],
+        orientations: &[(u64, &Orientation)],
         published: Instant,
         tick_seconds: f32,
     ) -> InstanceStream {
@@ -912,24 +940,26 @@ impl Streamer {
                 }
             })
             .collect();
-        self.stream_rows(capture.tick, &rows, anims, published, tick_seconds)
+        self.stream_rows(capture.tick, &rows, anims, orientations, published, tick_seconds)
     }
 
     /// The stream of `rows` (ascending by key), matched to the previous
     /// stream by key; a row whose state changed starts where it is. Rows
-    /// whose key has channels in `anims` (ascending by key) are posed.
+    /// whose key has channels in `anims` (ascending by key) are posed;
+    /// rows whose key has an `Orientation` (ascending too) are drawn by it.
     pub fn stream_rows(
         &mut self,
         tick: u64,
         rows: &[UnitRow],
         anims: &[(u64, &Anim)],
+        orientations: &[(u64, &Orientation)],
         published: Instant,
         tick_seconds: f32,
     ) -> InstanceStream {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
         let mut anim = std::mem::take(&mut self.spare);
         let mut next = Vec::with_capacity(rows.len());
-        let (mut p, mut a) = (0, 0);
+        let (mut p, mut a, mut o) = (0, 0, 0);
         // Rows with channels: (row, then key, class, channels).
         let mut posed = Vec::new();
         let mut units = Vec::new();
@@ -953,13 +983,22 @@ impl Streamer {
                 posed.push(next.len());
                 units.push((row.key, row.class, *anim));
             }
+            while o < orientations.len() && orientations[o].0 < row.key {
+                o += 1;
+            }
+            let rot = orientations
+                .get(o)
+                .filter(|x| x.0 == row.key)
+                .map_or_else(|| Orientation::along(hx, hy).rot, |x| x.1.rot);
             let words = [
                 x.to_bits(),
                 y.to_bits(),
                 px.to_bits(),
                 py.to_bits(),
-                hx.to_bits(),
-                hy.to_bits(),
+                rot[0].to_bits(),
+                rot[1].to_bits(),
+                rot[2].to_bits(),
+                rot[3].to_bits(),
                 row.radius,
                 row.class,
                 NO_POSE,
@@ -1208,15 +1247,17 @@ mod tests {
         s.columns[a].iter().map(|&w| f32::from_bits(w)).collect()
     }
 
-    /// Rows come out in entity order; previous positions and headings
-    /// follow entities across reordered captures; new units start where
-    /// they are; standing units keep their heading.
+    /// Rows come out in entity order; previous positions and turns follow
+    /// entities across reordered captures; new units start where they are;
+    /// standing units keep their turn; a unit without an `Orientation` is
+    /// turned by its velocity.
     #[test]
     fn streams_match_rows_by_entity() {
         let mut s = Streamer::default();
         let now = Instant::now();
         let first = s.stream(
             &capture(1, &[(9, 90.0, 0.0, 0.0, 1.0), (4, 40.0, 0.0, 1.0, 0.0)]),
+            &[],
             &[],
             now,
             0.1,
@@ -1234,29 +1275,77 @@ mod tests {
                 ],
             ),
             &[],
+            &[],
             now,
             0.1,
         );
         assert_eq!(column(&second, "x"), [40.0, 70.0, 91.0]);
         assert_eq!(column(&second, "prev_x"), [40.0, 70.0, 90.0]);
         assert_eq!(column(&second, "prev_y"), [0.0, 5.0, 0.0]);
+        let half = std::f32::consts::FRAC_1_SQRT_2;
         assert_eq!(
-            column(&second, "heading_x"),
-            [1.0, 1.0, 0.0],
-            "4 keeps its heading, 7 gets the default"
+            (
+                column(&second, "rot_x"),
+                column(&second, "rot_y"),
+                column(&second, "rot_z"),
+                column(&second, "rot_w"),
+            ),
+            (
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, -half],
+                vec![0.0, 0.0, 0.0],
+                vec![1.0, 1.0, half]
+            ),
+            "4 keeps its turn (+x), 7 gets the default (+x), 9 keeps its velocity's (+y)"
         );
-        assert_eq!(column(&second, "heading_y"), [0.0, 0.0, 1.0]);
-        assert_eq!(second.columns[7], [1, 1, 0], "class = profile");
+        assert_eq!(second.columns[9], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
-        assert_eq!(second.columns[8], [NO_POSE; 3], "no poses without models");
+        assert_eq!(second.columns[10], [NO_POSE; 3], "no poses without models");
         // 9 left.
         let third = s.stream(
             &capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]),
+            &[],
             &[],
             now,
             0.1,
         );
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+    }
+
+    /// A unit with an `Orientation` is drawn by it, not by its velocity:
+    /// one walking backwards is drawn backwards (A's regression), and a
+    /// tilted rotation reaches the stream bit-exact. A unit without one
+    /// keeps the velocity's turn.
+    #[test]
+    fn streams_draw_facing() {
+        use ae_sdk::aim::rotation;
+        let mut s = Streamer::default();
+        let now = Instant::now();
+        let back = Orientation::along(-1.0, 0.0);
+        let tilt = Orientation::along(0.0, 1.0).then(rotation([1.0, 0.0, 0.0], 0.3));
+        // 1 walks +x backwards, 2 walks +x tilted, 3 walks +x with no
+        // `Orientation`, 4 stands with none (the default turn).
+        let c = capture(
+            1,
+            &[
+                (1, 0.0, 0.0, 1.0, 0.0),
+                (2, 10.0, 0.0, 1.0, 0.0),
+                (3, 20.0, 0.0, 1.0, 0.0),
+                (4, 30.0, 0.0, 0.0, 0.0),
+            ],
+        );
+        let stream = s.stream(&c, &[], &[(1, &back), (2, &tilt)], now, 0.1);
+        let forward = Orientation::along(1.0, 0.0).rot;
+        let expected = [back.rot, tilt.rot, forward, forward];
+        for k in 0..4 {
+            let words: Vec<u32> = stream.columns[4 + k].clone();
+            assert_eq!(
+                words,
+                expected.map(|r| r[k].to_bits()),
+                "row rotation {k}: 1 and 2 drawn by their `Orientation` bit-exact, not by their velocity; 3 and 4 by theirs"
+            );
+        }
+        assert_eq!(back.to_world([1.0, 0.0, 0.0]), [-1.0, 0.0, 0.0], "walking backwards");
     }
 
     /// With a poser, a unit drawn with a model whose `Anim` names it gets
@@ -1316,9 +1405,9 @@ mod tests {
         }
         let mut table: Vec<Cell> = Vec::new();
         let ticks = |table: &[Cell]| (table[0][0], table[RECORD_CELLS][0]);
-        let first = s.stream(&capture(10, &rows), &refs(&anims(0.1)), now, 0.1);
+        let first = s.stream(&capture(10, &rows), &refs(&anims(0.1)), &[], now, 0.1);
         assert_eq!(
-            first.columns[8],
+            first.columns[ATTR_POSE],
             [POSE_MANUAL, NO_POSE, NO_POSE],
             "4 is drawn as a dart, 6 is another model; 3 shows a manual joint"
         );
@@ -1336,37 +1425,37 @@ mod tests {
         );
         // The next tick's turn: the newer record is the last tick's, so
         // the new one goes over the older: its tick and the entry's value.
-        let second = s.stream(&capture(11, &rows), &refs(&anims(0.2)), now, 0.1);
+        let second = s.stream(&capture(11, &rows), &refs(&anims(0.2)), &[], now, 0.1);
         assert!(!second.anim.reset);
         assert_eq!(second.anim.at, [0, 7], "the older record's changed cells");
         second.anim.apply(&mut table);
         assert_eq!(ticks(&table), (11, 10));
         // Held there: nothing written.
         assert!(
-            s.stream(&capture(12, &rows), &refs(&anims(0.2)), now, 0.1)
+            s.stream(&capture(12, &rows), &refs(&anims(0.2)), &[], now, 0.1)
                 .anim
                 .is_empty()
         );
         // A tick later it turns back: the newer (11) stamped the last tick
         // (13, it held so), the new one over the older (which held that
         // turn already: only its tick).
-        let fourth = s.stream(&capture(14, &rows), &refs(&anims(0.1)), now, 0.1);
+        let fourth = s.stream(&capture(14, &rows), &refs(&anims(0.1)), &[], now, 0.1);
         assert_eq!(fourth.anim.at, [0, RECORD_CELLS as u32]);
         fourth.anim.apply(&mut table);
         assert_eq!(ticks(&table), (13, 14));
         assert_eq!(table[RECORD_CELLS + 7][1], (0.05f32).sin().to_bits());
         assert!(
-            s.stream(&capture(15, &rows), &refs(&anims(0.1)), now, 0.1)
+            s.stream(&capture(15, &rows), &refs(&anims(0.1)), &[], now, 0.1)
                 .anim
                 .is_empty()
         );
         // The reader missed writes: the whole table, as it stands.
         s.poser.as_mut().unwrap().write_whole();
-        let whole = s.stream(&capture(16, &rows), &refs(&anims(0.1)), now, 0.1);
+        let whole = s.stream(&capture(16, &rows), &refs(&anims(0.1)), &[], now, 0.1);
         assert!(whole.anim.reset && whole.anim.at.len() == POSE_CELLS);
         assert_eq!(whole.anim.cells, table, "the cells as written");
         assert!(
-            s.stream(&capture(17, &rows), &refs(&anims(0.1)), now, 0.1)
+            s.stream(&capture(17, &rows), &refs(&anims(0.1)), &[], now, 0.1)
                 .anim
                 .is_empty(),
             "then only what changes"
@@ -1375,28 +1464,28 @@ mod tests {
         let rows2 = [(4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let mut moved = anims(0.1);
         moved[2].1.model = arm;
-        let sixth = s.stream(&capture(18, &rows2), &refs(&moved[1..]), now, 0.1);
-        assert_eq!(sixth.columns[8], [NO_POSE, POSE_MANUAL]);
+        let sixth = s.stream(&capture(18, &rows2), &refs(&moved[1..]), &[], now, 0.1);
+        assert_eq!(sixth.columns[ATTR_POSE], [NO_POSE, POSE_MANUAL]);
         assert_eq!(sixth.anim.at.len(), POSE_CELLS);
         assert_eq!(sixth.sim_seconds, TICK_SECONDS, "sim time per tick, whatever the speed");
         // Its manual joint gone: marked while the older record shows it.
         moved[2].1.manual_kind = [manual_kind::NONE; _];
-        let seventh = s.stream(&capture(19, &rows2), &refs(&moved[1..]), now, 0.1);
+        let seventh = s.stream(&capture(19, &rows2), &refs(&moved[1..]), &[], now, 0.1);
         assert_eq!(
-            seventh.columns[8],
+            seventh.columns[ATTR_POSE],
             [NO_POSE, POSE_MANUAL],
             "the older record still shows it"
         );
         // (Held, nothing is written and the older keeps it: as the table.)
-        let eighth = s.stream(&capture(20, &rows2), &refs(&moved[1..]), now, 0.1);
+        let eighth = s.stream(&capture(20, &rows2), &refs(&moved[1..]), &[], now, 0.1);
         assert_eq!(
-            eighth.columns[8],
+            eighth.columns[ATTR_POSE],
             [NO_POSE, POSE_MANUAL],
             "held: the records as they were"
         );
         moved[2].1.phase[2] = 0.5;
-        let ninth = s.stream(&capture(21, &rows2), &refs(&moved[1..]), now, 0.1);
-        assert_eq!(ninth.columns[8], [NO_POSE, 0], "neither does");
+        let ninth = s.stream(&capture(21, &rows2), &refs(&moved[1..]), &[], now, 0.1);
+        assert_eq!(ninth.columns[ATTR_POSE], [NO_POSE, 0], "neither does");
     }
 
     /// A unit gone since the last capture explodes where it stood, if the

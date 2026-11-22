@@ -1019,7 +1019,7 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         // Where each class is (to aim `--camera` at).
         let mut classes: Vec<(u32, f64, f64)> = vec![(0, 0.0, 0.0); s.classes().len()];
         for r in 0..stream.len() {
-            if let Some(c) = classes.get_mut(stream.columns[7][r] as usize) {
+            if let Some(c) = classes.get_mut(stream.columns[ae_render::units::ATTR_CLASS][r] as usize) {
                 *c = (
                     c.0 + 1,
                     c.1 + f32::from_bits(stream.columns[0][r]) as f64,

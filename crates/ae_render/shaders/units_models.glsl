@@ -132,9 +132,7 @@ Skinned skinVertex(DrawRecord d, uint v, uint paletteBase) {
 }
 
 // A model-space direction in the unit's frame (place() without the move
-// and the scale).
+// and the scale), the unit's full rotation (tilt included).
 vec3 orient(Unit unit, vec3 d) {
-    vec3 forward = vec3(unit.heading.x, 0.0, unit.heading.y);
-    vec3 side = vec3(-unit.heading.y, 0.0, unit.heading.x);
-    return forward * d.x + vec3(0.0, d.y, 0.0) + side * d.z;
+    return rotate(unit.rot, d);
 }

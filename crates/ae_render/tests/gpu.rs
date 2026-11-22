@@ -30,6 +30,22 @@ fn at_rest(mut columns: [Vec<u32>; ATTRIBUTE_COUNT]) -> [Vec<u32>; ATTRIBUTE_COU
     columns
 }
 
+/// The `Orientation` of a unit heading `(hx, hy)` (nav x, nav y; need not
+/// be unit length; zero: the identity): the shortest turn from +x about up.
+fn yaw(hx: f32, hy: f32) -> [f32; 4] {
+    let len = (hx * hx + hy * hy).sqrt();
+    if len == 0.0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let (c, s) = (hx / len, hy / len);
+    if c <= -1.0 + 1e-6 {
+        return [0.0, 1.0, 0.0, 0.0];
+    }
+    let q = [0.0, -s, 0.0, 1.0 + c];
+    let n = (q[1] * q[1] + q[3] * q[3]).sqrt();
+    [0.0, q[1] / n, 0.0, q[3] / n]
+}
+
 fn assert_clean(gpu: &GpuDevice) {
     let counters = &gpu.instance.counters;
     assert_eq!(
@@ -841,8 +857,10 @@ fn units_render_over_terrain() {
             y.to_bits(),
             px.to_bits(),
             py.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             4.0f32.to_bits(),
             class,
         ]
@@ -976,8 +994,10 @@ fn terrain_edits_reach_the_heightfield() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             5.0f32.to_bits(),
             class,
         ]
@@ -1759,8 +1779,10 @@ fn model_lights_light_the_ground() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             5.0f32.to_bits(),
             class,
         ]
@@ -2283,8 +2305,10 @@ fn cull_on_gpu(
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -2425,8 +2449,10 @@ fn units_cull_matches_the_cpu_reference() {
                         y.to_bits(),
                         x.to_bits(),
                         y.to_bits(),
+                        0.0f32.to_bits(),
+                        0.0f32.to_bits(),
+                        0.0f32.to_bits(),
                         1.0f32.to_bits(),
-                        0,
                         r.to_bits(),
                         c,
                         ae_render::units::NO_POSE,
@@ -2946,8 +2972,10 @@ fn scene_app_with(
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            1.0f32.to_bits(),
-            0.5f32.to_bits(),
+            0.0f32.to_bits(),
+            (-0.5f32 / (1.25f32).sqrt()).to_bits(),
+            0.0f32.to_bits(),
+            (1.0f32 / (1.25f32).sqrt()).to_bits(),
             6.0f32.to_bits(),
             i % 3,
         ]
@@ -3775,8 +3803,10 @@ fn water_covers_the_low_ground_only() {
                 y.to_bits(),
                 x.to_bits(),
                 y.to_bits(),
-                1.0f32.to_bits(),
                 0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                1.0f32.to_bits(),
                 8.0f32.to_bits(),
                 class,
             ]
@@ -4163,8 +4193,10 @@ fn hills_shade_away_from_the_sun() {
                 y.to_bits(),
                 x.to_bits(),
                 y.to_bits(),
-                1.0f32.to_bits(),
                 0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                1.0f32.to_bits(),
                 6.0f32.to_bits(),
                 0,
             ]
@@ -4538,10 +4570,11 @@ fn units_cast_shadows() {
     let render = |shadows: bool, view_shadows: bool| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         for &(x, z, hx, hz, r) in &units {
-            for (k, word) in [x, z, x, z, hx, hz, r]
+            for (k, word) in [x, z, x, z]
                 .map(f32::to_bits)
                 .into_iter()
-                .chain([0])
+                .chain(yaw(hx, hz).map(f32::to_bits))
+                .chain([r.to_bits(), 0])
                 .enumerate()
             {
                 columns[k].push(word);
@@ -4812,10 +4845,11 @@ fn particles_cast_coloured_shadows() {
     let render = |bursts: Option<&[Burst]>, shadows: bool, view_shadows: bool, name: &str| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         let (x, z, hx, hz, r) = unit;
-        for (k, word) in [x, z, x, z, hx, hz, r]
+        for (k, word) in [x, z, x, z]
             .map(f32::to_bits)
             .into_iter()
-            .chain([0])
+            .chain(yaw(hx, hz).map(f32::to_bits))
+            .chain([r.to_bits(), 0])
             .enumerate()
         {
             columns[k].push(word);
@@ -6463,10 +6497,11 @@ fn decals_wrap_over_cliffs() {
     }
     let render = |decals: Decals| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
-        for (k, word) in [unit.0, unit.1, unit.0, unit.1, 1.0, 0.0, 4.0]
+        for (k, word) in [unit.0, unit.1, unit.0, unit.1]
             .map(f32::to_bits)
             .into_iter()
-            .chain([0])
+            .chain([0.0, 0.0, 0.0, 1.0].map(f32::to_bits))
+            .chain([4.0f32.to_bits(), 0])
             .enumerate()
         {
             columns[k].push(word);
@@ -7802,8 +7837,10 @@ fn units_draw_models() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            hx.to_bits(),
-            hy.to_bits(),
+            yaw(hx, hy)[0].to_bits(),
+            yaw(hx, hy)[1].to_bits(),
+            yaw(hx, hy)[2].to_bits(),
+            yaw(hx, hy)[3].to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -8117,8 +8154,10 @@ fn units_model_shadows_culled() {
             p.y.to_bits(),
             p.x.to_bits(),
             p.y.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -8370,15 +8409,17 @@ fn units_pose_models() {
         view.camera
     };
     let camera = set_view(&TerrainApp::new(source.clone(), TerrainOutput::Readback));
-    let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let lod = lod_view(&source, &camera, extent.width, extent.height);
+    let view_proj = lod.view_proj;
     let planes = frustum_planes(view_proj);
     let outside = |c: Vec3, r: f32| planes.iter().any(|p| Vec3::new(p[0], p[1], p[2]).dot(c) + p[3] < -r);
-    // Model point (forward, up, right) of a unit at (x, y), heading h,
-    // radius r (the arm model's footprint is 1).
-    let at = |x: f32, y: f32, (hx, hy): (f32, f32), r: f32, local: Vec3| -> Vec3 {
-        let (forward, side) = (Vec3::new(hx, 0.0, hy), Vec3::new(-hy, 0.0, hx));
-        Vec3::new(x, 50.0, y) + (forward * local.x + Vec3::Y * local.y + side * local.z) * r
+    // Model point (forward, up, right) local to a unit at (x, y) turned by
+    // `rot`, radius r (the arm model's footprint is 1).
+    let at = |x: f32, y: f32, rot: [f32; 4], r: f32, local: Vec3| -> Vec3 {
+        Vec3::new(x, 50.0, y) + Quat::from_array(rot) * (local * r)
     };
+    let at_heading =
+        |x: f32, y: f32, (hx, hy): (f32, f32), r: f32, local: Vec3| -> Vec3 { at(x, y, yaw(hx, hy), r, local) };
 
     // What a unit's records hold: none (at rest), records not in the
     // table, or channels at ticks 5 and 7 (stored newer first when
@@ -8559,7 +8600,7 @@ fn units_pose_models() {
     let heading = (0.0, 1.0);
     let mut x = 512.0;
     while !outside(
-        at(
+        at_heading(
             x,
             512.0,
             heading,
@@ -8571,7 +8612,7 @@ fn units_pose_models() {
         x += 2.0;
     }
     units.push(((x + 4.0, 512.0), heading, 20.0, 0, one(1, looped, 0.99, 0.99)));
-    let reach_tip = at(x + 4.0, 512.0, heading, 20.0, Vec3::new(0.0, 1.39, 5.94));
+    let reach_tip = at_heading(x + 4.0, 512.0, heading, 20.0, Vec3::new(0.0, 1.39, 5.94));
     assert!(
         !outside(reach_tip, 0.0),
         "the off-screen unit's arm reaches into the view"
@@ -8589,12 +8630,15 @@ fn units_pose_models() {
     );
     let centre = Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2]);
     let mut turned_x = 512.0;
-    while !outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre), clip_r * 20.0) {
+    while !outside(at_heading(turned_x, 512.0, (1.0, 0.0), 20.0, centre), clip_r * 20.0) {
         turned_x += 2.0;
     }
     turned_x += 2.0;
     assert!(
-        !outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre * along), turned_r * 20.0),
+        !outside(
+            at_heading(turned_x, 512.0, (1.0, 0.0), 20.0, centre * along),
+            turned_r * 20.0
+        ),
         "the turned unit's sphere is in view"
     );
     let half_round = with(
@@ -8665,8 +8709,10 @@ fn units_pose_models() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            hx.to_bits(),
-            hy.to_bits(),
+            yaw(*hx, *hy)[0].to_bits(),
+            yaw(*hx, *hy)[1].to_bits(),
+            yaw(*hx, *hy)[2].to_bits(),
+            yaw(*hx, *hy)[3].to_bits(),
             radius.to_bits(),
             *class,
             pose,
@@ -8676,6 +8722,13 @@ fn units_pose_models() {
         {
             columns[a].push(word);
         }
+    }
+    // Unit 3 is drawn tilted (a roll about its forward axis), so the
+    // stream's rotation reaches the model matrix: its turn replaces the
+    // heading's identity.
+    let tilt = Quat::from_rotation_x(-0.5).to_array();
+    for (k, w) in tilt.iter().enumerate() {
+        columns[4 + k][3] = w.to_bits();
     }
     let classes = vec![
         UnitClass {
@@ -8851,27 +8904,52 @@ fn units_pose_models() {
         let unit = |k: usize| (units[k].0.0, units[k].0.1, units[k].1, units[k].2);
         let (x, y, h, r) = unit(0);
         assert!(
-            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
+            blue(at_heading(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
             "at rest, the arm on the base"
         );
         let (x, y, h, r) = unit(1);
         assert!(
-            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))),
+            blue(at_heading(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))),
             "half way through the reach, the arm 3 to the right"
         );
-        assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "and not on the base");
+        assert!(
+            !blue(at_heading(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
+            "and not on the base"
+        );
         let (x, y, h, r) = unit(4);
         assert!(
-            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
+            blue(at_heading(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
             "records not in the table: at rest"
         );
         assert!(blue(reach_tip), "the off-screen unit's arm is drawn");
         let (x, y, h, r) = unit(9);
         assert!(
-            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))),
+            blue(at_heading(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))),
             "played once, held at full reach (looping it would be half way)"
         );
-        assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "and not half way");
+        // Unit 3 is tilted: its arm's bone, placed as `Anim::bone_world`
+        // places it (the ground point, the rotation, then the fit), where
+        // the GPU draws it. Its bone is 2, its middle one unit above its
+        // origin.
+        let (x, y, _h, r) = unit(3);
+        let ch = match &units[3].4 {
+            Spec::Records(_, newer, _) => newer,
+            _ => unreachable!("unit 3 has records"),
+        };
+        // The size it is drawn at (the minimum pixel size included).
+        let ground = Vec3::new(x, 50.0, y);
+        let pixels_ = 2.0 * r * lod.proj_scale / ground.distance(lod.pos).max(1e-3);
+        let size = r * (6.0 / pixels_.max(1e-6)).max(1.0);
+        let (p, q) = rigs[0].bone_frame(ch, 2);
+        let facing = Quat::from_array(tilt);
+        let (bone, rot) = (ground + facing * (Vec3::from(p) * size), facing * Quat::from_array(q));
+        let middle = bone + rot * (Vec3::Y * size);
+        assert!(blue(middle), "the tilted unit's arm at {middle}");
+        let untilted = ground + (Vec3::from(p) + Vec3::Y) * size;
+        assert!(
+            (middle - untilted).length() > 5.0 && !blue(untilted),
+            "the tilt moves the arm: {middle} vs {untilted}"
+        );
     }
     assert_clean(&gpu);
 }
@@ -8978,8 +9056,10 @@ fn speculars_follow_material_and_lights() {
         512.0f32.to_bits(),
         512.0f32.to_bits(),
         512.0f32.to_bits(),
-        1.0f32.to_bits(),
         0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
         40.0f32.to_bits(),
         0u32,
     ]
@@ -9430,8 +9510,10 @@ fn lights_clusters_match_the_unculled_reference() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
-            1.0f32.to_bits(),
             0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             5.0f32.to_bits(),
             0,
         ]
