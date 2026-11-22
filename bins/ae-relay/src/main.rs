@@ -38,7 +38,17 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { players: 2, ticks: 300, bind: "127.0.0.1:7600".into(), hz: 30.0, record: None, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
+    let mut o = Opts {
+        players: 2,
+        ticks: 300,
+        bind: "127.0.0.1:7600".into(),
+        hz: 30.0,
+        record: None,
+        latency: 0,
+        jitter: 0,
+        loss: 0.0,
+        seed: 1,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -100,16 +110,34 @@ fn run() -> Result<bool> {
         {
             match &header {
                 None => header = Some(h),
-                Some(first) => first.check(&h).with_context(|| format!("player {player} builds another world"))?,
+                Some(first) => first
+                    .check(&h)
+                    .with_context(|| format!("player {player} builds another world"))?,
             }
             ensure!(player < o.players, "player {player} of {}", o.players);
-            peers.entry(player).or_insert(Peer { addr: from, want: 0, pending: BTreeMap::new(), taken: 0, echo_us: 0, final_digest: None });
+            peers.entry(player).or_insert(Peer {
+                addr: from,
+                want: 0,
+                pending: BTreeMap::new(),
+                taken: 0,
+                echo_us: 0,
+                final_digest: None,
+            });
         }
     }
     let header = header.unwrap();
-    eprintln!("relay: {} players joined; game of {} ticks at {} Hz", o.players, o.ticks, o.hz);
+    eprintln!(
+        "relay: {} players joined; game of {} ticks at {} Hz",
+        o.players, o.ticks, o.hz
+    );
     let mut recorder = match &o.record {
-        Some(path) => Some(Recorder::new(std::io::BufWriter::new(std::fs::File::create(path)?), &Header { checkpoint_every: header.checkpoint_every, ..header.clone() })?),
+        Some(path) => Some(Recorder::new(
+            std::io::BufWriter::new(std::fs::File::create(path)?),
+            &Header {
+                checkpoint_every: header.checkpoint_every,
+                ..header.clone()
+            },
+        )?),
         None => None,
     };
 
@@ -125,7 +153,16 @@ fn run() -> Result<bool> {
     loop {
         // Receive everything waiting.
         while let Ok((n, from)) = socket.recv_from(&mut buf) {
-            let Ok(Packet::Client { player, inputs, want, digests: ds, sent_us }) = Packet::decode(&buf[..n]) else { continue };
+            let Ok(Packet::Client {
+                player,
+                inputs,
+                want,
+                digests: ds,
+                sent_us,
+            }) = Packet::decode(&buf[..n])
+            else {
+                continue;
+            };
             let Some(peer) = peers.get_mut(&player) else { continue };
             peer.addr = from;
             peer.want = peer.want.max(want);
@@ -152,11 +189,21 @@ fn run() -> Result<bool> {
             let first = *by_player.values().next().unwrap();
             if by_player.values().any(|d| *d != first) {
                 if desync == 0 {
-                    eprintln!("DESYNC at tick {tick}: {:?}", by_player.iter().map(|(p, d)| format!("player {p}: {:016x}", *d as u64)).collect::<Vec<_>>());
+                    eprintln!(
+                        "DESYNC at tick {tick}: {:?}",
+                        by_player
+                            .iter()
+                            .map(|(p, d)| format!("player {p}: {:016x}", *d as u64))
+                            .collect::<Vec<_>>()
+                    );
                 }
                 desync = if desync == 0 { tick } else { desync };
             } else if let Some(r) = recorder.as_mut() {
-                r.checkpoint(&Checkpoint { tick, total: first, parts: Vec::new() })?;
+                r.checkpoint(&Checkpoint {
+                    tick,
+                    total: first,
+                    parts: Vec::new(),
+                })?;
             }
             checked += 1;
             compared_through = Some(tick);
@@ -172,7 +219,9 @@ fn run() -> Result<bool> {
                 for t in due {
                     let cmds = peer.pending.remove(&t).unwrap();
                     late += (t < tick) as u64;
-                    bundle.commands.extend(cmds.into_iter().map(|c| Command { player: *player, ..c }));
+                    bundle
+                        .commands
+                        .extend(cmds.into_iter().map(|c| Command { player: *player, ..c }));
                     peer.taken = peer.taken.max(t);
                 }
             }
@@ -202,7 +251,17 @@ fn run() -> Result<bool> {
                 bytes += size;
                 out.push(b.clone());
             }
-            net.send(peer.addr, Packet::Relay { bundles: out, taken: peer.taken, echo_us: peer.echo_us, end, desync }.encode());
+            net.send(
+                peer.addr,
+                Packet::Relay {
+                    bundles: out,
+                    taken: peer.taken,
+                    echo_us: peer.echo_us,
+                    end,
+                    desync,
+                }
+                .encode(),
+            );
         }
         net.flush(&socket)?;
         let finals = peers.values().filter(|p| p.final_digest.is_some()).count();
@@ -211,7 +270,17 @@ fn run() -> Result<bool> {
             if finals == peers.len() {
                 for _ in 0..20 {
                     for peer in peers.values() {
-                        net.send(peer.addr, Packet::Relay { bundles: Vec::new(), taken: peer.taken, echo_us: peer.echo_us, end, desync }.encode());
+                        net.send(
+                            peer.addr,
+                            Packet::Relay {
+                                bundles: Vec::new(),
+                                taken: peer.taken,
+                                echo_us: peer.echo_us,
+                                end,
+                                desync,
+                            }
+                            .encode(),
+                        );
                     }
                     net.flush(&socket)?;
                     std::thread::sleep(Duration::from_millis(5));
@@ -237,10 +306,18 @@ fn run() -> Result<bool> {
         bundles.len() as f64 / wall,
         peers.len(),
         if complete { "" } else { " (INCOMPLETE)" },
-        if desync == 0 { "in sync".to_string() } else { format!("DESYNC first at tick {desync}") },
+        if desync == 0 {
+            "in sync".to_string()
+        } else {
+            format!("DESYNC first at tick {desync}")
+        },
         net.sent,
         net.dropped,
-        if agree { format!("agree ({:016x})", finals[0].unwrap() as u64) } else { format!("DIFFER {finals:x?}") },
+        if agree {
+            format!("agree ({:016x})", finals[0].unwrap() as u64)
+        } else {
+            format!("DIFFER {finals:x?}")
+        },
     );
     let _ = micros(epoch);
     Ok(desync == 0 && agree && complete)

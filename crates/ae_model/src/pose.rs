@@ -72,7 +72,11 @@ pub fn globals(model: &Model, locals: &[Mat4]) -> Vec<Mat4> {
 /// The skinning palette: per joint, its bone's matrix times its inverse
 /// bind matrix.
 pub fn palette(model: &Model, globals: &[Mat4]) -> Vec<Mat4> {
-    model.joints.iter().map(|j| globals[j.bone as usize] * Mat4::from_cols_array(&j.inverse_bind)).collect()
+    model
+        .joints
+        .iter()
+        .map(|j| globals[j.bone as usize] * Mat4::from_cols_array(&j.inverse_bind))
+        .collect()
 }
 
 /// The rest pose's palette.
@@ -135,10 +139,20 @@ pub fn bake(model: &Model, clip: usize) -> BakedClip {
             if f > 0 && keys[(f as usize - 1) * tracks.len() + i].r.dot(r) < 0.0 {
                 r = -r;
             }
-            keys.push(Trs { t: pose.translation[b], r, s: pose.scale[b] });
+            keys.push(Trs {
+                t: pose.translation[b],
+                r,
+                s: pose.scale[b],
+            });
         }
     }
-    BakedClip { tracks, frames, rate, duration: c.duration, keys }
+    BakedClip {
+        tracks,
+        frames,
+        rate,
+        duration: c.duration,
+        keys,
+    }
 }
 
 /// How a clip plays past its end.
@@ -211,7 +225,9 @@ impl BakedClip {
 
 /// Vertex `v`'s position skinned by `palette`.
 pub fn skin(v: &Vertex, palette: &[Mat4]) -> Vec3 {
-    let m = (0..4).fold(Mat4::ZERO, |m, k| m + palette[v.joints[k] as usize] * (v.weights[k] as f32 / 65535.0));
+    let m = (0..4).fold(Mat4::ZERO, |m, k| {
+        m + palette[v.joints[k] as usize] * (v.weights[k] as f32 / 65535.0)
+    });
     m.transform_point3(Vec3::from(v.position))
 }
 
@@ -222,7 +238,11 @@ pub fn animated_radius(model: &Model, centre: Vec3) -> f32 {
     for clip in 0..model.clips.len() {
         let baked = bake(model, clip);
         for f in 0..baked.frames {
-            let time = if f + 1 == baked.frames { baked.duration } else { f as f32 / baked.rate.max(1e-9) };
+            let time = if f + 1 == baked.frames {
+                baked.duration
+            } else {
+                f as f32 / baked.rate.max(1e-9)
+            };
             // At the frame itself (the blend's weight 0).
             let time = time.min(baked.duration * (1.0 - 1e-6));
             let palette = palette(model, &globals(model, &baked.locals(model, time, PlayMode::Loop)));
@@ -252,17 +272,28 @@ pub fn turned_reach(model: &Model) -> f32 {
     // Per bone: its longest local translation and largest scale factor
     // (the largest stretch of its local matrix: its largest scale when the
     // rest matrix is its TRS, else bounded by the Frobenius norm).
-    let mut t: Vec<f32> = model.bones.iter().map(|b| Mat4::from_cols_array(&b.rest).w_axis.truncate().length()).collect();
+    let mut t: Vec<f32> = model
+        .bones
+        .iter()
+        .map(|b| Mat4::from_cols_array(&b.rest).w_axis.truncate().length())
+        .collect();
     let mut s: Vec<f32> = model
         .bones
         .iter()
         .map(|b| {
             let m = Mat4::from_cols_array(&b.rest);
-            let trs = Mat4::from_scale_rotation_translation(Vec3::from(b.scale), Quat::from_array(b.rotation).normalize(), Vec3::from(b.translation));
+            let trs = Mat4::from_scale_rotation_translation(
+                Vec3::from(b.scale),
+                Quat::from_array(b.rotation).normalize(),
+                Vec3::from(b.translation),
+            );
             let scale = Vec3::from(b.scale).abs().max_element();
             match m.abs_diff_eq(trs, 1e-4 * scale.max(1.0)) {
                 true => scale,
-                false => (m.x_axis.truncate().length_squared() + m.y_axis.truncate().length_squared() + m.z_axis.truncate().length_squared()).sqrt(),
+                false => (m.x_axis.truncate().length_squared()
+                    + m.y_axis.truncate().length_squared()
+                    + m.z_axis.truncate().length_squared())
+                .sqrt(),
             }
         })
         .collect();
@@ -288,7 +319,9 @@ pub fn turned_reach(model: &Model) -> f32 {
     // Each bone's origin's reach, and the scale its children are under.
     let (mut reach, mut scale) = (vec![0.0f32; n], vec![1.0f32; n]);
     for (b, bone) in model.bones.iter().enumerate() {
-        let (r, sc) = bone.parent.map_or((0.0, 1.0), |p| (reach[p as usize], scale[p as usize]));
+        let (r, sc) = bone
+            .parent
+            .map_or((0.0, 1.0), |p| (reach[p as usize], scale[p as usize]));
         reach[b] = r + sc * (t[b] + t_add[b]);
         scale[b] = sc * s[b] * s_add[b];
     }

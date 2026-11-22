@@ -1,0 +1,8 @@
+# The pinned toolchain: rustfmt's output changes between releases, so the
+# formatter, clippy and every developer's shell must use the same binary (and
+# the pre-commit hook with them). Both wasm targets are what the guest crates
+# and the render modules build for.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-wasip1-threads", "wasm32-unknown-unknown"]

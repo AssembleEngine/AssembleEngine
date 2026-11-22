@@ -292,10 +292,10 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M4** Copy layer + fog | `ae_sensors`, rule executor, ghosts, radar degradation, interpolation, fog pass | two observers see different worlds; property test: no hidden field reaches a view; view build < 2 ms at 10k |
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
-| **M17** Formatting + lints (next stage) | decided: rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
+| **M17** Formatting + lints (done) | rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
 | Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
-### M17 — Formatting, lints and the commit gate (next stage)
+### M17 — Formatting, lints and the commit gate (done)
 
 The workspace has neither a formatter config nor a linter config, and no CI. This stage adds both
 gates locally, before more code lands: one canonical format, clippy clean, and a pre-commit hook
@@ -350,7 +350,8 @@ repo carries them in `.githooks/` and the setup is one idempotent command,
 1. Collects the staged paths. A commit touching no Rust, manifest or build input returns at once,
    so a docs-only commit stays instant.
 2. With any staged `.rs` file, runs the formatter check over the workspace and the guest crates.
-   It fails with the file names and `cargo fmt --all` as the fix.
+   It fails with the file names and `tools/fmt.sh` as the fix: `cargo fmt --all` is not the
+   command here, because `--all` follows the `flecs_ecs_sys` path dependency into `vendor/`.
 3. With any staged `.rs`, `Cargo.toml`, `Cargo.lock`, `build.rs` or `.cargo/` file, runs
    `cargo clippy --workspace --all-targets -- -D warnings` and prints the first diagnostics.
    Warm, incremental runs reuse `target/`; the first cold run after a dependency change is the
@@ -364,7 +365,7 @@ repo carries them in `.githooks/` and the setup is one idempotent command,
 
 Partial staging is the known rough edge: the formatter and clippy read the working tree, not the
 index, so an unstaged edit elsewhere can fail the check. The message says which command to run
-(`cargo fmt --all`, or stage all with `git add -A`); no attempt is made to format a temporary
+(`tools/fmt.sh`, or stage all with `git add -A`); no attempt is made to format a temporary
 index copy, because the simple check is the one people can reason about.
 
 **Steps** (each its own commit):
@@ -382,17 +383,72 @@ index copy, because the simple check is the one people can reason about.
    on code commits.
 
 **Exit criteria:**
-- `cargo fmt --all -- --check` exits 0, guests included, from a fresh checkout.
+- `tools/fmt.sh --check` exits 0, guests included, from a fresh checkout. (`cargo fmt --all --
+  --check` cannot be the gate: `--all` formats local path dependencies, so it follows
+  `flecs_ecs_sys` into `vendor/`, which stays unformatted. The wrapper names the workspace
+  packages with `cargo fmt -p …` instead, which does not follow them, and then formats each guest
+  manifest.)
 - `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - The hook refuses both a misformatted and a warning-producing commit, and does not fire on a
   docs-only one.
 - `cargo test --workspace` is green, and the pinned digests (`ae_sim --test sandbox`, the crossing
   and skirmish goldens, the replay tests) are unchanged: formatting cannot move bits, and any
   clippy fix that would is not taken.
-- README and CLAUDE.md state the toolchain pin, the format, the two commands and the hook setup.
+- README and CLAUDE.md state the toolchain pin, the format, the two commands (`tools/fmt.sh
+  --check`, `cargo clippy --workspace --all-targets -- -D warnings`) and the hook setup.
 
 **Not in M17:** CI (still none; the hook is local), pedantic/nursery lints, formatting of
 `vendor/`, and clippy on the wasm guest crates. These are revisited when CI exists.
+
+### M17 progress
+
+Done (2026-11-22), in the steps above; each commit is separate and `cargo test --workspace` was
+green at every one of them (271 tests).
+
+- **Toolchain and format.** `rust-toolchain.toml` pins 1.98.1 with `rustfmt`, `clippy` and both
+  wasm targets; `rustfmt.toml` holds `max_width = 120` and nothing else. The reformat is 3,470
+  hunks over 192 files. At rustfmt's default 100 the same workspace takes 3,970 hunks, so 120 is
+  the smaller one-time diff, as planned; the reformat commit is in `.git-blame-ignore-revs`.
+- **`vendor/` is not formatted, and that forced the wrapper.** `cargo fmt --all` formats local
+  path dependencies, and `ae_ecs` depends on `vendor/flecs_ecs_sys`, so `--all` rewrites three
+  files (four hunks) in the patched flecs copy: no good. `tools/fmt.sh` therefore names the 30
+  workspace packages (`cargo fmt -p …`, which does not follow path dependencies) and then formats
+  the twelve guest manifests, each its own workspace root; a manifest is a guest if it declares
+  `[workspace]`, so a new guest needs no edit here. `tools/fmt.sh --check` is the read-only form
+  and runs in 1.6 s warm. A guest `cargo fmt --manifest-path` per manifest adds about a second;
+  formatting all 30 packages by manifest instead of `-p` would add six.
+- **Clippy.** Before: the run stopped at `approx_constant` — eight corner gradients in
+  `ae_render/src/terrain/heightmap.rs` and one full turn in `ae_spatial/tests/brute_force.rs`. With
+  that lint allowed, 99 more warning locations, none of them wrong bits. After: 0, and
+  `cargo clippy --workspace --all-targets -- -D warnings` takes 15 s on this machine when crates
+  changed, 2 s when nothing did. The counts per lint: 17 `manual_is_multiple_of`, 17
+  `missing_safety_doc`, 12 `excessive_precision`, 10 `type_complexity`, 7
+  `doc_lazy_continuation`, 5 `needless_range_loop`, 3 `map_entry`, and 21 more across 17 other
+  lints. Batches by lint, in four commits: float literals, mechanical rewrites, documentation and
+  API shape, then the leftovers.
+- **Four scoped `#[allow]`s, each with its reason** (crate-level: none): `approx_constant` on the
+  Perlin corner gradients — 0.7071 is baked into every generated heightmap, so `FRAC_1_SQRT_2`
+  would move the crossing map, the nav terrain and the captures, and the digests and goldens
+  pinned to them — and on `ae_spatial`'s sweep test, whose 6.283 angle ceiling belongs to a fixed
+  random stream that `TAU` (6.2831853) would change; `too_many_arguments` on `Light::cone` and on
+  the render module test's `target_for`. Everything else is a real change. The 12
+  `excessive_precision` literals were checked to parse to the same `f32` (`0.1593017578125` →
+  `0.159_301_76`, the colour matrices); `is_multiple_of` replaced `% n == 0` on unsigned values
+  only; `WorldPos::add`/`sub` were deleted in favour of the `Add`/`Sub` impls that already
+  existed, so the expressions are unchanged.
+
+No fused or platform-specific float operation enters the tree: the fixes add no `mul_add`, no std
+or `libm` transcendental, and no SIMD or target-feature path, and the sim is untouched by them.
+Two `let`-bound `Arc`s and a boxed `FlowField` change allocation, not arithmetic.
+- **The hook.** `.githooks/pre-commit`, installed once per clone with `ae-tool hooks install` (or
+  `git config core.hooksPath .githooks`; both are idempotent). Measured warm on this machine: 5 ms
+  for a docs-only commit (it returns before running anything), 1.6 s for the formatter check,
+  2.5 s to refuse a warning-producing commit (clippy stops at the first failing crate) and 2 s for
+  a clean code commit with nothing to re-check; the expensive case is the first code commit after
+  a change, 15 s, because clippy re-checks what was edited. Tested: a staged `.rs` that rustfmt
+  would change is refused with the file name and `tools/fmt.sh` as the fix, a staged `.rs` that
+  clippy rejects is refused with its first diagnostics, and the docs-only and clean code commits
+  pass. The hook reads the working tree, never the index, and has no skip variable.
 
 ### M0 findings that shape M1 (details and numbers: `spikes/README.md`)
 
@@ -4292,10 +4348,11 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 ## TODO (open, not a priority now)
 
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
-  pre-commit hook is local, and several notes above wait on it (the `glslc`/SDL3 gating of
-  `cargo test --workspace`, clippy on the wasm guests, the cross-platform digest runs). Scope,
-  as a `.gitlab-ci.yml`:
-  - `fmt` (`cargo fmt --all -- --check`, guest crates included) and `clippy`
+  pre-commit hook is local (see `### M17 progress` for what it gates and its measured times), and
+  several notes above wait on it (the `glslc`/SDL3 gating of `cargo test --workspace`, clippy on
+  the wasm guests, the cross-platform digest runs). Scope, as a `.gitlab-ci.yml`:
+  - `fmt` (`tools/fmt.sh --check`: the workspace packages and the guest crates, since
+    `cargo fmt --all` would reach `vendor/`) and `clippy`
     (`cargo clippy --workspace --all-targets -- -D warnings`) on the pinned toolchain
     (`rust-toolchain.toml`), with `target/` cached;
   - `test` on a runner that has `glslc`, SDL3 and a Vulkan driver: `cargo test --workspace`

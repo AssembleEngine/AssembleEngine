@@ -303,9 +303,7 @@ impl Exposure {
                 }
             }
             let meter_sets = (0..frames_in_flight).map(|slot| sets[2 * slot]).collect();
-            let adapt_sets = (0..frames_in_flight)
-                .map(|slot| sets[2 * slot + 1])
-                .collect();
+            let adapt_sets = (0..frames_in_flight).map(|slot| sets[2 * slot + 1]).collect();
             (set_layout, layout, pool, meter_sets, adapt_sets, sampler)
         };
         let meter = pipeline::compute_pipeline(device, spirv!("exposure_meter.comp"), layout)
@@ -333,10 +331,7 @@ impl Exposure {
             image: self.image.image,
             view: self.image.view,
             format: self.image.desc.format,
-            extent: vk::Extent2D {
-                width: 1,
-                height: 1,
-            },
+            extent: vk::Extent2D { width: 1, height: 1 },
             range: self.image.range(),
             identity: IDENTITY_EXPOSURE,
         }
@@ -479,20 +474,13 @@ impl Exposure {
             );
             ctx.device
                 .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.meter);
-            ctx.device.cmd_bind_descriptor_sets(
-                ctx.cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.layout,
-                0,
-                &[set],
-                &[],
-            );
+            ctx.device
+                .cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
             let groups = (
                 scene.extent.width.div_ceil(4).div_ceil(8),
                 scene.extent.height.div_ceil(4).div_ceil(8),
             );
-            ctx.device
-                .cmd_dispatch(ctx.cmd, groups.0.max(1), groups.1.max(1), 1);
+            ctx.device.cmd_dispatch(ctx.cmd, groups.0.max(1), groups.1.max(1), 1);
         }
         Ok(())
     }
@@ -503,14 +491,8 @@ impl Exposure {
         unsafe {
             ctx.device
                 .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.adapt);
-            ctx.device.cmd_bind_descriptor_sets(
-                ctx.cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.layout,
-                0,
-                &[set],
-                &[],
-            );
+            ctx.device
+                .cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
             ctx.device.cmd_dispatch(ctx.cmd, 1, 1, 1);
         }
     }

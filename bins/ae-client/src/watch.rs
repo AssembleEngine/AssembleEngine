@@ -51,7 +51,10 @@ impl ModuleWatch {
             vec![file, dir]
         } else {
             let dir = ae_render::module::module_dir(&name);
-            ["src", "shaders", "build.rs", "Cargo.toml"].iter().map(|p| dir.join(p)).collect()
+            ["src", "shaders", "build.rs", "Cargo.toml"]
+                .iter()
+                .map(|p| dir.join(p))
+                .collect()
         };
         let handle = std::thread::Builder::new()
             .name("module watch".into())
@@ -67,7 +70,9 @@ impl ModuleWatch {
                     seen = now;
                     eprintln!("render module `{name}` changed; rebuilding");
                     match ae_render::module::build(&name) {
-                        Ok(bytes) if bytes == last => eprintln!("render module `{name}`: same bytes, nothing to reload"),
+                        Ok(bytes) if bytes == last => {
+                            eprintln!("render module `{name}`: same bytes, nothing to reload")
+                        }
                         Ok(bytes) => {
                             eprintln!("render module `{name}`: {} bytes, reloading", bytes.len());
                             last = bytes.clone();
@@ -78,7 +83,10 @@ impl ModuleWatch {
                 }
             })
             .expect("spawn the module watcher");
-        Self { stop, handle: Some(handle) }
+        Self {
+            stop,
+            handle: Some(handle),
+        }
     }
 }
 

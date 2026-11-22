@@ -46,7 +46,14 @@ fn build_guest() -> Result<Vec<u8>> {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let target_dir = crate_dir.join("../../target/test-guests");
     let status = Process::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release", "--quiet", "--target", "wasm32-wasip1-threads", "--manifest-path"])
+        .args([
+            "build",
+            "--release",
+            "--quiet",
+            "--target",
+            "wasm32-wasip1-threads",
+            "--manifest-path",
+        ])
         .arg(crate_dir.join("tests/guest/Cargo.toml"))
         .arg("--target-dir")
         .arg(&target_dir)
@@ -83,9 +90,21 @@ impl World {
             let position = fb::register_component(world, "Position", 8, 4)?;
             let velocity = fb::register_component(world, "Velocity", 8, 4)?;
             let stunned = fb::register_component(world, "Stunned", 4, 4)?;
-            let terms = [Term { component: position, access: Access::Write }, Term { component: velocity, access: Access::Read }];
+            let terms = [
+                Term {
+                    component: position,
+                    access: Access::Write,
+                },
+                Term {
+                    component: velocity,
+                    access: Access::Read,
+                },
+            ];
             let query = fb::create_query(world, &terms)?;
-            let stunned_terms = [Term { component: stunned, access: Access::Read }];
+            let stunned_terms = [Term {
+                component: stunned,
+                access: Access::Read,
+            }];
             let stunned_query = fb::create_query(world, &stunned_terms)?;
             let table = fb::find_table(world, &[position, velocity])?;
             for i in 0..ENTITIES as u32 {
@@ -94,7 +113,18 @@ impl World {
                 fb::set_component(world, e, position, bytes(&[(i % 1000) as f32, (i / 1000) as f32]))?;
                 fb::set_component(world, e, velocity, bytes(&[angle * 0.01 - 1.8, 1.8 - angle * 0.01]))?;
             }
-            Ok(Self { world, position, velocity, stunned, query, terms, stunned_query, stunned_terms, applier: Applier::default(), stats: ApplyStats::default() })
+            Ok(Self {
+                world,
+                position,
+                velocity,
+                stunned,
+                query,
+                terms,
+                stunned_query,
+                stunned_terms,
+                applier: Applier::default(),
+                stats: ApplyStats::default(),
+            })
         }
     }
 
@@ -166,15 +196,26 @@ impl Emit for NativeEmit<'_> {
         self.buffer.push(Command::Despawn(EntityId(entity))).unwrap();
     }
     fn spawn(&mut self, position: [f32; 2], velocity: [f32; 2]) {
-        let mut components = vec![(self.position, bytes(&position).to_vec()), (self.velocity, bytes(&velocity).to_vec())];
+        let mut components = vec![
+            (self.position, bytes(&position).to_vec()),
+            (self.velocity, bytes(&velocity).to_vec()),
+        ];
         components.sort_by_key(|(c, _)| *c);
         self.buffer.push(Command::Spawn(components)).unwrap();
     }
     fn add_stunned(&mut self, entity: u64, value: u32) {
-        self.buffer.push(Command::Add(EntityId(entity), self.stunned, value.to_le_bytes().to_vec())).unwrap();
+        self.buffer
+            .push(Command::Add(
+                EntityId(entity),
+                self.stunned,
+                value.to_le_bytes().to_vec(),
+            ))
+            .unwrap();
     }
     fn remove_stunned(&mut self, entity: u64) {
-        self.buffer.push(Command::Remove(EntityId(entity), self.stunned)).unwrap();
+        self.buffer
+            .push(Command::Remove(EntityId(entity), self.stunned))
+            .unwrap();
     }
 }
 
@@ -185,10 +226,16 @@ fn run_native(memory: GuestMemory) -> Result<(u64, usize, usize, ApplyStats)> {
         for range in world.ranges(memory)? {
             buffer.begin(0, range.index);
             let n = range.count as usize;
-            let positions = unsafe { std::slice::from_raw_parts_mut(memory.ptr(range.columns[0]).cast::<[f32; 2]>(), n) };
+            let positions =
+                unsafe { std::slice::from_raw_parts_mut(memory.ptr(range.columns[0]).cast::<[f32; 2]>(), n) };
             let velocities = unsafe { std::slice::from_raw_parts(memory.ptr(range.columns[1]).cast::<[f32; 2]>(), n) };
             let entities = unsafe { std::slice::from_raw_parts(range.entities, n) };
-            let mut emit = NativeEmit { buffer: &mut buffer, position: world.position, velocity: world.velocity, stunned: world.stunned };
+            let mut emit = NativeEmit {
+                buffer: &mut buffer,
+                position: world.position,
+                velocity: world.velocity,
+                stunned: world.stunned,
+            };
             for i in 0..n {
                 lifecycle_row(entities[i], tick, &mut positions[i], velocities[i], &mut emit);
             }
@@ -216,7 +263,12 @@ struct GuestRun {
     apply_ms: f64,
 }
 
-fn run_guests(set: &mut InstanceSet<WorkerCtx>, scratch: &[u32], workers: usize, order: MergeOrder) -> Result<GuestRun> {
+fn run_guests(
+    set: &mut InstanceSet<WorkerCtx>,
+    scratch: &[u32],
+    workers: usize,
+    order: MergeOrder,
+) -> Result<GuestRun> {
     let memory = set.guest_memory();
     let mut world = World::new()?;
     let (cp, cv, cs) = (world.position.0, world.velocity.0, world.stunned.0);
@@ -243,10 +295,18 @@ fn run_guests(set: &mut InstanceSet<WorkerCtx>, scratch: &[u32], workers: usize,
                             let index = next.fetch_add(1, Ordering::Relaxed);
                             let Some(range) = work.get(index) else { return Ok(()) };
                             // flecs keeps entity ids on the host heap; the guest gets a copy.
-                            unsafe { std::ptr::copy_nonoverlapping(range.entities, memory.ptr(ids).cast::<u64>(), range.count as usize) };
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    range.entities,
+                                    memory.ptr(ids).cast::<u64>(),
+                                    range.count as usize,
+                                )
+                            };
                             instance.store.data_mut().commands.begin(0, range.index);
                             let args = (range.columns[0], range.columns[1], ids, range.count, tick, cp, cv, cs);
-                            lifecycle.call(&mut instance.store, args).map_err(|e| anyhow!("guest trapped: {e}"))?;
+                            lifecycle
+                                .call(&mut instance.store, args)
+                                .map_err(|e| anyhow!("guest trapped: {e}"))?;
                         }
                     })
                 })
@@ -259,7 +319,12 @@ fn run_guests(set: &mut InstanceSet<WorkerCtx>, scratch: &[u32], workers: usize,
         system_s += started.elapsed().as_secs_f64();
 
         let started = Instant::now();
-        let buffers: Vec<_> = set.instances.iter_mut().take(workers).map(|i| i.store.data_mut().commands.take()).collect();
+        let buffers: Vec<_> = set
+            .instances
+            .iter_mut()
+            .take(workers)
+            .map(|i| i.store.data_mut().commands.take())
+            .collect();
         let commands = match order {
             MergeOrder::ByKey => merge(buffers)?,
             MergeOrder::ByWorker => buffers.into_iter().flatten().collect(),
@@ -268,7 +333,13 @@ fn run_guests(set: &mut InstanceSet<WorkerCtx>, scratch: &[u32], workers: usize,
         apply_s += started.elapsed().as_secs_f64();
     }
     let (digest, rows, stunned) = world.digest()?;
-    Ok(GuestRun { digest, rows, stunned, system_ms: system_s * 1e3 / TICKS as f64, apply_ms: apply_s * 1e3 / TICKS as f64 })
+    Ok(GuestRun {
+        digest,
+        rows,
+        stunned,
+        system_ms: system_s * 1e3 / TICKS as f64,
+        apply_ms: apply_s * 1e3 / TICKS as f64,
+    })
 }
 
 #[test]
@@ -301,26 +372,52 @@ fn structural_commands_are_independent_of_worker_count() -> Result<()> {
         "native: digest {reference:016x}, {rows} live, {stunned} stunned after {TICKS} ticks; spawned {} despawned {} added {} overwritten {} removed {} ignored {}",
         stats.spawned, stats.despawned, stats.added, stats.overwritten, stats.removed, stats.ignored
     );
-    ensure!(stats.spawned > 1000 && stats.despawned > 1000 && stats.added > 1000 && stats.removed > 100, "the workload must exercise every command kind");
-    ensure!(stats.ignored > 0, "the workload should include commands on already-despawned entities");
-    ensure!(reference == EXPECTED_DIGEST, "native digest {reference:016x} differs from the pinned {EXPECTED_DIGEST:016x}");
+    ensure!(
+        stats.spawned > 1000 && stats.despawned > 1000 && stats.added > 1000 && stats.removed > 100,
+        "the workload must exercise every command kind"
+    );
+    ensure!(
+        stats.ignored > 0,
+        "the workload should include commands on already-despawned entities"
+    );
+    ensure!(
+        reference == EXPECTED_DIGEST,
+        "native digest {reference:016x} differs from the pinned {EXPECTED_DIGEST:016x}"
+    );
 
     for w in [1usize, 2, 4, 8].into_iter().filter(|w| *w <= workers) {
         let run = run_guests(&mut set, &scratch, w, MergeOrder::ByKey)?;
-        eprintln!("{w} worker(s): digest {:016x}, system {:.2} ms/tick, merge+apply {:.2} ms/tick", run.digest, run.system_ms, run.apply_ms);
-        ensure!((run.rows, run.stunned) == (rows, stunned), "{w} workers: {} live / {} stunned, native {rows} / {stunned}", run.rows, run.stunned);
-        ensure!(run.digest == reference, "{w} workers: digest {:016x} differs from native {reference:016x}", run.digest);
+        eprintln!(
+            "{w} worker(s): digest {:016x}, system {:.2} ms/tick, merge+apply {:.2} ms/tick",
+            run.digest, run.system_ms, run.apply_ms
+        );
+        ensure!(
+            (run.rows, run.stunned) == (rows, stunned),
+            "{w} workers: {} live / {} stunned, native {rows} / {stunned}",
+            run.rows,
+            run.stunned
+        );
+        ensure!(
+            run.digest == reference,
+            "{w} workers: digest {:016x} differs from native {reference:016x}",
+            run.digest
+        );
     }
 
     // Negative control: without the key sort, multi-worker results depend on
     // which worker happened to run which range.
     if workers >= 4 {
-        let distinct: std::collections::BTreeSet<u64> =
-            (0..3).map(|_| run_guests(&mut set, &scratch, workers, MergeOrder::ByWorker).map(|r| r.digest)).collect::<Result<_>>()?;
+        let distinct: std::collections::BTreeSet<u64> = (0..3)
+            .map(|_| run_guests(&mut set, &scratch, workers, MergeOrder::ByWorker).map(|r| r.digest))
+            .collect::<Result<_>>()?;
         eprintln!(
             "negative control, merged by worker instead of key: {} distinct digest(s) in 3 runs, {} the reference",
             distinct.len(),
-            if distinct.contains(&reference) { "including" } else { "none equal to" }
+            if distinct.contains(&reference) {
+                "including"
+            } else {
+                "none equal to"
+            }
         );
     }
     Ok(())

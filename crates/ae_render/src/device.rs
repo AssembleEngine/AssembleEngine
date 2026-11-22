@@ -107,8 +107,7 @@ impl GpuInstance {
         let has_validation = layers
             .iter()
             .any(|layer| layer.layer_name_as_c_str().ok() == Some(VALIDATION_LAYER));
-        let want_validation =
-            validation.unwrap_or_else(|| env_flag("AE_VK_VALIDATION", cfg!(debug_assertions)));
+        let want_validation = validation.unwrap_or_else(|| env_flag("AE_VK_VALIDATION", cfg!(debug_assertions)));
         if want_validation && !has_validation {
             eprintln!("[vulkan] validation requested but VK_LAYER_KHRONOS_validation is not installed");
         }
@@ -142,8 +141,15 @@ impl GpuInstance {
             extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
         }
         // Only with a surface: the extension requires VK_KHR_surface.
-        let has_surface = extension_names.iter().any(|name| unsafe { CStr::from_ptr(*name) } == ash::khr::surface::NAME);
-        if has_swapchain_colorspace && has_surface && !extension_names.iter().any(|name| unsafe { CStr::from_ptr(*name) } == ash::ext::swapchain_colorspace::NAME) {
+        let has_surface = extension_names
+            .iter()
+            .any(|name| unsafe { CStr::from_ptr(*name) } == ash::khr::surface::NAME);
+        if has_swapchain_colorspace
+            && has_surface
+            && !extension_names
+                .iter()
+                .any(|name| unsafe { CStr::from_ptr(*name) } == ash::ext::swapchain_colorspace::NAME)
+        {
             extension_names.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
         }
         if sync_validation {
@@ -171,7 +177,8 @@ impl GpuInstance {
             .pfn_user_callback(Some(debug_callback))
             .user_data(Arc::as_ptr(&counters) as *mut c_void);
         let enabled_features = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
-        let mut validation_features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_features);
+        let mut validation_features =
+            vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_features);
         let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layer_names)
@@ -295,7 +302,10 @@ impl GpuDevice {
             let mut chosen: Option<u32> = None;
             // One queue runs every pass: it must do graphics and compute.
             for (index, family) in families.iter().enumerate() {
-                if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE) {
+                if !family
+                    .queue_flags
+                    .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
+                {
                     continue;
                 }
                 if let Some(surface) = surface {
@@ -320,10 +330,19 @@ impl GpuDevice {
             };
             let mut features11 = vk::PhysicalDeviceVulkan11Features::default();
             let mut features12b = vk::PhysicalDeviceVulkan12Features::default();
-            let mut more = vk::PhysicalDeviceFeatures2::default().push_next(&mut features11).push_next(&mut features12b);
+            let mut more = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut features11)
+                .push_next(&mut features12b);
             unsafe { vk_instance.get_physical_device_features2(physical, &mut more) };
-            let gpu_driven = base.multi_draw_indirect == vk::TRUE && features11.shader_draw_parameters == vk::TRUE && features12b.descriptor_binding_partially_bound == vk::TRUE;
-            let optional = (base.fill_mode_non_solid == vk::TRUE, base.fragment_stores_and_atomics == vk::TRUE, base.texture_compression_bc == vk::TRUE, gpu_driven);
+            let gpu_driven = base.multi_draw_indirect == vk::TRUE
+                && features11.shader_draw_parameters == vk::TRUE
+                && features12b.descriptor_binding_partially_bound == vk::TRUE;
+            let optional = (
+                base.fill_mode_non_solid == vk::TRUE,
+                base.fragment_stores_and_atomics == vk::TRUE,
+                base.texture_compression_bc == vk::TRUE,
+                gpu_driven,
+            );
             candidates.push((rank, physical, family, properties, optional));
         }
         candidates.sort_by_key(|(rank, ..)| *rank);
@@ -348,15 +367,21 @@ impl GpuDevice {
             unsafe { vk_instance.get_physical_device_features2(physical, &mut features) };
             let mut control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
             let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
-            let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut control).push_next(&mut subgroup);
+            let mut properties2 = vk::PhysicalDeviceProperties2::default()
+                .push_next(&mut control)
+                .push_next(&mut subgroup);
             unsafe { vk_instance.get_physical_device_properties2(physical, &mut properties2) };
             features13.subgroup_size_control == vk::TRUE
                 && features13.compute_full_subgroups == vk::TRUE
                 && (control.min_subgroup_size..=control.max_subgroup_size).contains(&32)
-                && control.required_subgroup_size_stages.contains(vk::ShaderStageFlags::COMPUTE)
+                && control
+                    .required_subgroup_size_stages
+                    .contains(vk::ShaderStageFlags::COMPUTE)
                 && control.max_compute_workgroup_subgroups >= 8
                 && subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
-                && subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::BALLOT)
+                && subgroup
+                    .supported_operations
+                    .contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::BALLOT)
         };
         let has_hdr_metadata = unsafe { vk_instance.enumerate_device_extension_properties(physical) }?
             .iter()
@@ -379,7 +404,9 @@ impl GpuDevice {
             .shader_demote_to_helper_invocation(true)
             .subgroup_size_control(compute_subgroups_32)
             .compute_full_subgroups(compute_subgroups_32);
-        let mut features12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true).descriptor_binding_partially_bound(gpu_driven);
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .timeline_semaphore(true)
+            .descriptor_binding_partially_bound(gpu_driven);
         let mut features11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(gpu_driven);
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
         let base_features = vk::PhysicalDeviceFeatures::default()
@@ -418,7 +445,8 @@ impl GpuDevice {
                 return Err(err);
             }
         };
-        let hdr_metadata = (has_hdr_metadata && surface.is_some()).then(|| ash::ext::hdr_metadata::Device::new(&instance.instance, &device));
+        let hdr_metadata = (has_hdr_metadata && surface.is_some())
+            .then(|| ash::ext::hdr_metadata::Device::new(&instance.instance, &device));
         let debug_utils = instance
             .debug_utils_enabled
             .then(|| ash::ext::debug_utils::Device::new(vk_instance, &device));

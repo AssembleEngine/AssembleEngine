@@ -11,6 +11,7 @@
 //! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ae-tool model convert IN.gltf|IN.glb OUT.aemodel  # glTF 2.0 to the engine model (M11)
 //! ae-tool model info FILE.aemodel      # its parts, sizes and load time
+//! ae-tool hooks install                # point git at the tracked .githooks/
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -19,9 +20,9 @@ use ae_bench::Report;
 use ae_bench::diff::{Thresholds, diff};
 use ae_bench::measure::Budget;
 use ae_bench::suites::{self, Options};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 const USAGE: &str = "usage:
   ae-tool bench list
@@ -33,7 +34,8 @@ const USAGE: &str = "usage:
   ae-tool map-export land|water CELLS DIR [NAME]
   ae-tool unpack-list FILE
   ae-tool model convert IN.gltf|IN.glb OUT.aemodel
-  ae-tool model info FILE.aemodel";
+  ae-tool model info FILE.aemodel
+  ae-tool hooks install";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
 /// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
@@ -42,9 +44,15 @@ fn navbench(args: &[String]) -> Result<ExitCode> {
     let exe = std::env::current_exe().context("locating ae-tool")?;
     let path = exe.with_file_name(format!("navbench{}", std::env::consts::EXE_SUFFIX));
     if !path.exists() {
-        bail!("{} not found; build it with `cargo build --release -p ae_nav --bin navbench`", path.display());
+        bail!(
+            "{} not found; build it with `cargo build --release -p ae_nav --bin navbench`",
+            path.display()
+        );
     }
-    let status = std::process::Command::new(&path).args(args).status().with_context(|| format!("running {}", path.display()))?;
+    let status = std::process::Command::new(&path)
+        .args(args)
+        .status()
+        .with_context(|| format!("running {}", path.display()))?;
     Ok(ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8))
 }
 
@@ -55,7 +63,9 @@ fn catalog_fmt(files: &[String]) -> Result<()> {
     }
     for f in files {
         let text = std::fs::read_to_string(f).with_context(|| format!("read {f}"))?;
-        let canonical = ae_catalog::CatalogFile::parse(&text).with_context(|| f.clone())?.write();
+        let canonical = ae_catalog::CatalogFile::parse(&text)
+            .with_context(|| f.clone())?
+            .write();
         if canonical != text {
             std::fs::write(f, &canonical).with_context(|| format!("write {f}"))?;
             println!("{f}: rewritten");
@@ -77,7 +87,11 @@ fn model(args: &[String]) -> Result<()> {
             }
             let bytes = converted.model.to_bytes();
             std::fs::write(output, &bytes).with_context(|| format!("write {output}"))?;
-            println!("{output}: {} bytes, converted in {:.1} ms", bytes.len(), start.elapsed().as_secs_f64() * 1e3);
+            println!(
+                "{output}: {} bytes, converted in {:.1} ms",
+                bytes.len(),
+                start.elapsed().as_secs_f64() * 1e3
+            );
             model_info(output)
         }
         [cmd, file] if cmd == "info" => model_info(file),
@@ -120,18 +134,80 @@ fn model_info(file: &str) -> Result<()> {
         );
     }
     println!("  bounds {:?} .. {:?}", m.bounds.min, m.bounds.max);
-    let gpu_bytes: usize = m.primitives.iter().map(|p| p.vertex_count as usize * p.layout.words() * 4).sum();
+    let gpu_bytes: usize = m
+        .primitives
+        .iter()
+        .map(|p| p.vertex_count as usize * p.layout.words() * 4)
+        .sum();
     println!("  GPU vertices: {gpu_bytes} bytes");
     for (i, p) in m.primitives.iter().enumerate() {
-        println!("  primitive {i}: {:?}, material {} ({}), {} vertices, {} triangles", p.layout, p.material, m.materials[p.material as usize].name, p.vertex_count, p.index_count / 3);
+        println!(
+            "  primitive {i}: {:?}, material {} ({}), {} vertices, {} triangles",
+            p.layout,
+            p.material,
+            m.materials[p.material as usize].name,
+            p.vertex_count,
+            p.index_count / 3
+        );
     }
     for (i, t) in m.textures.iter().enumerate() {
         let img = ae_model::ktx::read(t)?;
-        println!("  texture {i} {}: VkFormat {} {}x{}, {} levels, {} bytes", m.texture_names[i], img.format.0, img.width, img.height, img.levels.len(), t.len());
+        println!(
+            "  texture {i} {}: VkFormat {} {}x{}, {} levels, {} bytes",
+            m.texture_names[i],
+            img.format.0,
+            img.width,
+            img.height,
+            img.levels.len(),
+            t.len()
+        );
     }
     for c in &m.clips {
         println!("  clip {}: {:.2} s, {} channels", c.name, c.duration, c.channels.len());
     }
+    Ok(())
+}
+
+/// `ae-tool hooks install`: point git at the tracked hooks directory.
+///
+/// Git does not clone hooks, so the repository carries them in `.githooks/` and
+/// every clone runs this once: `git config core.hooksPath .githooks`. Safe to
+/// run twice; the hook itself refuses a commit the formatter or clippy rejects.
+fn hooks_install() -> Result<()> {
+    let root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("run git rev-parse --show-toplevel")?;
+    ensure!(root.status.success(), "not a git repository");
+    let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let hook = root.join(".githooks").join("pre-commit");
+    ensure!(
+        hook.is_file(),
+        "{} is missing; run this from the AssembleEngine checkout",
+        hook.display()
+    );
+
+    let current = Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .context("run git config")?;
+    let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    if current == ".githooks" {
+        println!("core.hooksPath is already .githooks; the pre-commit hook is installed");
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .args(["config", "core.hooksPath", ".githooks"])
+        .status()
+        .context("run git config core.hooksPath")?;
+    ensure!(status.success(), "git config core.hooksPath .githooks failed");
+    if current.is_empty() {
+        println!("core.hooksPath = .githooks: the pre-commit hook is installed");
+    } else {
+        println!("core.hooksPath = .githooks (was {current}): the pre-commit hook is installed");
+    }
+    println!("it checks `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings`");
+    println!("on the staged files' kinds; `git commit --no-verify` skips it");
     Ok(())
 }
 
@@ -146,6 +222,13 @@ fn main() -> ExitCode {
         Some("map-export") => map_export(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("model") => model(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("hooks") => match args[1..] {
+            [ref cmd] if cmd == "install" => hooks_install().map(|()| ExitCode::SUCCESS),
+            _ => {
+                eprintln!("usage: ae-tool hooks install");
+                Ok(ExitCode::from(2))
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -166,7 +249,11 @@ struct Args {
 
 impl Args {
     fn parse(args: &[String], value_flags: &[&str], switch_flags: &[&str]) -> Result<Self> {
-        let mut parsed = Args { positional: Vec::new(), values: Vec::new(), switches: Vec::new() };
+        let mut parsed = Args {
+            positional: Vec::new(),
+            values: Vec::new(),
+            switches: Vec::new(),
+        };
         let mut iter = args.iter();
         while let Some(arg) = iter.next() {
             if value_flags.contains(&arg.as_str()) {
@@ -184,7 +271,10 @@ impl Args {
     }
 
     fn value(&self, flag: &str) -> Option<&str> {
-        self.values.iter().find(|(name, _)| name == flag).map(|(_, value)| value.as_str())
+        self.values
+            .iter()
+            .find(|(name, _)| name == flag)
+            .map(|(_, value)| value.as_str())
     }
 
     fn switch(&self, flag: &str) -> bool {
@@ -193,8 +283,14 @@ impl Args {
 }
 
 fn bench(args: &[String]) -> Result<()> {
-    let args = Args::parse(args, &["--threads", "--label", "--out"], &["--small", "--quick", "--no-save"])?;
-    let [target] = args.positional.as_slice() else { bail!("expected one suite name, `all` or `list`") };
+    let args = Args::parse(
+        args,
+        &["--threads", "--label", "--out"],
+        &["--small", "--quick", "--no-save"],
+    )?;
+    let [target] = args.positional.as_slice() else {
+        bail!("expected one suite name, `all` or `list`")
+    };
     if target == "list" {
         for suite in suites::SUITES {
             println!("{:<18} {}", suite.name, suite.about);
@@ -207,9 +303,16 @@ fn bench(args: &[String]) -> Result<()> {
         vec![suites::find(target).with_context(|| format!("unknown suite `{target}` (try `ae-tool bench list`)"))?]
     };
 
-    let default_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8);
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(8);
     let options = Options {
-        budget: if args.switch("--quick") { Budget::QUICK } else { Budget::FULL },
+        budget: if args.switch("--quick") {
+            Budget::QUICK
+        } else {
+            Budget::FULL
+        },
         small: args.switch("--small"),
         threads: match args.value("--threads") {
             Some(text) => text.parse().context("--threads must be a number")?,
@@ -235,14 +338,24 @@ fn bench(args: &[String]) -> Result<()> {
 
 fn bench_diff(args: &[String]) -> Result<ExitCode> {
     let args = Args::parse(args, &["--time-tolerance"], &["--all"])?;
-    let [base, head] = args.positional.as_slice() else { bail!("expected <base> <head>") };
+    let [base, head] = args.positional.as_slice() else {
+        bail!("expected <base> <head>")
+    };
     let mut thresholds = Thresholds::default();
     if let Some(text) = args.value("--time-tolerance") {
         thresholds.time = text.parse::<f64>().context("--time-tolerance must be a percentage")? / 100.0;
     }
-    let result = diff(&Report::load_all(Path::new(base))?, &Report::load_all(Path::new(head))?, thresholds);
+    let result = diff(
+        &Report::load_all(Path::new(base))?,
+        &Report::load_all(Path::new(head))?,
+        thresholds,
+    );
     result.print(args.switch("--all"));
-    Ok(if result.regressions() > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    Ok(if result.regressions() > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// `ae-tool pack DIR OUT [--module GAME] [--with DIR]...`: DIR (a
@@ -252,7 +365,9 @@ fn bench_diff(args: &[String]) -> Result<ExitCode> {
 /// package's files (not its manifest) bundled in, e.g. a map. So one
 /// archive can be the whole game.
 fn pack(args: &[String]) -> Result<()> {
-    let [dir, out, rest @ ..] = args else { anyhow::bail!("usage: ae-tool pack DIR OUT [--module GAME] [--with DIR]...") };
+    let [dir, out, rest @ ..] = args else {
+        anyhow::bail!("usage: ae-tool pack DIR OUT [--module GAME] [--with DIR]...")
+    };
     let (mut module, mut with) = (None, Vec::new());
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
@@ -284,14 +399,24 @@ fn pack(args: &[String]) -> Result<()> {
     std::fs::write(out, &zip)?;
     let mut v = ae_vfs::Vfs::new();
     v.mount_archive(out)?;
-    println!("{out}: {}@{} ({}), {} files, {} bytes, content hash {:032x}", p.manifest.name, p.manifest.version, p.manifest.kind, files.len(), zip.len(), v.content_hash()?);
+    println!(
+        "{out}: {}@{} ({}), {} files, {} bytes, content hash {:032x}",
+        p.manifest.name,
+        p.manifest.version,
+        p.manifest.kind,
+        files.len(),
+        zip.len(),
+        v.content_hash()?
+    );
     Ok(())
 }
 
 /// `ae-tool unpack-list FILE`: the files of an archive, with sizes, and its
 /// content hash (every entry is read and checked).
 fn unpack_list(args: &[String]) -> Result<()> {
-    let [file] = args else { anyhow::bail!("usage: ae-tool unpack-list FILE") };
+    let [file] = args else {
+        anyhow::bail!("usage: ae-tool unpack-list FILE")
+    };
     let a = ae_vfs::Archive::open(std::path::Path::new(file))?;
     for p in a.paths() {
         println!("{:>10} {p}", a.read(p).unwrap()?.len());
@@ -316,16 +441,36 @@ fn map_export(args: &[String]) -> Result<()> {
         "water" => ae_nav::scenario::water_crossing_terrain(cells),
         k => anyhow::bail!("unknown map {k} (land or water)"),
     };
-    let name = args.get(3).cloned().unwrap_or_else(|| format!("{kind}-crossing-{cells}"));
+    let name = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| format!("{kind}-crossing-{cells}"));
     let e = cells as f32 * ae_nav::service::NavConfig::default().cell_size;
-    let map = ae_map::GameMap::from_terrain(&terrain, vec![[e * 0.15, e * 0.15], [e * 0.85, e * 0.85]], &format!("The {kind} crossing map at {cells} cells"))?;
+    let map = ae_map::GameMap::from_terrain(
+        &terrain,
+        vec![[e * 0.15, e * 0.15], [e * 0.85, e * 0.85]],
+        &format!("The {kind} crossing map at {cells} cells"),
+    )?;
     std::fs::create_dir_all(dir)?;
     let mut files = map.files()?;
-    let manifest = ae_vfs::Manifest { name: name.clone(), version: "1".into(), kind: "map".into(), depends: Vec::new() };
-    files.insert(ae_vfs::MANIFEST.into(), format!("{}\n", serde_json::to_string_pretty(&manifest)?).into_bytes());
+    let manifest = ae_vfs::Manifest {
+        name: name.clone(),
+        version: "1".into(),
+        kind: "map".into(),
+        depends: Vec::new(),
+    };
+    files.insert(
+        ae_vfs::MANIFEST.into(),
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?).into_bytes(),
+    );
     for (p, bytes) in &files {
         std::fs::write(dir.join(p), bytes)?;
     }
-    println!("{}: map {name}, {cells}x{cells} cells, {} terrain types{}", dir.display(), map.info.types.len(), if map.info.water_level.is_some() { ", water" } else { "" });
+    println!(
+        "{}: map {name}, {cells}x{cells} cells, {} terrain types{}",
+        dir.display(),
+        map.info.types.len(),
+        if map.info.water_level.is_some() { ", water" } else { "" }
+    );
     Ok(())
 }

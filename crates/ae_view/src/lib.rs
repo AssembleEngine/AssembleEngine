@@ -116,12 +116,20 @@ impl ViewSpec {
 
     /// The fields that get a column: all but `Never`, in order.
     pub fn columns(&self) -> Vec<usize> {
-        (0..self.fields.len()).filter(|&f| self.fields[f].1 != ViewClass::Never).collect()
+        (0..self.fields.len())
+            .filter(|&f| self.fields[f].1 != ViewClass::Never)
+            .collect()
     }
 
     fn check(&self) {
-        assert!(self.fields.len() <= 32, "a view table has at most 32 fields (row masks are u32)");
-        assert!(self.x < self.fields.len() && self.y < self.fields.len() && self.x != self.y, "position fields");
+        assert!(
+            self.fields.len() <= 32,
+            "a view table has at most 32 fields (row masks are u32)"
+        );
+        assert!(
+            self.x < self.fields.len() && self.y < self.fields.len() && self.x != self.y,
+            "position fields"
+        );
         assert!(self.wobble_ticks > 0, "wobble_ticks must be positive");
     }
 }
@@ -141,13 +149,34 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    pub fn new(tick: u64, entities: &'a [u64], columns: &'a [&'a [u32]], ally: &'a [u32], coverage: &'a Coverage) -> Self {
+    pub fn new(
+        tick: u64,
+        entities: &'a [u64],
+        columns: &'a [&'a [u32]],
+        ally: &'a [u32],
+        coverage: &'a Coverage,
+    ) -> Self {
         let n = entities.len();
-        assert!(columns.iter().all(|c| c.len() == n) && ally.len() == n, "frame columns differ in length");
+        assert!(
+            columns.iter().all(|c| c.len() == n) && ally.len() == n,
+            "frame columns differ in length"
+        );
         let mut by_entity: Vec<u32> = (0..n as u32).collect();
         by_entity.sort_unstable_by_key(|&r| entities[r as usize]);
-        assert!(by_entity.windows(2).all(|w| entities[w[0] as usize] != entities[w[1] as usize]), "an entity appears twice in a frame");
-        Self { tick, entities, columns, ally, coverage, by_entity }
+        assert!(
+            by_entity
+                .windows(2)
+                .all(|w| entities[w[0] as usize] != entities[w[1] as usize]),
+            "an entity appears twice in a frame"
+        );
+        Self {
+            tick,
+            entities,
+            columns,
+            ally,
+            coverage,
+            by_entity,
+        }
     }
 }
 
@@ -176,7 +205,10 @@ impl ViewTable {
 
     /// The column of spec field `field`, if it has one.
     pub fn column(&self, field: usize) -> Option<&[u32]> {
-        self.fields.iter().position(|&f| f == field).map(|c| self.columns[c].as_slice())
+        self.fields
+            .iter()
+            .position(|&f| f == field)
+            .map(|c| self.columns[c].as_slice())
     }
 }
 
@@ -222,7 +254,14 @@ impl Observer {
     /// `seed` keys the id shuffle and the radar wobble: give each observer
     /// its own (it is local, never synced).
     pub fn new(ally: u32, seed: u64) -> Self {
-        Self { ally, seed, next_id: 1, known: Vec::new(), last_seen: Vec::new(), ghosts: Vec::new() }
+        Self {
+            ally,
+            seed,
+            next_id: 1,
+            known: Vec::new(),
+            last_seen: Vec::new(),
+            ghosts: Vec::new(),
+        }
     }
 
     /// The sim entity behind view id `id`, while it is in view (not for
@@ -252,8 +291,15 @@ impl Observer {
             if frame.ally[r] == self.ally {
                 return Some(RowState::Own);
             }
-            let (x, y) = (f32::from_bits(frame.columns[spec.x][r]), f32::from_bits(frame.columns[spec.y][r]));
-            let (los, radar) = if ally < cov.allies() { cov.sees(ally, x, y) } else { (false, false) };
+            let (x, y) = (
+                f32::from_bits(frame.columns[spec.x][r]),
+                f32::from_bits(frame.columns[spec.y][r]),
+            );
+            let (los, radar) = if ally < cov.allies() {
+                cov.sees(ally, x, y)
+            } else {
+                (false, false)
+            };
             if los {
                 Some(RowState::Seen)
             } else if radar {
@@ -277,7 +323,8 @@ impl Observer {
         }
 
         let entity_of = |v: &(u32, RowState, Option<ViewId>)| frame.entities[v.0 as usize];
-        let find = |visible: &[(u32, RowState, Option<ViewId>)], e: u64| visible.binary_search_by_key(&e, entity_of).ok();
+        let find =
+            |visible: &[(u32, RowState, Option<ViewId>)], e: u64| visible.binary_search_by_key(&e, entity_of).ok();
         let los = |cell: (u32, u32)| ally < cov.allies() && cov.los[ally].get(cell.0, cell.1);
         let ghosts = spec.ghosts();
 
@@ -313,8 +360,16 @@ impl Observer {
                 .filter(|v| v.1 == RowState::Seen)
                 .map(|v| {
                     let r = v.0 as usize;
-                    let (x, y) = (f32::from_bits(frame.columns[spec.x][r]), f32::from_bits(frame.columns[spec.y][r]));
-                    Ghost { id: v.2.unwrap(), entity: frame.entities[r], cell: cov.grid.cell(x, y), values: frame.columns.iter().map(|c| c[r]).collect() }
+                    let (x, y) = (
+                        f32::from_bits(frame.columns[spec.x][r]),
+                        f32::from_bits(frame.columns[spec.y][r]),
+                    );
+                    Ghost {
+                        id: v.2.unwrap(),
+                        entity: frame.entities[r],
+                        cell: cov.grid.cell(x, y),
+                        values: frame.columns.iter().map(|c| c[r]).collect(),
+                    }
                 })
                 .collect();
         }
@@ -324,13 +379,24 @@ impl Observer {
         // The table, in id order.
         let fields = spec.columns();
         let rows = visible.len() + self.ghosts.len();
-        let mut out = ViewTable { tick: frame.tick, ids: Vec::with_capacity(rows), state: Vec::with_capacity(rows), mask: Vec::with_capacity(rows), columns: vec![Vec::with_capacity(rows); fields.len()], fields: fields.clone() };
+        let mut out = ViewTable {
+            tick: frame.tick,
+            ids: Vec::with_capacity(rows),
+            state: Vec::with_capacity(rows),
+            mask: Vec::with_capacity(rows),
+            columns: vec![Vec::with_capacity(rows); fields.len()],
+            fields: fields.clone(),
+        };
         #[derive(Clone, Copy)]
         enum Source<'g> {
             Row(u32, RowState),
             Ghost(&'g Ghost),
         }
-        let mut order: Vec<(ViewId, Source)> = visible.iter().map(|v| (v.2.unwrap(), Source::Row(v.0, v.1))).chain(self.ghosts.iter().map(|g| (g.id, Source::Ghost(g)))).collect();
+        let mut order: Vec<(ViewId, Source)> = visible
+            .iter()
+            .map(|v| (v.2.unwrap(), Source::Row(v.0, v.1)))
+            .chain(self.ghosts.iter().map(|g| (g.id, Source::Ghost(g))))
+            .collect();
         order.sort_unstable_by_key(|o| o.0);
         for (id, source) in order {
             let state = match source {
@@ -371,14 +437,26 @@ mod tests {
 
     #[test]
     fn wobble_is_bounded_smooth_and_keyed_by_observer_and_id() {
-        let spec = ViewSpec { fields: vec![("x".into(), ViewClass::RadarDegraded), ("y".into(), ViewClass::RadarDegraded)], x: 0, y: 1, wobble: 40.0, wobble_ticks: 30 };
+        let spec = ViewSpec {
+            fields: vec![
+                ("x".into(), ViewClass::RadarDegraded),
+                ("y".into(), ViewClass::RadarDegraded),
+            ],
+            x: 0,
+            y: 1,
+            wobble: 40.0,
+            wobble_ticks: 30,
+        };
         let (a, b) = (Observer::new(0, 1), Observer::new(0, 2));
         let mut moved = 0.0f32;
         for tick in 0..300 {
             let (w0, w1) = (a.wobble(&spec, 7, tick), a.wobble(&spec, 7, tick + 1));
             assert!(w0.0.abs() <= 40.0 && w0.1.abs() <= 40.0);
             // At most 2 × amplitude per period, spread over its ticks.
-            assert!((w1.0 - w0.0).abs() <= 80.0 / 30.0 + 1e-3 && (w1.1 - w0.1).abs() <= 80.0 / 30.0 + 1e-3, "tick {tick}");
+            assert!(
+                (w1.0 - w0.0).abs() <= 80.0 / 30.0 + 1e-3 && (w1.1 - w0.1).abs() <= 80.0 / 30.0 + 1e-3,
+                "tick {tick}"
+            );
             moved += (w1.0 - w0.0).abs();
         }
         assert!(moved > 40.0, "it drifts");

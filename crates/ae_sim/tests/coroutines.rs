@@ -87,7 +87,12 @@ fn coroutines_resume_anywhere_with_the_same_result() -> Result<()> {
     let max = cores.clamp(1, 8);
     // Small ranges: about 30 jobs per tick for the scripts, so ranges change
     // workers from tick to tick.
-    let cfg = RuntimeConfig { max_workers: max, range_rows: 128, parallel_min_rows: 256, ..RuntimeConfig::default() };
+    let cfg = RuntimeConfig {
+        max_workers: max,
+        range_rows: 128,
+        parallel_min_rows: 256,
+        ..RuntimeConfig::default()
+    };
     let mut rt = Runtime::new(&wasm, cfg)?;
 
     let mut order = vec![max];
@@ -109,17 +114,45 @@ fn coroutines_resume_anywhere_with_the_same_result() -> Result<()> {
             r.size,
             started.elapsed().as_secs_f64()
         );
-        ensure!(r.units == (UNITS + UNITS / 4) as usize, "{w} workers: {} units", r.units);
-        ensure!(r.done == r.units, "{w} workers: {} of {} scripts finished", r.done, r.units);
+        ensure!(
+            r.units == (UNITS + UNITS / 4) as usize,
+            "{w} workers: {} units",
+            r.units
+        );
+        ensure!(
+            r.done == r.units,
+            "{w} workers: {} of {} scripts finished",
+            r.done,
+            r.units
+        );
         ensure!(r.bad == 0, "{w} workers: {} heap blocks read back wrong", r.bad);
-        ensure!(r.slots[0] != r.slots[1], "{w} workers: the slot arena did not change between snapshots");
-        ensure!(w == 1 || r.moved > 0, "{w} workers: no future was resumed on another instance");
+        ensure!(
+            r.slots[0] != r.slots[1],
+            "{w} workers: the slot arena did not change between snapshots"
+        );
+        ensure!(
+            w == 1 || r.moved > 0,
+            "{w} workers: no future was resumed on another instance"
+        );
         match &base {
             None => base = Some((w, r)),
             Some((bw, b)) => {
-                ensure!(r.digest == b.digest, "{w} workers: digest {:032x}, {bw} workers {:032x}", r.digest, b.digest);
-                ensure!(r.slots == b.slots, "{w} workers: slot arena {:x?}, {bw} workers {:x?}", r.slots, b.slots);
-                ensure!((r.polls, r.rounds) == (b.polls, b.rounds), "{w} workers: polls or rounds differ from {bw} workers");
+                ensure!(
+                    r.digest == b.digest,
+                    "{w} workers: digest {:032x}, {bw} workers {:032x}",
+                    r.digest,
+                    b.digest
+                );
+                ensure!(
+                    r.slots == b.slots,
+                    "{w} workers: slot arena {:x?}, {bw} workers {:x?}",
+                    r.slots,
+                    b.slots
+                );
+                ensure!(
+                    (r.polls, r.rounds) == (b.polls, b.rounds),
+                    "{w} workers: polls or rounds differ from {bw} workers"
+                );
             }
         }
     }
@@ -127,11 +160,24 @@ fn coroutines_resume_anywhere_with_the_same_result() -> Result<()> {
     // A block kept across an `await` reads back as poison...
     let r = run(&mut rt, max, UNITS | BAD_READ, 60)?;
     eprintln!("kept across an await: {} of {} read back wrong", r.bad, r.units);
-    ensure!(r.bad > 0, "no block kept across an await read back wrong (is the arena poisoned?)");
+    ensure!(
+        r.bad > 0,
+        "no block kept across an await read back wrong (is the arena poisoned?)"
+    );
     // ...and freeing it traps (last: the trapped instance is not reused).
-    let e = run(&mut rt, max, UNITS | BAD_DROP, 60).err().ok_or_else(|| anyhow::anyhow!("dropping a block kept across an await did not trap"))?;
+    let e = run(&mut rt, max, UNITS | BAD_DROP, 60)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("dropping a block kept across an await did not trap"))?;
     let text = format!("{e:?}");
-    eprintln!("dropped across an await: {}", text.lines().find(|l| l.contains("heap_survived")).unwrap_or(text.lines().next().unwrap_or("")));
-    ensure!(text.contains("heap_survived_an_await"), "the trap is not the heap check: {text}");
+    eprintln!(
+        "dropped across an await: {}",
+        text.lines()
+            .find(|l| l.contains("heap_survived"))
+            .unwrap_or(text.lines().next().unwrap_or(""))
+    );
+    ensure!(
+        text.contains("heap_survived_an_await"),
+        "the trap is not the heap check: {text}"
+    );
     Ok(())
 }

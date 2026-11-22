@@ -34,7 +34,12 @@ fn warn(warnings: &mut Vec<String>, w: String) {
 }
 
 /// `None` when the primitive has no triangles (points, lines: warned).
-pub fn read_primitive<'a, 's, F>(prim: &'a gltf::Primitive<'a>, buffer: F, what: &str, warnings: &mut Vec<String>) -> Result<Option<Source>>
+pub fn read_primitive<'a, 's, F>(
+    prim: &'a gltf::Primitive<'a>,
+    buffer: F,
+    what: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Source>>
 where
     F: Clone + Fn(gltf::Buffer<'a>) -> Option<&'s [u8]>,
 {
@@ -49,7 +54,10 @@ where
         match semantic {
             S::TexCoords(n) if n >= 2 => warn(warnings, format!("{what}: TEXCOORD_{n} dropped")),
             S::Colors(n) if n >= 1 => warn(warnings, format!("{what}: COLOR_{n} dropped")),
-            S::Joints(n) | S::Weights(n) if n >= 2 => warn(warnings, format!("{what}: JOINTS_{n}/WEIGHTS_{n} dropped (more than 8 influences)")),
+            S::Joints(n) | S::Weights(n) if n >= 2 => warn(
+                warnings,
+                format!("{what}: JOINTS_{n}/WEIGHTS_{n} dropped (more than 8 influences)"),
+            ),
             _ => {}
         }
     }
@@ -57,7 +65,10 @@ where
         warn(warnings, format!("{what}: morph targets dropped"));
     }
     let r = prim.reader(buffer);
-    let positions: Vec<[f32; 3]> = r.read_positions().with_context(|| format!("{what}: no POSITION"))?.collect();
+    let positions: Vec<[f32; 3]> = r
+        .read_positions()
+        .with_context(|| format!("{what}: no POSITION"))?
+        .collect();
     let n = positions.len();
     let check = |len: usize, name: &str| -> Result<()> {
         ensure!(len == n, "{what}: {name} has {len} values for {n} positions");
@@ -84,7 +95,9 @@ where
     if has_joints {
         let mut inf = vec![[(0u16, 0.0f32); READ_INFLUENCES]; n];
         for set in 0..2u32 {
-            let (Some(j), Some(w)) = (r.read_joints(set), r.read_weights(set)) else { continue };
+            let (Some(j), Some(w)) = (r.read_joints(set), r.read_weights(set)) else {
+                continue;
+            };
             let j: Vec<[u16; 4]> = j.into_u16().collect();
             let w: Vec<[f32; 4]> = w.into_f32().collect();
             check(j.len(), "JOINTS")?;
@@ -105,12 +118,20 @@ where
     let mut indices = Vec::new();
     match mode {
         Mode::Triangles => {
-            ensure!(list.len().is_multiple_of(3), "{what}: {} indices, not whole triangles", list.len());
+            ensure!(
+                list.len().is_multiple_of(3),
+                "{what}: {} indices, not whole triangles",
+                list.len()
+            );
             indices = list;
         }
         Mode::TriangleStrip => {
             for i in 0..list.len().saturating_sub(2) {
-                let (a, b) = if i % 2 == 0 { (list[i], list[i + 1]) } else { (list[i + 1], list[i]) };
+                let (a, b) = if i % 2 == 0 {
+                    (list[i], list[i + 1])
+                } else {
+                    (list[i + 1], list[i])
+                };
                 indices.extend([a, b, list[i + 2]]);
             }
         }
@@ -120,7 +141,16 @@ where
             }
         }
     }
-    Ok(Some(Source { positions, normals, tangents, uv: [uv0, uv1], colors, influences, indices, has_joints }))
+    Ok(Some(Source {
+        positions,
+        normals,
+        tangents,
+        uv: [uv0, uv1],
+        colors,
+        influences,
+        indices,
+        has_joints,
+    }))
 }
 
 /// Joints and weights of one vertex: the four strongest, renormalised to
@@ -134,7 +164,9 @@ fn reduce(inf: &[(u16, f32); READ_INFLUENCES], map: &[u16]) -> Result<Option<Red
         if w <= 0.0 {
             continue;
         }
-        let mj = *map.get(j as usize).with_context(|| format!("joint {j} outside its skin ({} joints)", map.len()))?;
+        let mj = *map
+            .get(j as usize)
+            .with_context(|| format!("joint {j} outside its skin ({} joints)", map.len()))?;
         match merged.iter_mut().find(|(m, _)| *m == mj) {
             Some(e) => e.1 += w,
             None => merged.push((mj, w)),
@@ -161,7 +193,13 @@ fn reduce(inf: &[(u16, f32); READ_INFLUENCES], map: &[u16]) -> Result<Option<Red
 
 /// The vertices and triangle list; `tangent_uv` the normal map's UV set
 /// when the material has one (tangents generated if absent).
-pub fn build(s: Source, joints: &Joints, tangent_uv: Option<u32>, what: &str, warnings: &mut Vec<String>) -> Result<(Vec<Vertex>, Vec<u32>)> {
+pub fn build(
+    s: Source,
+    joints: &Joints,
+    tangent_uv: Option<u32>,
+    what: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<Vertex>, Vec<u32>)> {
     let n = s.positions.len();
     let mut vertices = vec![Vertex::default(); n];
     let mut dropped = false;
@@ -196,10 +234,18 @@ pub fn build(s: Source, joints: &Joints, tangent_uv: Option<u32>, what: &str, wa
         }
     }
     if dropped {
-        warn(warnings, format!("{what}: more than {MAX_INFLUENCES} influences on some vertices; the strongest {MAX_INFLUENCES} kept, renormalised"));
+        warn(
+            warnings,
+            format!(
+                "{what}: more than {MAX_INFLUENCES} influences on some vertices; the strongest {MAX_INFLUENCES} kept, renormalised"
+            ),
+        );
     }
     if unweighted {
-        warn(warnings, format!("{what}: vertices with all weights 0; put on the skin's first joint"));
+        warn(
+            warnings,
+            format!("{what}: vertices with all weights 0; put on the skin's first joint"),
+        );
     }
     let mut indices = s.indices;
     let flat = s.normals.is_none();
@@ -208,7 +254,10 @@ pub fn build(s: Source, joints: &Joints, tangent_uv: Option<u32>, what: &str, wa
             if s.uv[uv as usize].is_some() {
                 true
             } else {
-                warn(warnings, format!("{what}: normal map on TEXCOORD_{uv}, which the primitive lacks; no tangents"));
+                warn(
+                    warnings,
+                    format!("{what}: normal map on TEXCOORD_{uv}, which the primitive lacks; no tangents"),
+                );
                 false
             }
         }
@@ -229,7 +278,10 @@ pub fn build(s: Source, joints: &Joints, tangent_uv: Option<u32>, what: &str, wa
         }
     }
     if gen_tangents {
-        let mut g = Mikk { corners: &mut corners, uv: tangent_uv.unwrap() as usize };
+        let mut g = Mikk {
+            corners: &mut corners,
+            uv: tangent_uv.unwrap() as usize,
+        };
         if bevy_mikktspace::generate_tangents(&mut g).is_err() {
             warn(warnings, format!("{what}: MikkTSpace failed; default tangents"));
         }
@@ -251,7 +303,13 @@ pub fn build(s: Source, joints: &Joints, tangent_uv: Option<u32>, what: &str, wa
 
 fn vertex_key(v: &Vertex) -> [u32; 20] {
     let mut k = [0u32; 20];
-    let f = v.position.iter().chain(&v.normal).chain(&v.tangent).chain(&v.uv0).chain(&v.uv1);
+    let f = v
+        .position
+        .iter()
+        .chain(&v.normal)
+        .chain(&v.tangent)
+        .chain(&v.uv0)
+        .chain(&v.uv1);
     for (i, x) in f.enumerate() {
         k[i] = x.to_bits();
     }

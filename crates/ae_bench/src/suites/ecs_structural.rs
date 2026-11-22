@@ -53,9 +53,23 @@ impl World {
             let velocity = fb::register_component(world, "Velocity", 8, 4)?;
             let health = fb::register_component(world, "Health", 4, 4)?;
             let stunned = fb::register_component(world, "Stunned", 4, 4)?;
-            let terms = [Term { component: position, access: Access::Read }];
+            let terms = [Term {
+                component: position,
+                access: Access::Read,
+            }];
             let query = fb::create_query(world, &terms)?;
-            let mut this = Self { world, position, velocity, health, stunned, query, terms, alive: Vec::with_capacity(entities * 2), rng: Rng(0xAE), serial: 0 };
+            let mut this = Self {
+                world,
+                position,
+                velocity,
+                health,
+                stunned,
+                query,
+                terms,
+                alive: Vec::with_capacity(entities * 2),
+                rng: Rng(0xAE),
+                serial: 0,
+            };
             for _ in 0..entities {
                 this.spawn()?;
             }
@@ -71,10 +85,10 @@ impl World {
             let entity = fb::create_entity(self.world);
             let position = [serial as f32, -(serial as f32)];
             fb::set_component(self.world, entity, self.position, bytes(&position))?;
-            if serial % 2 == 0 {
+            if serial.is_multiple_of(2) {
                 fb::set_component(self.world, entity, self.velocity, bytes(&[1.0f32, 0.5]))?;
             }
-            if serial % 3 == 0 {
+            if serial.is_multiple_of(3) {
                 fb::set_component(self.world, entity, self.health, bytes(&serial))?;
             }
             self.alive.push(entity);
@@ -150,20 +164,36 @@ fn run_world(entities: usize, commands: usize) -> Result<(u64, usize, usize)> {
 
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("ecs-structural");
-    let (entities, commands) = if options.small { (10_000, 1_000) } else { (50_000, 5_000) };
+    let (entities, commands) = if options.small {
+        (10_000, 1_000)
+    } else {
+        (50_000, 5_000)
+    };
     let tag = format!("{}k_{}cmd", entities / 1000, commands);
 
     let (digest, rows, chunks) = run_world(entities, commands)?;
     let (again, ..) = run_world(entities, commands)?;
-    ensure!(digest == again, "two worlds fed the same commands ended with different digests");
-    ensure!(rows == entities, "live rows {rows} != {entities}: spawns and despawns should balance");
+    ensure!(
+        digest == again,
+        "two worlds fed the same commands ended with different digests"
+    );
+    ensure!(
+        rows == entities,
+        "live rows {rows} != {entities}: spawns and despawns should balance"
+    );
     report.info(&format!("{tag}/digest_low32"), digest & 0xFFFF_FFFF, "");
     report.info(&format!("{tag}/live_rows"), rows as u64, "");
     report.counter(&format!("{tag}/chunks"), chunks as u64, "");
 
-    report.time(&format!("{tag}/populate"), time(options.budget, || World::new(entities).map(|w| w.alive.len())));
+    report.time(
+        &format!("{tag}/populate"),
+        time(options.budget, || World::new(entities).map(|w| w.alive.len())),
+    );
     let mut world = World::new(entities)?;
-    report.time(&format!("{tag}/apply_tick_commands"), time(options.budget, || world.apply_commands(commands)));
+    report.time(
+        &format!("{tag}/apply_tick_commands"),
+        time(options.budget, || world.apply_commands(commands)),
+    );
     report.time(&format!("{tag}/digest_scan"), time(options.budget, || world.digest()));
     Ok(report)
 }

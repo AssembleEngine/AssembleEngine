@@ -90,18 +90,34 @@ pub struct CrowdMap {
 
 impl CrowdMap {
     pub fn empty(geom: &WorldGeometry) -> Self {
-        let (bx, by) = ((geom.cells_x + BLOCK_CELLS - 1) / BLOCK_CELLS, (geom.cells_y + BLOCK_CELLS - 1) / BLOCK_CELLS);
+        let (bx, by) = (
+            (geom.cells_x + BLOCK_CELLS - 1) / BLOCK_CELLS,
+            (geom.cells_y + BLOCK_CELLS - 1) / BLOCK_CELLS,
+        );
         let n = (bx * by) as usize;
-        Self { version: 0, blocks_x: bx, blocks_y: by, levels: vec![0; n], route_levels: vec![0; n], slow: vec![0; n], nav_version: 0, extra: Vec::new() }
+        Self {
+            version: 0,
+            blocks_x: bx,
+            blocks_y: by,
+            levels: vec![0; n],
+            route_levels: vec![0; n],
+            slow: vec![0; n],
+            nav_version: 0,
+            extra: Vec::new(),
+        }
     }
 
     /// Level of the block at `c` as routes see it (with the margin).
-    pub fn level_at(&self, c: CellPos) -> u8 { self.block(&self.route_levels, c) }
+    pub fn level_at(&self, c: CellPos) -> u8 {
+        self.block(&self.route_levels, c)
+    }
 
     /// Level of the block at `c` without the margin. Look-ahead lines use
     /// it: a unit at a crowd's edge stands in its margin, and judged by
     /// that level any line through the crowd was acceptable.
-    pub fn raw_level_at(&self, c: CellPos) -> u8 { self.block(&self.levels, c) }
+    pub fn raw_level_at(&self, c: CellPos) -> u8 {
+        self.block(&self.levels, c)
+    }
 
     /// Extra cost (`block_extra`) of the blocks of sector `s` (row-major)
     /// from raw levels (no margin) and traffic, or empty when all are 0: a
@@ -119,46 +135,76 @@ impl CrowdMap {
                 out.push(block_extra(self.raw_level_at(c), self.block(&self.slow, c)) as u8);
             }
         }
-        if out.iter().all(|&l| l == 0) { out.clear(); }
+        if out.iter().all(|&l| l == 0) {
+            out.clear();
+        }
         out
     }
 
     fn block(&self, levels: &[u8], c: CellPos) -> u8 {
         let (x, y) = (c.x / BLOCK_CELLS, c.y / BLOCK_CELLS);
-        if x < 0 || y < 0 || x >= self.blocks_x || y >= self.blocks_y { return 0; }
+        if x < 0 || y < 0 || x >= self.blocks_x || y >= self.blocks_y {
+            return 0;
+        }
         levels[(y * self.blocks_x + x) as usize]
     }
 
     /// Extra cost of `ph.in_edges[node][k]` for profile `pid` (0 when the
     /// extras belong to another navigation version).
     pub fn edge_extra(&self, nav_version: u32, pid: u8, node: u32, k: usize) -> u32 {
-        if nav_version != self.nav_version { return 0; }
-        self.extra.get(pid as usize).and_then(|p| p.get(node as usize)).and_then(|e| e.get(k)).copied().unwrap_or(0)
+        if nav_version != self.nav_version {
+            return 0;
+        }
+        self.extra
+            .get(pid as usize)
+            .and_then(|p| p.get(node as usize))
+            .and_then(|e| e.get(k))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The map for standing bodies `(position, radius)` and traffic levels
     /// `slow` as `version`, or `None` when fewer than `MIN_CHANGED_BLOCKS`
     /// blocks changed level and fewer than `MIN_CHANGED_SLOW_BLOCKS`
     /// changed traffic level.
-    pub fn update(&self, h: &NavHierarchy, bodies: impl Iterator<Item = (WorldPos, f32)>, slow: &[u8], version: u32) -> Option<CrowdMap> {
+    pub fn update(
+        &self,
+        h: &NavHierarchy,
+        bodies: impl Iterator<Item = (WorldPos, f32)>,
+        slow: &[u8],
+        version: u32,
+    ) -> Option<CrowdMap> {
         let geom = &h.terrain.geom;
         let mut area = vec![0.0f32; self.levels.len()];
         for (p, r) in bodies {
             let c = geom.world_to_cell(p);
             let (x, y) = (c.x / BLOCK_CELLS, c.y / BLOCK_CELLS);
-            if x < 0 || y < 0 || x >= self.blocks_x || y >= self.blocks_y { continue; }
+            if x < 0 || y < 0 || x >= self.blocks_x || y >= self.blocks_y {
+                continue;
+            }
             area[(y * self.blocks_x + x) as usize] += std::f32::consts::PI * r * r;
         }
         let block_area = (BLOCK_CELLS as f32 * geom.cell_size).powi(2);
         let mut changed = 0;
-        let levels: Vec<u8> = area.iter().zip(&self.levels).map(|(&a, &old)| {
-            let new = level_with_hysteresis(a / block_area, old);
-            changed += (new != old) as usize;
-            new
-        }).collect();
+        let levels: Vec<u8> = area
+            .iter()
+            .zip(&self.levels)
+            .map(|(&a, &old)| {
+                let new = level_with_hysteresis(a / block_area, old);
+                changed += (new != old) as usize;
+                new
+            })
+            .collect();
         let changed_slow = slow.iter().zip(&self.slow).filter(|(a, b)| a != b).count();
-        if changed < MIN_CHANGED_BLOCKS && changed_slow < MIN_CHANGED_SLOW_BLOCKS { return None; }
-        let mut next = CrowdMap { version, levels, slow: slow.to_vec(), ..self.clone() };
+        if changed < MIN_CHANGED_BLOCKS && changed_slow < MIN_CHANGED_SLOW_BLOCKS {
+            return None;
+        }
+        let mut next = CrowdMap {
+            version,
+            levels,
+            slow: slow.to_vec(),
+            ..self.clone()
+        };
         next.route_levels = grow(&next.levels, next.blocks_x, next.blocks_y, MARGIN_BLOCKS);
         next.rebuild_extras(h);
         Some(next)
@@ -175,25 +221,42 @@ impl CrowdMap {
     fn rebuild_extras(&mut self, h: &NavHierarchy) {
         self.nav_version = h.version;
         self.extra.clear();
-        if self.levels.iter().all(|&l| l == 0) && self.slow.iter().all(|&l| l == 0) { return; }
+        if self.levels.iter().all(|&l| l == 0) && self.slow.iter().all(|&l| l == 0) {
+            return;
+        }
         let geom = &h.terrain.geom;
         // Sectors with any dense block: only edges touching them can cost
         // extra.
         let mut dense = vec![false; (geom.sectors_x() * geom.sectors_y()) as usize];
         for (i, (&l, &sl)) in self.route_levels.iter().zip(&self.slow).enumerate() {
-            if l == 0 && sl == 0 { continue; }
-            let c = CellPos::new((i as i32 % self.blocks_x) * BLOCK_CELLS, (i as i32 / self.blocks_x) * BLOCK_CELLS);
+            if l == 0 && sl == 0 {
+                continue;
+            }
+            let c = CellPos::new(
+                (i as i32 % self.blocks_x) * BLOCK_CELLS,
+                (i as i32 / self.blocks_x) * BLOCK_CELLS,
+            );
             dense[geom.sector_index(geom.sector_of(c))] = true;
         }
         for ph in &h.hierarchies {
-            let per_node: Vec<Vec<u32>> = ph.in_edges.iter().enumerate().map(|(node, edges)| {
-                let to = &ph.nodes[node];
-                edges.iter().map(|&(from, c)| {
-                    let from = &ph.nodes[from as usize];
-                    if !dense[from.sector as usize] && !dense[to.sector as usize] { return 0; }
-                    self.line_extra(from.cell, to.cell, c)
-                }).collect()
-            }).collect();
+            let per_node: Vec<Vec<u32>> = ph
+                .in_edges
+                .iter()
+                .enumerate()
+                .map(|(node, edges)| {
+                    let to = &ph.nodes[node];
+                    edges
+                        .iter()
+                        .map(|&(from, c)| {
+                            let from = &ph.nodes[from as usize];
+                            if !dense[from.sector as usize] && !dense[to.sector as usize] {
+                                return 0;
+                            }
+                            self.line_extra(from.cell, to.cell, c)
+                        })
+                        .collect()
+                })
+                .collect();
             self.extra.push(per_node);
         }
     }
@@ -205,10 +268,12 @@ impl CrowdMap {
     fn line_extra(&self, a: CellPos, b: CellPos, cost: u32) -> u32 {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
         let m = (dx.abs().max(dy.abs()) / 4).max(1);
-        let sum: u64 = (0..=m).map(|k| {
-            let c = CellPos::new(a.x + dx * k / m, a.y + dy * k / m);
-            block_extra(self.level_at(c), self.block(&self.slow, c))
-        }).sum();
+        let sum: u64 = (0..=m)
+            .map(|k| {
+                let c = CellPos::new(a.x + dx * k / m, a.y + dy * k / m);
+                block_extra(self.level_at(c), self.block(&self.slow, c))
+            })
+            .sum();
         (cost as u64 * sum / (LEVELS as u64 * (m as u64 + 1))) as u32
     }
 }
@@ -226,7 +291,10 @@ pub struct Traffic {
 impl Traffic {
     pub fn new(map: &CrowdMap) -> Self {
         let n = map.levels.len();
-        Self { speed: vec![1.0; n], slow: vec![0; n] }
+        Self {
+            speed: vec![1.0; n],
+            slow: vec![0; n],
+        }
     }
 
     /// One sample of movers `(position, radius, speed fraction)`.
@@ -236,7 +304,9 @@ impl Traffic {
         for (p, r, f) in movers {
             let c = geom.world_to_cell(p);
             let (x, y) = (c.x / BLOCK_CELLS, c.y / BLOCK_CELLS);
-            if x < 0 || y < 0 || x >= map.blocks_x || y >= map.blocks_y { continue; }
+            if x < 0 || y < 0 || x >= map.blocks_x || y >= map.blocks_y {
+                continue;
+            }
             let i = (y * map.blocks_x + x) as usize;
             area[i] += std::f32::consts::PI * r * r;
             sum[i] += f;
@@ -244,7 +314,11 @@ impl Traffic {
         }
         let block_area = (BLOCK_CELLS as f32 * geom.cell_size).powi(2);
         for i in 0..n {
-            let sample = if area[i] / block_area >= TRAFFIC_MIN_COVER { sum[i] / count[i] as f32 } else { 1.0 };
+            let sample = if area[i] / block_area >= TRAFFIC_MIN_COVER {
+                sum[i] / count[i] as f32
+            } else {
+                1.0
+            };
             self.speed[i] += TRAFFIC_SMOOTHING * (sample - self.speed[i]);
             self.slow[i] = slow_with_hysteresis(self.speed[i], self.slow[i]);
         }
@@ -260,8 +334,12 @@ pub fn block_extra(level: u8, slow: u8) -> u64 {
 
 fn slow_with_hysteresis(speed: f32, old: u8) -> u8 {
     let mut level = old;
-    while (level as usize) < SLOW_THRESHOLDS.len() && speed < SLOW_THRESHOLDS[level as usize] - SLOW_HYSTERESIS { level += 1; }
-    while level > 0 && speed >= SLOW_THRESHOLDS[level as usize - 1] + SLOW_HYSTERESIS { level -= 1; }
+    while (level as usize) < SLOW_THRESHOLDS.len() && speed < SLOW_THRESHOLDS[level as usize] - SLOW_HYSTERESIS {
+        level += 1;
+    }
+    while level > 0 && speed >= SLOW_THRESHOLDS[level as usize - 1] + SLOW_HYSTERESIS {
+        level -= 1;
+    }
     level
 }
 
@@ -269,16 +347,34 @@ fn slow_with_hysteresis(speed: f32, old: u8) -> u8 {
 /// max: rows, then columns).
 fn grow(levels: &[u8], w: i32, h: i32, r: i32) -> Vec<u8> {
     let at = |v: &[u8], x: i32, y: i32| v[(y * w + x) as usize];
-    let rows: Vec<u8> = (0..h).flat_map(|y| (0..w).map(move |x| (y, x)))
-        .map(|(y, x)| ((x - r).max(0)..=(x + r).min(w - 1)).map(|xx| at(levels, xx, y)).max().unwrap_or(0)).collect();
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x)))
-        .map(|(y, x)| ((y - r).max(0)..=(y + r).min(h - 1)).map(|yy| at(&rows, x, yy)).max().unwrap_or(0)).collect()
+    let rows: Vec<u8> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            ((x - r).max(0)..=(x + r).min(w - 1))
+                .map(|xx| at(levels, xx, y))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            ((y - r).max(0)..=(y + r).min(h - 1))
+                .map(|yy| at(&rows, x, yy))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 fn level_with_hysteresis(covered: f32, old: u8) -> u8 {
     let mut level = old;
-    while (level as usize) < THRESHOLDS.len() && covered >= THRESHOLDS[level as usize] + HYSTERESIS { level += 1; }
-    while level > 0 && covered < THRESHOLDS[level as usize - 1] - HYSTERESIS { level -= 1; }
+    while (level as usize) < THRESHOLDS.len() && covered >= THRESHOLDS[level as usize] + HYSTERESIS {
+        level += 1;
+    }
+    while level > 0 && covered < THRESHOLDS[level as usize - 1] - HYSTERESIS {
+        level -= 1;
+    }
     level
 }
 
@@ -291,10 +387,12 @@ mod tests {
         let mut v = vec![0u8; 7 * 7];
         v[3 * 7 + 3] = 2;
         let g = grow(&v, 7, 7, 2);
-        for y in 0..7 { for x in 0..7 {
-            let inside = (x as i32 - 3).abs() <= 2 && (y as i32 - 3).abs() <= 2;
-            assert_eq!(g[y * 7 + x], if inside { 2 } else { 0 }, "({x}, {y})");
-        } }
+        for y in 0..7 {
+            for x in 0..7 {
+                let inside = (x as i32 - 3).abs() <= 2 && (y as i32 - 3).abs() <= 2;
+                assert_eq!(g[y * 7 + x], if inside { 2 } else { 0 }, "({x}, {y})");
+            }
+        }
     }
 
     #[test]

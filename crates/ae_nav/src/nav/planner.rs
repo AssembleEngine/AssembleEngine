@@ -64,14 +64,36 @@ pub fn context_key(h: &NavHierarchy, profile_id: u8, target: CellPos) -> Option<
     let ax = ((target.x / q) * q + q / 2).clamp(x0, x1 - 1);
     let ay = ((target.y / q) * q + q / 2).clamp(y0, y1 - 1);
     let anchor = CellPos::new(ax, ay);
-    let anchor = if ph.region_at(geom, anchor) == Some((sector, region)) { anchor } else { target };
-    Some(ContextKey { profile_id, nav_version: h.version, goal_sector: sector, goal_region: region, anchor, crowd: 0 })
+    let anchor = if ph.region_at(geom, anchor) == Some((sector, region)) {
+        anchor
+    } else {
+        target
+    };
+    Some(ContextKey {
+        profile_id,
+        nav_version: h.version,
+        goal_sector: sector,
+        goal_region: region,
+        anchor,
+        crowd: 0,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Open { cost: u64, node: u32 }
-impl PartialOrd for Open { fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) } }
-impl Ord for Open { fn cmp(&self, o: &Self) -> Ordering { o.cost.cmp(&self.cost).then_with(|| o.node.cmp(&self.node)) } }
+struct Open {
+    cost: u64,
+    node: u32,
+}
+impl PartialOrd for Open {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Open {
+    fn cmp(&self, o: &Self) -> Ordering {
+        o.cost.cmp(&self.cost).then_with(|| o.node.cmp(&self.node))
+    }
+}
 
 /// Backward Dijkstra over the portal graph from the goal region. Initial
 /// labels of the goal region's nodes are exact in-sector costs to the anchor.
@@ -87,31 +109,47 @@ impl Ord for Open { fn cmp(&self, o: &Self) -> Ordering { o.cost.cmp(&self.cost)
 /// straight through its nearest part.)
 pub fn build_context(h: &NavHierarchy, key: &ContextKey, crowd: Option<&Arc<CrowdMap>>) -> Option<DestContext> {
     let start = std::time::Instant::now();
-    if key.nav_version != h.version { return None; }
+    if key.nav_version != h.version {
+        return None;
+    }
     let geom = &h.terrain.geom;
     let ph = h.hierarchy(key.profile_id);
     let grid = h.grid(key.profile_id);
-    let gsec = SectorPos::new(key.goal_sector as i32 % geom.sectors_x(), key.goal_sector as i32 / geom.sectors_x());
-    if ph.region_at(geom, key.anchor) != Some((key.goal_sector, key.goal_region)) { return None; }
+    let gsec = SectorPos::new(
+        key.goal_sector as i32 % geom.sectors_x(),
+        key.goal_sector as i32 / geom.sectors_x(),
+    );
+    if ph.region_at(geom, key.anchor) != Some((key.goal_sector, key.goal_region)) {
+        return None;
+    }
     let (dist, mut expansions) = sector_dijkstra(&h.terrain, grid, gsec, &[(key.anchor, 0)], true);
     let gbounds = geom.sector_bounds(gsec);
     let (x0, y0, x1, _) = gbounds;
     let w = x1 - x0;
     let mut goal_boundary = vec![u64::MAX; perimeter_len(gbounds)];
-    for (k, slot) in goal_boundary.iter_mut().enumerate() { *slot = dist[perimeter_offset(gbounds, k)]; }
+    for (k, slot) in goal_boundary.iter_mut().enumerate() {
+        *slot = dist[perimeter_offset(gbounds, k)];
+    }
     let n = ph.nodes.len();
     let mut labels = vec![u64::MAX; n];
     let mut next_hop = vec![u32::MAX; n];
     let mut open = BinaryHeap::new();
     for &id in &ph.sector_nodes[key.goal_sector as usize] {
         let node = &ph.nodes[id as usize];
-        if node.region != key.goal_region { continue; }
+        if node.region != key.goal_region {
+            continue;
+        }
         let d = dist[((node.cell.y - y0) * w + (node.cell.x - x0)) as usize];
-        if d < labels[id as usize] { labels[id as usize] = d; open.push(Open { cost: d, node: id }); }
+        if d < labels[id as usize] {
+            labels[id as usize] = d;
+            open.push(Open { cost: d, node: id });
+        }
     }
     let crowd = crowd.filter(|m| key.crowd != 0 && m.version == key.crowd);
     while let Some(Open { cost, node }) = open.pop() {
-        if cost != labels[node as usize] { continue; }
+        if cost != labels[node as usize] {
+            continue;
+        }
         expansions += 1;
         for (k, &(from, c)) in ph.in_edges[node as usize].iter().enumerate() {
             let extra = crowd.map_or(0, |m| m.edge_extra(h.version, key.profile_id, node, k));
@@ -123,8 +161,15 @@ pub fn build_context(h: &NavHierarchy, key: &ContextKey, crowd: Option<&Arc<Crow
             }
         }
     }
-    Some(DestContext { key: key.clone(), labels, next_hop, goal_boundary, expansions, build_ms: start.elapsed().as_secs_f64() * 1000.0,
-        crowd: crowd.cloned() })
+    Some(DestContext {
+        key: key.clone(),
+        labels,
+        next_hop,
+        goal_boundary,
+        expansions,
+        build_ms: start.elapsed().as_secs_f64() * 1000.0,
+        crowd: crowd.cloned(),
+    })
 }
 
 /// Cost to go from `cell`, a boundary cell on abstract node `node`'s side
@@ -149,12 +194,18 @@ fn cost_to_go_from_boundary(h: &NavHierarchy, ctx: &DestContext, node: u32, cell
     let rim = perimeter_len(bounds);
     let mut best: Option<u64> = None;
     for (k, &id) in ph.sector_nodes[n.sector as usize].iter().enumerate() {
-        if ph.nodes[id as usize].region != n.region { continue; }
+        if ph.nodes[id as usize].region != n.region {
+            continue;
+        }
         let label = ctx.labels[id as usize];
         let b = sg.boundary_cost[k * rim + slot];
-        if label == u64::MAX || b == u32::MAX { continue; }
+        if label == u64::MAX || b == u32::MAX {
+            continue;
+        }
         let v = label.saturating_add(b as u64);
-        if best.map(|x| v < x).unwrap_or(true) { best = Some(v); }
+        if best.map(|x| v < x).unwrap_or(true) {
+            best = Some(v);
+        }
     }
     best
 }
@@ -177,24 +228,46 @@ pub struct FieldRecipe {
 /// Seeding a whole portal run with the far node's label instead (measured
 /// from the run's middle cell) sent units to the nearest cell of the run and
 /// made long routes on the default map about 20% dearer than optimal.
-pub fn field_recipe(h: &NavHierarchy, ctx: &DestContext, sector: u32, region: u16, target: CellPos) -> Option<FieldRecipe> {
+pub fn field_recipe(
+    h: &NavHierarchy,
+    ctx: &DestContext,
+    sector: u32,
+    region: u16,
+    target: CellPos,
+) -> Option<FieldRecipe> {
     let geom = &h.terrain.geom;
     let ph = h.hierarchy(ctx.key.profile_id);
     let spos = SectorPos::new(sector as i32 % geom.sectors_x(), sector as i32 / geom.sectors_x());
     let sector_version = ph.sectors[sector as usize].version;
-    let crowd = ctx.crowd.as_ref().map(|m| m.sector_levels(geom, spos)).unwrap_or_default();
+    let crowd = ctx
+        .crowd
+        .as_ref()
+        .map(|m| m.sector_levels(geom, spos))
+        .unwrap_or_default();
     if sector == ctx.key.goal_sector && region == ctx.key.goal_region {
         return Some(FieldRecipe {
-            key: FieldKey { profile_id: ctx.key.profile_id, sector: spos, sector_version,
-                seeds: vec![GateSeed { cell: target, exit_dir: NO_EXIT, downstream_cost: 0 }], crowd },
-            offset: 0, best_exit_far_node: None,
+            key: FieldKey {
+                profile_id: ctx.key.profile_id,
+                sector: spos,
+                sector_version,
+                seeds: vec![GateSeed {
+                    cell: target,
+                    exit_dir: NO_EXIT,
+                    downstream_cost: 0,
+                }],
+                crowd,
+            },
+            offset: 0,
+            best_exit_far_node: None,
         });
     }
     let mut raw: Vec<(CellPos, u8, u64)> = Vec::new();
     let mut best: Option<(u64, u32)> = None;
     for &id in &ph.sector_nodes[sector as usize] {
         let node = &ph.nodes[id as usize];
-        if node.region != region { continue; }
+        if node.region != region {
+            continue;
+        }
         let p = &ph.portals[node.portal as usize];
         let far = if node.a_side { p.node_b } else { p.node_a };
         let label = ctx.labels[far as usize];
@@ -203,28 +276,55 @@ pub fn field_recipe(h: &NavHierarchy, ctx: &DestContext, sector: u32, region: u1
         // such exit (Dijkstra optimality), and no unit can be sent back across
         // a portal it just used, because that would need both
         // label(a) < label(b) and label(b) < label(a).
-        if label == u64::MAX || label >= ctx.labels[id as usize] { continue; }
-        let (dx, dy) = if node.a_side { p.a_to_b() } else { let (x, y) = p.a_to_b(); (-x, -y) };
+        if label == u64::MAX || label >= ctx.labels[id as usize] {
+            continue;
+        }
+        let (dx, dy) = if node.a_side {
+            p.a_to_b()
+        } else {
+            let (x, y) = p.a_to_b();
+            (-x, -y)
+        };
         let dir = NEIGHBORS4.iter().position(|&d| d == (dx, dy)).unwrap() as u8;
         for along in p.lo..=p.hi {
-            let (near, far_cell) = if node.a_side { (p.a_cell(along), p.b_cell(along)) } else { (p.b_cell(along), p.a_cell(along)) };
+            let (near, far_cell) = if node.a_side {
+                (p.a_cell(along), p.b_cell(along))
+            } else {
+                (p.b_cell(along), p.a_cell(along))
+            };
             let down = cost_to_go_from_boundary(h, ctx, far, far_cell).unwrap_or(label);
             let v = traversal_cost_units(&h.terrain, near, dx, dy).saturating_add(down);
             raw.push((near, dir, v));
-            if best.map(|(b, bn)| (v, far) < (b, bn)).unwrap_or(true) { best = Some((v, far)); }
+            if best.map(|(b, bn)| (v, far) < (b, bn)).unwrap_or(true) {
+                best = Some((v, far));
+            }
         }
     }
-    if raw.is_empty() { return None; }
+    if raw.is_empty() {
+        return None;
+    }
     // One seed per cell (a corner cell can exit two ways): keep the cheapest.
     raw.sort_unstable_by_key(|&(c, d, v)| (c, v, d));
     raw.dedup_by_key(|s| s.0);
     let offset = raw.iter().map(|s| s.2).min().unwrap();
-    let seeds = raw.into_iter().map(|(cell, exit_dir, v)| GateSeed {
-        cell, exit_dir, downstream_cost: (v - offset).min(u32::MAX as u64) as u32,
-    }).collect();
+    let seeds = raw
+        .into_iter()
+        .map(|(cell, exit_dir, v)| GateSeed {
+            cell,
+            exit_dir,
+            downstream_cost: (v - offset).min(u32::MAX as u64) as u32,
+        })
+        .collect();
     Some(FieldRecipe {
-        key: FieldKey { profile_id: ctx.key.profile_id, sector: spos, sector_version, seeds, crowd },
-        offset, best_exit_far_node: best.map(|b| b.1),
+        key: FieldKey {
+            profile_id: ctx.key.profile_id,
+            sector: spos,
+            sector_version,
+            seeds,
+            crowd,
+        },
+        offset,
+        best_exit_far_node: best.map(|b| b.1),
     })
 }
 
@@ -239,9 +339,13 @@ pub fn regions_ahead(ph: &ProfileHierarchy, ctx: &DestContext, from_node: u32, m
         guard += 1;
         let node = &ph.nodes[n as usize];
         let key = (node.sector, node.region);
-        if out.last() != Some(&key) { out.push(key); }
+        if out.last() != Some(&key) {
+            out.push(key);
+        }
         let nx = ctx.next_hop[n as usize];
-        if nx == u32::MAX { break; }
+        if nx == u32::MAX {
+            break;
+        }
         n = nx;
     }
     out
@@ -259,12 +363,19 @@ pub fn route_polyline(h: &NavHierarchy, ctx: &DestContext, from: CellPos, target
                 let mut guard = 0;
                 loop {
                     guard += 1;
-                    if guard > 4096 { break; }
+                    if guard > 4096 {
+                        break;
+                    }
                     pts.push(ph.portals[ph.nodes[n as usize].portal as usize].center_world(geom));
                     let nx = ctx.next_hop[n as usize];
-                    if nx == u32::MAX { break; }
+                    if nx == u32::MAX {
+                        break;
+                    }
                     // Skip the intra-sector hop; record each crossing once.
-                    if ph.nodes[nx as usize].portal == ph.nodes[n as usize].portal { n = nx; continue; }
+                    if ph.nodes[nx as usize].portal == ph.nodes[n as usize].portal {
+                        n = nx;
+                        continue;
+                    }
                     n = nx;
                 }
             }
@@ -293,7 +404,9 @@ mod tests {
         let mut at = start;
         let mut cost = 0u64;
         for steps in 0..100_000usize {
-            if at == goal { return Some((cost, steps)); }
+            if at == goal {
+                return Some((cost, steps));
+            }
             assert!(grid.is_passable(t, at), "walked onto impassable {at:?}");
             let (s, r) = h.region_at(profile, at).unwrap();
             let rec = field_recipe(h, &ctx, s, r, goal)?;
@@ -302,7 +415,11 @@ mod tests {
             let (dx, dy) = (next.x - at.x, next.y - at.y);
             assert!(dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0));
             if dx != 0 && dy != 0 {
-                assert!(grid.is_passable(t, CellPos::new(at.x + dx, at.y)) && grid.is_passable(t, CellPos::new(at.x, at.y + dy)), "corner cut");
+                assert!(
+                    grid.is_passable(t, CellPos::new(at.x + dx, at.y))
+                        && grid.is_passable(t, CellPos::new(at.x, at.y + dy)),
+                    "corner cut"
+                );
             }
             cost += traversal_cost_units(t, at, dx, dy);
             at = next;
@@ -318,16 +435,28 @@ mod tests {
             tt.height[i] = rng.range_i32(0, 60) as i16;
         }
         for _ in 0..walls {
-            let x = rng.range_i32(0, w); let y = rng.range_i32(0, h);
-            if rng.chance(0.5) { tt.wall(x, y, (x + rng.range_i32(2, 14)).min(w - 1), y); }
-            else { tt.wall(x, y, x, (y + rng.range_i32(2, 14)).min(h - 1)); }
+            let x = rng.range_i32(0, w);
+            let y = rng.range_i32(0, h);
+            if rng.chance(0.5) {
+                tt.wall(x, y, (x + rng.range_i32(2, 14)).min(w - 1), y);
+            } else {
+                tt.wall(x, y, x, (y + rng.range_i32(2, 14)).min(h - 1));
+            }
         }
         tt.into_terrain(seed)
     }
 
     #[test]
     fn hierarchical_fields_match_reference_on_random_maps() {
-        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0, medium: crate::terrain::Medium::ANY }];
+        let profile = vec![MovementProfile {
+            id: 0,
+            name: "p".into(),
+            clearance_cells: 0,
+            max_slope: 1000,
+            unit_radius: 0.4,
+            base_speed: 1.0,
+            medium: crate::terrain::Medium::ANY,
+        }];
         let mut compared = 0;
         let mut worst_ratio = 1.0f64;
         for seed in 1..=12u64 {
@@ -338,16 +467,32 @@ mod tests {
             for _ in 0..12 {
                 let a = CellPos::new(rng.range_i32(0, 48), rng.range_i32(0, 40));
                 let b = CellPos::new(rng.range_i32(0, 48), rng.range_i32(0, 40));
-                if !grid.is_passable(&t, a) || !grid.is_passable(&t, b) { continue; }
+                if !grid.is_passable(&t, a) || !grid.is_passable(&t, b) {
+                    continue;
+                }
                 let reference = astar(&t, grid, a, b, false);
                 let same_comp = h.component_at(0, a) == h.component_at(0, b);
-                assert_eq!(reference.is_some(), same_comp, "component disagrees with reference for {a:?}->{b:?}");
-                let Some(reference) = reference else { continue; };
+                assert_eq!(
+                    reference.is_some(),
+                    same_comp,
+                    "component disagrees with reference for {a:?}->{b:?}"
+                );
+                let Some(reference) = reference else {
+                    continue;
+                };
                 let (cost, _) = follow(&h, 0, a, b).expect("hierarchical route exists when reference does");
-                assert!(cost >= reference.cost, "cheaper than optimal: {cost} < {}", reference.cost);
+                assert!(
+                    cost >= reference.cost,
+                    "cheaper than optimal: {cost} < {}",
+                    reference.cost
+                );
                 let ratio = cost as f64 / reference.cost.max(1) as f64;
                 worst_ratio = worst_ratio.max(ratio);
-                assert!(ratio <= 1.6, "route {a:?}->{b:?} cost {cost} vs optimal {} (ratio {ratio:.2})", reference.cost);
+                assert!(
+                    ratio <= 1.6,
+                    "route {a:?}->{b:?} cost {cost} vs optimal {} (ratio {ratio:.2})",
+                    reference.cost
+                );
                 compared += 1;
             }
         }
@@ -359,9 +504,21 @@ mod tests {
     fn asymmetric_costs_are_respected_in_both_directions() {
         // A ramp rising to the east; uphill is surcharged, downhill is not.
         let mut tt = TestTerrain::new(40, 8);
-        for y in 0..8 { for x in 0..40 { tt.height[(y * 40 + x) as usize] = (x * 12) as i16; } }
+        for y in 0..8 {
+            for x in 0..40 {
+                tt.height[(y * 40 + x) as usize] = (x * 12) as i16;
+            }
+        }
         let t = Arc::new(tt.into_terrain(1));
-        let profile = vec![MovementProfile { id: 0, name: "p".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 1.0, medium: crate::terrain::Medium::ANY }];
+        let profile = vec![MovementProfile {
+            id: 0,
+            name: "p".into(),
+            clearance_cells: 0,
+            max_slope: 1000,
+            unit_radius: 0.4,
+            base_speed: 1.0,
+            medium: crate::terrain::Medium::ANY,
+        }];
         let h = NavHierarchy::build(t.clone(), &profile);
         let (a, b) = (CellPos::new(2, 4), CellPos::new(37, 4));
         let (up, _) = follow(&h, 0, a, b).unwrap();
@@ -371,8 +528,14 @@ mod tests {
         assert!(up > down);
         // Exit seeds lean toward run middles (see `cost_to_go_from_boundary`):
         // here the route steps diagonally to the middle row and back, +80.
-        assert!(up >= ref_up && up * 100 <= ref_up * 103, "uphill {up} vs optimal {ref_up}");
-        assert!(down >= ref_down && down * 100 <= ref_down * 103, "downhill {down} vs optimal {ref_down}");
+        assert!(
+            up >= ref_up && up * 100 <= ref_up * 103,
+            "uphill {up} vs optimal {ref_up}"
+        );
+        assert!(
+            down >= ref_down && down * 100 <= ref_down * 103,
+            "downhill {down} vs optimal {ref_down}"
+        );
     }
 
     #[test]
@@ -389,7 +552,11 @@ mod tests {
         let (a, b) = (CellPos::new(8, 23), CellPos::new(40, 23));
         assert_eq!(h.component_at(0, a), h.component_at(0, b), "scout fits a 5-cell gap");
         assert!(follow(&h, 0, a, b).is_some());
-        assert_ne!(h.component_at(1, a), h.component_at(1, b), "heavy must not fit a 5-cell gap");
+        assert_ne!(
+            h.component_at(1, a),
+            h.component_at(1, b),
+            "heavy must not fit a 5-cell gap"
+        );
         assert!(astar(&t, h.grid(1), a, b, false).is_none());
     }
 

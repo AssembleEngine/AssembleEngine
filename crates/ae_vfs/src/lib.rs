@@ -40,7 +40,8 @@ impl Mount {
         match self {
             Mount::Dir(dir) => {
                 let file = dir.join(path);
-                file.is_file().then(|| std::fs::read(&file).with_context(|| format!("read {}", file.display())))
+                file.is_file()
+                    .then(|| std::fs::read(&file).with_context(|| format!("read {}", file.display())))
             }
             Mount::Archive(a) => a.read(path),
         }
@@ -71,8 +72,14 @@ pub struct Vfs {
 
 /// A content path: relative, `/`-separated, no `..`, no empty parts.
 fn check_path(path: &str) -> Result<()> {
-    ensure!(!path.is_empty() && !path.starts_with('/') && !path.contains('\\'), "content path {path:?} must be relative with `/` separators");
-    ensure!(path.split('/').all(|p| !p.is_empty() && p != "." && p != ".."), "content path {path:?} has an empty, `.` or `..` part");
+    ensure!(
+        !path.is_empty() && !path.starts_with('/') && !path.contains('\\'),
+        "content path {path:?} must be relative with `/` separators"
+    );
+    ensure!(
+        path.split('/').all(|p| !p.is_empty() && p != "." && p != ".."),
+        "content path {path:?} has an empty, `.` or `..` part"
+    );
     Ok(())
 }
 
@@ -91,14 +98,19 @@ impl Vfs {
 
     /// Mount a zip archive on top of the existing mounts.
     pub fn mount_archive(&mut self, file: impl AsRef<Path>) -> Result<&mut Self> {
-        self.mounts.push(Mount::Archive(Arc::new(Archive::open(file.as_ref())?)));
+        self.mounts
+            .push(Mount::Archive(Arc::new(Archive::open(file.as_ref())?)));
         Ok(self)
     }
 
     /// Mount a directory or an archive file.
     pub fn mount(&mut self, path: impl AsRef<Path>) -> Result<&mut Self> {
         let path = path.as_ref();
-        if path.is_dir() { self.mount_dir(path) } else { self.mount_archive(path) }
+        if path.is_dir() {
+            self.mount_dir(path)
+        } else {
+            self.mount_archive(path)
+        }
     }
 
     /// Mount `packages` in order (as [`Library::resolve`] gives them).
@@ -145,7 +157,11 @@ impl Vfs {
     /// Files under `prefix` (a directory path, `""` for all) with
     /// extension `ext`, sorted.
     pub fn list(&self, prefix: &str, ext: &str) -> Result<Vec<String>> {
-        Ok(self.files()?.into_iter().filter(|p| (prefix.is_empty() || p.starts_with(&format!("{prefix}/"))) && p.ends_with(&format!(".{ext}"))).collect())
+        Ok(self
+            .files()?
+            .into_iter()
+            .filter(|p| (prefix.is_empty() || p.starts_with(&format!("{prefix}/"))) && p.ends_with(&format!(".{ext}")))
+            .collect())
     }
 
     /// xxh3-128 over every visible file's path and bytes, in path order.
@@ -163,7 +179,9 @@ impl Vfs {
 }
 
 fn walk(root: &Path, dir: &Path, f: &mut dyn FnMut(String)) -> Result<()> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?.collect::<Result<_, _>>()?;
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("read {}", dir.display()))?
+        .collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let path = e.path();
@@ -171,7 +189,10 @@ fn walk(root: &Path, dir: &Path, f: &mut dyn FnMut(String)) -> Result<()> {
             walk(root, &path, f)?;
         } else if path.is_file() {
             let rel = path.strip_prefix(root).unwrap();
-            let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            let parts: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
             f(parts.join("/"));
         }
     }
@@ -182,7 +203,15 @@ fn walk(root: &Path, dir: &Path, f: &mut dyn FnMut(String)) -> Result<()> {
 pub fn dir_files(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut paths = Vec::new();
     walk(dir, dir, &mut |p| paths.push(p))?;
-    paths.into_iter().map(|p| Ok((p.clone(), std::fs::read(dir.join(&p)).with_context(|| format!("read {p}"))?))).collect()
+    paths
+        .into_iter()
+        .map(|p| {
+            Ok((
+                p.clone(),
+                std::fs::read(dir.join(&p)).with_context(|| format!("read {p}"))?,
+            ))
+        })
+        .collect()
 }
 
 /// A package's `manifest.json`.
@@ -204,10 +233,23 @@ pub const KINDS: [&str; 4] = ["game", "map", "mod", "library"];
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self> {
         let m: Manifest = serde_json::from_str(text).context("manifest.json")?;
-        let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
-        ensure!(ok(&m.name) && !m.name.contains('.'), "package name {:?}: letters, digits, `-` and `_`", m.name);
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        };
+        ensure!(
+            ok(&m.name) && !m.name.contains('.'),
+            "package name {:?}: letters, digits, `-` and `_`",
+            m.name
+        );
         ensure!(ok(&m.version), "package {} version {:?}", m.name, m.version);
-        ensure!(KINDS.contains(&m.kind.as_str()), "package {} kind {:?} (one of {KINDS:?})", m.name, m.kind);
+        ensure!(
+            KINDS.contains(&m.kind.as_str()),
+            "package {} kind {:?} (one of {KINDS:?})",
+            m.name,
+            m.kind
+        );
         for d in &m.depends {
             let (n, v) = d.split_once('@').unwrap_or((d, "x"));
             ensure!(ok(n) && ok(v), "package {} depends on {d:?}", m.name);
@@ -229,12 +271,19 @@ impl Package {
     pub fn open(source: impl Into<PathBuf>) -> Result<Self> {
         let source = source.into();
         let text = if source.is_dir() {
-            std::fs::read_to_string(source.join(MANIFEST)).with_context(|| format!("{} has no {MANIFEST}", source.display()))?
+            std::fs::read_to_string(source.join(MANIFEST))
+                .with_context(|| format!("{} has no {MANIFEST}", source.display()))?
         } else {
             let a = Archive::open(&source)?;
-            String::from_utf8(a.read(MANIFEST).with_context(|| format!("{} has no {MANIFEST}", source.display()))??)?
+            String::from_utf8(
+                a.read(MANIFEST)
+                    .with_context(|| format!("{} has no {MANIFEST}", source.display()))??,
+            )?
         };
-        Ok(Self { manifest: Manifest::parse(&text).with_context(|| format!("package {}", source.display()))?, source })
+        Ok(Self {
+            manifest: Manifest::parse(&text).with_context(|| format!("package {}", source.display()))?,
+            source,
+        })
     }
 }
 
@@ -252,11 +301,25 @@ impl Library {
         let mut lib = Self::default();
         for d in dirs {
             let d = d.as_ref();
-            let mut entries: Vec<_> = std::fs::read_dir(d).with_context(|| format!("read {}", d.display()))?.collect::<Result<_, _>>()?;
+            let mut entries: Vec<_> = std::fs::read_dir(d)
+                .with_context(|| format!("read {}", d.display()))?
+                .collect::<Result<_, _>>()?;
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 let path = e.path();
-                let is_package = if path.is_dir() { path.join(MANIFEST).is_file() } else { std::fs::File::open(&path).ok().and_then(|mut f| { let mut sig = [0u8; 4]; std::io::Read::read_exact(&mut f, &mut sig).ok().map(|()| sig == *b"PK\x03\x04") }).unwrap_or(false) };
+                let is_package = if path.is_dir() {
+                    path.join(MANIFEST).is_file()
+                } else {
+                    std::fs::File::open(&path)
+                        .ok()
+                        .and_then(|mut f| {
+                            let mut sig = [0u8; 4];
+                            std::io::Read::read_exact(&mut f, &mut sig)
+                                .ok()
+                                .map(|()| sig == *b"PK\x03\x04")
+                        })
+                        .unwrap_or(false)
+                };
                 if is_package {
                     lib.add(Package::open(path)?)?;
                 }
@@ -268,7 +331,13 @@ impl Library {
     pub fn add(&mut self, p: Package) -> Result<()> {
         let key = (p.manifest.name.clone(), p.manifest.version.clone());
         if let Some(old) = self.packages.get(&key) {
-            bail!("package {}@{} twice: {} and {}", key.0, key.1, old.source.display(), p.source.display());
+            bail!(
+                "package {}@{} twice: {} and {}",
+                key.0,
+                key.1,
+                old.source.display(),
+                p.source.display()
+            );
         }
         self.packages.insert(key, p);
         Ok(())
@@ -280,11 +349,29 @@ impl Library {
             Some((n, v)) => (n, Some(v)),
             None => (spec, None),
         };
-        let found: Vec<&Package> = self.packages.values().filter(|p| p.manifest.name == name && version.is_none_or(|v| p.manifest.version == v)).collect();
+        let found: Vec<&Package> = self
+            .packages
+            .values()
+            .filter(|p| p.manifest.name == name && version.is_none_or(|v| p.manifest.version == v))
+            .collect();
         match found[..] {
             [p] => Ok(p),
-            [] => bail!("no package {spec} (have: {})", self.packages.keys().map(|(n, v)| format!("{n}@{v}")).collect::<Vec<_>>().join(", ")),
-            _ => bail!("package {name} in several versions ({}): name one", found.iter().map(|p| p.manifest.version.as_str()).collect::<Vec<_>>().join(", ")),
+            [] => bail!(
+                "no package {spec} (have: {})",
+                self.packages
+                    .keys()
+                    .map(|(n, v)| format!("{n}@{v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => bail!(
+                "package {name} in several versions ({}): name one",
+                found
+                    .iter()
+                    .map(|p| p.manifest.version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 
@@ -292,11 +379,21 @@ impl Library {
     /// in the order the manifests list them); a cycle is an error.
     pub fn resolve(&self, spec: &str) -> Result<Vec<Package>> {
         fn visit(lib: &Library, spec: &str, path: &mut Vec<String>, out: &mut Vec<Package>) -> Result<()> {
-            let p = lib.get(spec).with_context(|| if let Some(by) = path.last() { format!("needed by {by}") } else { "the package to run".into() })?;
+            let p = lib.get(spec).with_context(|| {
+                if let Some(by) = path.last() {
+                    format!("needed by {by}")
+                } else {
+                    "the package to run".into()
+                }
+            })?;
             let id = format!("{}@{}", p.manifest.name, p.manifest.version);
             ensure!(!path.contains(&id), "dependency cycle: {} -> {id}", path.join(" -> "));
             if out.iter().any(|o| o.manifest.name == p.manifest.name) {
-                ensure!(out.iter().any(|o| o.manifest == p.manifest), "package {} needed in two versions", p.manifest.name);
+                ensure!(
+                    out.iter().any(|o| o.manifest == p.manifest),
+                    "package {} needed in two versions",
+                    p.manifest.name
+                );
                 return Ok(());
             }
             path.push(id);
@@ -317,7 +414,11 @@ impl Library {
 /// the libraries `dirs`), each after its dependencies, each once; one
 /// name in two versions is an error.
 pub fn resolve_specs(dirs: &[impl AsRef<Path>], specs: &[String]) -> Result<Vec<Package>> {
-    let mut lib = if dirs.is_empty() { Library::default() } else { Library::scan(dirs)? };
+    let mut lib = if dirs.is_empty() {
+        Library::default()
+    } else {
+        Library::scan(dirs)?
+    };
     let mut out: Vec<Package> = Vec::new();
     for spec in specs {
         let name = if Path::new(spec).exists() {
@@ -332,7 +433,13 @@ pub fn resolve_specs(dirs: &[impl AsRef<Path>], specs: &[String]) -> Result<Vec<
         };
         for p in lib.resolve(&name)? {
             match out.iter().find(|o| o.manifest.name == p.manifest.name) {
-                Some(o) => ensure!(o.manifest.version == p.manifest.version, "package {} in versions {} and {}", p.manifest.name, o.manifest.version, p.manifest.version),
+                Some(o) => ensure!(
+                    o.manifest.version == p.manifest.version,
+                    "package {} in versions {} and {}",
+                    p.manifest.name,
+                    o.manifest.version,
+                    p.manifest.version
+                ),
                 None => out.push(p),
             }
         }
@@ -357,16 +464,29 @@ mod tests {
 
     #[test]
     fn later_mounts_override_and_the_hash_follows_content() {
-        let base = dir("base", &[("units/tank.json", "base tank"), ("units/scout.json", "scout"), ("maps/a.txt", "map")]);
+        let base = dir(
+            "base",
+            &[
+                ("units/tank.json", "base tank"),
+                ("units/scout.json", "scout"),
+                ("maps/a.txt", "map"),
+            ],
+        );
         let moded = dir("mod", &[("units/tank.json", "mod tank")]);
         let mut v = Vfs::new();
         v.mount_dir(&base).unwrap();
         let h0 = v.content_hash().unwrap();
-        assert_eq!(v.files().unwrap(), ["maps/a.txt", "units/scout.json", "units/tank.json"]);
+        assert_eq!(
+            v.files().unwrap(),
+            ["maps/a.txt", "units/scout.json", "units/tank.json"]
+        );
         v.mount_dir(&moded).unwrap();
         assert_eq!(v.read_string("units/tank.json").unwrap(), "mod tank");
         assert_eq!(v.read_string("units/scout.json").unwrap(), "scout");
-        assert_eq!(v.list("units", "json").unwrap(), ["units/scout.json", "units/tank.json"]);
+        assert_eq!(
+            v.list("units", "json").unwrap(),
+            ["units/scout.json", "units/tank.json"]
+        );
         assert_ne!(v.content_hash().unwrap(), h0, "an override changes the hash");
         let mut again = Vfs::new();
         again.mount_dir(&base).unwrap();
@@ -386,7 +506,10 @@ mod tests {
 
     #[test]
     fn archives_mount_like_directories() {
-        let base = dir("arc-base", &[("units/tank.json", "base tank"), ("units/scout.json", "scout")]);
+        let base = dir(
+            "arc-base",
+            &[("units/tank.json", "base tank"), ("units/scout.json", "scout")],
+        );
         let mut files = BTreeMap::new();
         files.insert("units/tank.json".to_string(), b"zip tank".to_vec());
         files.insert(MANIFEST.to_string(), manifest("tanks", "mod", &[]).into_bytes());
@@ -395,7 +518,11 @@ mod tests {
         let mut v = Vfs::new();
         v.mount(&base).unwrap().mount(&zip).unwrap();
         assert_eq!(v.read_string("units/tank.json").unwrap(), "zip tank");
-        assert_eq!(v.files().unwrap(), ["units/scout.json", "units/tank.json"], "the manifest is not content");
+        assert_eq!(
+            v.files().unwrap(),
+            ["units/scout.json", "units/tank.json"],
+            "the manifest is not content"
+        );
         assert!(v.read(MANIFEST).is_err() && !v.exists(MANIFEST));
         // An archive of a directory hashes like the directory.
         let mut packed = Vfs::new();
@@ -431,15 +558,27 @@ mod tests {
         // Not a package: no manifest.
         std::fs::create_dir_all(root.join("stray")).unwrap();
         let lib = Library::scan(&[&root]).unwrap();
-        let order: Vec<String> = lib.resolve("match").unwrap().into_iter().map(|p| p.manifest.name).collect();
+        let order: Vec<String> = lib
+            .resolve("match")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.manifest.name)
+            .collect();
         assert_eq!(order, ["core", "game", "map", "match"]);
         let mut v = Vfs::new();
         v.mount_packages(&lib.resolve("match").unwrap()).unwrap();
-        assert_eq!(v.read_string("who.txt").unwrap(), "match", "the package overrides what it builds on");
+        assert_eq!(
+            v.read_string("who.txt").unwrap(),
+            "match",
+            "the package overrides what it builds on"
+        );
         let e = format!("{:#}", lib.resolve("loop_a").unwrap_err());
         assert!(e.contains("cycle"), "{e}");
         let e = format!("{:#}", lib.resolve("broken").unwrap_err());
-        assert!(e.contains("no package nowhere") && e.contains("needed by broken@1"), "{e}");
+        assert!(
+            e.contains("no package nowhere") && e.contains("needed by broken@1"),
+            "{e}"
+        );
         assert!(lib.get("game@2").is_err());
         assert!(Manifest::parse(&manifest("bad name", "game", &[])).is_err());
         assert!(Manifest::parse(&manifest("x", "weapon", &[])).is_err());

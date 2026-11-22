@@ -15,7 +15,10 @@ const ACQUIRE_TIMEOUT_NS: u64 = 100_000_000;
 /// Result of `Swapchain::acquire`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Acquired {
-    Image { index: u32, suboptimal: bool },
+    Image {
+        index: u32,
+        suboptimal: bool,
+    },
     /// The swapchain must be recreated.
     OutOfDate,
     /// No image within the timeout (nothing was signalled): skip the frame.
@@ -91,12 +94,20 @@ impl TargetFormat {
 }
 
 /// The HDR10 pair (M13 stage 5): 10-bit, ST.2084 in BT.2020.
-const HDR10: TargetFormat = TargetFormat { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
+const HDR10: TargetFormat = TargetFormat {
+    format: vk::Format::A2B10G10R10_UNORM_PACK32,
+    color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+};
 /// The scRGB pair: extended linear sRGB in half floats.
-const SCRGB: TargetFormat = TargetFormat { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT };
+const SCRGB: TargetFormat = TargetFormat {
+    format: vk::Format::R16G16B16A16_SFLOAT,
+    color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+};
 
 fn offered(formats: &[vk::SurfaceFormatKHR], want: TargetFormat) -> bool {
-    formats.iter().any(|f| f.format == want.format && f.color_space == want.color_space)
+    formats
+        .iter()
+        .any(|f| f.format == want.format && f.color_space == want.color_space)
 }
 
 /// The surface's pairs, compactly, for an error that names what it does
@@ -116,7 +127,12 @@ fn offered_summary(formats: &[vk::SurfaceFormatKHR]) -> String {
             format_names.push(name);
         }
     }
-    format!("{} pair(s): colour spaces [{}] over formats [{}]", formats.len(), spaces.join(", "), format_names.join(", "))
+    format!(
+        "{} pair(s): colour spaces [{}] over formats [{}]",
+        formats.len(),
+        spaces.join(", "),
+        format_names.join(", ")
+    )
 }
 
 /// The static HDR10 metadata for an output gamut and display levels (what
@@ -154,7 +170,10 @@ pub fn hdr_metadata_values(levels: DisplayLevels, gamut: Gamut) -> HdrMetadataVa
 pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest) -> Result<TargetFormat> {
     let sdr = || {
         let chosen = choose_format(formats);
-        TargetFormat { format: chosen.format, color_space: chosen.color_space }
+        TargetFormat {
+            format: chosen.format,
+            color_space: chosen.color_space,
+        }
     };
     match request {
         HdrRequest::Off => Ok(sdr()),
@@ -166,7 +185,12 @@ pub fn resolve_target(formats: &[vk::SurfaceFormatKHR], request: HdrRequest) -> 
             if offered(formats, want) {
                 Ok(want)
             } else {
-                bail!("--hdr {}: the surface does not offer {}; it offers {}", if other == HdrRequest::Hdr10 { "hdr10" } else { "scrgb" }, want.describe(), offered_summary(formats))
+                bail!(
+                    "--hdr {}: the surface does not offer {}; it offers {}",
+                    if other == HdrRequest::Hdr10 { "hdr10" } else { "scrgb" },
+                    want.describe(),
+                    offered_summary(formats)
+                )
             }
         }
     }
@@ -246,8 +270,13 @@ impl Swapchain {
         let mut extent = capabilities.current_extent;
         if extent.width == u32::MAX {
             extent = vk::Extent2D {
-                width: size.0.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-                height: size.1.clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height),
+                width: size
+                    .0
+                    .clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
+                height: size.1.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
             };
         }
         if extent.width == 0 || extent.height == 0 {
@@ -255,7 +284,10 @@ impl Swapchain {
         }
         let formats = unsafe { surface_loader.get_physical_device_surface_formats(gpu.physical, self.surface) }?;
         let target = resolve_target(&formats, self.options.hdr)?;
-        let format = vk::SurfaceFormatKHR { format: target.format, color_space: target.color_space };
+        let format = vk::SurfaceFormatKHR {
+            format: target.format,
+            color_space: target.color_space,
+        };
         let modes = unsafe { surface_loader.get_physical_device_surface_present_modes(gpu.physical, self.surface) }?;
         let present_mode = match self.policy {
             PresentPolicy::Mailbox if modes.contains(&vk::PresentModeKHR::MAILBOX) => vk::PresentModeKHR::MAILBOX,
@@ -274,7 +306,9 @@ impl Swapchain {
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
             )
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
@@ -326,7 +360,10 @@ impl Swapchain {
 
     /// The pair this swapchain stores (its encoding).
     pub fn target(&self) -> TargetFormat {
-        TargetFormat { format: self.format.format, color_space: self.format.color_space }
+        TargetFormat {
+            format: self.format.format,
+            color_space: self.format.color_space,
+        }
     }
 
     /// Ask for a pair next recreate. The swapchain keeps presenting in the
@@ -392,7 +429,10 @@ impl Swapchain {
     /// Acquire the next image, waiting at most `ACQUIRE_TIMEOUT` so a stuck
     /// presentation engine cannot keep the render thread from stopping.
     pub fn acquire(&self, signal: vk::Semaphore) -> Result<Acquired> {
-        match unsafe { self.loader.acquire_next_image(self.handle, ACQUIRE_TIMEOUT_NS, signal, vk::Fence::null()) } {
+        match unsafe {
+            self.loader
+                .acquire_next_image(self.handle, ACQUIRE_TIMEOUT_NS, signal, vk::Fence::null())
+        } {
             Ok((index, suboptimal)) => Ok(Acquired::Image { index, suboptimal }),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(Acquired::OutOfDate),
             Err(vk::Result::TIMEOUT | vk::Result::NOT_READY) => Ok(Acquired::TimedOut),
@@ -442,15 +482,30 @@ mod tests {
 
     fn pairs() -> Vec<vk::SurfaceFormatKHR> {
         vec![
-            vk::SurfaceFormatKHR { format: vk::Format::B8G8R8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR },
-            vk::SurfaceFormatKHR { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT },
-            vk::SurfaceFormatKHR { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT },
+            vk::SurfaceFormatKHR {
+                format: vk::Format::B8G8R8A8_SRGB,
+                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            },
+            vk::SurfaceFormatKHR {
+                format: vk::Format::A2B10G10R10_UNORM_PACK32,
+                color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+            },
+            vk::SurfaceFormatKHR {
+                format: vk::Format::R16G16B16A16_SFLOAT,
+                color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            },
         ]
     }
 
     #[test]
     fn the_metadata_states_the_output_gamut_and_the_peak() {
-        let values = hdr_metadata_values(DisplayLevels { paper_white: 203.0, peak: 441.0 }, Gamut::P3);
+        let values = hdr_metadata_values(
+            DisplayLevels {
+                paper_white: 203.0,
+                peak: 441.0,
+            },
+            Gamut::P3,
+        );
         // Display P3's primaries and D65 white.
         assert_eq!(values.primaries, [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
         assert_eq!(values.white, [0.3127, 0.3290]);
@@ -460,14 +515,26 @@ mod tests {
         assert_eq!(values.max_cll, 441.0);
         assert_eq!(values.max_fall, 441.0);
         // BT.2020 for scRGB's default output gamut.
-        assert_eq!(hdr_metadata_values(DisplayLevels::default(), Gamut::Bt2020).primaries[0], [0.708, 0.292]);
+        assert_eq!(
+            hdr_metadata_values(DisplayLevels::default(), Gamut::Bt2020).primaries[0],
+            [0.708, 0.292]
+        );
     }
 
     #[test]
     fn the_three_targets_are_the_three_encodings() {
-        let sdr = TargetFormat { format: vk::Format::B8G8R8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let hdr10 = TargetFormat { format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
-        let scrgb = TargetFormat { format: vk::Format::R16G16B16A16_SFLOAT, color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT };
+        let sdr = TargetFormat {
+            format: vk::Format::B8G8R8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let hdr10 = TargetFormat {
+            format: vk::Format::A2B10G10R10_UNORM_PACK32,
+            color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+        };
+        let scrgb = TargetFormat {
+            format: vk::Format::R16G16B16A16_SFLOAT,
+            color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+        };
         assert_eq!(sdr.encoding(), OutputEncoding::Sdr);
         assert_eq!(hdr10.encoding(), OutputEncoding::Hdr10Pq);
         assert_eq!(scrgb.encoding(), OutputEncoding::ScRgb);
@@ -484,13 +551,27 @@ mod tests {
         // Both offered: HDR10.
         assert_eq!(resolve_target(&all, HdrRequest::Auto).unwrap(), HDR10);
         // No HDR10 pair: scRGB.
-        let no_hdr10: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::HDR10_ST2084_EXT).collect();
+        let no_hdr10: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|p| p.color_space != vk::ColorSpaceKHR::HDR10_ST2084_EXT)
+            .collect();
         assert_eq!(resolve_target(&no_hdr10, HdrRequest::Auto).unwrap(), SCRGB);
         // Neither: SDR.
-        let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
-        assert_eq!(resolve_target(&sdr_only, HdrRequest::Auto).unwrap().encoding(), OutputEncoding::Sdr);
+        let sdr_only: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .collect();
+        assert_eq!(
+            resolve_target(&sdr_only, HdrRequest::Auto).unwrap().encoding(),
+            OutputEncoding::Sdr
+        );
         // Off is always SDR.
-        assert_eq!(resolve_target(&all, HdrRequest::Off).unwrap().encoding(), OutputEncoding::Sdr);
+        assert_eq!(
+            resolve_target(&all, HdrRequest::Off).unwrap().encoding(),
+            OutputEncoding::Sdr
+        );
     }
 
     #[test]
@@ -500,11 +581,22 @@ mod tests {
         assert_eq!(resolve_target(&all, HdrRequest::ScRgb).unwrap(), SCRGB);
         // An explicit mode the surface does not offer names what it does,
         // and never falls back silently.
-        let sdr_only: Vec<_> = all.iter().copied().filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR).collect();
+        let sdr_only: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|p| p.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .collect();
         let error = resolve_target(&sdr_only, HdrRequest::Hdr10).unwrap_err().to_string();
         assert!(error.contains("A2B10G10R10_UNORM_PACK32 + HDR10_ST2084_EXT"), "{error}");
-        assert!(error.contains("SRGB_NONLINEAR") && error.contains("B8G8R8A8_SRGB"), "{error}");
-        let no_scrgb: Vec<_> = all.iter().copied().filter(|p| p.color_space != vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT).collect();
+        assert!(
+            error.contains("SRGB_NONLINEAR") && error.contains("B8G8R8A8_SRGB"),
+            "{error}"
+        );
+        let no_scrgb: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|p| p.color_space != vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT)
+            .collect();
         let error = resolve_target(&no_scrgb, HdrRequest::ScRgb).unwrap_err();
         assert!(error.to_string().contains("EXTENDED_SRGB_LINEAR_EXT"), "{error}");
     }

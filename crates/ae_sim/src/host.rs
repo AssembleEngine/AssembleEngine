@@ -47,7 +47,15 @@ pub struct HostDecl {
 
 impl HostDecl {
     pub fn new(name: &str) -> Self {
-        Self { name: name.into(), query: Vec::new(), creates: Vec::new(), emits: Vec::new(), reads_events: Vec::new(), after: Vec::new(), cadence: Cadence::EveryTick }
+        Self {
+            name: name.into(),
+            query: Vec::new(),
+            creates: Vec::new(),
+            emits: Vec::new(),
+            reads_events: Vec::new(),
+            after: Vec::new(),
+            cadence: Cadence::EveryTick,
+        }
     }
 }
 
@@ -138,8 +146,15 @@ impl Chunk<'_> {
     /// `Read` breaks the schedule's guarantees.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn column<T: Copy>(&self, term: usize) -> &mut [T] {
-        assert_eq!(size_of::<T>(), self.sizes[term], "column type does not match the component size");
-        assert!((self.columns[term] as usize).is_multiple_of(align_of::<T>()), "misaligned column");
+        assert_eq!(
+            size_of::<T>(),
+            self.sizes[term],
+            "column type does not match the component size"
+        );
+        assert!(
+            (self.columns[term] as usize).is_multiple_of(align_of::<T>()),
+            "misaligned column"
+        );
         unsafe { std::slice::from_raw_parts_mut(self.columns[term].cast::<T>(), self.entities.len()) }
     }
 }
@@ -168,8 +183,16 @@ impl HostCtx<'_> {
             for (t, c) in columns.iter_mut().enumerate().take(self.sizes.len()) {
                 *c = self.memory.ptr(r.columns[t]);
             }
-            let entities = if r.count == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(r.entities, r.count as usize) } };
-            Chunk { entities, columns, sizes: self.sizes }
+            let entities = if r.count == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(r.entities, r.count as usize) }
+            };
+            Chunk {
+                entities,
+                columns,
+                sizes: self.sizes,
+            }
         })
     }
 
@@ -181,18 +204,30 @@ impl HostCtx<'_> {
     /// Every event of `stream` emitted since this system last ran, in key
     /// order. The stream must be in the system's `reads_events`.
     pub fn events<E: Copy>(&mut self, stream: u64) -> Result<Vec<E>> {
-        ensure!(self.reads.contains(&stream), "host system reads stream {stream:#x} without declaring it");
+        ensure!(
+            self.reads.contains(&stream),
+            "host system reads stream {stream:#x} without declaring it"
+        );
         let size = self.ids.streams.get(&stream).copied().context("unknown event stream")?;
-        ensure!(size == size_of::<E>(), "event type of {} bytes for a stream of {size}", size_of::<E>());
+        ensure!(
+            size == size_of::<E>(),
+            "event type of {} bytes for a stream of {size}",
+            size_of::<E>()
+        );
         let (bytes, count) = self.events.unseen(stream, self.reader);
-        let out = (0..count as usize).map(|k| unsafe { bytes.as_ptr().add(k * size).cast::<E>().read_unaligned() }).collect();
+        let out = (0..count as usize)
+            .map(|k| unsafe { bytes.as_ptr().add(k * size).cast::<E>().read_unaligned() })
+            .collect();
         self.events.mark_seen(stream, self.reader);
         Ok(out)
     }
 
     /// Spawn an entity with these components (stable id, value bytes).
     pub fn spawn(&mut self, components: &[(u64, &[u8])]) -> Result<()> {
-        let mut c: Vec<(ComponentId, Vec<u8>)> = components.iter().map(|&(id, bytes)| Ok((self.ids.component(id, Some(bytes.len()))?, bytes.to_vec()))).collect::<Result<_>>()?;
+        let mut c: Vec<(ComponentId, Vec<u8>)> = components
+            .iter()
+            .map(|&(id, bytes)| Ok((self.ids.component(id, Some(bytes.len()))?, bytes.to_vec())))
+            .collect::<Result<_>>()?;
         c.sort_by_key(|(id, _)| *id);
         ensure!(c.windows(2).all(|w| w[0].0 != w[1].0), "spawn lists a component twice");
         self.commands.push(Command::Spawn(c))
@@ -200,8 +235,15 @@ impl HostCtx<'_> {
 
     /// Emit an event (the stream must be in the system's `emits`).
     pub fn emit(&mut self, stream: u64, bytes: &[u8]) -> Result<()> {
-        ensure!(self.emits.contains(&stream), "host system emits stream {stream:#x} without declaring it");
-        ensure!(self.ids.streams.get(&stream) == Some(&bytes.len()), "event of {} bytes for stream {stream:#x}", bytes.len());
+        ensure!(
+            self.emits.contains(&stream),
+            "host system emits stream {stream:#x} without declaring it"
+        );
+        ensure!(
+            self.ids.streams.get(&stream) == Some(&bytes.len()),
+            "event of {} bytes for stream {stream:#x}",
+            bytes.len()
+        );
         self.commands.push_event(stream, bytes.to_vec())
     }
 
@@ -227,7 +269,13 @@ pub fn bytes_of<T: Copy>(value: &T) -> &[u8] {
 /// same name, size, alignment and fields.
 pub fn expect_component(schema: &Schema, record: &[u8]) -> Result<ComponentDecl> {
     let ours = component_record(record)?;
-    let theirs = schema.component(ours.id).with_context(|| format!("the module does not declare `{}` (id {:#x})", ours.name, ours.id))?;
-    ensure!(*theirs == ours, "the module's `{}` differs from the engine's: {theirs:?} vs {ours:?}", ours.name);
+    let theirs = schema
+        .component(ours.id)
+        .with_context(|| format!("the module does not declare `{}` (id {:#x})", ours.name, ours.id))?;
+    ensure!(
+        *theirs == ours,
+        "the module's `{}` differs from the engine's: {theirs:?} vs {ours:?}",
+        ours.name
+    );
     Ok(ours)
 }

@@ -87,20 +87,54 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let state = |blend: Blend| {
         vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(blend != Blend::Off)
-            .src_color_blend_factor(if matches!(blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::SRC_ALPHA })
-            .dst_color_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-            .color_blend_op(if blend == Blend::Max { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
+            .src_color_blend_factor(
+                if matches!(blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) {
+                    vk::BlendFactor::ONE
+                } else {
+                    vk::BlendFactor::SRC_ALPHA
+                },
+            )
+            .dst_color_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) {
+                vk::BlendFactor::ONE
+            } else {
+                vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+            })
+            .color_blend_op(if blend == Blend::Max {
+                vk::BlendOp::MAX
+            } else {
+                vk::BlendOp::ADD
+            })
             .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) { vk::BlendFactor::ONE } else { vk::BlendFactor::ONE_MINUS_SRC_ALPHA })
-            .alpha_blend_op(if matches!(blend, Blend::AdditiveMaxAlpha | Blend::Max) { vk::BlendOp::MAX } else { vk::BlendOp::ADD })
+            .dst_alpha_blend_factor(if matches!(blend, Blend::Additive | Blend::AdditiveMaxAlpha) {
+                vk::BlendFactor::ONE
+            } else {
+                vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+            })
+            .alpha_blend_op(if matches!(blend, Blend::AdditiveMaxAlpha | Blend::Max) {
+                vk::BlendOp::MAX
+            } else {
+                vk::BlendOp::ADD
+            })
             .color_write_mask(vk::ColorComponentFlags::RGBA)
     };
     let glow_slot = desc.color_formats.get(1) == Some(&vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32));
-    let attachment: Vec<_> = desc.color_formats.iter().enumerate().map(|(i, _)| state(if i == 1 && glow_slot { desc.glow_blend } else { desc.blend })).collect();
+    let attachment: Vec<_> = desc
+        .color_formats
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            state(if i == 1 && glow_slot {
+                desc.glow_blend
+            } else {
+                desc.blend
+            })
+        })
+        .collect();
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
@@ -156,7 +190,11 @@ pub fn compute_pipeline(device: &ash::Device, code: &[u8], layout: vk::PipelineL
 /// active (`REQUIRE_FULL_SUBGROUPS`): for shaders written against a 32-bit
 /// ballot. Needs [`crate::device::GpuDevice::compute_subgroups_32`] and a
 /// workgroup X size that is a multiple of 32.
-pub fn compute_pipeline_subgroup32(device: &ash::Device, code: &[u8], layout: vk::PipelineLayout) -> Result<vk::Pipeline> {
+pub fn compute_pipeline_subgroup32(
+    device: &ash::Device,
+    code: &[u8],
+    layout: vk::PipelineLayout,
+) -> Result<vk::Pipeline> {
     let module = shader_module(device, code)?;
     let mut size = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default().required_subgroup_size(32);
     let stage = vk::PipelineShaderStageCreateInfo::default()

@@ -37,7 +37,10 @@
 //! given, bits 40..48 = the reorder tick (0: none), bits 48..64 = the churn
 //! tick (0: no churn).
 
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, Goal, MoveOrder, MovementClass, NavAgent, OrderPoint, TerrainChanged, TerrainEdit, terrain};
+use ae_sdk::nav::{
+    ANY_DEPTH, Body, CELL_SIZE, CostOverlay, Goal, MoveOrder, MovementClass, NavAgent, OrderPoint, TerrainChanged,
+    TerrainEdit, terrain,
+};
 use ae_sdk::{Component, Entity, Run, Spawn, add, despawn, emit, schedule, spatial_radius, system};
 
 /// Neighbours within four body radii, as of tick `tick`.
@@ -72,11 +75,56 @@ pub struct Landed {
 // hovercraft, amphibious), declared here as a game would, with the same
 // values as `ae_nav::nav::water_profiles`.
 ae_sdk::movement_classes![
-    MovementClass { name: "Scout", clearance_cells: 1, max_slope: 135, radius: CELL_SIZE * 0.34, speed: CELL_SIZE * 14.0, min_depth: 0, max_depth: 20, hover: false },
-    MovementClass { name: "Heavy", clearance_cells: 2, max_slope: 95, radius: CELL_SIZE * 0.52, speed: CELL_SIZE * 10.0, min_depth: 0, max_depth: 20, hover: false },
-    MovementClass { name: "Ship", clearance_cells: 2, max_slope: 60, radius: CELL_SIZE * 0.62, speed: CELL_SIZE * 9.0, min_depth: 30, max_depth: ANY_DEPTH, hover: false },
-    MovementClass { name: "Hover", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.40, speed: CELL_SIZE * 13.0, min_depth: 0, max_depth: ANY_DEPTH, hover: true },
-    MovementClass { name: "Amphibious", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.48, speed: CELL_SIZE * 9.0, min_depth: 0, max_depth: ANY_DEPTH, hover: false },
+    MovementClass {
+        name: "Scout",
+        clearance_cells: 1,
+        max_slope: 135,
+        radius: CELL_SIZE * 0.34,
+        speed: CELL_SIZE * 14.0,
+        min_depth: 0,
+        max_depth: 20,
+        hover: false
+    },
+    MovementClass {
+        name: "Heavy",
+        clearance_cells: 2,
+        max_slope: 95,
+        radius: CELL_SIZE * 0.52,
+        speed: CELL_SIZE * 10.0,
+        min_depth: 0,
+        max_depth: 20,
+        hover: false
+    },
+    MovementClass {
+        name: "Ship",
+        clearance_cells: 2,
+        max_slope: 60,
+        radius: CELL_SIZE * 0.62,
+        speed: CELL_SIZE * 9.0,
+        min_depth: 30,
+        max_depth: ANY_DEPTH,
+        hover: false
+    },
+    MovementClass {
+        name: "Hover",
+        clearance_cells: 1,
+        max_slope: 110,
+        radius: CELL_SIZE * 0.40,
+        speed: CELL_SIZE * 13.0,
+        min_depth: 0,
+        max_depth: ANY_DEPTH,
+        hover: true
+    },
+    MovementClass {
+        name: "Amphibious",
+        clearance_cells: 1,
+        max_slope: 110,
+        radius: CELL_SIZE * 0.48,
+        speed: CELL_SIZE * 9.0,
+        min_depth: 0,
+        max_depth: ANY_DEPTH,
+        hover: false
+    },
 ];
 
 const NEIGHBOUR_RADII: f32 = 4.0;
@@ -121,7 +169,11 @@ const REGROUP: u64 = 1 << 40;
 /// Guide points of `reorder`'s route (`kind` 1) or formation (2) around a
 /// goal at `(x, y)`.
 fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
-    if kind == 1 { [(x - 160.0, y + 160.0), (x - 80.0, y + 80.0)] } else { [(x - 96.0, y - 96.0), (x + 96.0, y + 96.0)] }
+    if kind == 1 {
+        [(x - 160.0, y + 160.0), (x - 80.0, y + 80.0)]
+    } else {
+        [(x - 96.0, y - 96.0), (x + 96.0, y + 96.0)]
+    }
 }
 
 #[system(read(Goal), emits(MoveOrder, OrderPoint))]
@@ -143,14 +195,30 @@ fn reorder(run: &Run) {
         }
         // Every unit emits its group's points; the copies agree.
         for (index, (x, y)) in reorder_points(kind, g.x, g.y).into_iter().enumerate() {
-            emit(&OrderPoint { group, index: index as u32, x, y, reserved: 0 });
+            emit(&OrderPoint {
+                group,
+                index: index as u32,
+                x,
+                y,
+                reserved: 0,
+            });
         }
         if kind == 2 {
             // The formation's line runs north-west to south-east; it faces
             // north-east.
-            emit(&OrderPoint { group, index: ae_sdk::nav::order::FACING, x: g.x + 200.0, y: g.y - 200.0, reserved: 0 });
+            emit(&OrderPoint {
+                group,
+                index: ae_sdk::nav::order::FACING,
+                x: g.x + 200.0,
+                y: g.y - 200.0,
+                reserved: 0,
+            });
         }
-        emit(&if kind == 1 { MoveOrder::route(ids[i], g.x, g.y, group) } else { MoveOrder::formation(ids[i], g.x, g.y, group) });
+        emit(&if kind == 1 {
+            MoveOrder::route(ids[i], g.x, g.y, group)
+        } else {
+            MoveOrder::formation(ids[i], g.x, g.y, group)
+        });
     }
 }
 
@@ -158,16 +226,43 @@ fn reorder(run: &Run) {
 /// then rock (rock also sets cost 255, whatever the order).
 fn quake_edits(x: f32, y: f32) -> [TerrainEdit; 2] {
     let (x0, y0, x1, y1) = square(x, y, SLOW_HALF);
-    let slow = TerrainEdit { x0, y0, x1, y1, set: terrain::COST, blocked: 0, height: 0, cost: SLOW_COST };
+    let slow = TerrainEdit {
+        x0,
+        y0,
+        x1,
+        y1,
+        set: terrain::COST,
+        blocked: 0,
+        height: 0,
+        cost: SLOW_COST,
+    };
     let (x0, y0, x1, y1) = square(x, y, ROCK_HALF);
-    let rock = TerrainEdit { x0, y0, x1, y1, set: terrain::BLOCKED, blocked: 1, height: 0, cost: 0 };
+    let rock = TerrainEdit {
+        x0,
+        y0,
+        x1,
+        y1,
+        set: terrain::BLOCKED,
+        blocked: 1,
+        height: 0,
+        cost: 0,
+    };
     [slow, rock]
 }
 
 /// The edit of `quake`'s second tick around world `(x, y)`.
 fn hill_edit(x: f32, y: f32) -> TerrainEdit {
     let (x0, y0, x1, y1) = square(x, y, HILL_HALF);
-    TerrainEdit { x0, y0, x1, y1, set: terrain::HEIGHT, blocked: 0, height: HILL_HEIGHT, cost: 0 }
+    TerrainEdit {
+        x0,
+        y0,
+        x1,
+        y1,
+        set: terrain::HEIGHT,
+        blocked: 0,
+        height: HILL_HEIGHT,
+        cost: 0,
+    }
 }
 
 /// Cells within `half` cells of the cell holding world `(x, y)`.
@@ -208,16 +303,42 @@ fn zones(run: &Run) {
     let at = (run.param() >> 24) & 0xFF;
     let (x0, y0, x1, y1) = ZONE;
     if at != 0 && run.tick() == at {
-        emit(&CostOverlay { id: 1, x0, y0, x1, y1, cost: ZONE_COST, op: ae_sdk::nav::overlay::ADD });
+        emit(&CostOverlay {
+            id: 1,
+            x0,
+            y0,
+            x1,
+            y1,
+            cost: ZONE_COST,
+            op: ae_sdk::nav::overlay::ADD,
+        });
     } else if at != 0 && run.tick() == at + ZONE_TICKS {
-        emit(&CostOverlay { id: 1, x0: 0, y0: 0, x1: 0, y1: 0, cost: 0, op: ae_sdk::nav::overlay::REMOVE });
+        emit(&CostOverlay {
+            id: 1,
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+            cost: 0,
+            op: ae_sdk::nav::overlay::REMOVE,
+        });
     }
 }
 
 #[system(reads_events(TerrainChanged))]
 fn landed(run: &Run) {
     for c in run.events::<TerrainChanged>() {
-        Spawn::new().with(&Landed { version: c.version, tick: run.tick() as u32, x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, flags: c.flags }).submit();
+        Spawn::new()
+            .with(&Landed {
+                version: c.version,
+                tick: run.tick() as u32,
+                x0: c.x0,
+                y0: c.y0,
+                x1: c.x1,
+                y1: c.y1,
+                flags: c.flags,
+            })
+            .submit();
     }
 }
 
@@ -229,7 +350,10 @@ fn crowding(run: &Run) {
         let b = bodies[i];
         let n = spatial_radius(b.x, b.y, b.radius * NEIGHBOUR_RADII, &mut near);
         // The unit itself is always a hit.
-        crowd[i] = Crowd { neighbours: n.saturating_sub(1) as u32, tick: run.tick() as u32 };
+        crowd[i] = Crowd {
+            neighbours: n.saturating_sub(1) as u32,
+            tick: run.tick() as u32,
+        };
     }
 }
 
@@ -242,9 +366,24 @@ fn churn(run: &Run) {
     for i in run.rows() {
         if ids[i].index() % 7 == 0 {
             despawn(ids[i]);
-            Spawn::new().with(&bodies[i]).with(&agents[i]).with(&Replaces { old: ids[i] }).submit();
+            Spawn::new()
+                .with(&bodies[i])
+                .with(&agents[i])
+                .with(&Replaces { old: ids[i] })
+                .submit();
         }
     }
 }
 
-schedule!(host(nav_spawn), orders, quake, reorder, zones, host(nav), host(spatial), crowding, churn, landed);
+schedule!(
+    host(nav_spawn),
+    orders,
+    quake,
+    reorder,
+    zones,
+    host(nav),
+    host(spatial),
+    crowding,
+    churn,
+    landed
+);

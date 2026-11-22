@@ -71,8 +71,14 @@ impl Guest {
     }
 
     pub fn global_i32(&mut self, name: &str) -> Result<i32> {
-        let global = self.instance.get_global(&mut self.store, name).with_context(|| format!("guest does not export {name}"))?;
-        global.get(&mut self.store).i32().with_context(|| format!("{name} is not an i32"))
+        let global = self
+            .instance
+            .get_global(&mut self.store, name)
+            .with_context(|| format!("guest does not export {name}"))?;
+        global
+            .get(&mut self.store)
+            .i32()
+            .with_context(|| format!("{name} is not an i32"))
     }
 
     pub fn alloc(&mut self, bytes: u32) -> Result<u32> {
@@ -86,7 +92,10 @@ impl Guest {
     pub fn adopt_private_stack_and_tls(&mut self, allocator: &mut Guest) -> Result<()> {
         let stack = allocator.alloc(STACK_BYTES)?;
         let top = (stack + STACK_BYTES) & !15;
-        let stack_pointer = self.instance.get_global(&mut self.store, "__stack_pointer").context("no __stack_pointer export")?;
+        let stack_pointer = self
+            .instance
+            .get_global(&mut self.store, "__stack_pointer")
+            .context("no __stack_pointer export")?;
         stack_pointer.set(&mut self.store, Val::I32(top as i32))?;
 
         let size = self.global_i32("__tls_size")? as u32;
@@ -104,7 +113,13 @@ impl Guest {
 /// `count` instances over one new shared memory. Instance 0 runs the
 /// constructors and owns the heap; the rest get private stacks and TLS when
 /// `isolate` is set.
-pub fn spawn_guests(engine: &Engine, module: &Module, count: usize, metering: Metering, isolate: bool) -> Result<(SharedMemory, Vec<Guest>)> {
+pub fn spawn_guests(
+    engine: &Engine,
+    module: &Module,
+    count: usize,
+    metering: Metering,
+    isolate: bool,
+) -> Result<(SharedMemory, Vec<Guest>)> {
     spawn_guests_with(engine, module, count, metering, isolate, |_, _| Ok(()))
 }
 
@@ -148,4 +163,3 @@ pub fn spawn_guests_with(
 pub fn memory_base(memory: &SharedMemory) -> *mut u8 {
     memory.data().as_ptr() as *mut u8
 }
-

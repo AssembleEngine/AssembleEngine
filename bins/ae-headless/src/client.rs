@@ -12,9 +12,9 @@
 //! skirmish game) player P is allyteam P's bot of `ae_bot::SkirmishBot::pair`
 //! instead, sending what it decides the same way.
 
-use super::{Opts, Script};
 use super::replay::orders;
 use super::setup::Setup;
+use super::{Opts, Script};
 use ae_net::{Emulator, Packet, micros};
 use ae_sim::input::{Command, TickBundle};
 use anyhow::{Context, Result};
@@ -45,14 +45,27 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     let workers = o.workers[0];
     let mut rt = setup.runtime(workers, o.range_rows)?;
     let mut world = rt.world_for(param, workers)?;
-    let bot = if o.script == Script::Bot { Some(ae_bot::SkirmishBot::pair(&rt)?.into_iter().nth(player as usize).context("--script bot plays player 0 or 1")?) } else { None };
+    let bot = if o.script == Script::Bot {
+        Some(
+            ae_bot::SkirmishBot::pair(&rt)?
+                .into_iter()
+                .nth(player as usize)
+                .context("--script bot plays player 0 or 1")?,
+        )
+    } else {
+        None
+    };
 
     let socket = UdpSocket::bind("127.0.0.1:0")?;
     socket.set_read_timeout(Some(Duration::from_millis(1)))?;
     let mut net = Emulator::new(o.latency, o.jitter, o.loss, o.seed ^ ((player as u64 + 1) * 0x9E37));
     let epoch = Instant::now();
     let mut buf = vec![0u8; 65536];
-    let hello = Packet::Hello { player, header: h.clone() }.encode();
+    let hello = Packet::Hello {
+        player,
+        header: h.clone(),
+    }
+    .encode();
 
     let mut bundles: BTreeMap<u64, TickBundle> = BTreeMap::new();
     let mut pending: BTreeMap<u64, Vec<Command>> = BTreeMap::new();
@@ -69,7 +82,16 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
     loop {
         // Receive.
         while let Ok((n, _)) = socket.recv_from(&mut buf) {
-            let Ok(Packet::Relay { bundles: bs, taken, echo_us, end: e, desync: d }) = Packet::decode(&buf[..n]) else { continue };
+            let Ok(Packet::Relay {
+                bundles: bs,
+                taken,
+                echo_us,
+                end: e,
+                desync: d,
+            }) = Packet::decode(&buf[..n])
+            else {
+                continue;
+            };
             joined = true;
             for b in bs {
                 if b.tick >= world.tick {
@@ -93,7 +115,12 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
                     bot.commands(&rt, &world, &mut c)?;
                     c.into_iter().take(MAX_ORDERS).collect()
                 } else {
-                    orders(&rt, &world, 16)?.commands.into_iter().filter(|c| c.player == player).take(MAX_ORDERS).collect()
+                    orders(&rt, &world, 16)?
+                        .commands
+                        .into_iter()
+                        .filter(|c| c.player == player)
+                        .take(MAX_ORDERS)
+                        .collect()
                 };
                 if !mine.is_empty() {
                     let delay = ((rtt_ms / 2.0) / (period.as_secs_f64() * 1000.0)).ceil() as u64 + 2;
@@ -106,7 +133,10 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
             if let Some(fault) = &o.inject
                 && let Some(e) = fault.apply(&rt, &mut world)?
             {
-                eprintln!("player {player}: injected a fault in {}.{} of entity {e:#x} after tick {}", fault.component, fault.field, fault.tick);
+                eprintln!(
+                    "player {player}: injected a fault in {}.{} of entity {e:#x} after tick {}",
+                    fault.component, fault.field, fault.tick
+                );
             }
             rt.tick_with(&mut world, workers, &bundle)?;
             if world.tick % h.checkpoint_every == 0 || world.tick == end {
@@ -120,7 +150,14 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
         if last_send.elapsed() >= Duration::from_millis(10) {
             last_send = Instant::now();
             let packet = if joined {
-                Packet::Client { player, inputs: pending.iter().map(|(t, c)| (*t, c.clone())).collect(), want: world.tick, digests: reported.clone(), sent_us: micros(epoch) }.encode()
+                Packet::Client {
+                    player,
+                    inputs: pending.iter().map(|(t, c)| (*t, c.clone())).collect(),
+                    want: world.tick,
+                    digests: reported.clone(),
+                    sent_us: micros(epoch),
+                }
+                .encode()
             } else {
                 hello.clone()
             };
@@ -143,7 +180,11 @@ pub fn run(o: &Opts, relay: &str, player: u32) -> Result<bool> {
         net.sent,
         net.dropped,
         digest.short(),
-        if desync > 0 { format!("; the relay saw a DESYNC at tick {desync}") } else { String::new() }
+        if desync > 0 {
+            format!("; the relay saw a DESYNC at tick {desync}")
+        } else {
+            String::new()
+        }
     );
     Ok(desync == 0)
 }

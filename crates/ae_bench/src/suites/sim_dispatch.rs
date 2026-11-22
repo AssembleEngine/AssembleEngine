@@ -85,18 +85,12 @@ pub fn run(options: &Options) -> Result<Report> {
                 None => {
                     report.counter(&format!("{tag}/commands"), counts[0], "");
                     report.counter(&format!("{tag}/events"), counts[1], "");
-                    report.info(
-                        &format!("{tag}/digest_low32"),
-                        digest as u64 & 0xFFFF_FFFF,
-                        "",
-                    );
+                    report.info(&format!("{tag}/digest_low32"), digest as u64 & 0xFFFF_FFFF, "");
                     first = Some((w, digest, counts));
                 }
                 Some((w0, d0, c0)) => {
                     if digest != *d0 {
-                        bail!(
-                            "sandbox digest differs: {d0:#034x} at {w0} worker(s), {digest:#034x} at {w}"
-                        );
+                        bail!("sandbox digest differs: {d0:#034x} at {w0} worker(s), {digest:#034x} at {w}");
                     }
                     if counts[..2] != c0[..2] {
                         bail!("sandbox command/event counts differ between {w0} and {w} worker(s)");

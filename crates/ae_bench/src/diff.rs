@@ -13,7 +13,10 @@ pub struct Thresholds {
 
 impl Default for Thresholds {
     fn default() -> Self {
-        Self { time: 0.10, counter: 0.0 }
+        Self {
+            time: 0.10,
+            counter: 0.0,
+        }
     }
 }
 
@@ -60,13 +63,19 @@ impl Diff {
     }
 
     pub fn print(&self, show_unchanged: bool) {
-        println!("{:<58} {:>14} {:>14} {:>9}  verdict", "metric", "base", "head", "change");
+        println!(
+            "{:<58} {:>14} {:>14} {:>9}  verdict",
+            "metric", "base", "head", "change"
+        );
         for row in &self.rows {
             if row.verdict == Verdict::Same && !show_unchanged {
                 continue;
             }
             let value = |v: Option<f64>| v.map(|v| format_value(v, &row.unit)).unwrap_or_else(|| "-".to_string());
-            let change = row.change().map(|c| format!("{:+.1}%", c * 100.0)).unwrap_or_else(|| "-".to_string());
+            let change = row
+                .change()
+                .map(|c| format!("{:+.1}%", c * 100.0))
+                .unwrap_or_else(|| "-".to_string());
             let verdict = match row.verdict {
                 Verdict::Same => "same",
                 Verdict::Improved => "improved",
@@ -76,10 +85,22 @@ impl Diff {
                 Verdict::Removed => "removed",
                 Verdict::NotComparable => "other machine",
             };
-            println!("{:<58} {:>14} {:>14} {:>9}  {}", format!("{}/{}", row.suite, row.metric), value(row.base), value(row.head), change, verdict);
+            println!(
+                "{:<58} {:>14} {:>14} {:>9}  {}",
+                format!("{}/{}", row.suite, row.metric),
+                value(row.base),
+                value(row.head),
+                change,
+                verdict
+            );
         }
         let same = self.rows.iter().filter(|r| r.verdict == Verdict::Same).count();
-        println!("{} metrics, {} unchanged, {} regressed", self.rows.len(), same, self.regressions());
+        println!(
+            "{} metrics, {} unchanged, {} regressed",
+            self.rows.len(),
+            same,
+            self.regressions()
+        );
     }
 }
 
@@ -98,7 +119,13 @@ pub fn diff(base: &[Report], head: &[Report], thresholds: Thresholds) -> Diff {
             for r in &report.records {
                 map.insert(
                     (report.suite.clone(), r.metric.clone()),
-                    Entry { kind: r.kind, unit: r.unit.clone(), value: r.value, machine: report.machine.clone(), tolerance: r.tolerance },
+                    Entry {
+                        kind: r.kind,
+                        unit: r.unit.clone(),
+                        value: r.value,
+                        machine: report.machine.clone(),
+                        tolerance: r.tolerance,
+                    },
                 );
             }
         }
@@ -119,20 +146,44 @@ pub fn diff(base: &[Report], head: &[Report], thresholds: Thresholds) -> Diff {
                 (Some(_), None) => Verdict::Removed,
                 (Some(b), Some(h)) => {
                     // A record's own tolerance widens the global one (either side's).
-                    let own = b.tolerance.into_iter().chain(h.tolerance).fold(thresholds.time, f64::max);
-                    judge(b.kind, b.value, h.value, b.machine == h.machine, Thresholds { time: own, ..thresholds })
+                    let own = b
+                        .tolerance
+                        .into_iter()
+                        .chain(h.tolerance)
+                        .fold(thresholds.time, f64::max);
+                    judge(
+                        b.kind,
+                        b.value,
+                        h.value,
+                        b.machine == h.machine,
+                        Thresholds {
+                            time: own,
+                            ..thresholds
+                        },
+                    )
                 }
                 (None, None) => unreachable!(),
             };
             let unit = h.or(b).map(|e| e.unit.clone()).unwrap_or_default();
-            Row { suite: key.0.clone(), metric: key.1.clone(), unit, base: b.map(|e| e.value), head: h.map(|e| e.value), verdict }
+            Row {
+                suite: key.0.clone(),
+                metric: key.1.clone(),
+                unit,
+                base: b.map(|e| e.value),
+                head: h.map(|e| e.value),
+                verdict,
+            }
         })
         .collect();
     Diff { rows }
 }
 
 fn judge(kind: Kind, base: f64, head: f64, same_machine: bool, thresholds: Thresholds) -> Verdict {
-    let ratio = if base == 0.0 { if head == 0.0 { 1.0 } else { f64::INFINITY } } else { head / base };
+    let ratio = if base == 0.0 {
+        if head == 0.0 { 1.0 } else { f64::INFINITY }
+    } else {
+        head / base
+    };
     match kind {
         Kind::Info if head != base => Verdict::WorkloadChanged,
         Kind::Info => Verdict::Same,
@@ -158,19 +209,50 @@ mod tests {
             machine: machine.into(),
             records: records
                 .iter()
-                .map(|(m, kind, value)| Record { metric: m.to_string(), kind: *kind, value: *value, unit: "ns".into(), spread: 0.0, tolerance: None })
+                .map(|(m, kind, value)| Record {
+                    metric: m.to_string(),
+                    kind: *kind,
+                    value: *value,
+                    unit: "ns".into(),
+                    spread: 0.0,
+                    tolerance: None,
+                })
                 .collect(),
         }
     }
 
     fn verdicts(base: Report, head: Report) -> Vec<(String, Verdict)> {
-        diff(&[base], &[head], Thresholds::default()).rows.into_iter().map(|r| (r.metric, r.verdict)).collect()
+        diff(&[base], &[head], Thresholds::default())
+            .rows
+            .into_iter()
+            .map(|r| (r.metric, r.verdict))
+            .collect()
     }
 
     #[test]
     fn times_use_a_tolerance_and_counters_do_not() {
-        let base = report("m", &[("t_noise", Kind::Time, 100.0), ("t_slow", Kind::Time, 100.0), ("t_fast", Kind::Time, 100.0), ("c_up", Kind::Counter, 1000.0), ("c_down", Kind::Counter, 1000.0), ("c_same", Kind::Counter, 5.0)]);
-        let head = report("m", &[("t_noise", Kind::Time, 108.0), ("t_slow", Kind::Time, 120.0), ("t_fast", Kind::Time, 70.0), ("c_up", Kind::Counter, 1001.0), ("c_down", Kind::Counter, 900.0), ("c_same", Kind::Counter, 5.0)]);
+        let base = report(
+            "m",
+            &[
+                ("t_noise", Kind::Time, 100.0),
+                ("t_slow", Kind::Time, 100.0),
+                ("t_fast", Kind::Time, 100.0),
+                ("c_up", Kind::Counter, 1000.0),
+                ("c_down", Kind::Counter, 1000.0),
+                ("c_same", Kind::Counter, 5.0),
+            ],
+        );
+        let head = report(
+            "m",
+            &[
+                ("t_noise", Kind::Time, 108.0),
+                ("t_slow", Kind::Time, 120.0),
+                ("t_fast", Kind::Time, 70.0),
+                ("c_up", Kind::Counter, 1001.0),
+                ("c_down", Kind::Counter, 900.0),
+                ("c_same", Kind::Counter, 5.0),
+            ],
+        );
         let v = verdicts(base, head);
         let get = |name: &str| v.iter().find(|(m, _)| m == name).unwrap().1;
         assert_eq!(get("t_noise"), Verdict::Same);
@@ -200,7 +282,10 @@ mod tests {
         let base = report("a", &[("t", Kind::Time, 100.0), ("c", Kind::Counter, 10.0)]);
         let head = report("b", &[("t", Kind::Time, 500.0), ("c", Kind::Counter, 11.0)]);
         let result = diff(&[base], &[head], Thresholds::default());
-        assert_eq!(result.rows.iter().find(|r| r.metric == "t").unwrap().verdict, Verdict::NotComparable);
+        assert_eq!(
+            result.rows.iter().find(|r| r.metric == "t").unwrap().verdict,
+            Verdict::NotComparable
+        );
         assert_eq!(result.regressions(), 1);
     }
 

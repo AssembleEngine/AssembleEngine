@@ -153,35 +153,69 @@ impl Tileset {
     /// Whether the textures and table are consistent.
     pub fn validate(&self) -> Result<(), String> {
         if !self.size.is_power_of_two() || self.size < 4 {
-            return Err(format!("tileset `{}`: size {} is not a power of two of at least 4", self.name, self.size));
+            return Err(format!(
+                "tileset `{}`: size {} is not a power of two of at least 4",
+                self.name, self.size
+            ));
         }
         if self.layers.is_empty() || self.layers.len() > MAX_LAYERS {
-            return Err(format!("tileset `{}`: {} layers (1..={MAX_LAYERS})", self.name, self.layers.len()));
+            return Err(format!(
+                "tileset `{}`: {} layers (1..={MAX_LAYERS})",
+                self.name,
+                self.layers.len()
+            ));
         }
         let side = self.size as usize;
         for l in &self.layers {
             let s = &l.settings;
             if l.albedo.len() != side * side * 4 || l.normal.len() != side * side * 2 {
-                return Err(format!("layer `{}`: {} albedo and {} normal bytes, not {side}² texels", s.name, l.albedo.len(), l.normal.len()));
+                return Err(format!(
+                    "layer `{}`: {} albedo and {} normal bytes, not {side}² texels",
+                    s.name,
+                    l.albedo.len(),
+                    l.normal.len()
+                ));
             }
-            if !positive(s.tile_size) || !(0.0..=4.0).contains(&s.normal_strength) || !(0.0..=1.0).contains(&s.roughness) {
-                return Err(format!("layer `{}`: tile size {}, normal strength {} or roughness {} out of range", s.name, s.tile_size, s.normal_strength, s.roughness));
+            if !positive(s.tile_size)
+                || !(0.0..=4.0).contains(&s.normal_strength)
+                || !(0.0..=1.0).contains(&s.roughness)
+            {
+                return Err(format!(
+                    "layer `{}`: tile size {}, normal strength {} or roughness {} out of range",
+                    s.name, s.tile_size, s.normal_strength, s.roughness
+                ));
             }
         }
         for (id, m) in self.materials.iter().enumerate() {
             if m.ground as usize >= self.layers.len() || m.cliff as usize >= self.layers.len() {
-                return Err(format!("tileset `{}`: material {id} uses layer {} / {} of {}", self.name, m.ground, m.cliff, self.layers.len()));
+                return Err(format!(
+                    "tileset `{}`: material {id} uses layer {} / {} of {}",
+                    self.name,
+                    m.ground,
+                    m.cliff,
+                    self.layers.len()
+                ));
             }
         }
         let (a, b) = self.cliff_slope;
-        if !(0.0..=4.0).contains(&self.warp.0) || !positive(self.warp.1) || !(0.0..=0.9).contains(&self.macro_variation.0) || !positive(self.macro_variation.1) {
+        if !(0.0..=4.0).contains(&self.warp.0)
+            || !positive(self.warp.1)
+            || !(0.0..=0.9).contains(&self.macro_variation.0)
+            || !positive(self.macro_variation.1)
+        {
             return Err(format!("tileset `{}`: warp {:?} out of range", self.name, self.warp));
         }
         if !(0.0..=1.0).contains(&self.anti_tiling) {
-            return Err(format!("tileset `{}`: anti-tiling degree {} out of range", self.name, self.anti_tiling));
+            return Err(format!(
+                "tileset `{}`: anti-tiling degree {} out of range",
+                self.name, self.anti_tiling
+            ));
         }
         if !(0.0 <= a && a < b && b <= 1.0) || !positive(self.blend_depth) {
-            return Err(format!("tileset `{}`: cliff slope {a}..{b} or blend depth {} out of range", self.name, self.blend_depth));
+            return Err(format!(
+                "tileset `{}`: cliff slope {a}..{b} or blend depth {} out of range",
+                self.name, self.blend_depth
+            ));
         }
         Ok(())
     }
@@ -202,8 +236,18 @@ impl Tileset {
         for (slot, l) in u.roughness.iter_mut().zip(&self.layers) {
             *slot = [l.settings.roughness, 0.0, 0.0, 0.0];
         }
-        u.params = [self.cliff_slope.0, self.cliff_slope.1, self.blend_depth, self.detail_tilt];
-        u.warp = [self.warp.0, 1.0 / self.warp.1, self.macro_variation.0, 1.0 / self.macro_variation.1];
+        u.params = [
+            self.cliff_slope.0,
+            self.cliff_slope.1,
+            self.blend_depth,
+            self.detail_tilt,
+        ];
+        u.warp = [
+            self.warp.0,
+            1.0 / self.warp.1,
+            self.macro_variation.0,
+            1.0 / self.macro_variation.1,
+        ];
         u.anti_tiling = [self.anti_tiling, 0.0, 0.0, 0.0];
         u
     }
@@ -211,7 +255,10 @@ impl Tileset {
     /// Texture bytes on the GPU (both arrays, every mip: a third more than
     /// mip 0).
     pub fn bytes(&self) -> usize {
-        self.layers.iter().map(|l| (l.albedo.len() + l.normal.len()) * 4 / 3).sum()
+        self.layers
+            .iter()
+            .map(|l| (l.albedo.len() + l.normal.len()) * 4 / 3)
+            .sum()
     }
 }
 
@@ -265,7 +312,8 @@ pub const NAMES: [&str; 2] = ["temperate", "desert"];
 // ---------------------------------------------------------------------------
 
 fn hash(x: i32, y: i32, seed: u32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
+    let mut h =
+        (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5bd1_e995);
     h ^ (h >> 15)
@@ -336,7 +384,11 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 fn scale3(a: [f32; 3], s: f32) -> [f32; 3] {
@@ -351,13 +403,34 @@ fn scale3(a: [f32; 3], s: f32) -> [f32; 3] {
 /// coordinates `(u, v)`.
 #[derive(Clone, Copy, Debug)]
 enum Recipe {
-    Grass { base: [f32; 3], tip: [f32; 3] },
+    Grass {
+        base: [f32; 3],
+        tip: [f32; 3],
+    },
     Forest,
-    Sand { light: [f32; 3], dark: [f32; 3], ripples: f32 },
-    Rock { light: [f32; 3], dark: [f32; 3], strata: f32 },
-    Pebbles { stone: [f32; 3], fill: [f32; 3], cells: i32 },
-    Mud { wet: [f32; 3], dry: [f32; 3] },
-    Cracked { clay: [f32; 3], crack: [f32; 3] },
+    Sand {
+        light: [f32; 3],
+        dark: [f32; 3],
+        ripples: f32,
+    },
+    Rock {
+        light: [f32; 3],
+        dark: [f32; 3],
+        strata: f32,
+    },
+    Pebbles {
+        stone: [f32; 3],
+        fill: [f32; 3],
+        cells: i32,
+    },
+    Mud {
+        wet: [f32; 3],
+        dry: [f32; 3],
+    },
+    Cracked {
+        clay: [f32; 3],
+        crack: [f32; 3],
+    },
 }
 
 fn sample(recipe: Recipe, u: f32, v: f32, seed: u32) -> (f32, [f32; 3]) {
@@ -391,7 +464,11 @@ fn sample(recipe: Recipe, u: f32, v: f32, seed: u32) -> (f32, [f32; 3]) {
             let crack = smooth(0.0, 0.08, d2 - d1);
             let bands = (std::f32::consts::TAU * (v * strata + fbm(u, v, 2, 2, 0.5, seed + 2) * 0.6)).sin() * 0.5 + 0.5;
             let h = (ridged * 0.6 + bands * 0.15 + 0.25 * unit(id)) * (0.35 + 0.65 * crack);
-            let col = mix3(dark, light, (ridged * 0.5 + bands * 0.3 + unit(id) * 0.2).clamp(0.0, 1.0));
+            let col = mix3(
+                dark,
+                light,
+                (ridged * 0.5 + bands * 0.3 + unit(id) * 0.2).clamp(0.0, 1.0),
+            );
             (h, scale3(col, 0.55 + 0.45 * crack))
         }
         Recipe::Pebbles { stone, fill, cells } => {
@@ -401,7 +478,11 @@ fn sample(recipe: Recipe, u: f32, v: f32, seed: u32) -> (f32, [f32; 3]) {
             let is_stone = smooth(0.05, 0.2, stone_h);
             let fine = fbm(u, v, 32, 2, 0.5, seed + 1) * 0.5 + 0.5;
             let h = stone_h * (0.7 + 0.3 * unit(id)) * 0.85 + fine * 0.15;
-            let col = mix3(scale3(fill, 0.8 + 0.4 * fine), scale3(stone, 0.75 + 0.5 * unit(id)), is_stone);
+            let col = mix3(
+                scale3(fill, 0.8 + 0.4 * fine),
+                scale3(stone, 0.75 + 0.5 * unit(id)),
+                is_stone,
+            );
             (h, col)
         }
         Recipe::Mud { wet, dry } => {
@@ -422,13 +503,21 @@ fn sample(recipe: Recipe, u: f32, v: f32, seed: u32) -> (f32, [f32; 3]) {
 
 fn srgb_encode(c: f32) -> u8 {
     let c = c.clamp(0.0, 1.0);
-    let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
     (s * 255.0).round() as u8
 }
 
 fn srgb_decode(b: u8) -> f32 {
     let s = b as f32 / 255.0;
-    if s <= 0.040_45 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    if s <= 0.040_45 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn unorm(x: f32) -> u8 {
@@ -449,13 +538,22 @@ fn generate(recipe: Recipe, size: u32, seed: u32, bump: f32) -> (Vec<u8>, Vec<u8
     let threads = std::thread::available_parallelism().map_or(4, |t| t.get()).min(n);
     let rows = n.div_ceil(threads);
     std::thread::scope(|s| {
-        for (chunk, (hs, al)) in heights.chunks_mut(rows * n).zip(albedo.chunks_mut(rows * n * 4)).enumerate() {
+        for (chunk, (hs, al)) in heights
+            .chunks_mut(rows * n)
+            .zip(albedo.chunks_mut(rows * n * 4))
+            .enumerate()
+        {
             s.spawn(move || {
                 for (i, h) in hs.iter_mut().enumerate() {
                     let (x, y) = (i % n, chunk * rows + i / n);
                     let (height, col) = sample(recipe, (x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32, seed);
                     *h = height.clamp(0.0, 1.0);
-                    al[i * 4..i * 4 + 4].copy_from_slice(&[srgb_encode(col[0]), srgb_encode(col[1]), srgb_encode(col[2]), (*h * 255.0).round() as u8]);
+                    al[i * 4..i * 4 + 4].copy_from_slice(&[
+                        srgb_encode(col[0]),
+                        srgb_encode(col[1]),
+                        srgb_encode(col[2]),
+                        (*h * 255.0).round() as u8,
+                    ]);
                 }
             });
         }
@@ -478,9 +576,29 @@ fn generate(recipe: Recipe, size: u32, seed: u32, bump: f32) -> (Vec<u8>, Vec<u8
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layer(name: &str, recipe: Recipe, size: u32, seed: u32, tile_size: f32, bump: f32, projection: Projection, directional: bool) -> Layer {
+fn layer(
+    name: &str,
+    recipe: Recipe,
+    size: u32,
+    seed: u32,
+    tile_size: f32,
+    bump: f32,
+    projection: Projection,
+    directional: bool,
+) -> Layer {
     let (albedo, normal) = generate(recipe, size, seed, bump);
-    Layer { settings: LayerSettings { name: name.into(), tile_size, normal_strength: 1.0, roughness: 0.85, projection, directional }, albedo, normal }
+    Layer {
+        settings: LayerSettings {
+            name: name.into(),
+            tile_size,
+            normal_strength: 1.0,
+            roughness: 0.85,
+            projection,
+            directional,
+        },
+        albedo,
+        normal,
+    }
 }
 
 /// The per-layer roughness of a tileset, in its layer order (the sets below
@@ -495,13 +613,38 @@ fn roughness(mut t: Tileset, values: &[f32]) -> Tileset {
     t
 }
 
-fn build(name: &str, size: u32, specs: Vec<(&str, Recipe, f32, f32, Projection, bool)>, materials: [MaterialLayers; MATERIAL_SLOTS]) -> Tileset {
+fn build(
+    name: &str,
+    size: u32,
+    specs: Vec<(&str, Recipe, f32, f32, Projection, bool)>,
+    materials: [MaterialLayers; MATERIAL_SLOTS],
+) -> Tileset {
     assert!(size.is_power_of_two() && size >= 4, "tileset size {size}");
     let layers = std::thread::scope(|s| {
-        let handles: Vec<_> = specs.iter().enumerate().map(|(i, &(n, r, tile, bump, p, a))| s.spawn(move || layer(n, r, size, 0x5eed + i as u32 * 131, tile, bump, p, a))).collect();
-        handles.into_iter().map(|h| h.join().expect("layer generation")).collect()
+        let handles: Vec<_> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, &(n, r, tile, bump, p, a))| {
+                s.spawn(move || layer(n, r, size, 0x5eed + i as u32 * 131, tile, bump, p, a))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("layer generation"))
+            .collect()
     });
-    let t = Tileset { name: name.into(), size, layers, materials, anti_tiling: 1.0, cliff_slope: (0.18, 0.42), blend_depth: 0.22, detail_tilt: 0.35, warp: (2.0, 40.0), macro_variation: (0.22, 150.0) };
+    let t = Tileset {
+        name: name.into(),
+        size,
+        layers,
+        materials,
+        anti_tiling: 1.0,
+        cliff_slope: (0.18, 0.42),
+        blend_depth: 0.22,
+        detail_tilt: 0.35,
+        warp: (2.0, 40.0),
+        macro_variation: (0.22, 150.0),
+    };
     debug_assert_eq!(t.validate(), Ok(()));
     t
 }
@@ -516,16 +659,88 @@ const fn m(ground: u8, cliff: u8) -> MaterialLayers {
 pub fn temperate(size: u32) -> Tileset {
     use Projection::*;
     let specs = vec![
-        ("grass", Recipe::Grass { base: [0.08, 0.14, 0.03], tip: [0.20, 0.26, 0.06] }, 24.0, 1.0, ByOrientation, false),
+        (
+            "grass",
+            Recipe::Grass {
+                base: [0.08, 0.14, 0.03],
+                tip: [0.20, 0.26, 0.06],
+            },
+            24.0,
+            1.0,
+            ByOrientation,
+            false,
+        ),
         ("forest floor", Recipe::Forest, 20.0, 1.2, ByOrientation, false),
-        ("sand", Recipe::Sand { light: [0.62, 0.52, 0.33], dark: [0.42, 0.34, 0.20], ripples: 9.0 }, 32.0, 0.8, ByOrientation, true),
-        ("rock", Recipe::Rock { light: [0.33, 0.31, 0.29], dark: [0.12, 0.11, 0.10], strata: 5.0 }, 48.0, 2.0, ByOrientation, true),
-        ("river bed", Recipe::Pebbles { stone: [0.30, 0.28, 0.24], fill: [0.16, 0.14, 0.10], cells: 12 }, 16.0, 1.5, ByOrientation, false),
-        ("gravel", Recipe::Pebbles { stone: [0.38, 0.35, 0.31], fill: [0.25, 0.22, 0.18], cells: 22 }, 12.0, 1.0, ByOrientation, false),
-        ("mud", Recipe::Mud { wet: [0.07, 0.05, 0.03], dry: [0.20, 0.14, 0.08] }, 20.0, 2.5, ByOrientation, false),
+        (
+            "sand",
+            Recipe::Sand {
+                light: [0.62, 0.52, 0.33],
+                dark: [0.42, 0.34, 0.20],
+                ripples: 9.0,
+            },
+            32.0,
+            0.8,
+            ByOrientation,
+            true,
+        ),
+        (
+            "rock",
+            Recipe::Rock {
+                light: [0.33, 0.31, 0.29],
+                dark: [0.12, 0.11, 0.10],
+                strata: 5.0,
+            },
+            48.0,
+            2.0,
+            ByOrientation,
+            true,
+        ),
+        (
+            "river bed",
+            Recipe::Pebbles {
+                stone: [0.30, 0.28, 0.24],
+                fill: [0.16, 0.14, 0.10],
+                cells: 12,
+            },
+            16.0,
+            1.5,
+            ByOrientation,
+            false,
+        ),
+        (
+            "gravel",
+            Recipe::Pebbles {
+                stone: [0.38, 0.35, 0.31],
+                fill: [0.25, 0.22, 0.18],
+                cells: 22,
+            },
+            12.0,
+            1.0,
+            ByOrientation,
+            false,
+        ),
+        (
+            "mud",
+            Recipe::Mud {
+                wet: [0.07, 0.05, 0.03],
+                dry: [0.20, 0.14, 0.08],
+            },
+            20.0,
+            2.5,
+            ByOrientation,
+            false,
+        ),
     ];
     // grass, forest floor, sand, rock, river bed, gravel, mud
-    roughness(build("temperate", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)]), &[0.92, 0.95, 0.75, 0.52, 0.45, 0.82, 0.48])
+    roughness(
+        build(
+            "temperate",
+            size,
+            specs,
+            [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)],
+        ),
+        &[0.92, 0.95, 0.75, 0.52, 0.45, 0.82, 0.48],
+    )
 }
 
 /// Dry scrub, dark scrub, dune sand, red rock (triplanar), cracked clay
@@ -533,16 +748,97 @@ pub fn temperate(size: u32) -> Tileset {
 pub fn desert(size: u32) -> Tileset {
     use Projection::*;
     let specs = vec![
-        ("dry scrub", Recipe::Grass { base: [0.30, 0.24, 0.12], tip: [0.42, 0.36, 0.18] }, 24.0, 0.9, ByOrientation, false),
-        ("dark scrub", Recipe::Grass { base: [0.14, 0.13, 0.06], tip: [0.28, 0.24, 0.10] }, 20.0, 1.1, ByOrientation, false),
-        ("dune sand", Recipe::Sand { light: [0.78, 0.55, 0.30], dark: [0.55, 0.36, 0.18], ripples: 14.0 }, 40.0, 0.9, ByOrientation, true),
-        ("red rock", Recipe::Rock { light: [0.55, 0.28, 0.15], dark: [0.22, 0.10, 0.06], strata: 9.0 }, 56.0, 2.2, Triplanar, true),
-        ("cracked clay", Recipe::Cracked { clay: [0.50, 0.38, 0.26], crack: [0.18, 0.12, 0.08] }, 18.0, 1.4, ByOrientation, false),
-        ("gravel", Recipe::Pebbles { stone: [0.45, 0.33, 0.24], fill: [0.36, 0.26, 0.17], cells: 22 }, 12.0, 1.0, ByOrientation, false),
-        ("salt pan", Recipe::Cracked { clay: [0.40, 0.36, 0.30], crack: [0.24, 0.20, 0.15] }, 26.0, 0.6, ByOrientation, false),
+        (
+            "dry scrub",
+            Recipe::Grass {
+                base: [0.30, 0.24, 0.12],
+                tip: [0.42, 0.36, 0.18],
+            },
+            24.0,
+            0.9,
+            ByOrientation,
+            false,
+        ),
+        (
+            "dark scrub",
+            Recipe::Grass {
+                base: [0.14, 0.13, 0.06],
+                tip: [0.28, 0.24, 0.10],
+            },
+            20.0,
+            1.1,
+            ByOrientation,
+            false,
+        ),
+        (
+            "dune sand",
+            Recipe::Sand {
+                light: [0.78, 0.55, 0.30],
+                dark: [0.55, 0.36, 0.18],
+                ripples: 14.0,
+            },
+            40.0,
+            0.9,
+            ByOrientation,
+            true,
+        ),
+        (
+            "red rock",
+            Recipe::Rock {
+                light: [0.55, 0.28, 0.15],
+                dark: [0.22, 0.10, 0.06],
+                strata: 9.0,
+            },
+            56.0,
+            2.2,
+            Triplanar,
+            true,
+        ),
+        (
+            "cracked clay",
+            Recipe::Cracked {
+                clay: [0.50, 0.38, 0.26],
+                crack: [0.18, 0.12, 0.08],
+            },
+            18.0,
+            1.4,
+            ByOrientation,
+            false,
+        ),
+        (
+            "gravel",
+            Recipe::Pebbles {
+                stone: [0.45, 0.33, 0.24],
+                fill: [0.36, 0.26, 0.17],
+                cells: 22,
+            },
+            12.0,
+            1.0,
+            ByOrientation,
+            false,
+        ),
+        (
+            "salt pan",
+            Recipe::Cracked {
+                clay: [0.40, 0.36, 0.30],
+                crack: [0.24, 0.20, 0.15],
+            },
+            26.0,
+            0.6,
+            ByOrientation,
+            false,
+        ),
     ];
     // dry scrub, dark scrub, dune sand, red rock, cracked clay, gravel, salt
-    roughness(build("desert", size, specs, [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)]), &[0.92, 0.95, 0.78, 0.50, 0.68, 0.82, 0.62])
+    roughness(
+        build(
+            "desert",
+            size,
+            specs,
+            [m(0, 3), m(1, 3), m(2, 3), m(3, 3), m(4, 3), m(5, 3), m(6, 3), m(0, 3)],
+        ),
+        &[0.92, 0.95, 0.78, 0.50, 0.68, 0.82, 0.62],
+    )
 }
 
 #[cfg(test)]
@@ -556,9 +852,17 @@ mod tests {
         let (mut inner, mut edge) = (0.0, 0.0);
         for i in 0..side {
             for j in 0..side - 1 {
-                inner += if vertical { (at(i, j) - at(i, j + 1)).abs() } else { (at(j, i) - at(j + 1, i)).abs() };
+                inner += if vertical {
+                    (at(i, j) - at(i, j + 1)).abs()
+                } else {
+                    (at(j, i) - at(j + 1, i)).abs()
+                };
             }
-            edge += if vertical { (at(i, side - 1) - at(i, 0)).abs() } else { (at(side - 1, i) - at(0, i)).abs() };
+            edge += if vertical {
+                (at(i, side - 1) - at(i, 0)).abs()
+            } else {
+                (at(side - 1, i) - at(0, i)).abs()
+            };
         }
         (inner / (side * (side - 1)) as f64, edge / side as f64)
     }
@@ -583,7 +887,12 @@ mod tests {
                     for c in channels {
                         for vertical in [false, true] {
                             let (inner, edge) = neighbour_diffs(img, 128, comps, c, vertical);
-                            assert!(edge <= inner * 2.5 + 1.0, "{name} `{}` channel {c} ({}): edge step {edge:.2} vs inside {inner:.2}", l.settings.name, if vertical { "v" } else { "u" });
+                            assert!(
+                                edge <= inner * 2.5 + 1.0,
+                                "{name} `{}` channel {c} ({}): edge step {edge:.2} vs inside {inner:.2}",
+                                l.settings.name,
+                                if vertical { "v" } else { "u" }
+                            );
                         }
                     }
                 }
@@ -591,7 +900,11 @@ mod tests {
                 let h: Vec<u8> = l.albedo.chunks(4).map(|p| p[3]).collect();
                 let (lo, hi) = (*h.iter().min().unwrap(), *h.iter().max().unwrap());
                 assert!(hi - lo > 80, "{name} `{}`: heights {lo}..{hi}", l.settings.name);
-                let tilt = l.normal.chunks(2).map(|p| snorm(p[0]).abs() + snorm(p[1]).abs()).fold(0.0f32, f32::max);
+                let tilt = l
+                    .normal
+                    .chunks(2)
+                    .map(|p| snorm(p[0]).abs() + snorm(p[1]).abs())
+                    .fold(0.0f32, f32::max);
                 assert!(tilt > 0.2, "{name} `{}`: normals tilt", l.settings.name);
                 for p in l.normal.chunks(2) {
                     let (x, y) = (snorm(p[0]), snorm(p[1]));
@@ -633,7 +946,11 @@ mod tests {
         assert_eq!(u.materials[4], [4, 3, 0, 0]);
         assert_eq!(u.layers[0][0], 1.0 / 24.0);
         assert_eq!(u.roughness[0][0], 0.92);
-        assert_eq!(desert(16).ubo().layers[3][2], 3.0, "red rock is triplanar and directional");
+        assert_eq!(
+            desert(16).ubo().layers[3][2],
+            3.0,
+            "red rock is triplanar and directional"
+        );
         assert_eq!(desert(16).ubo().roughness[3][0], 0.50);
     }
 

@@ -97,7 +97,13 @@ struct World {
 
 impl World {
     fn new(seed: u64, n: usize) -> Self {
-        let mut w = World { units: Vec::new(), rng: Rng(seed), serial: 0, generation: BTreeMap::new(), free: Vec::new() };
+        let mut w = World {
+            units: Vec::new(),
+            rng: Rng(seed),
+            serial: 0,
+            generation: BTreeMap::new(),
+            free: Vec::new(),
+        };
         for i in 0..n as u32 {
             w.free.push(i);
         }
@@ -120,7 +126,13 @@ impl World {
             ally,
             los: 60.0 + r.f(200.0),
             radar: if r.below(4) == 0 { 400.0 + r.f(400.0) } else { 0.0 },
-            rest: [self.serial, r.below(100) as u32, 7000 + r.below(100) as u32, 9000 + r.below(100) as u32, r.below(10) as u32],
+            rest: [
+                self.serial,
+                r.below(100) as u32,
+                7000 + r.below(100) as u32,
+                9000 + r.below(100) as u32,
+                r.below(10) as u32,
+            ],
             mobile: r.below(3) != 0,
         };
         self.units.push(unit);
@@ -167,7 +179,15 @@ struct Memory {
 }
 
 fn words(u: &Unit) -> [u32; 7] {
-    [u.x.to_bits(), u.y.to_bits(), u.rest[0], u.rest[1], u.rest[2], u.rest[3], u.rest[4]]
+    [
+        u.x.to_bits(),
+        u.y.to_bits(),
+        u.rest[0],
+        u.rest[1],
+        u.rest[2],
+        u.rest[3],
+        u.rest[4],
+    ]
 }
 
 fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
@@ -175,7 +195,13 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
     if ghosting {
         fields[6].1 = ViewClass::Ghost;
     }
-    let spec = ViewSpec { fields, x: X, y: Y, wobble: WOBBLE, wobble_ticks: 10 };
+    let spec = ViewSpec {
+        fields,
+        x: X,
+        y: Y,
+        wobble: WOBBLE,
+        wobble_ticks: 10,
+    };
     let grid = SensorGrid::new(EXTENT, EXTENT, CELL);
     let mut world = World::new(seed, 300);
     let mut observers = [Observer::new(0, seed ^ 0xA), Observer::new(1, seed ^ 0xB)];
@@ -188,7 +214,16 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
         let allies: Vec<u32> = u.iter().map(|u| u.ally).collect();
         let (los, radar): (Vec<f32>, Vec<f32>) = u.iter().map(|u| (u.los, u.radar)).unzip();
         let mut coverage = Coverage::new(grid, 3);
-        coverage.stamp(&Sensors { x: &xs, y: &ys, ally: &allies, los: &los, radar: &radar }, false);
+        coverage.stamp(
+            &Sensors {
+                x: &xs,
+                y: &ys,
+                ally: &allies,
+                los: &los,
+                radar: &radar,
+            },
+            false,
+        );
         let entities: Vec<u64> = u.iter().map(|u| u.id).collect();
         let columns: Vec<Vec<u32>> = (0..7).map(|f| u.iter().map(|u| words(u)[f]).collect()).collect();
         let column_refs: Vec<&[u32]> = columns.iter().map(Vec::as_slice).collect();
@@ -206,10 +241,18 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
             assert_eq!(table.fields, want_fields, "{}", at("layout"));
             assert!(table.column(5).is_none(), "{}", at("a Never column exists"));
             // Ids unique, ascending.
-            assert!(table.ids.windows(2).all(|w| w[0] < w[1]), "{}", at("ids ascending and unique"));
+            assert!(
+                table.ids.windows(2).all(|w| w[0] < w[1]),
+                "{}",
+                at("ids ascending and unique")
+            );
             // No sim id half anywhere.
             for col in &table.columns {
-                assert!(col.iter().all(|w| !id_halves.contains(w)), "{}", at("a sim id reached a column"));
+                assert!(
+                    col.iter().all(|w| !id_halves.contains(w)),
+                    "{}",
+                    at("a sim id reached a column")
+                );
             }
 
             let expected_state = |u: &Unit| -> Option<RowState> {
@@ -229,8 +272,16 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
             for r in 0..table.len() {
                 let state = table.state[r];
                 let tag = tag_col[r];
-                assert!(table.mask[r] & (1 << want_fields.iter().position(|&f| f == TAG).unwrap()) != 0, "{}", at("tag (Always) is shown"));
-                assert!(rows_by_tag.insert(tag, r).is_none() || state == RowState::Ghost, "{}", at("one row per entity"));
+                assert!(
+                    table.mask[r] & (1 << want_fields.iter().position(|&f| f == TAG).unwrap()) != 0,
+                    "{}",
+                    at("tag (Always) is shown")
+                );
+                assert!(
+                    rows_by_tag.insert(tag, r).is_none() || state == RowState::Ghost,
+                    "{}",
+                    at("one row per entity")
+                );
                 let value = |f: usize| table.column(f).map(|c| c[r]);
                 let shown = |f: usize| {
                     let c = want_fields.iter().position(|&w| w == f).unwrap();
@@ -240,27 +291,55 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
                     ghosts_seen += 1;
                     ghost_ids.insert(tag, table.ids[r]);
                     assert!(ghosting, "{}", at("a ghost in a table without Ghost fields"));
-                    let last = mem.sighted.get(&tag).unwrap_or_else(|| panic!("{}", at("a ghost of something never seen")));
+                    let last = mem
+                        .sighted
+                        .get(&tag)
+                        .unwrap_or_else(|| panic!("{}", at("a ghost of something never seen")));
                     if let Some(u) = by_tag.get(&tag) {
                         assert!(expected_state(u).is_none(), "{}", at("a ghost of an entity in view"));
                     }
                     // The ghost's own position (from the table) is the last sighting's.
                     let (gx, gy) = (value(X).unwrap(), value(Y).unwrap());
-                    assert!(shown(X) && shown(Y) && (gx, gy) == (last[X], last[Y]), "{}", at("a ghost without its last-seen position"));
-                    assert!(!coverage.sees(o, f32::from_bits(gx), f32::from_bits(gy)).0, "{}", at("a ghost on a cell in line of sight"));
+                    assert!(
+                        shown(X) && shown(Y) && (gx, gy) == (last[X], last[Y]),
+                        "{}",
+                        at("a ghost without its last-seen position")
+                    );
+                    assert!(
+                        !coverage.sees(o, f32::from_bits(gx), f32::from_bits(gy)).0,
+                        "{}",
+                        at("a ghost on a cell in line of sight")
+                    );
                     for &f in &want_fields {
                         let class = spec.fields[f].1;
-                        assert_eq!(shown(f), allowed(class, state), "{}", at(&format!("field {f} shown in a ghost")));
-                        assert_eq!(value(f).unwrap(), if allowed(class, state) { last[f] } else { 0 }, "{}", at(&format!("ghost field {f}")));
+                        assert_eq!(
+                            shown(f),
+                            allowed(class, state),
+                            "{}",
+                            at(&format!("field {f} shown in a ghost"))
+                        );
+                        assert_eq!(
+                            value(f).unwrap(),
+                            if allowed(class, state) { last[f] } else { 0 },
+                            "{}",
+                            at(&format!("ghost field {f}"))
+                        );
                     }
                     continue;
                 }
-                let u = by_tag.get(&tag).unwrap_or_else(|| panic!("{}", at("a row for an entity not in the frame")));
+                let u = by_tag
+                    .get(&tag)
+                    .unwrap_or_else(|| panic!("{}", at("a row for an entity not in the frame")));
                 assert_eq!(Some(state), expected_state(u), "{}", at("row state"));
                 let truth = words(u);
                 for &f in &want_fields {
                     let class = spec.fields[f].1;
-                    assert_eq!(shown(f), allowed(class, state), "{}", at(&format!("field {f} ({class:?}) shown in {state:?}")));
+                    assert_eq!(
+                        shown(f),
+                        allowed(class, state),
+                        "{}",
+                        at(&format!("field {f} ({class:?}) shown in {state:?}"))
+                    );
                     let v = value(f).unwrap();
                     if !allowed(class, state) {
                         assert_eq!(v, 0, "{}", at("a hidden value is not 0"));
@@ -276,7 +355,11 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
                 let id = table.ids[r];
                 match mem.ids.get(&u.id) {
                     Some(&old) => assert_eq!(id, old, "{}", at("an entity in view changed id")),
-                    None => assert!(!mem.used.contains(&id) || mem.ghost_ids.get(&tag) == Some(&id), "{}", at("a fresh row reused an id that was not its ghost's")),
+                    None => assert!(
+                        !mem.used.contains(&id) || mem.ghost_ids.get(&tag) == Some(&id),
+                        "{}",
+                        at("a fresh row reused an id that was not its ghost's")
+                    ),
                 }
                 ids_now.insert(u.id, id);
                 if state == RowState::Seen || state == RowState::Own {
@@ -286,7 +369,11 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
             // Completeness: every entity in view has a row.
             for u in u.iter() {
                 if expected_state(u).is_some() {
-                    assert!(rows_by_tag.contains_key(&u.rest[0]), "{}", at("an entity in view has no row"));
+                    assert!(
+                        rows_by_tag.contains_key(&u.rest[0]),
+                        "{}",
+                        at("an entity in view has no row")
+                    );
                 }
             }
             mem.used.extend(table.ids.iter().copied());
@@ -308,5 +395,11 @@ fn views_reveal_exactly_what_the_rules_allow() {
         }
     }
     // The checks were exercised: ghosts, blips, observers that differ.
-    assert!(totals.0 > 50 && totals.1 > 50 && totals.2 > 50, "ghost rows {}, blip positions {}, ticks where the observers differ {}", totals.0, totals.1, totals.2);
+    assert!(
+        totals.0 > 50 && totals.1 > 50 && totals.2 > 50,
+        "ghost rows {}, blip positions {}, ticks where the observers differ {}",
+        totals.0,
+        totals.1,
+        totals.2
+    );
 }

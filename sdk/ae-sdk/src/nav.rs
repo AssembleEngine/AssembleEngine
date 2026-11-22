@@ -115,24 +115,52 @@ pub struct MoveOrder {
 impl MoveOrder {
     /// Go to `(x, y)`; the group shares one flow field and arrival slots.
     pub fn move_to(entity: Entity, x: f32, y: f32, group: u64) -> Self {
-        Self { entity, x, y, group, kind: order::MOVE, reserved: 0 }
+        Self {
+            entity,
+            x,
+            y,
+            group,
+            kind: order::MOVE,
+            reserved: 0,
+        }
     }
 
     /// Leave the current command and stand where the unit comes to rest.
     pub fn stop(entity: Entity, group: u64) -> Self {
-        Self { entity, x: 0.0, y: 0.0, group, kind: order::STOP, reserved: 0 }
+        Self {
+            entity,
+            x: 0.0,
+            y: 0.0,
+            group,
+            kind: order::STOP,
+            reserved: 0,
+        }
     }
 
     /// Go to `(x, y)` along the group's guide points ([`OrderPoint`]), in
     /// order, gathering at the end.
     pub fn route(entity: Entity, x: f32, y: f32, group: u64) -> Self {
-        Self { entity, x, y, group, kind: order::ROUTE, reserved: 0 }
+        Self {
+            entity,
+            x,
+            y,
+            group,
+            kind: order::ROUTE,
+            reserved: 0,
+        }
     }
 
     /// Take a slot spread evenly along the polyline of the group's guide
     /// points (or around `(x, y)` without any).
     pub fn formation(entity: Entity, x: f32, y: f32, group: u64) -> Self {
-        Self { entity, x, y, group, kind: order::FORMATION, reserved: 0 }
+        Self {
+            entity,
+            x,
+            y,
+            group,
+            kind: order::FORMATION,
+            reserved: 0,
+        }
     }
 }
 
@@ -328,7 +356,10 @@ pub const fn classes_record<const B: usize>(classes: &[MovementClass]) -> [u8; B
     let mut i = 0;
     while i < classes.len() {
         let c = &classes[i];
-        assert!(!c.name.is_empty() && c.name.len() <= CLASS_NAME_MAX, "a movement class name is 1..=32 bytes");
+        assert!(
+            !c.name.is_empty() && c.name.len() <= CLASS_NAME_MAX,
+            "a movement class name is 1..=32 bytes"
+        );
         put_bytes(&mut b, at, c.name.as_bytes());
         put_u32(&mut b, at + 32, c.clearance_cells);
         put_u32(&mut b, at + 36, c.max_slope);

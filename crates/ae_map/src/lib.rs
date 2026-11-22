@@ -81,10 +81,23 @@ fn decode_png(bytes: &[u8], name: &str, cells: i32, depth: png::BitDepth) -> Res
     d.set_transformations(png::Transformations::IDENTITY);
     let mut r = d.read_info().with_context(|| format!("{name}: not a PNG"))?;
     let info = r.info();
-    ensure!(info.width == cells as u32 && info.height == cells as u32, "{name} is {}x{}; the map is {cells}x{cells} cells", info.width, info.height);
-    ensure!(info.color_type == png::ColorType::Grayscale && info.bit_depth == depth, "{name} must be {}-bit greyscale (is {:?} {:?})", depth as u8, info.color_type, info.bit_depth);
+    ensure!(
+        info.width == cells as u32 && info.height == cells as u32,
+        "{name} is {}x{}; the map is {cells}x{cells} cells",
+        info.width,
+        info.height
+    );
+    ensure!(
+        info.color_type == png::ColorType::Grayscale && info.bit_depth == depth,
+        "{name} must be {}-bit greyscale (is {:?} {:?})",
+        depth as u8,
+        info.color_type,
+        info.bit_depth
+    );
     let mut buf = vec![0; r.output_buffer_size()];
-    let f = r.next_frame(&mut buf).with_context(|| format!("{name}: bad PNG data"))?;
+    let f = r
+        .next_frame(&mut buf)
+        .with_context(|| format!("{name}: bad PNG data"))?;
     buf.truncate(f.buffer_size());
     Ok(buf)
 }
@@ -108,28 +121,62 @@ impl GameMap {
     /// under others).
     pub fn load(vfs: &Vfs) -> Result<Self> {
         let info: MapInfo = serde_json::from_slice(&vfs.read(MAP_JSON)?).context(MAP_JSON)?;
-        ensure!(info.version == 1, "{MAP_JSON} version {} (this engine reads 1)", info.version);
-        ensure!((16..=8192).contains(&info.cells), "{MAP_JSON}: {} cells a side (16..=8192)", info.cells);
-        ensure!(!info.types.is_empty() && info.types.len() <= 256, "{MAP_JSON}: {} terrain types (1..=256)", info.types.len());
+        ensure!(
+            info.version == 1,
+            "{MAP_JSON} version {} (this engine reads 1)",
+            info.version
+        );
+        ensure!(
+            (16..=8192).contains(&info.cells),
+            "{MAP_JSON}: {} cells a side (16..=8192)",
+            info.cells
+        );
+        ensure!(
+            !info.types.is_empty() && info.types.len() <= 256,
+            "{MAP_JSON}: {} terrain types (1..=256)",
+            info.types.len()
+        );
         for t in &info.types {
             ensure!(t.cost >= 1, "terrain type {}: cost 0 (1..=255)", t.name);
-            ensure!(MATERIALS.contains(&t.material.as_str()), "terrain type {}: material {:?} (one of {MATERIALS:?})", t.name, t.material);
+            ensure!(
+                MATERIALS.contains(&t.material.as_str()),
+                "terrain type {}: material {:?} (one of {MATERIALS:?})",
+                t.name,
+                t.material
+            );
         }
         if let Some(w) = info.water_level {
-            ensure!((0..=MAX_HEIGHT as i16).contains(&w), "{MAP_JSON}: water level {w} (0..={MAX_HEIGHT})");
+            ensure!(
+                (0..=MAX_HEIGHT as i16).contains(&w),
+                "{MAP_JSON}: water level {w} (0..={MAX_HEIGHT})"
+            );
         }
         let extent = info.cells as f32 * NavConfig::default().cell_size;
         for s in &info.starts {
-            ensure!(s.iter().all(|v| (0.0..extent).contains(v)), "start {s:?} outside the map (0..{extent})");
+            ensure!(
+                s.iter().all(|v| (0.0..extent).contains(v)),
+                "start {s:?} outside the map (0..{extent})"
+            );
         }
         let raw = decode_png(&vfs.read(HEIGHT_PNG)?, HEIGHT_PNG, info.cells, png::BitDepth::Sixteen)?;
         let height: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect();
         if let Some(i) = height.iter().position(|&h| h > MAX_HEIGHT) {
-            bail!("{HEIGHT_PNG}: cell ({}, {}) is {} dm high (at most {MAX_HEIGHT})", i as i32 % info.cells, i as i32 / info.cells, height[i]);
+            bail!(
+                "{HEIGHT_PNG}: cell ({}, {}) is {} dm high (at most {MAX_HEIGHT})",
+                i as i32 % info.cells,
+                i as i32 / info.cells,
+                height[i]
+            );
         }
         let types = decode_png(&vfs.read(TYPES_PNG)?, TYPES_PNG, info.cells, png::BitDepth::Eight)?;
         if let Some(i) = types.iter().position(|&t| t as usize >= info.types.len()) {
-            bail!("{TYPES_PNG}: cell ({}, {}) has type {}; the table has {}", i as i32 % info.cells, i as i32 / info.cells, types[i], info.types.len());
+            bail!(
+                "{TYPES_PNG}: cell ({}, {}) has type {}; the table has {}",
+                i as i32 % info.cells,
+                i as i32 / info.cells,
+                types[i],
+                info.types.len()
+            );
         }
         Ok(Self { info, height, types })
     }
@@ -141,15 +188,28 @@ impl GameMap {
 
     /// The nav terrain (the engine's cell size and sectors).
     pub fn to_terrain(&self) -> Terrain {
-        let cfg = NavConfig { map_cells: self.info.cells, seed: self.info.seed, ..NavConfig::default() };
+        let cfg = NavConfig {
+            map_cells: self.info.cells,
+            seed: self.info.seed,
+            ..NavConfig::default()
+        };
         let g = cfg.terrain_config().geom;
         let n = self.height.len();
-        let material: Vec<u8> = self.info.types.iter().map(|t| MATERIALS.iter().position(|m| *m == t.material).unwrap() as u8).collect();
+        let material: Vec<u8> = self
+            .info
+            .types
+            .iter()
+            .map(|t| MATERIALS.iter().position(|m| *m == t.material).unwrap() as u8)
+            .collect();
         let mut t = Terrain {
             geom: g,
             seed: self.info.seed,
             version: TERRAIN_VERSION_INITIAL,
-            blocked: self.types.iter().map(|&k| self.info.types[k as usize].solid as u8).collect(),
+            blocked: self
+                .types
+                .iter()
+                .map(|&k| self.info.types[k as usize].solid as u8)
+                .collect(),
             height: self.height.iter().map(|&h| h as i16).collect(),
             move_cost: self.types.iter().map(|&k| self.info.types[k as usize].cost).collect(),
             material: self.types.iter().map(|&k| material[k as usize]).collect(),
@@ -178,19 +238,44 @@ impl GameMap {
         let mut height = Vec::with_capacity(n);
         for i in 0..n {
             let g = t.ground_height(i);
-            ensure!((0..=MAX_HEIGHT as i16).contains(&g), "cell {i}: ground {g} dm (0..={MAX_HEIGHT})");
+            ensure!(
+                (0..=MAX_HEIGHT as i16).contains(&g),
+                "cell {i}: ground {g} dm (0..={MAX_HEIGHT})"
+            );
             height.push(g as u16);
         }
-        let types = (0..n).map(|i| keys.binary_search(&(t.move_cost[i], t.blocked[i], t.material[i])).unwrap() as u8).collect();
+        let types = (0..n)
+            .map(|i| {
+                keys.binary_search(&(t.move_cost[i], t.blocked[i], t.material[i]))
+                    .unwrap() as u8
+            })
+            .collect();
         let types_table = keys
             .iter()
             .map(|&(cost, solid, m)| {
                 let material = MATERIALS.get(m as usize).with_context(|| format!("material id {m}"))?;
-                Ok(TerrainType { name: format!("{material}-{cost}{}", if solid != 0 { "-solid" } else { "" }), cost, solid: solid != 0, material: material.to_string() })
+                Ok(TerrainType {
+                    name: format!("{material}-{cost}{}", if solid != 0 { "-solid" } else { "" }),
+                    cost,
+                    solid: solid != 0,
+                    material: material.to_string(),
+                })
             })
             .collect::<Result<_>>()?;
         let water_level = (t.water_level != NO_WATER).then_some(t.water_level);
-        Ok(Self { info: MapInfo { version: 1, cells: t.geom.cells_x, seed: t.seed, water_level, types: types_table, starts, description: description.into() }, height, types })
+        Ok(Self {
+            info: MapInfo {
+                version: 1,
+                cells: t.geom.cells_x,
+                seed: t.seed,
+                water_level,
+                types: types_table,
+                starts,
+                description: description.into(),
+            },
+            height,
+            types,
+        })
     }
 
     /// `map.json`, `height.png` and `types.png`, deterministic.
@@ -201,8 +286,14 @@ impl GameMap {
         json.push('\n');
         f.insert(MAP_JSON.into(), json.into_bytes());
         let be: Vec<u8> = self.height.iter().flat_map(|h| h.to_be_bytes()).collect();
-        f.insert(HEIGHT_PNG.into(), encode_png(&be, self.info.cells, png::BitDepth::Sixteen)?);
-        f.insert(TYPES_PNG.into(), encode_png(&self.types, self.info.cells, png::BitDepth::Eight)?);
+        f.insert(
+            HEIGHT_PNG.into(),
+            encode_png(&be, self.info.cells, png::BitDepth::Sixteen)?,
+        );
+        f.insert(
+            TYPES_PNG.into(),
+            encode_png(&self.types, self.info.cells, png::BitDepth::Eight)?,
+        );
         Ok(f)
     }
 }
@@ -212,8 +303,13 @@ mod tests {
     use super::*;
 
     fn same(a: &Terrain, b: &Terrain) {
-        assert_eq!((a.geom.cells_x, a.geom.cell_size, a.geom.sector_cells, a.seed, a.version), (b.geom.cells_x, b.geom.cell_size, b.geom.sector_cells, b.seed, b.version));
-        assert!(a.height == b.height && a.blocked == b.blocked && a.move_cost == b.move_cost && a.material == b.material);
+        assert_eq!(
+            (a.geom.cells_x, a.geom.cell_size, a.geom.sector_cells, a.seed, a.version),
+            (b.geom.cells_x, b.geom.cell_size, b.geom.sector_cells, b.seed, b.version)
+        );
+        assert!(
+            a.height == b.height && a.blocked == b.blocked && a.move_cost == b.move_cost && a.material == b.material
+        );
         assert!(a.water_level == b.water_level && a.water_depth == b.water_depth);
         assert_eq!(a.digest(), b.digest());
     }
@@ -221,7 +317,10 @@ mod tests {
     fn mount(files: &BTreeMap<String, Vec<u8>>, name: &str) -> (Vfs, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("ae-map-{}-{name}.aemap", std::process::id()));
         let mut all = files.clone();
-        all.insert(ae_vfs::MANIFEST.into(), format!("{{\"name\": \"{name}\", \"version\": \"1\", \"kind\": \"map\"}}").into_bytes());
+        all.insert(
+            ae_vfs::MANIFEST.into(),
+            format!("{{\"name\": \"{name}\", \"version\": \"1\", \"kind\": \"map\"}}").into_bytes(),
+        );
         std::fs::write(&path, ae_vfs::zip::write(&all).unwrap()).unwrap();
         let mut v = Vfs::new();
         v.mount(&path).unwrap();
@@ -232,7 +331,10 @@ mod tests {
     /// bit (nav digests included), and the files are deterministic.
     #[test]
     fn generated_maps_round_trip_through_a_package() {
-        for (name, t) in [("land", ae_nav::scenario::land_crossing_terrain(256)), ("water", ae_nav::scenario::water_crossing_terrain(256))] {
+        for (name, t) in [
+            ("land", ae_nav::scenario::land_crossing_terrain(256)),
+            ("water", ae_nav::scenario::water_crossing_terrain(256)),
+        ] {
             let m = GameMap::from_terrain(&t, vec![[300.0, 1800.0], [1800.0, 300.0]], name).unwrap();
             let files = m.files().unwrap();
             assert_eq!(files, m.files().unwrap(), "deterministic");
@@ -267,11 +369,40 @@ mod tests {
         small.height.truncate(32 * 32);
         small.types.truncate(32 * 32);
         let h = small.files().unwrap().remove(HEIGHT_PNG).unwrap();
-        check(&|f| drop(f.insert(HEIGHT_PNG.into(), h.clone())), "height.png is 32x32; the map is 64x64");
+        check(
+            &|f| drop(f.insert(HEIGHT_PNG.into(), h.clone())),
+            "height.png is 32x32; the map is 64x64",
+        );
         let t8 = m.files().unwrap().remove(TYPES_PNG).unwrap();
         check(&|f| drop(f.insert(HEIGHT_PNG.into(), t8.clone())), "16-bit greyscale");
         check(&|f| drop(f.remove(TYPES_PNG)), "types.png");
-        check(&|f| drop(f.insert(MAP_JSON.into(), String::from_utf8(f[MAP_JSON].clone()).unwrap().replace("\"road\"", "\"lava\"").into_bytes())), "material \"lava\"");
-        check(&|f| drop(f.insert(MAP_JSON.into(), String::from_utf8(f[MAP_JSON].clone()).unwrap().replace("\"version\": 1", "\"version\": 1, \"colour\": 3").into_bytes())), "unknown field");
+        check(
+            &|f| {
+                drop(
+                    f.insert(
+                        MAP_JSON.into(),
+                        String::from_utf8(f[MAP_JSON].clone())
+                            .unwrap()
+                            .replace("\"road\"", "\"lava\"")
+                            .into_bytes(),
+                    ),
+                )
+            },
+            "material \"lava\"",
+        );
+        check(
+            &|f| {
+                drop(
+                    f.insert(
+                        MAP_JSON.into(),
+                        String::from_utf8(f[MAP_JSON].clone())
+                            .unwrap()
+                            .replace("\"version\": 1", "\"version\": 1, \"colour\": 3")
+                            .into_bytes(),
+                    ),
+                )
+            },
+            "unknown field",
+        );
     }
 }

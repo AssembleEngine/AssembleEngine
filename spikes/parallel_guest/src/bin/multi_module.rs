@@ -52,7 +52,12 @@ struct HostHeap {
     allocations: u64,
 }
 
-static HEAP: Mutex<HostHeap> = Mutex::new(HostHeap { top: MODULE2_HEAP.0, free: BTreeMap::new(), live: BTreeMap::new(), allocations: 0 });
+static HEAP: Mutex<HostHeap> = Mutex::new(HostHeap {
+    top: MODULE2_HEAP.0,
+    free: BTreeMap::new(),
+    live: BTreeMap::new(),
+    allocations: 0,
+});
 
 fn heap_alloc(size: u32, align: u32) -> u32 {
     let class = size.max(align).max(16).next_power_of_two();
@@ -81,7 +86,12 @@ fn heap_free(address: u32) {
 }
 
 fn heap_block_size(address: u32) -> u32 {
-    HEAP.lock().unwrap().live.get(&address).map(|&(_, size)| size).unwrap_or(0)
+    HEAP.lock()
+        .unwrap()
+        .live
+        .get(&address)
+        .map(|&(_, size)| size)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +107,13 @@ struct Guest2 {
 }
 
 fn global_i32(store: &mut Store<()>, instance: &Instance, name: &str) -> Result<i32> {
-    let global = instance.get_global(&mut *store, name).with_context(|| format!("module 2 does not export {name}"))?;
-    global.get(&mut *store).i32().with_context(|| format!("{name} is not i32"))
+    let global = instance
+        .get_global(&mut *store, name)
+        .with_context(|| format!("module 2 does not export {name}"))?;
+    global
+        .get(&mut *store)
+        .i32()
+        .with_context(|| format!("{name} is not i32"))
 }
 
 fn instantiate_module2(engine: &Engine, module: &Module, memory: &SharedMemory, first: bool) -> Result<Guest2> {
@@ -115,10 +130,16 @@ fn instantiate_module2(engine: &Engine, module: &Module, memory: &SharedMemory, 
     // The linker put module 2's default stack at the bottom of memory, on
     // top of module 1's. It must be replaced before the first call.
     let default_stack = global_i32(&mut store, &instance, "__stack_pointer")? as u32;
-    ensure!(default_stack < MODULE2_DATA.0, "expected the linker's default stack below the module's base");
+    ensure!(
+        default_stack < MODULE2_DATA.0,
+        "expected the linker's default stack below the module's base"
+    );
     let stack = heap_alloc(STACK_BYTES, 16);
     ensure!(stack != 0, "module 2 heap exhausted");
-    instance.get_global(&mut store, "__stack_pointer").unwrap().set(&mut store, Val::I32((stack + STACK_BYTES) as i32))?;
+    instance
+        .get_global(&mut store, "__stack_pointer")
+        .unwrap()
+        .set(&mut store, Val::I32((stack + STACK_BYTES) as i32))?;
 
     let size = global_i32(&mut store, &instance, "__tls_size")? as u32;
     let align = (global_i32(&mut store, &instance, "__tls_align")? as u32).max(1);
@@ -130,8 +151,14 @@ fn instantiate_module2(engine: &Engine, module: &Module, memory: &SharedMemory, 
         let ctors: TypedFunc<(), ()> = instance.get_typed_func(&mut store, "__wasm_call_ctors")?;
         ctors.call(&mut store, ())?;
         let heap_base = global_i32(&mut store, &instance, "__heap_base")? as u32;
-        ensure!(heap_base <= MODULE2_DATA.1, "module 2 data ({heap_base:#x}) overflows its region");
-        println!("module 2: data {:#x}..{heap_base:#x}, default stack pointer {default_stack:#x} (replaced), TLS {size} bytes", MODULE2_DATA.0);
+        ensure!(
+            heap_base <= MODULE2_DATA.1,
+            "module 2 data ({heap_base:#x}) overflows its region"
+        );
+        println!(
+            "module 2: data {:#x}..{heap_base:#x}, default stack pointer {default_stack:#x} (replaced), TLS {size} bytes",
+            MODULE2_DATA.0
+        );
     }
     Ok(Guest2 {
         damp: instance.get_typed_func(&mut store, "damp")?,
@@ -208,11 +235,17 @@ fn main() -> Result<()> {
     let (memory, mut guests1) = spawn_guests_with(&engine, &module1, 2, Metering::None, true, |memory, _| {
         let target_pages = MODULE2_HEAP.1 as u64 / PAGE;
         let current = memory.data_size() as u64 / PAGE;
-        ensure!(current < MODULE2_DATA.0 as u64 / PAGE, "module 1 already reaches module 2's base");
+        ensure!(
+            current < MODULE2_DATA.0 as u64 / PAGE,
+            "module 1 already reaches module 2's base"
+        );
         memory.grow(target_pages - current)?;
         Ok(())
     })?;
-    let mut guests2 = vec![instantiate_module2(&engine, &module2, &memory, true)?, instantiate_module2(&engine, &module2, &memory, false)?];
+    let mut guests2 = [
+        instantiate_module2(&engine, &module2, &memory, true)?,
+        instantiate_module2(&engine, &module2, &memory, false)?,
+    ];
 
     // Address checks.
     for g in guests2.iter_mut() {
@@ -227,15 +260,25 @@ fn main() -> Result<()> {
     let sentinel = guests1[0].alloc(64 << 10)?;
     for g in guests1.iter_mut() {
         let stack = g.stack_address.call(&mut g.store, ())?;
-        ensure!(!in_range(stack, (MODULE2_DATA.0, MODULE2_HEAP.1)), "module 1 stack at {stack:#x} is in module 2's ranges");
+        ensure!(
+            !in_range(stack, (MODULE2_DATA.0, MODULE2_HEAP.1)),
+            "module 1 stack at {stack:#x} is in module 2's ranges"
+        );
     }
-    for (name, address, len) in [("position column", pos, column_bytes), ("velocity column", vel, column_bytes), ("sentinel", sentinel, 64 << 10)] {
+    for (name, address, len) in [
+        ("position column", pos, column_bytes),
+        ("velocity column", vel, column_bytes),
+        ("sentinel", sentinel, 64 << 10),
+    ] {
         let overlaps = address < MODULE2_HEAP.1 && address + len > MODULE2_DATA.0;
         ensure!(!overlaps, "module 1 {name} at {address:#x} overlaps module 2's ranges");
     }
-    println!("module 1: columns at {pos:#x} and {vel:#x}, sentinel at {sentinel:#x}; module 2 addresses all inside 64..96 MiB");
+    println!(
+        "module 1: columns at {pos:#x} and {vel:#x}, sentinel at {sentinel:#x}; module 2 addresses all inside 64..96 MiB"
+    );
 
-    let column = |offset: u32| unsafe { std::slice::from_raw_parts_mut(base.add(offset as usize).cast::<[f32; 2]>(), ROWS) };
+    let column =
+        |offset: u32| unsafe { std::slice::from_raw_parts_mut(base.add(offset as usize).cast::<[f32; 2]>(), ROWS) };
     fill(column(pos), column(vel));
     unsafe { std::ptr::write_bytes(base.add(sentinel as usize), 0xA5, 64 << 10) };
 
@@ -265,7 +308,10 @@ fn main() -> Result<()> {
                     let mut result = Ok(());
                     while let Some(index) = Some(next.fetch_add(1, Ordering::Relaxed)).filter(|i| *i < ranges) {
                         let byte = (index * RANGE_ROWS * 8) as u32;
-                        if let Err(e) = g.integrate.call(&mut g.store, (pos + byte, vel + byte, RANGE_ROWS as u32, DT)) {
+                        if let Err(e) = g
+                            .integrate
+                            .call(&mut g.store, (pos + byte, vel + byte, RANGE_ROWS as u32, DT))
+                        {
                             result = Err(anyhow!("module 1 trapped: {e}"));
                         }
                     }
@@ -283,7 +329,10 @@ fn main() -> Result<()> {
                     let mut result = Ok(());
                     while let Some(index) = Some(next.fetch_add(1, Ordering::Relaxed)).filter(|i| *i < ranges) {
                         let first = HALF + index * RANGE_ROWS;
-                        if let Err(e) = g.damp.call(&mut g.store, (pos + (first * 8) as u32, RANGE_ROWS as u32, first as u32)) {
+                        if let Err(e) = g.damp.call(
+                            &mut g.store,
+                            (pos + (first * 8) as u32, RANGE_ROWS as u32, first as u32),
+                        ) {
                             result = Err(anyhow!("module 2 trapped: {e}"));
                         }
                     }
@@ -305,21 +354,32 @@ fn main() -> Result<()> {
         Ok(())
     })?;
     let result = digest(column(pos));
-    ensure!(result == reference, "digest {result:016x} differs from native {reference:016x}");
+    ensure!(
+        result == reference,
+        "digest {result:016x} differs from native {reference:016x}"
+    );
     println!("{TICKS} ticks, both modules concurrently on one column: digest {result:016x} equals native");
 
-    let intact = unsafe { std::slice::from_raw_parts(base.add(sentinel as usize), 64 << 10) }.iter().all(|b| *b == 0xA5);
+    let intact = unsafe { std::slice::from_raw_parts(base.add(sentinel as usize), 64 << 10) }
+        .iter()
+        .all(|b| *b == 0xA5);
     ensure!(intact, "module 1's sentinel buffer was overwritten");
     for (index, g) in guests1.iter_mut().enumerate() {
         let before = g.tls_bump.call(&mut g.store, ())?;
         for _ in 0..99 {
             g.tls_bump.call(&mut g.store, ())?;
         }
-        ensure!(g.tls_bump.call(&mut g.store, ())? == before + 100, "module 1 instance {index}: TLS disturbed");
+        ensure!(
+            g.tls_bump.call(&mut g.store, ())? == before + 100,
+            "module 1 instance {index}: TLS disturbed"
+        );
     }
     for (index, g) in guests2.iter_mut().enumerate() {
         for call in 1..=100 {
-            ensure!(g.tls_bump.call(&mut g.store, ())? == call, "module 2 instance {index}: TLS shared or disturbed");
+            ensure!(
+                g.tls_bump.call(&mut g.store, ())? == call,
+                "module 2 instance {index}: TLS shared or disturbed"
+            );
         }
     }
     let heap = HEAP.lock().unwrap();

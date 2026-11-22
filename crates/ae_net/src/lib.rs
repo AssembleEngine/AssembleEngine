@@ -37,9 +37,24 @@ pub const MAX_BUNDLE_BYTES: usize = 48 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Packet {
-    Hello { player: u32, header: Header },
-    Client { player: u32, inputs: Vec<(u64, Vec<Command>)>, want: u64, digests: Vec<(u64, u128)>, sent_us: u64 },
-    Relay { bundles: Vec<TickBundle>, taken: u64, echo_us: u64, end: u64, desync: u64 },
+    Hello {
+        player: u32,
+        header: Header,
+    },
+    Client {
+        player: u32,
+        inputs: Vec<(u64, Vec<Command>)>,
+        want: u64,
+        digests: Vec<(u64, u128)>,
+        sent_us: u64,
+    },
+    Relay {
+        bundles: Vec<TickBundle>,
+        taken: u64,
+        echo_us: u64,
+        end: u64,
+        desync: u64,
+    },
 }
 
 struct W(Vec<u8>);
@@ -115,7 +130,13 @@ impl Packet {
                 }
                 w.u64(header.checkpoint_every);
             }
-            Packet::Client { player, inputs, want, digests, sent_us } => {
+            Packet::Client {
+                player,
+                inputs,
+                want,
+                digests,
+                sent_us,
+            } => {
                 w.u8(CLIENT);
                 w.u32(*player);
                 w.u64(*want);
@@ -123,7 +144,11 @@ impl Packet {
                 w.u32(inputs.len() as u32);
                 for (tick, commands) in inputs {
                     let mut b = Vec::new();
-                    TickBundle { tick: *tick, commands: commands.clone() }.encode(&mut b);
+                    TickBundle {
+                        tick: *tick,
+                        commands: commands.clone(),
+                    }
+                    .encode(&mut b);
                     w.0.extend_from_slice(&b);
                 }
                 w.u32(digests.len() as u32);
@@ -132,7 +157,13 @@ impl Packet {
                     w.u128(*d);
                 }
             }
-            Packet::Relay { bundles, taken, echo_us, end, desync } => {
+            Packet::Relay {
+                bundles,
+                taken,
+                echo_us,
+                end,
+                desync,
+            } => {
                 w.u8(RELAY);
                 w.u64(*taken);
                 w.u64(*echo_us);
@@ -160,7 +191,17 @@ impl Packet {
                     config.insert(r.str()?, r.str()?);
                 }
                 let checkpoint_every = r.u64()?;
-                Packet::Hello { player, header: Header { engine, module_hash, schema_hash, param, config, checkpoint_every } }
+                Packet::Hello {
+                    player,
+                    header: Header {
+                        engine,
+                        module_hash,
+                        schema_hash,
+                        param,
+                        config,
+                        checkpoint_every,
+                    },
+                }
             }
             CLIENT => {
                 let (player, want, sent_us) = (r.u32()?, r.u64()?, r.u64()?);
@@ -176,7 +217,13 @@ impl Packet {
                 for _ in 0..n {
                     digests.push((r.u64()?, r.u128()?));
                 }
-                Packet::Client { player, inputs, want, digests, sent_us }
+                Packet::Client {
+                    player,
+                    inputs,
+                    want,
+                    digests,
+                    sent_us,
+                }
             }
             RELAY => {
                 let (taken, echo_us, end, desync) = (r.u64()?, r.u64()?, r.u64()?, r.u64()?);
@@ -187,7 +234,13 @@ impl Packet {
                     r.1 += used;
                     bundles.push(b);
                 }
-                Packet::Relay { bundles, taken, echo_us, end, desync }
+                Packet::Relay {
+                    bundles,
+                    taken,
+                    echo_us,
+                    end,
+                    desync,
+                }
             }
             k => bail!("unknown packet kind {k}"),
         };
@@ -211,7 +264,15 @@ pub struct Emulator {
 
 impl Emulator {
     pub fn new(latency_ms: u64, jitter_ms: u64, loss: f64, seed: u64) -> Self {
-        Self { latency: Duration::from_millis(latency_ms), jitter: Duration::from_millis(jitter_ms), loss, rng: seed | 1, queue: Vec::new(), sent: 0, dropped: 0 }
+        Self {
+            latency: Duration::from_millis(latency_ms),
+            jitter: Duration::from_millis(jitter_ms),
+            loss,
+            rng: seed | 1,
+            queue: Vec::new(),
+            sent: 0,
+            dropped: 0,
+        }
     }
 
     fn next(&mut self) -> f64 {
@@ -260,12 +321,41 @@ mod tests {
 
     #[test]
     fn packets_round_trip() {
-        let header = Header { engine: "0.0.1".into(), module_hash: 5, schema_hash: 6, param: 7, config: [("map".to_string(), "water".to_string())].into(), checkpoint_every: 30 };
-        let cmd = Command { player: 2, stream: 4, bytes: vec![1, 2, 3] };
+        let header = Header {
+            engine: "0.0.1".into(),
+            module_hash: 5,
+            schema_hash: 6,
+            param: 7,
+            config: [("map".to_string(), "water".to_string())].into(),
+            checkpoint_every: 30,
+        };
+        let cmd = Command {
+            player: 2,
+            stream: 4,
+            bytes: vec![1, 2, 3],
+        };
         for p in [
             Packet::Hello { player: 3, header },
-            Packet::Client { player: 1, inputs: vec![(9, vec![cmd.clone()]), (10, vec![])], want: 8, digests: vec![(30, 0xABC)], sent_us: 123 },
-            Packet::Relay { bundles: vec![TickBundle { tick: 8, commands: vec![cmd] }, TickBundle::new(9)], taken: 7, echo_us: 123, end: 0, desync: 0 },
+            Packet::Client {
+                player: 1,
+                inputs: vec![(9, vec![cmd.clone()]), (10, vec![])],
+                want: 8,
+                digests: vec![(30, 0xABC)],
+                sent_us: 123,
+            },
+            Packet::Relay {
+                bundles: vec![
+                    TickBundle {
+                        tick: 8,
+                        commands: vec![cmd],
+                    },
+                    TickBundle::new(9),
+                ],
+                taken: 7,
+                echo_us: 123,
+                end: 0,
+                desync: 0,
+            },
         ] {
             let bytes = p.encode();
             assert_eq!(Packet::decode(&bytes).unwrap(), p);

@@ -70,11 +70,19 @@ mod tests {
         let rows: [(u64, u64, &[u8]); 3] = [(1, 10, &[1, 2, 3, 4]), (2, 10, &[5, 6, 7, 8]), (1, 11, &[9; 8])];
         let base = hash(&rows);
         assert_eq!(hash(&[rows[2], rows[0], rows[1]]), base, "order independent");
-        assert_ne!(hash(&[(1, 10, &[5, 6, 7, 8]), (2, 10, &[1, 2, 3, 4]), rows[2]]), base, "swapped data between entities");
+        assert_ne!(
+            hash(&[(1, 10, &[5, 6, 7, 8]), (2, 10, &[1, 2, 3, 4]), rows[2]]),
+            base,
+            "swapped data between entities"
+        );
         assert_ne!(hash(&[(1, 12, &[1, 2, 3, 4]), rows[1], rows[2]]), base, "component id");
         assert_ne!(hash(&[(1, 10, &[1, 2, 3, 5]), rows[1], rows[2]]), base, "one data bit");
         assert_ne!(hash(&rows[..2]), base, "a missing row");
-        assert_ne!(hash(&[rows[0], rows[0], rows[1], rows[2]]), base, "a duplicated row does not cancel");
+        assert_ne!(
+            hash(&[rows[0], rows[0], rows[1], rows[2]]),
+            base,
+            "a duplicated row does not cancel"
+        );
         let big = [7u8; 200];
         let mut streamed = StateHash::new();
         streamed.add_row(3, 4, &big);

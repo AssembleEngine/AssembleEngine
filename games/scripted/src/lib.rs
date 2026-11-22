@@ -75,8 +75,17 @@ fn start(run: &Run) {
     for i in 0..n {
         let (x, y) = (x0 + (i % 100) as f32 * step, y0 + (i / 100) as f32 * step);
         Spawn::new()
-            .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: step / 4.0 })
-            .with(&Walker { dir: if i % 2 == 0 { 1.0 } else { -1.0 }, reserved: 0 })
+            .with(&Body {
+                x,
+                y,
+                vx: 0.0,
+                vy: 0.0,
+                radius: step / 4.0,
+            })
+            .with(&Walker {
+                dir: if i % 2 == 0 { 1.0 } else { -1.0 },
+                reserved: 0,
+            })
             .with(&anim)
             .with(&bounds)
             .submit();
@@ -107,7 +116,11 @@ const LOOK: [f32; 3] = [0.6, 0.0, -0.8];
 fn animate(run: &Run) {
     let (bodies, anims) = (run.read::<Body>(), run.write::<Anim>());
     let model = model_id(MODEL);
-    let (Some(survey), Some(walk), Some(head)) = (anim::clip(model, "Survey"), anim::clip(model, "Walk"), anim::bone(model, "b_Head_05")) else {
+    let (Some(survey), Some(walk), Some(head)) = (
+        anim::clip(model, "Survey"),
+        anim::clip(model, "Walk"),
+        anim::bone(model, "b_Head_05"),
+    ) else {
         return;
     };
     for i in run.rows() {
@@ -117,7 +130,9 @@ fn animate(run: &Run) {
         }
         if bodies[i].vx != 0.0 {
             if a.playing(1) != walk {
-                a.play(1, walk).per_metre(WALK_PER_METRE / bodies[i].radius).blend_in(200);
+                a.play(1, walk)
+                    .per_metre(WALK_PER_METRE / bodies[i].radius)
+                    .blend_in(200);
             } else if a.target[1] != 1.0 {
                 a.layer(1).fade_to(1.0, 200);
             }

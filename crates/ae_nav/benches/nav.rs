@@ -18,20 +18,36 @@ fn benches(c: &mut Criterion) {
     let profile = profiles[0].id;
     let hierarchy = NavHierarchy::build_parallel(terrain.clone(), &profiles, 4);
     let centre = CellPos::new(CELLS / 2, CELLS / 2);
-    let goal = terrain.nearest_open_cell(centre, CELLS / 4, |cell| context_key(&hierarchy, profile, cell).is_some()).unwrap();
+    let goal = terrain
+        .nearest_open_cell(centre, CELLS / 4, |cell| {
+            context_key(&hierarchy, profile, cell).is_some()
+        })
+        .unwrap();
     let key = context_key(&hierarchy, profile, goal).unwrap();
     let context = build_context(&hierarchy, &key, None).unwrap();
     let recipe = field_recipe(&hierarchy, &context, key.goal_sector, key.goal_region, goal).unwrap();
     let grid = hierarchy.grid(profile);
 
-    c.bench_function("context_build", |b| b.iter(|| build_context(black_box(&hierarchy), &key, None)));
-    c.bench_function("flow_field_build", |b| b.iter(|| build_flow_field(&terrain, grid, black_box(recipe.key.clone()))));
+    c.bench_function("context_build", |b| {
+        b.iter(|| build_context(black_box(&hierarchy), &key, None))
+    });
+    c.bench_function("flow_field_build", |b| {
+        b.iter(|| build_flow_field(&terrain, grid, black_box(recipe.key.clone())))
+    });
 
     let agents: Vec<Agent> = (0..4000usize)
         .map(|k| {
             let heading = WorldPos::new(((k * 7) % 5) as f32 * 40.0 - 80.0, ((k * 3) % 7) as f32 * 30.0 - 90.0);
-            Agent { pos: WorldPos::new((k % 64) as f32 * 11.0, (k / 64) as f32 * 11.0), vel: heading.scaled(0.8), radius: 5.0,
-                max_speed: 112.0, pref: heading, avoids: true, moving: k % 5 != 0, horizon: 0.0 }
+            Agent {
+                pos: WorldPos::new((k % 64) as f32 * 11.0, (k / 64) as f32 * 11.0),
+                vel: heading.scaled(0.8),
+                radius: 5.0,
+                max_speed: 112.0,
+                pref: heading,
+                avoids: true,
+                moving: k % 5 != 0,
+                horizon: 0.0,
+            }
         })
         .collect();
     let config = AvoidanceConfig::default();

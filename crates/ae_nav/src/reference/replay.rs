@@ -53,19 +53,38 @@ pub struct Divergence {
 
 impl Divergence {
     pub fn describe(&self) -> String {
-        format!("first divergence at tick {} (sample {}): {:016x} vs {:016x}; differing: {}",
-            self.tick, self.sample_index, self.left_hash, self.right_hash,
-            if self.differing_parts.is_empty() { "-".to_string() } else { self.differing_parts.join(", ") })
+        format!(
+            "first divergence at tick {} (sample {}): {:016x} vs {:016x}; differing: {}",
+            self.tick,
+            self.sample_index,
+            self.left_hash,
+            self.right_hash,
+            if self.differing_parts.is_empty() {
+                "-".to_string()
+            } else {
+                self.differing_parts.join(", ")
+            }
+        )
     }
 }
 
 fn differing(a: &StateHashParts, b: &StateHashParts) -> Vec<&'static str> {
     let mut v = Vec::new();
-    if a.bodies != b.bodies { v.push("bodies"); }
-    if a.unit_nav != b.unit_nav { v.push("unit_nav"); }
-    if a.commands != b.commands { v.push("commands"); }
-    if a.terrain != b.terrain { v.push("terrain"); }
-    if a.nav_version != b.nav_version { v.push("nav_version"); }
+    if a.bodies != b.bodies {
+        v.push("bodies");
+    }
+    if a.unit_nav != b.unit_nav {
+        v.push("unit_nav");
+    }
+    if a.commands != b.commands {
+        v.push("commands");
+    }
+    if a.terrain != b.terrain {
+        v.push("terrain");
+    }
+    if a.nav_version != b.nav_version {
+        v.push("nav_version");
+    }
     v
 }
 
@@ -87,7 +106,10 @@ impl ReplayLog {
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        std::fs::write(path, serde_json::to_string(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?)
+        std::fs::write(
+            path,
+            serde_json::to_string(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        )
     }
 
     pub fn run_with_config(&self, config: &SimConfig) -> Vec<ReplayDigest> {

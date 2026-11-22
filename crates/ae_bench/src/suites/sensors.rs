@@ -32,7 +32,13 @@ fn army(n: usize, allies: u32) -> Army {
         (s >> 40) as f32 / (1u64 << 24) as f32
     };
     let squads: Vec<(f32, f32)> = (0..40).map(|_| (f() * MAP, f() * MAP)).collect();
-    let mut a = Army { x: vec![], y: vec![], ally: vec![], los: vec![], radar: vec![] };
+    let mut a = Army {
+        x: vec![],
+        y: vec![],
+        ally: vec![],
+        los: vec![],
+        radar: vec![],
+    };
     for i in 0..n {
         let squad = i % squads.len();
         let (cx, cy) = squads[squad];
@@ -49,26 +55,50 @@ fn army(n: usize, allies: u32) -> Army {
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("sensors");
     let grid = SensorGrid::new(MAP, MAP, CELL);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(options.threads.max(1)).build()?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(options.threads.max(1))
+        .build()?;
     for (n, allies) in [(10_000, 2), (10_000, 8), (50_000, 8)] {
         if options.small && n > 10_000 {
             continue;
         }
         let tag = format!("units{n}_allies{allies}");
         let a = army(n, allies);
-        let units = Sensors { x: &a.x, y: &a.y, ally: &a.ally, los: &a.los, radar: &a.radar };
+        let units = Sensors {
+            x: &a.x,
+            y: &a.y,
+            ally: &a.ally,
+            los: &a.los,
+            radar: &a.radar,
+        };
         let mut serial = Coverage::new(grid, allies as usize);
-        report.time(&format!("{tag}/stamp_1t"), time(options.budget, || serial.stamp(&units, false)));
+        report.time(
+            &format!("{tag}/stamp_1t"),
+            time(options.budget, || serial.stamp(&units, false)),
+        );
         serial.stamp(&units, false);
         let mut parallel = Coverage::new(grid, allies as usize);
-        pool.install(|| report.time(&format!("{tag}/stamp_{}t", options.threads), time(options.budget, || parallel.stamp(&units, true))));
+        pool.install(|| {
+            report.time(
+                &format!("{tag}/stamp_{}t", options.threads),
+                time(options.budget, || parallel.stamp(&units, true)),
+            )
+        });
         pool.install(|| parallel.stamp(&units, true));
         if serial != parallel {
             bail!("{tag}: coverage differs serial and parallel");
         }
         report.counter(&format!("{tag}/stamped_cells"), serial.stamped, "");
-        report.info(&format!("{tag}/los_cells"), serial.los.iter().map(|b| b.count()).sum(), "");
-        report.info(&format!("{tag}/radar_cells"), serial.radar.iter().map(|b| b.count()).sum(), "");
+        report.info(
+            &format!("{tag}/los_cells"),
+            serial.los.iter().map(|b| b.count()).sum(),
+            "",
+        );
+        report.info(
+            &format!("{tag}/radar_cells"),
+            serial.radar.iter().map(|b| b.count()).sum(),
+            "",
+        );
     }
     report.info("grid_cells", grid.width as u64 * grid.height as u64, "");
     Ok(report)

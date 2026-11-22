@@ -61,7 +61,10 @@ pub struct IdMap {
 
 impl IdMap {
     pub(crate) fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
-        let &(component, size) = self.components.get(&id).with_context(|| format!("unknown component id {id:#x}"))?;
+        let &(component, size) = self
+            .components
+            .get(&id)
+            .with_context(|| format!("unknown component id {id:#x}"))?;
         if let Some(len) = len {
             ensure!(len == size, "component {id:#x} is {size} bytes, got {len}");
         }
@@ -81,11 +84,20 @@ pub struct WorkerCtx {
 
 impl WorkerCtx {
     pub fn new(memory: SharedMemory) -> Self {
-        Self { memory, commands: CommandBuffer::default(), ids: None, spatial: None, hits: Vec::new() }
+        Self {
+            memory,
+            commands: CommandBuffer::default(),
+            ids: None,
+            spatial: None,
+            hits: Vec::new(),
+        }
     }
 
     pub fn with_ids(memory: SharedMemory, ids: Arc<IdMap>) -> Self {
-        Self { ids: Some(ids), ..Self::new(memory) }
+        Self {
+            ids: Some(ids),
+            ..Self::new(memory)
+        }
     }
 
     fn component(&self, id: u64, len: Option<usize>) -> Result<ComponentId> {
@@ -103,28 +115,45 @@ pub fn read_guest(memory: &SharedMemory, ptr: u32, len: usize) -> Result<Vec<u8>
     let mut out = vec![0u8; len];
     // Shared memory may be written by other instances concurrently; a system
     // only reads its own record, which nothing else writes.
-    unsafe { std::ptr::copy_nonoverlapping((memory.data().as_ptr() as *const u8).add(ptr as usize), out.as_mut_ptr(), len) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (memory.data().as_ptr() as *const u8).add(ptr as usize),
+            out.as_mut_ptr(),
+            len,
+        )
+    };
     Ok(out)
 }
 
 pub fn parse_spawn(record: &[u8]) -> Result<Vec<(ComponentId, Vec<u8>)>> {
     let word = |at: usize| -> Result<u32> {
-        let bytes = record.get(at..at + 4).ok_or_else(|| anyhow::anyhow!("spawn record truncated"))?;
+        let bytes = record
+            .get(at..at + 4)
+            .ok_or_else(|| anyhow::anyhow!("spawn record truncated"))?;
         Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
     };
     let count = word(0)? as usize;
-    ensure!(count > 0 && count <= MAX_SPAWN_COMPONENTS, "spawn record has {count} components (1..={MAX_SPAWN_COMPONENTS})");
+    ensure!(
+        count > 0 && count <= MAX_SPAWN_COMPONENTS,
+        "spawn record has {count} components (1..={MAX_SPAWN_COMPONENTS})"
+    );
     let mut at = 8;
     let mut components = Vec::with_capacity(count);
     for _ in 0..count {
         let component = word(at)? as u64 | (word(at + 4)? as u64) << 32;
         let len = word(at + 8)? as usize;
         ensure!(len <= MAX_COMPONENT_BYTES, "spawn component of {len} bytes");
-        let data = record.get(at + 16..at + 16 + len).ok_or_else(|| anyhow::anyhow!("spawn record truncated"))?;
+        let data = record
+            .get(at + 16..at + 16 + len)
+            .ok_or_else(|| anyhow::anyhow!("spawn record truncated"))?;
         components.push((ComponentId(component), data.to_vec()));
         at += 16 + len.next_multiple_of(8);
     }
-    ensure!(at == record.len(), "spawn record has {} trailing bytes", record.len().saturating_sub(at));
+    ensure!(
+        at == record.len(),
+        "spawn record has {} trailing bytes",
+        record.len().saturating_sub(at)
+    );
     components.sort_by_key(|(c, _)| *c);
     if components.windows(2).any(|w| w[0].0 == w[1].0) {
         bail!("spawn record lists a component twice");
@@ -146,24 +175,39 @@ pub fn sched_yields() -> u64 {
 
 /// Define the command imports.
 pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
-    linker.func_wrap("env", "ae_spawn", |mut caller: Caller<'_, WorkerCtx>, ptr: u32, len: u32| -> wasmtime::Result<()> {
-        let mut run = || -> Result<()> {
-            ensure!(len as usize <= 16 + MAX_SPAWN_COMPONENTS * (16 + MAX_COMPONENT_BYTES), "spawn record too large");
-            let record = read_guest(&caller.data().memory, ptr, len as usize)?;
-            let mut components = parse_spawn(&record)?;
-            if caller.data().ids.is_some() {
-                for (component, data) in &mut components {
-                    *component = caller.data().component(component.0, Some(data.len()))?;
+    linker.func_wrap(
+        "env",
+        "ae_spawn",
+        |mut caller: Caller<'_, WorkerCtx>, ptr: u32, len: u32| -> wasmtime::Result<()> {
+            let mut run = || -> Result<()> {
+                ensure!(
+                    len as usize <= 16 + MAX_SPAWN_COMPONENTS * (16 + MAX_COMPONENT_BYTES),
+                    "spawn record too large"
+                );
+                let record = read_guest(&caller.data().memory, ptr, len as usize)?;
+                let mut components = parse_spawn(&record)?;
+                if caller.data().ids.is_some() {
+                    for (component, data) in &mut components {
+                        *component = caller.data().component(component.0, Some(data.len()))?;
+                    }
+                    components.sort_by_key(|(c, _)| *c);
                 }
-                components.sort_by_key(|(c, _)| *c);
-            }
-            caller.data_mut().commands.push(Command::Spawn(components))
-        };
-        run().map_err(trap)
-    })?;
-    linker.func_wrap("env", "ae_despawn", |mut caller: Caller<'_, WorkerCtx>, entity: u64| -> wasmtime::Result<()> {
-        caller.data_mut().commands.push(Command::Despawn(EntityId(entity))).map_err(trap)
-    })?;
+                caller.data_mut().commands.push(Command::Spawn(components))
+            };
+            run().map_err(trap)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "ae_despawn",
+        |mut caller: Caller<'_, WorkerCtx>, entity: u64| -> wasmtime::Result<()> {
+            caller
+                .data_mut()
+                .commands
+                .push(Command::Despawn(EntityId(entity)))
+                .map_err(trap)
+        },
+    )?;
     linker.func_wrap(
         "env",
         "ae_add",
@@ -172,72 +216,143 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
                 ensure!(len as usize <= MAX_COMPONENT_BYTES, "component of {len} bytes");
                 let data = read_guest(&caller.data().memory, ptr, len as usize)?;
                 let component = caller.data().component(component, Some(data.len()))?;
-                caller.data_mut().commands.push(Command::Add(EntityId(entity), component, data))
+                caller
+                    .data_mut()
+                    .commands
+                    .push(Command::Add(EntityId(entity), component, data))
             };
             run().map_err(trap)
         },
     )?;
-    linker.func_wrap("env", "ae_remove", |mut caller: Caller<'_, WorkerCtx>, entity: u64, component: u64| -> wasmtime::Result<()> {
-        let mut run = || -> Result<()> {
-            let component = caller.data().component(component, None)?;
-            caller.data_mut().commands.push(Command::Remove(EntityId(entity), component))
-        };
-        run().map_err(trap)
-    })?;
-    linker.func_wrap("env", "ae_emit", |mut caller: Caller<'_, WorkerCtx>, stream: u64, ptr: u32, len: u32| -> wasmtime::Result<()> {
-        let mut run = || -> Result<()> {
-            let size = caller.data().ids.as_ref().and_then(|m| m.streams.get(&stream).copied());
-            let size = size.with_context(|| format!("unknown event stream {stream:#x}"))?;
-            ensure!(len as usize == size, "event of stream {stream:#x} is {size} bytes, got {len}");
-            let system = caller.data().commands.current_system().context("event emitted outside a system call")?;
-            let declared = caller.data().ids.as_ref().is_some_and(|m| m.emits.get(system as usize).is_some_and(|e| e.contains(&stream)));
-            ensure!(declared, "system at position {system} emits stream {stream:#x} without declaring it in `emits`");
-            let data = read_guest(&caller.data().memory, ptr, len as usize)?;
-            caller.data_mut().commands.push_event(stream, data)
-        };
-        run().map_err(trap)
-    })?;
+    linker.func_wrap(
+        "env",
+        "ae_remove",
+        |mut caller: Caller<'_, WorkerCtx>, entity: u64, component: u64| -> wasmtime::Result<()> {
+            let mut run = || -> Result<()> {
+                let component = caller.data().component(component, None)?;
+                caller
+                    .data_mut()
+                    .commands
+                    .push(Command::Remove(EntityId(entity), component))
+            };
+            run().map_err(trap)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "ae_emit",
+        |mut caller: Caller<'_, WorkerCtx>, stream: u64, ptr: u32, len: u32| -> wasmtime::Result<()> {
+            let mut run = || -> Result<()> {
+                let size = caller.data().ids.as_ref().and_then(|m| m.streams.get(&stream).copied());
+                let size = size.with_context(|| format!("unknown event stream {stream:#x}"))?;
+                ensure!(
+                    len as usize == size,
+                    "event of stream {stream:#x} is {size} bytes, got {len}"
+                );
+                let system = caller
+                    .data()
+                    .commands
+                    .current_system()
+                    .context("event emitted outside a system call")?;
+                let declared = caller
+                    .data()
+                    .ids
+                    .as_ref()
+                    .is_some_and(|m| m.emits.get(system as usize).is_some_and(|e| e.contains(&stream)));
+                ensure!(
+                    declared,
+                    "system at position {system} emits stream {stream:#x} without declaring it in `emits`"
+                );
+                let data = read_guest(&caller.data().memory, ptr, len as usize)?;
+                caller.data_mut().commands.push_event(stream, data)
+            };
+            run().map_err(trap)
+        },
+    )?;
     linker.func_wrap(
         "env",
         "ae_spatial_radius",
         |mut caller: Caller<'_, WorkerCtx>, x: f32, y: f32, r: f32, out: u32, cap: u32| -> wasmtime::Result<u32> {
             let mut run = || -> Result<u32> {
                 let ctx = caller.data_mut();
-                let index = ctx.spatial.clone().context("no spatial index: schedule `host(spatial)` before querying it")?;
-                ensure!(r.is_finite() && r >= 0.0 && x.is_finite() && y.is_finite(), "bad spatial query ({x}, {y}, r {r})");
+                let index = ctx
+                    .spatial
+                    .clone()
+                    .context("no spatial index: schedule `host(spatial)` before querying it")?;
+                ensure!(
+                    r.is_finite() && r >= 0.0 && x.is_finite() && y.is_finite(),
+                    "bad spatial query ({x}, {y}, r {r})"
+                );
                 index.grid.radius_one(ae_spatial::Circle { x, y, r }, &mut ctx.hits);
                 let n = ctx.hits.len().min(cap as usize);
                 let end = out as usize + n * 8;
-                ensure!(end <= ctx.memory.data_size(), "spatial query output {out:#x}+{} is out of bounds", n * 8);
+                ensure!(
+                    end <= ctx.memory.data_size(),
+                    "spatial query output {out:#x}+{} is out of bounds",
+                    n * 8
+                );
                 // The output buffer is the calling system's own memory.
                 let dst = unsafe { (ctx.memory.data().as_ptr() as *mut u8).add(out as usize) };
                 for (k, &item) in ctx.hits[..n].iter().enumerate() {
-                    unsafe { dst.add(k * 8).cast::<u64>().write_unaligned(index.entities[item as usize]) };
+                    unsafe {
+                        dst.add(k * 8)
+                            .cast::<u64>()
+                            .write_unaligned(index.entities[item as usize])
+                    };
                 }
                 Ok(ctx.hits.len() as u32)
             };
             run().map_err(trap)
         },
     )?;
-    linker.func_wrap("env", "ae_lookup", |caller: Caller<'_, WorkerCtx>, scope: u64, name: u64| -> u32 {
-        caller.data().ids.as_ref().and_then(|m| m.names.get(&(scope, name)).copied()).unwrap_or(u32::MAX)
-    })?;
+    linker.func_wrap(
+        "env",
+        "ae_lookup",
+        |caller: Caller<'_, WorkerCtx>, scope: u64, name: u64| -> u32 {
+            caller
+                .data()
+                .ids
+                .as_ref()
+                .and_then(|m| m.names.get(&(scope, name)).copied())
+                .unwrap_or(u32::MAX)
+        },
+    )?;
     linker.func_wrap(
         "env",
         "ae_query",
-        |caller: Caller<'_, WorkerCtx>, op: u64, input: u32, input_len: u32, out: u32, out_len: u32| -> wasmtime::Result<u32> {
+        |caller: Caller<'_, WorkerCtx>,
+         op: u64,
+         input: u32,
+         input_len: u32,
+         out: u32,
+         out_len: u32|
+         -> wasmtime::Result<u32> {
             let run = || -> Result<u32> {
                 let ctx = caller.data();
-                let Some(plugin) = ctx.ids.as_ref().and_then(|m| m.queries.0.get(&op)) else { return Ok(ae_abi::query::MISSING) };
-                ensure!(input_len as usize <= MAX_QUERY_BYTES && out_len as usize <= MAX_QUERY_BYTES, "query of {input_len} -> {out_len} bytes");
+                let Some(plugin) = ctx.ids.as_ref().and_then(|m| m.queries.0.get(&op)) else {
+                    return Ok(ae_abi::query::MISSING);
+                };
+                ensure!(
+                    input_len as usize <= MAX_QUERY_BYTES && out_len as usize <= MAX_QUERY_BYTES,
+                    "query of {input_len} -> {out_len} bytes"
+                );
                 let data = read_guest(&ctx.memory, input, input_len as usize)?;
                 let mut result = vec![0u8; out_len as usize];
                 let n = plugin.query(op, &data, &mut result)?;
                 ensure!(n <= result.len(), "query {op:#x} wrote past its output");
                 let end = out as usize + n;
-                ensure!(end <= ctx.memory.data_size(), "query output {out:#x}+{n} is out of bounds");
+                ensure!(
+                    end <= ctx.memory.data_size(),
+                    "query output {out:#x}+{n} is out of bounds"
+                );
                 // The output buffer is the calling system's own memory.
-                unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), (ctx.memory.data().as_ptr() as *mut u8).add(out as usize), n) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        result.as_ptr(),
+                        (ctx.memory.data().as_ptr() as *mut u8).add(out as usize),
+                        n,
+                    )
+                };
                 Ok(n as u32)
             };
             run().map_err(trap)
@@ -275,7 +390,10 @@ mod tests {
     #[test]
     fn spawn_records_parse_and_sort() {
         let parsed = parse_spawn(&record(&[(9, &[1, 2, 3]), (4, &[7; 8])])).unwrap();
-        assert_eq!(parsed, vec![(ComponentId(4), vec![7; 8]), (ComponentId(9), vec![1, 2, 3])]);
+        assert_eq!(
+            parsed,
+            vec![(ComponentId(4), vec![7; 8]), (ComponentId(9), vec![1, 2, 3])]
+        );
     }
 
     #[test]
@@ -285,7 +403,10 @@ mod tests {
         let mut long = good.clone();
         long.extend_from_slice(&[0; 8]);
         assert!(parse_spawn(&long).is_err(), "trailing bytes");
-        assert!(parse_spawn(&record(&[(9, &[1]), (9, &[2])])).is_err(), "duplicate component");
+        assert!(
+            parse_spawn(&record(&[(9, &[1]), (9, &[2])])).is_err(),
+            "duplicate component"
+        );
         assert!(parse_spawn(&record(&[])).is_err(), "no components");
     }
 }

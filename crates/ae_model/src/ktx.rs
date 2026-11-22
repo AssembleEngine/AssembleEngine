@@ -72,10 +72,19 @@ impl Image {
     pub fn check(&self) -> Result<()> {
         ensure!(self.width > 0 && self.height > 0, "empty texture");
         ensure!(!self.levels.is_empty(), "texture without levels");
-        ensure!(self.levels.len() as u32 <= 32 - self.width.max(self.height).leading_zeros(), "{} levels for {}x{}", self.levels.len(), self.width, self.height);
+        ensure!(
+            self.levels.len() as u32 <= 32 - self.width.max(self.height).leading_zeros(),
+            "{} levels for {}x{}",
+            self.levels.len(),
+            self.width,
+            self.height
+        );
         for (i, l) in self.levels.iter().enumerate() {
             let (w, h) = self.level_size(i);
-            let want = self.format.level_bytes(w, h).with_context(|| format!("VkFormat {} not taken", self.format.0))?;
+            let want = self
+                .format
+                .level_bytes(w, h)
+                .with_context(|| format!("VkFormat {} not taken", self.format.0))?;
             ensure!(l.len() == want, "level {i}: {} bytes, {w}x{h} needs {want}", l.len());
         }
         Ok(())
@@ -89,10 +98,15 @@ const SUPERCOMPRESSION_ZSTD: u32 = 2;
 pub fn read(bytes: &[u8]) -> Result<Image> {
     let reader = ktx2::Reader::new(bytes).map_err(|e| anyhow::anyhow!("KTX2: {e:?}"))?;
     let h = reader.header();
-    let Some(vk) = h.format else { bail!("KTX2 without a VkFormat (Basis: convert the model again)") };
+    let Some(vk) = h.format else {
+        bail!("KTX2 without a VkFormat (Basis: convert the model again)")
+    };
     let format = Format(vk.value());
     ensure!(format.block().is_some(), "KTX2 VkFormat {} not taken", format.0);
-    ensure!(h.pixel_depth == 0 && h.layer_count == 0 && h.face_count == 1, "KTX2 not a plain 2D texture");
+    ensure!(
+        h.pixel_depth == 0 && h.layer_count == 0 && h.face_count == 1,
+        "KTX2 not a plain 2D texture"
+    );
     ensure!(h.level_count > 0, "KTX2 without its levels");
     let zstd = match h.supercompression_scheme {
         None => false,
@@ -103,14 +117,20 @@ pub fn read(bytes: &[u8]) -> Result<Image> {
     for level in reader.levels() {
         if zstd {
             let mut out = Vec::with_capacity(level.uncompressed_byte_length as usize);
-            let mut decoder = ruzstd::decoding::StreamingDecoder::new(level.data).map_err(|e| anyhow::anyhow!("zstd: {e}"))?;
+            let mut decoder =
+                ruzstd::decoding::StreamingDecoder::new(level.data).map_err(|e| anyhow::anyhow!("zstd: {e}"))?;
             std::io::Read::read_to_end(&mut decoder, &mut out).context("zstd")?;
             levels.push(out);
         } else {
             levels.push(level.data.to_vec());
         }
     }
-    let image = Image { format, width: h.pixel_width, height: h.pixel_height.max(1), levels };
+    let image = Image {
+        format,
+        width: h.pixel_width,
+        height: h.pixel_height.max(1),
+        levels,
+    };
     image.check()?;
     Ok(image)
 }
@@ -148,7 +168,13 @@ fn dfd(format: Format, zstd: bool) -> Vec<u8> {
         }
     };
     let block_size = 24 + 16 * samples.len() as u32;
-    let mut words = vec![block_size + 4, 0, 2 | (block_size << 16), model | (BT709 << 8) | (transfer << 16), dims];
+    let mut words = vec![
+        block_size + 4,
+        0,
+        2 | (block_size << 16),
+        model | (BT709 << 8) | (transfer << 16),
+        dims,
+    ];
     // libktx zeroes bytesPlane0 for supercompressed data.
     words.push(if zstd { 0 } else { bytes_plane });
     words.push(0);
@@ -165,7 +191,10 @@ pub type Compress = dyn Fn(&[u8]) -> Vec<u8>;
 /// level) when `zstd`.
 pub fn write(image: &Image, zstd: bool) -> Result<Vec<u8>> {
     if zstd {
-        write_with(image, Some(&|l: &[u8]| ruzstd::encoding::compress_to_vec(l, ruzstd::encoding::CompressionLevel::Fastest)))
+        write_with(
+            image,
+            Some(&|l: &[u8]| ruzstd::encoding::compress_to_vec(l, ruzstd::encoding::CompressionLevel::Fastest)),
+        )
     } else {
         write_with(image, None)
     }
@@ -198,13 +227,35 @@ pub fn write_with(image: &Image, zstd: Option<&Compress>) -> Result<Vec<u8>> {
     let mut index = vec![(0u64, 0u64, 0u64); n];
     for level in (0..n).rev() {
         out.resize(out.len().div_ceil(align) * align, 0);
-        index[level] = (out.len() as u64, payloads[level].len() as u64, image.levels[level].len() as u64);
+        index[level] = (
+            out.len() as u64,
+            payloads[level].len() as u64,
+            image.levels[level].len() as u64,
+        );
         out.extend_from_slice(&payloads[level]);
     }
     let mut head = Vec::with_capacity(80);
     head.extend_from_slice(&[0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A]);
     // typeSize: 1 for 8-bit components and for block-compressed formats.
-    for w in [image.format.0, 1, image.width, image.height, 0, 0, 1, n as u32, if zstd { SUPERCOMPRESSION_ZSTD } else { SUPERCOMPRESSION_NONE }, dfd_offset as u32, dfd.len() as u32, 0, 0] {
+    for w in [
+        image.format.0,
+        1,
+        image.width,
+        image.height,
+        0,
+        0,
+        1,
+        n as u32,
+        if zstd {
+            SUPERCOMPRESSION_ZSTD
+        } else {
+            SUPERCOMPRESSION_NONE
+        },
+        dfd_offset as u32,
+        dfd.len() as u32,
+        0,
+        0,
+    ] {
         head.extend_from_slice(&w.to_le_bytes());
     }
     head.extend_from_slice(&0u64.to_le_bytes());

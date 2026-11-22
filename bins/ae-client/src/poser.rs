@@ -111,10 +111,14 @@ impl Poser {
         // Each unit's model, if posed.
         let mut models = std::mem::take(&mut self.models);
         models.clear();
-        models.extend(units.iter().map(|&(_, class, a)| match self.classes.get(class as usize) {
-            Some(&Some(model)) if a.model == model => Some(model),
-            _ => None,
-        }));
+        models.extend(
+            units
+                .iter()
+                .map(|&(_, class, a)| match self.classes.get(class as usize) {
+                    Some(&Some(model)) if a.model == model => Some(model),
+                    _ => None,
+                }),
+        );
         // Units that stay keep their slots; the others' slots are freed
         // before new units take slots.
         let mut kept = std::mem::take(&mut self.kept);
@@ -149,7 +153,11 @@ impl Poser {
                 job_of.resize(self.slots, (u32::MAX, false));
             }
             job_of[slot as usize] = (i as u32, fresh);
-            self.units.push(Unit { key: key_of, model, slot });
+            self.units.push(Unit {
+                key: key_of,
+                model,
+                slot,
+            });
             poses.push((slot as usize * POSE_CELLS) as u32);
         }
         job_of.resize(self.slots, (u32::MAX, false));
@@ -167,7 +175,13 @@ impl Poser {
             .for_each(|(b, ((((cells, written), manual), jobs), (at, out)))| {
                 at.clear();
                 out.clear();
-                for (s, (((cells, w), m), job)) in cells.chunks_mut(POSE_CELLS).zip(written).zip(manual).zip(jobs).enumerate() {
+                for (s, (((cells, w), m), job)) in cells
+                    .chunks_mut(POSE_CELLS)
+                    .zip(written)
+                    .zip(manual)
+                    .zip(jobs)
+                    .enumerate()
+                {
                     let (i, fresh) = std::mem::replace(job, (u32::MAX, false));
                     *w = match units.get(i as usize) {
                         Some(&(_, _, anim)) => pack_slot(&Job { anim, fresh }, now, cells),
@@ -231,7 +245,12 @@ pub fn record(a: &Anim, tick: u32) -> [Cell; RECORD_CELLS] {
     let mut r = [[0; 4]; RECORD_CELLS];
     for i in 0..LAYERS {
         if a.clip[i] != 0 {
-            r[1 + i] = [a.clip[i] as u32 | (a.mask[i] as u32) << 16, a.mode[i] as u32 | (a.kind[i] as u32) << 8, a.weight[i].to_bits(), a.phase[i].to_bits()];
+            r[1 + i] = [
+                a.clip[i] as u32 | (a.mask[i] as u32) << 16,
+                a.mode[i] as u32 | (a.kind[i] as u32) << 8,
+                a.weight[i].to_bits(),
+                a.phase[i].to_bits(),
+            ];
         }
     }
     let mut n = 0;

@@ -32,11 +32,23 @@ pub struct Bodies {
 
 impl Bodies {
     pub fn columns(&mut self) -> BodyColumns<'_> {
-        BodyColumns { pos_x: &mut self.pos_x, pos_y: &mut self.pos_y, vel_x: &mut self.vel_x, vel_y: &mut self.vel_y, radius: &self.radius }
+        BodyColumns {
+            pos_x: &mut self.pos_x,
+            pos_y: &mut self.pos_y,
+            vel_x: &mut self.vel_x,
+            vel_y: &mut self.vel_y,
+            radius: &self.radius,
+        }
     }
-    pub fn pos(&self, i: usize) -> WorldPos { WorldPos::new(self.pos_x[i], self.pos_y[i]) }
-    pub fn len(&self) -> usize { self.pos_x.len() }
-    pub fn is_empty(&self) -> bool { self.pos_x.is_empty() }
+    pub fn pos(&self, i: usize) -> WorldPos {
+        WorldPos::new(self.pos_x[i], self.pos_y[i])
+    }
+    pub fn len(&self) -> usize {
+        self.pos_x.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.pos_x.is_empty()
+    }
 }
 
 pub struct Scenario {
@@ -70,7 +82,10 @@ impl Scenario {
     /// Add the plan's units to `nav` (entity `k + 1` for unit `k`) and
     /// queue its orders.
     pub fn from_plan(nav: NavService, plan: &Plan) -> Self {
-        let mut s = Scenario { nav, bodies: Bodies::default() };
+        let mut s = Scenario {
+            nav,
+            bodies: Bodies::default(),
+        };
         for (k, spec) in plan.units.iter().enumerate() {
             s.add(k as u64 + 1, *spec);
         }
@@ -111,12 +126,22 @@ impl Scenario {
     }
 
     fn command(&mut self, id: u64, entities: impl Iterator<Item = u64>, to: WorldPos) {
-        let unit_ids = entities.map(|e| self.nav.local_id(e).expect("unit of the scenario")).collect();
-        self.nav.queue_command_at(CommandPayload { id, unit_ids, kind: CommandKind::MoveTo, requested_point: to, corridor_tolerance_world: 48.0 });
+        let unit_ids = entities
+            .map(|e| self.nav.local_id(e).expect("unit of the scenario"))
+            .collect();
+        self.nav.queue_command_at(CommandPayload {
+            id,
+            unit_ids,
+            kind: CommandKind::MoveTo,
+            requested_point: to,
+            corridor_tolerance_world: 48.0,
+        });
     }
 }
 
-fn cell_point(nav: &NavService, c: CellPos) -> WorldPos { nav.terrain.geom.cell_center(c) }
+fn cell_point(nav: &NavService, c: CellPos) -> WorldPos {
+    nav.terrain.geom.cell_center(c)
+}
 
 fn config(units: u32, map_cells: i32, workers: usize) -> NavConfig {
     let scale = |v: i32| v * map_cells / 2560;
@@ -125,7 +150,11 @@ fn config(units: u32, map_cells: i32, workers: usize) -> NavConfig {
         map_cells,
         worker_count: workers,
         spawn_center_cell: (scale(260), scale(2290)),
-        spawn_radius_cells: if map_cells == 2560 { 96 + units as i32 / 100 } else { (96 + units as i32 / 100) * map_cells / 2560 + 8 },
+        spawn_radius_cells: if map_cells == 2560 {
+            96 + units as i32 / 100
+        } else {
+            (96 + units as i32 / 100) * map_cells / 2560 + 8
+        },
         ..NavConfig::default()
     }
 }
@@ -147,7 +176,12 @@ pub fn land_crossing_plan(units: u32, map_cells: i32, workers: usize) -> (NavSer
 
 /// [`land_crossing_plan`] with other movement profiles (classes 0 and 1
 /// take the light and heavy units' places).
-pub fn land_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
+pub fn land_crossing_plan_with(
+    units: u32,
+    map_cells: i32,
+    workers: usize,
+    profiles: Vec<MovementProfile>,
+) -> (NavService, Plan) {
     assert!(profiles.len() >= 2, "the land map's units use classes 0 and 1");
     let cfg = config(units, map_cells, workers);
     let terrain = Terrain::generate(&cfg.terrain_config());
@@ -155,17 +189,37 @@ pub fn land_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profi
     let specs = nav.spawn_plan();
     let goal = cell_point(&nav, reference_cell(&nav.terrain.geom, 1020, 1900));
     let all = (0..specs.len()).collect();
-    (nav, Plan { units: specs, orders: vec![(1, all, goal)] })
+    (
+        nav,
+        Plan {
+            units: specs,
+            orders: vec![(1, all, goal)],
+        },
+    )
 }
 
 /// A plan on a given terrain (a loaded map): `units` land units on the
 /// land map's spawn plaza (none for a game that spawns its own), no orders.
-pub fn terrain_plan_with(units: u32, terrain: Terrain, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
-    let cfg = NavConfig { seed: terrain.seed, ..config(units, terrain.geom.cells_x, workers) };
+pub fn terrain_plan_with(
+    units: u32,
+    terrain: Terrain,
+    workers: usize,
+    profiles: Vec<MovementProfile>,
+) -> (NavService, Plan) {
+    let cfg = NavConfig {
+        seed: terrain.seed,
+        ..config(units, terrain.geom.cells_x, workers)
+    };
     #[allow(unused_mut)]
     let mut nav = NavService::with_terrain(cfg, terrain, profiles);
     let specs = if units == 0 { Vec::new() } else { nav.spawn_plan() };
-    (nav, Plan { units: specs, orders: Vec::new() })
+    (
+        nav,
+        Plan {
+            units: specs,
+            orders: Vec::new(),
+        },
+    )
 }
 
 /// The terrain of [`land_crossing_plan`] alone (no hierarchy, no units),
@@ -202,9 +256,17 @@ pub fn water_crossing_plan(units: u32, map_cells: i32, workers: usize) -> (NavSe
 
 /// [`water_crossing_plan`] with other movement profiles (classes 0..=4 take
 /// the places of scout, heavy, ship, hovercraft and amphibious units).
-pub fn water_crossing_plan_with(units: u32, map_cells: i32, workers: usize, profiles: Vec<MovementProfile>) -> (NavService, Plan) {
+pub fn water_crossing_plan_with(
+    units: u32,
+    map_cells: i32,
+    workers: usize,
+    profiles: Vec<MovementProfile>,
+) -> (NavService, Plan) {
     use class::*;
-    assert!(profiles.len() > AMPHIBIOUS as usize, "the water map's units use classes 0..=4");
+    assert!(
+        profiles.len() > AMPHIBIOUS as usize,
+        "the water map's units use classes 0..=4"
+    );
     let ships = units / 20;
     let cfg = config(units - ships, map_cells, workers);
     let mut tc: TerrainConfig = cfg.terrain_config();
@@ -231,7 +293,11 @@ pub fn water_crossing_plan_with(units: u32, map_cells: i32, workers: usize, prof
     let grid = nav.hierarchy.grid(SHIP).clone();
     // North of the road's causeway, which cuts the river near (1290, 1650).
     let anchor = reference_cell(&geom, 1150, 1250);
-    let ship_goal = nav.terrain.nearest_open_cell(reference_cell(&geom, 1050, 900), 128, |c| grid.is_passable(&nav.terrain, c));
+    let ship_goal = nav
+        .terrain
+        .nearest_open_cell(reference_cell(&geom, 1050, 900), 128, |c| {
+            grid.is_passable(&nav.terrain, c)
+        });
     let mut cells: Vec<CellPos> = (0..geom.cells_y)
         .flat_map(|y| (0..geom.cells_x).map(move |x| CellPos::new(x, y)))
         .filter(|&c| grid.is_passable(&nav.terrain, c))
@@ -241,22 +307,39 @@ pub fn water_crossing_plan_with(units: u32, map_cells: i32, workers: usize, prof
     let mut taken = BTreeSet::new();
     let mut placed = 0u32;
     for c in cells {
-        if placed >= ships { break; }
-        if (-1..=1).any(|dy| (-1..=1).any(|dx| taken.contains(&(c.x + dx, c.y + dy)))) { continue; }
+        if placed >= ships {
+            break;
+        }
+        if (-1..=1).any(|dy| (-1..=1).any(|dx| taken.contains(&(c.x + dx, c.y + dy)))) {
+            continue;
+        }
         taken.insert((c.x, c.y));
-        specs.push(UnitSpec { pos: geom.cell_center(c), radius: ship.unit_radius, max_speed: ship.base_speed, profile_id: SHIP });
+        specs.push(UnitSpec {
+            pos: geom.cell_center(c),
+            radius: ship.unit_radius,
+            max_speed: ship.base_speed,
+            profile_id: SHIP,
+        });
         placed += 1;
     }
 
     // Land units cross on the road's causeway; hovercraft and amphibious
     // units gather in the middle of the big lake, where only they can go.
-    let ground: Vec<usize> = (0..land_units).filter(|&u| matches!(specs[u].profile_id, SCOUT | HEAVY)).collect();
-    let crossers: Vec<usize> = (0..land_units).filter(|&u| matches!(specs[u].profile_id, HOVER | AMPHIBIOUS)).collect();
+    let ground: Vec<usize> = (0..land_units)
+        .filter(|&u| matches!(specs[u].profile_id, SCOUT | HEAVY))
+        .collect();
+    let crossers: Vec<usize> = (0..land_units)
+        .filter(|&u| matches!(specs[u].profile_id, HOVER | AMPHIBIOUS))
+        .collect();
     let mut orders = vec![(1, ground, cell_point(&nav, reference_cell(&geom, 1400, 1560)))];
     // In the big lake, clear of the road's causeway through its middle.
     orders.push((3, crossers, cell_point(&nav, reference_cell(&geom, 1357, 1650))));
     if let (Some(goal), true) = (ship_goal, placed > 0) {
-        orders.push((2, (land_units..land_units + placed as usize).collect(), cell_point(&nav, goal)));
+        orders.push((
+            2,
+            (land_units..land_units + placed as usize).collect(),
+            cell_point(&nav, goal),
+        ));
     }
     (nav, Plan { units: specs, orders })
 }

@@ -116,19 +116,51 @@ SDR at the defaults is unchanged. Details: [docs/PLAN.md](docs/PLAN.md) "M13 pro
 | `render/default`, `render/post` | Render modules: the engine's scene graph from WASM; the same with a colour grade and a vignette (built for `wasm32-unknown-unknown`; not workspace members) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
-| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary), `catalog-fmt`, `pack [--module GAME]`, `unpack-list`, `map-export` | new |
+| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary), `catalog-fmt`, `pack [--module GAME]`, `unpack-list`, `map-export`, `hooks install` | new |
 | `spikes/parallel_guest` | M0 risk spikes (three binaries) | new |
 | `vendor/` | flecs and its build crate | ecs_sim `vendor/` |
 
 ## Requirements
 
-- Rust 1.98 with the `wasm32-wasip1-threads` target (`rustup target add wasm32-wasip1-threads`), and
-  `wasm32-unknown-unknown` for render modules (`rustup target add wasm32-unknown-unknown`).
+- Rust 1.98.1, pinned by `rust-toolchain.toml` (rustup installs the channel, `rustfmt`, `clippy` and
+  both wasm targets on first use: `wasm32-wasip1-threads` for sim guests and `wasm32-unknown-unknown`
+  for render modules).
 - A C compiler (flecs is built from source).
 - `glslc` (shaderc) to build `ae_render`; SDL3 and a Vulkan 1.3 driver to run `ae-client` and the GPU
   tests, which also need `VK_LAYER_KHRONOS_validation`. `ae-client` builds the crossing game on first
   use, like `ae-headless` (the wasm target above); `--units 0` runs it without the sim.
 - Optional: `wasmtime` CLI to run the nav golden test as WASM; the Tracy profiler GUI for `--features tracy`.
+
+## Formatting, lints and the commit hook
+
+One format, `rustfmt` at `max_width = 120` (`rustfmt.toml`), on the toolchain `rust-toolchain.toml`
+pins, so the output does not drift between releases. `tools/fmt.sh` formats the whole tree —
+the workspace and the guest crates, which have their own manifests and are not workspace members —
+and `tools/fmt.sh --check` is its read-only form. `cargo fmt --all` alone is not the command here:
+it follows the `flecs_ecs_sys` path dependency into `vendor/`, the patched flecs copy, which stays
+unformatted.
+
+Lints are `cargo clippy --workspace --all-targets -- -D warnings`, clippy's defaults only. A fix
+must not change bits: where a suggestion would move float results (`approx_constant`,
+`suboptimal_flops` and friends), the code keeps its value and carries a scoped `#[allow(...)]` with
+the reason.
+
+The hook is tracked (`.githooks/pre-commit`) and installed once per clone:
+
+```sh
+./target/release/ae-tool hooks install   # or: git config core.hooksPath .githooks
+tools/fmt.sh                             # format, then commit
+```
+
+It refuses a commit whose staged `.rs` files the formatter rejects, and one where
+`cargo clippy --workspace --all-targets -- -D warnings` fails once any `.rs`, `Cargo.toml`,
+`Cargo.lock`, `build.rs` or `.cargo/` file is staged; a docs-only commit returns at once. Measured
+warm on one machine: 5 ms for a docs-only commit, 1.6 s for the formatter check, and clippy's own
+run for a code commit, about 2 s when nothing changed since the last clippy run and 15 s after code
+changes (`docs/PLAN.md` § M17 progress). It is a local guard, not a security boundary:
+`git commit --no-verify` skips it, and such a commit must be re-run through the hook before it is
+shared. It reads the working tree, not the index, so with a partially staged file, stage everything
+first.
 
 ## Commands
 

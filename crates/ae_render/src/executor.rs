@@ -11,11 +11,9 @@
 //! caller's waits/signals, fences the slot) → caller presents.
 
 use crate::device::GpuDevice;
-use ae_framegraph::barriers::{AccessState, BarrierDesc, StateKey, StateStore, pass_barriers};
-use ae_framegraph::{
-    BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, bake,
-};
 use crate::memory::{OwnedBuffer, OwnedImage};
+use ae_framegraph::barriers::{AccessState, BarrierDesc, StateKey, StateStore, pass_barriers};
+use ae_framegraph::{BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, bake};
 use anyhow::{Context as _, Result, anyhow, bail};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -203,7 +201,9 @@ impl StateStore for Store<'_> {
         match key {
             StateKey::Physical(_) => self.slot.entry(key).or_default(),
             StateKey::External(resource) => {
-                let identity = self.bindings[resource.index()].map(|b| b.identity()).unwrap_or(u64::MAX);
+                let identity = self.bindings[resource.index()]
+                    .map(|b| b.identity())
+                    .unwrap_or(u64::MAX);
                 self.external.entry(identity).or_default()
             }
         }
@@ -249,7 +249,10 @@ impl<R> Executor<R> {
                 .command_buffer_count(1);
             let cmd = unsafe { device.allocate_command_buffers(&alloc) }?[0];
             let fence = unsafe {
-                device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)
+                device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
             }?;
             let image_available = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }?;
             gpu.set_name(cmd, &format!("frame slot {index}"));
@@ -279,7 +282,12 @@ impl<R> Executor<R> {
             gpu_frames: Vec::new(),
             pool: match config.record_threads {
                 0 | 1 => None,
-                n => Some(rayon::ThreadPoolBuilder::new().num_threads(n).thread_name(|i| format!("ae-record-{i}")).build()?),
+                n => Some(
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n)
+                        .thread_name(|i| format!("ae-record-{i}"))
+                        .build()?,
+                ),
             },
         })
     }
@@ -303,7 +311,12 @@ impl<R> Executor<R> {
             .iter()
             .map(|(sum, count)| if *count > 0 { (*sum / *count as f64) as f32 } else { 0.0 })
             .collect();
-        stats.pass_names = self.baked.iter().flat_map(|b| b.order()).map(|p| self.graph.passes[p.0 as usize].name.clone()).collect();
+        stats.pass_names = self
+            .baked
+            .iter()
+            .flat_map(|b| b.order())
+            .map(|p| self.graph.passes[p.0 as usize].name.clone())
+            .collect();
         stats
     }
 
@@ -365,8 +378,18 @@ impl<R> Executor<R> {
             if self.pool.is_some() {
                 destroy_pass_cmds(&self.gpu.device, &mut slot.pass_cmds);
                 for index in 0..baked.passes.len() {
-                    let pool = unsafe { self.gpu.device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(self.gpu.queue_family).flags(vk::CommandPoolCreateFlags::TRANSIENT), None) }?;
-                    let alloc = vk::CommandBufferAllocateInfo::default().command_pool(pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+                    let pool = unsafe {
+                        self.gpu.device.create_command_pool(
+                            &vk::CommandPoolCreateInfo::default()
+                                .queue_family_index(self.gpu.queue_family)
+                                .flags(vk::CommandPoolCreateFlags::TRANSIENT),
+                            None,
+                        )
+                    }?;
+                    let alloc = vk::CommandBufferAllocateInfo::default()
+                        .command_pool(pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1);
                     let cmd = unsafe { self.gpu.device.allocate_command_buffers(&alloc) }?[0];
                     self.gpu.set_name(cmd, &format!("frame slot {slot_index} pass {index}"));
                     slot.pass_cmds.push((pool, cmd));
@@ -512,7 +535,10 @@ impl<R> Executor<R> {
                     }
                 }
                 None => Some(externals(ResourceId(index as u32)).ok_or_else(|| {
-                    anyhow!("external resource {:?} is not bound", graph.resource_name(ResourceId(index as u32)))
+                    anyhow!(
+                        "external resource {:?} is not bound",
+                        graph.resource_name(ResourceId(index as u32))
+                    )
                 })?),
             };
         }
@@ -530,14 +556,26 @@ impl<R> Executor<R> {
             let skipped = baked_pass.conditional && recorder.skip(&pass.record);
             if skipped {
                 self.stats.skipped_passes += 1;
-                plans.push(PassPlan { index, pass: baked_pass.pass, skipped, payload: false, barriers: Vec::new(), rendering: None });
+                plans.push(PassPlan {
+                    index,
+                    pass: baked_pass.pass,
+                    skipped,
+                    payload: false,
+                    barriers: Vec::new(),
+                    rendering: None,
+                });
                 continue;
             }
             let barriers = pass_barriers(baked, index, &mut store);
             barrier_count += barriers.len() as u64;
             let rendering = match baked_pass.kind {
                 PassKind::Graphics => {
-                    let mut rendering = Rendering { colors: Vec::new(), depth: None, stencil: false, area: vk::Extent2D::default() };
+                    let mut rendering = Rendering {
+                        colors: Vec::new(),
+                        depth: None,
+                        stencil: false,
+                        area: vk::Extent2D::default(),
+                    };
                     for access in &baked_pass.accesses {
                         let Some(load) = access.role.load_op() else { continue };
                         let Some(Binding::Image(image)) = bindings[access.resource.index()] else {
@@ -550,7 +588,11 @@ impl<R> Executor<R> {
                         let first_use = barriers.iter().any(|barrier| {
                             barrier.resource == access.resource && barrier.old_layout == vk::ImageLayout::UNDEFINED
                         });
-                        let load = if load == LoadOp::Load && first_use { LoadOp::Clear } else { load };
+                        let load = if load == LoadOp::Load && first_use {
+                            LoadOp::Clear
+                        } else {
+                            load
+                        };
                         let store = access.store.unwrap_or(vk::AttachmentStoreOp::STORE);
                         if access.role.is_depth() {
                             let (depth, stencil) = recorder.clear_depth(&pass.record, access.resource);
@@ -560,7 +602,9 @@ impl<R> Executor<R> {
                                 layout: access.usage.layout,
                                 load: load.vk(),
                                 store,
-                                clear: vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth, stencil } },
+                                clear: vk::ClearValue {
+                                    depth_stencil: vk::ClearDepthStencilValue { depth, stencil },
+                                },
                             });
                             continue;
                         }
@@ -570,7 +614,9 @@ impl<R> Executor<R> {
                             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                             load: load.vk(),
                             store,
-                            clear: vk::ClearValue { color: vk::ClearColorValue { float32: clear } },
+                            clear: vk::ClearValue {
+                                color: vk::ClearColorValue { float32: clear },
+                            },
                         });
                     }
                     Some(rendering)
@@ -578,7 +624,14 @@ impl<R> Executor<R> {
                 PassKind::Compute | PassKind::Transfer | PassKind::Present => None,
             };
             let payload = baked_pass.kind != PassKind::Present;
-            plans.push(PassPlan { index, pass: baked_pass.pass, skipped, payload, barriers, rendering });
+            plans.push(PassPlan {
+                index,
+                pass: baked_pass.pass,
+                skipped,
+                payload,
+                barriers,
+                rendering,
+            });
         }
 
         let timestamps = slot.query_capacity >= 2 * baked.passes.len() as u32 && slot.queries != vk::QueryPool::null();
@@ -586,7 +639,11 @@ impl<R> Executor<R> {
             gpu: &gpu,
             slot: token.slot,
             bindings: &bindings,
-            queries: if timestamps { slot.queries } else { vk::QueryPool::null() },
+            queries: if timestamps {
+                slot.queries
+            } else {
+                vk::QueryPool::null()
+            },
         };
         let recorded = plans.iter().filter(|p| !p.skipped).count();
         let mut cmds = Vec::with_capacity(plans.len() + 1);
@@ -601,9 +658,14 @@ impl<R> Executor<R> {
                             let pass = &graph.passes[plan.pass.index()];
                             unsafe {
                                 device.reset_command_pool(pass_pool, vk::CommandPoolResetFlags::empty())?;
-                                device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+                                device.begin_command_buffer(
+                                    cmd,
+                                    &vk::CommandBufferBeginInfo::default()
+                                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                                )?;
                             }
-                            let result = frame.record_pass(cmd, plan, &pass.name, &pass.record, &mut |r, ctx| shared.record(r, ctx));
+                            let result = frame
+                                .record_pass(cmd, plan, &pass.name, &pass.record, &mut |r, ctx| shared.record(r, ctx));
                             unsafe { device.end_command_buffer(cmd) }?;
                             result
                         })
@@ -616,7 +678,10 @@ impl<R> Executor<R> {
         let head = slot.cmd;
         unsafe {
             device.reset_command_pool(slot.pool, vk::CommandPoolResetFlags::empty())?;
-            device.begin_command_buffer(head, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            device.begin_command_buffer(
+                head,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
             if timestamps {
                 device.cmd_reset_query_pool(head, slot.queries, 0, 2 * baked.passes.len() as u32);
             }
@@ -633,7 +698,9 @@ impl<R> Executor<R> {
             None => {
                 for plan in &plans {
                     let pass = &graph.passes[plan.pass.index()];
-                    frame.record_pass(head, plan, &pass.name, &pass.record, &mut |r, ctx| recorder.record(r, ctx))?;
+                    frame.record_pass(head, plan, &pass.name, &pass.record, &mut |r, ctx| {
+                        recorder.record(r, ctx)
+                    })?;
                 }
                 unsafe { device.end_command_buffer(head) }?;
             }
@@ -657,7 +724,10 @@ impl<R> Executor<R> {
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             })
             .collect();
-        let cmd_infos: Vec<_> = cmds.iter().map(|&cmd| vk::CommandBufferSubmitInfo::default().command_buffer(cmd)).collect();
+        let cmd_infos: Vec<_> = cmds
+            .iter()
+            .map(|&cmd| vk::CommandBufferSubmitInfo::default().command_buffer(cmd))
+            .collect();
         let submit = vk::SubmitInfo2::default()
             .wait_semaphore_infos(&wait_infos)
             .command_buffer_infos(&cmd_infos)
@@ -733,7 +803,14 @@ struct FrameRecording<'a> {
 impl FrameRecording<'_> {
     /// Timestamps, label, barriers, rendering scope and the payload of one
     /// pass, into `cmd`.
-    fn record_pass<R>(&self, cmd: vk::CommandBuffer, plan: &PassPlan, name: &str, payload: &R, record: &mut dyn FnMut(&R, &PassContext<'_>) -> Result<()>) -> Result<()> {
+    fn record_pass<R>(
+        &self,
+        cmd: vk::CommandBuffer,
+        plan: &PassPlan,
+        name: &str,
+        payload: &R,
+        record: &mut dyn FnMut(&R, &PassContext<'_>) -> Result<()>,
+    ) -> Result<()> {
         let device = &self.gpu.device;
         let timestamp = |at: u32| {
             if self.queries != vk::QueryPool::null() {
@@ -744,13 +821,26 @@ impl FrameRecording<'_> {
         if !plan.skipped {
             self.gpu.begin_label(cmd, name);
             emit_barriers(device, cmd, &plan.barriers, self.bindings)?;
-            let mut ctx = PassContext { device, cmd, slot: self.slot, pass: plan.pass, render_area: vk::Rect2D::default(), bindings: self.bindings };
+            let mut ctx = PassContext {
+                device,
+                cmd,
+                slot: self.slot,
+                pass: plan.pass,
+                render_area: vk::Rect2D::default(),
+                bindings: self.bindings,
+            };
             match &plan.rendering {
                 Some(r) => {
-                    let render_area = vk::Rect2D { offset: vk::Offset2D::default(), extent: r.area };
+                    let render_area = vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent: r.area,
+                    };
                     let colors: Vec<_> = r.colors.iter().map(Attachment::info).collect();
                     let depth = r.depth.as_ref().map(Attachment::info);
-                    let mut info = vk::RenderingInfo::default().render_area(render_area).layer_count(1).color_attachments(&colors);
+                    let mut info = vk::RenderingInfo::default()
+                        .render_area(render_area)
+                        .layer_count(1)
+                        .color_attachments(&colors);
                     if let Some(depth) = depth.as_ref() {
                         info = info.depth_attachment(depth);
                         if r.stencil {
@@ -759,7 +849,14 @@ impl FrameRecording<'_> {
                     }
                     unsafe {
                         device.cmd_begin_rendering(cmd, &info);
-                        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: r.area.width as f32, height: r.area.height as f32, min_depth: 0.0, max_depth: 1.0 };
+                        let viewport = vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: r.area.width as f32,
+                            height: r.area.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        };
                         device.cmd_set_viewport(cmd, 0, &[viewport]);
                         device.cmd_set_scissor(cmd, 0, &[render_area]);
                     }

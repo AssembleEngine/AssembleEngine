@@ -40,8 +40,14 @@ pub struct AnimPlugin {
 impl AnimPlugin {
     /// The content's models by name, and the sim's tick length.
     pub fn new(models: impl IntoIterator<Item = (String, Rig)>, tick_seconds: f32) -> Self {
-        let rigs = models.into_iter().map(|(name, rig)| (name_id(&name), (name, Arc::new(rig)))).collect();
-        Self { rigs: Arc::new(rigs), tick_seconds }
+        let rigs = models
+            .into_iter()
+            .map(|(name, rig)| (name_id(&name), (name, Arc::new(rig))))
+            .collect();
+        Self {
+            rigs: Arc::new(rigs),
+            tick_seconds,
+        }
     }
 
     /// The content's models: every `models/*.aemodel` (`models/fox.aemodel`
@@ -62,7 +68,11 @@ impl AnimPlugin {
 
     /// The ticker's work on rows, for benches and tools.
     pub fn advance(&self) -> Advance {
-        Advance { rigs: self.rigs.clone(), none: Arc::new(Rig::new(&Default::default())), dt: self.tick_seconds }
+        Advance {
+            rigs: self.rigs.clone(),
+            none: Arc::new(Rig::new(&Default::default())),
+            dt: self.tick_seconds,
+        }
     }
 
     pub fn rig(&self, model: u64) -> Option<&Arc<Rig>> {
@@ -86,12 +96,19 @@ impl HostPlugin for AnimPlugin {
     fn instantiate(&self, init: &HostInit, _schema: &Schema, names: &[&str]) -> Result<Vec<Box<dyn HostSystem>>> {
         // One source of truth: the plugin's tick length is the runtime's.
         let hz = 1.0 / self.tick_seconds;
-        ensure!((hz - init.tick_hz as f32).abs() < 1e-3 * hz, "the animation service ticks at {hz} Hz, the sim at {} Hz", init.tick_hz);
+        ensure!(
+            (hz - init.tick_hz as f32).abs() < 1e-3 * hz,
+            "the animation service ticks at {hz} Hz, the sim at {} Hz",
+            init.tick_hz
+        );
         names
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 match name {
-                    "anim" => Ok(Box::new(Ticker { advance: self.advance(), par: ae_nav::par::Par::new(init.workers) })),
+                    "anim" => Ok(Box::new(Ticker {
+                        advance: self.advance(),
+                        par: ae_nav::par::Par::new(init.workers),
+                    })),
                     other => bail!("no host system `{other}` in the animation plugin"),
                 }
             })
@@ -102,35 +119,71 @@ impl HostPlugin for AnimPlugin {
         let mut out = Vec::new();
         for (&model, (_, rig)) in self.rigs.iter() {
             let key = |prefix: &str, name: &str| name_id_from(name_id(prefix), name);
-            out.extend(rig.clip_names().iter().enumerate().map(|(k, n)| (model, key(lookup::CLIP, n), k as u32 + 1)));
-            out.extend(rig.bone_names().iter().enumerate().map(|(k, n)| (model, key(lookup::BONE, n), k as u32)));
-            out.extend(rig.masks().iter().enumerate().map(|(k, m)| (model, key(lookup::MASK, &m.name), k as u32 + 1)));
+            out.extend(
+                rig.clip_names()
+                    .iter()
+                    .enumerate()
+                    .map(|(k, n)| (model, key(lookup::CLIP, n), k as u32 + 1)),
+            );
+            out.extend(
+                rig.bone_names()
+                    .iter()
+                    .enumerate()
+                    .map(|(k, n)| (model, key(lookup::BONE, n), k as u32)),
+            );
+            out.extend(
+                rig.masks()
+                    .iter()
+                    .enumerate()
+                    .map(|(k, m)| (model, key(lookup::MASK, &m.name), k as u32 + 1)),
+            );
         }
         out
     }
 
     fn queries(&self) -> Vec<u64> {
-        vec![name_id(query::ANIM_DIR_IN), name_id(query::ANIM_BOUNDS), name_id(query::ANIM_BONE_WORLD)]
+        vec![
+            name_id(query::ANIM_DIR_IN),
+            name_id(query::ANIM_BOUNDS),
+            name_id(query::ANIM_BONE_WORLD),
+        ]
     }
 
     fn query(&self, op: u64, input: &[u8], out: &mut [u8]) -> Result<usize> {
         let n = size_of::<Anim>();
         if op == name_id(query::ANIM_BOUNDS) {
-            ensure!(input.len() == n && out.len() >= 24, "bounds: {} bytes in, {} out", input.len(), out.len());
+            ensure!(
+                input.len() == n && out.len() >= 24,
+                "bounds: {} bytes in, {} out",
+                input.len(),
+                out.len()
+            );
             let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
-            let b = self.rigs.get(&a.model).map_or_else(ae_model::Bounds::default, |(_, r)| r.bounds(&channels(&a)));
+            let b = self
+                .rigs
+                .get(&a.model)
+                .map_or_else(ae_model::Bounds::default, |(_, r)| r.bounds(&channels(&a)));
             for (k, x) in b.min.iter().chain(&b.max).enumerate() {
                 out[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
             }
             return Ok(24);
         }
         if op == name_id(query::ANIM_BONE_WORLD) {
-            ensure!(input.len() == n + 32 && out.len() >= 28, "bone_world: {} bytes in, {} out", input.len(), out.len());
+            ensure!(
+                input.len() == n + 32 && out.len() >= 28,
+                "bone_world: {} bytes in, {} out",
+                input.len(),
+                out.len()
+            );
             let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
             let word = |k: usize| u32::from_le_bytes(input[n + 4 * k..n + 4 * k + 4].try_into().unwrap());
             let f = |k: usize| f32::from_bits(word(k));
             let (bone, x, y, radius, facing) = (word(0), f(1), f(2), f(3), [f(4), f(5), f(6), f(7)]);
-            let rig = self.rigs.get(&a.model).map(|(_, r)| r).with_context(|| format!("bone_world: no model {:#x}", a.model))?;
+            let rig = self
+                .rigs
+                .get(&a.model)
+                .map(|(_, r)| r)
+                .with_context(|| format!("bone_world: no model {:#x}", a.model))?;
             ensure!((bone as usize) < rig.bones(), "bone_world: no bone {bone}");
             let (p, q) = rig.bone_frame(&channels(&a), bone as u16);
             let (pos, rot) = place(facing, [x, y, radius / rig.footprint()], p, q);
@@ -139,12 +192,24 @@ impl HostPlugin for AnimPlugin {
             }
             return Ok(28);
         }
-        ensure!(op == name_id(query::ANIM_DIR_IN), "query {op:#x} is not the animation plugin's");
-        ensure!(input.len() == n + 16 && out.len() >= 12, "dir_in: {} bytes in, {} out", input.len(), out.len());
+        ensure!(
+            op == name_id(query::ANIM_DIR_IN),
+            "query {op:#x} is not the animation plugin's"
+        );
+        ensure!(
+            input.len() == n + 16 && out.len() >= 12,
+            "dir_in: {} bytes in, {} out",
+            input.len(),
+            out.len()
+        );
         let a: Anim = unsafe { input.as_ptr().cast::<Anim>().read_unaligned() };
         let word = |k: usize| u32::from_le_bytes(input[n + 4 * k..n + 4 * k + 4].try_into().unwrap());
         let (bone, d) = (word(0), [1, 2, 3].map(|k| f32::from_bits(word(k))));
-        let rig = self.rigs.get(&a.model).map(|(_, r)| r).with_context(|| format!("dir_in: no model {:#x}", a.model))?;
+        let rig = self
+            .rigs
+            .get(&a.model)
+            .map(|(_, r)| r)
+            .with_context(|| format!("dir_in: no model {:#x}", a.model))?;
         ensure!((bone as usize) < rig.bones(), "dir_in: no bone {bone}");
         let v = rig.dir_in(&channels(&a), bone as u16, d);
         for (k, x) in v.iter().enumerate() {
@@ -239,45 +304,9 @@ pub fn store(ch: &Channels, a: &mut Anim) {
         (a.weight[i], a.target[i], a.fade[i], a.speed[i], a.phase[i]) = (l.weight, l.target, l.fade, l.speed, l.phase);
     }
     for (k, m) in ch.manual.iter().enumerate().take(MANUAL) {
-        (a.bone[k], a.manual_kind[k], a.manual_flags[k], a.value[k], a.goal[k]) = (m.bone, m.kind, m.flags, m.value, m.target);
+        (a.bone[k], a.manual_kind[k], a.manual_flags[k], a.value[k], a.goal[k]) =
+            (m.bone, m.kind, m.flags, m.value, m.target);
         (a.top_speed[k], a.accel[k], a.decel[k], a.rate[k]) = (m.speed, m.accel, m.decel, m.rate);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn layouts_agree() {
-        use ae_sdk::anim::{Axis, deg};
-        assert_eq!((ae_sdk::anim::LAYERS, ae_sdk::anim::MANUAL), (LAYERS, MANUAL));
-        assert_eq!(size_of::<Anim>(), 8 + size_of::<Channels>(), "the model id and the channels: 536 bytes");
-        let mut a = Anim::new(7);
-        a.play(1, 3).once().per_metre(0.25).mask(2).blend_in(100).at(0.5);
-        a.turn(4, Axis::RIGHT, 1.0, 2.0).ramp(3.0);
-        a.spin(9, Axis::bone([0.0, 1.0, 0.0]), 3.0);
-        a.turn(4, Axis::UP, deg(90.0), 1.0);
-        let ch = channels(&a);
-        assert_eq!(ch.layers[1], Layer { clip: 3, mask: 2, mode: 2, kind: 0, flags: 5, reserved: 0, weight: 0.0, target: 1.0, fade: 10.0, speed: 0.25, phase: 0.5 });
-        assert!(ch.layers[0].is_empty());
-        let fresh = manual_flags::PENDING | manual_flags::FRESH;
-        let pi = std::f32::consts::PI;
-        assert_eq!(ch.manual[0], Manual { bone: 4, kind: 1, flags: fresh, target: [0.0, 1.0, 0.0, deg(90.0)], speed: 1.0, ..Default::default() }, "the second turn replaced the first");
-        assert!((deg(90.0) - pi / 2.0).abs() < 1e-6);
-        assert_eq!(ch.manual[1], Manual { bone: 9, kind: 2, flags: fresh | manual_flags::BONE_AXIS, target: [0.0, 1.0, 0.0, 0.0], speed: 3.0, ..Default::default() });
-        assert!(ch.manual[2].is_empty());
-        let mut back = Anim::new(7);
-        store(&ch, &mut back);
-        assert_eq!(back, a);
-        // The SDK's constants are the evaluator's.
-        use ae_model::anim::{kind, layer_flags, manual_flags, manual_kind};
-        use ae_sdk::anim as sdk;
-        assert_eq!((sdk::kind::ADDITIVE, sdk::layer_flags::GROUND_SPEED, sdk::layer_flags::ENDED, sdk::layer_flags::NEW), (kind::ADDITIVE, layer_flags::GROUND_SPEED, layer_flags::ENDED, layer_flags::NEW));
-        assert_eq!((sdk::manual_kind::TURN, sdk::manual_kind::SPIN, sdk::manual_kind::MOVE, sdk::manual_kind::SCALE), (manual_kind::TURN, manual_kind::SPIN, manual_kind::MOVE, manual_kind::SCALE));
-        assert_eq!((sdk::manual_flags::PENDING, sdk::manual_flags::FRESH, sdk::manual_flags::RELATIVE, sdk::manual_flags::BONE_AXIS), (manual_flags::PENDING, manual_flags::FRESH, manual_flags::RELATIVE, manual_flags::BONE_AXIS));
-        assert_eq!(ae_sdk::anim::mode::ONCE as u32, ae_model::pose::PlayMode::Once as u32);
-        assert_eq!(ae_sdk::anim::mode::PING_PONG as u32, ae_model::pose::PlayMode::PingPong as u32);
     }
 }
 
@@ -289,4 +318,123 @@ pub fn place(facing: [f32; 4], [x, y, scale]: [f32; 3], p: [f32; 3], q: [f32; 4]
     use ae_model::anim::{qmul, qrot};
     let v = qrot(facing, [p[0] * scale, p[1] * scale, p[2] * scale]);
     ([x + v[0], v[1], y + v[2]], qmul(facing, q))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_agree() {
+        use ae_sdk::anim::{Axis, deg};
+        assert_eq!((ae_sdk::anim::LAYERS, ae_sdk::anim::MANUAL), (LAYERS, MANUAL));
+        assert_eq!(
+            size_of::<Anim>(),
+            8 + size_of::<Channels>(),
+            "the model id and the channels: 536 bytes"
+        );
+        let mut a = Anim::new(7);
+        a.play(1, 3).once().per_metre(0.25).mask(2).blend_in(100).at(0.5);
+        a.turn(4, Axis::RIGHT, 1.0, 2.0).ramp(3.0);
+        a.spin(9, Axis::bone([0.0, 1.0, 0.0]), 3.0);
+        a.turn(4, Axis::UP, deg(90.0), 1.0);
+        let ch = channels(&a);
+        assert_eq!(
+            ch.layers[1],
+            Layer {
+                clip: 3,
+                mask: 2,
+                mode: 2,
+                kind: 0,
+                flags: 5,
+                reserved: 0,
+                weight: 0.0,
+                target: 1.0,
+                fade: 10.0,
+                speed: 0.25,
+                phase: 0.5
+            }
+        );
+        assert!(ch.layers[0].is_empty());
+        let fresh = manual_flags::PENDING | manual_flags::FRESH;
+        let pi = std::f32::consts::PI;
+        assert_eq!(
+            ch.manual[0],
+            Manual {
+                bone: 4,
+                kind: 1,
+                flags: fresh,
+                target: [0.0, 1.0, 0.0, deg(90.0)],
+                speed: 1.0,
+                ..Default::default()
+            },
+            "the second turn replaced the first"
+        );
+        assert!((deg(90.0) - pi / 2.0).abs() < 1e-6);
+        assert_eq!(
+            ch.manual[1],
+            Manual {
+                bone: 9,
+                kind: 2,
+                flags: fresh | manual_flags::BONE_AXIS,
+                target: [0.0, 1.0, 0.0, 0.0],
+                speed: 3.0,
+                ..Default::default()
+            }
+        );
+        assert!(ch.manual[2].is_empty());
+        let mut back = Anim::new(7);
+        store(&ch, &mut back);
+        assert_eq!(back, a);
+        // The SDK's constants are the evaluator's.
+        use ae_model::anim::{kind, layer_flags, manual_flags, manual_kind};
+        use ae_sdk::anim as sdk;
+        assert_eq!(
+            (
+                sdk::kind::ADDITIVE,
+                sdk::layer_flags::GROUND_SPEED,
+                sdk::layer_flags::ENDED,
+                sdk::layer_flags::NEW
+            ),
+            (
+                kind::ADDITIVE,
+                layer_flags::GROUND_SPEED,
+                layer_flags::ENDED,
+                layer_flags::NEW
+            )
+        );
+        assert_eq!(
+            (
+                sdk::manual_kind::TURN,
+                sdk::manual_kind::SPIN,
+                sdk::manual_kind::MOVE,
+                sdk::manual_kind::SCALE
+            ),
+            (
+                manual_kind::TURN,
+                manual_kind::SPIN,
+                manual_kind::MOVE,
+                manual_kind::SCALE
+            )
+        );
+        assert_eq!(
+            (
+                sdk::manual_flags::PENDING,
+                sdk::manual_flags::FRESH,
+                sdk::manual_flags::RELATIVE,
+                sdk::manual_flags::BONE_AXIS
+            ),
+            (
+                manual_flags::PENDING,
+                manual_flags::FRESH,
+                manual_flags::RELATIVE,
+                manual_flags::BONE_AXIS
+            )
+        );
+        assert_eq!(ae_sdk::anim::mode::ONCE as u32, ae_model::pose::PlayMode::Once as u32);
+        assert_eq!(
+            ae_sdk::anim::mode::PING_PONG as u32,
+            ae_model::pose::PlayMode::PingPong as u32
+        );
+    }
 }

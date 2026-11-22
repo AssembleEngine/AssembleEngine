@@ -40,9 +40,15 @@
 //! units and leave the encode to the end; a pass must not clamp at paper
 //! white, or the values the curve put above it are lost.
 
-pub use ae_render_abi::module::{BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, DeclareInput, DISPLAY_FORMAT, DISPLAY_NAME, EXPOSURE_FORMAT, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_LOG2_MAX, EXPOSURE_LOG2_MIN, EXPOSURE_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME, Gamut, OutputEncoding, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME, WorkingSpace, bloom_size, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, scene_spec, shadow_map_spec};
-pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 pub use ae_render_abi as abi;
+pub use ae_render_abi::module::{
+    BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, DISPLAY_FORMAT, DISPLAY_NAME, DeclareInput, EXPOSURE_FORMAT,
+    EXPOSURE_HISTOGRAM_NAME, EXPOSURE_LOG2_MAX, EXPOSURE_LOG2_MIN, EXPOSURE_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME,
+    Gamut, OutputEncoding, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME,
+    WorkingSpace, bloom_size, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, scene_spec,
+    shadow_map_spec,
+};
+pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 
 /// Raw Vulkan values a module needs to describe images.
 pub mod vk {
@@ -231,7 +237,12 @@ pub mod rt {
             self.output.uniforms.clear();
             self.module.frame(&input, &mut self.output);
             let o = &self.output;
-            self.returned = [o.disabled.as_ptr() as u32, o.disabled.len() as u32, o.uniforms.as_ptr() as u32, o.uniforms.len() as u32];
+            self.returned = [
+                o.disabled.as_ptr() as u32,
+                o.disabled.len() as u32,
+                o.uniforms.as_ptr() as u32,
+                o.uniforms.len() as u32,
+            ];
             self.returned.as_ptr() as u32
         }
     }

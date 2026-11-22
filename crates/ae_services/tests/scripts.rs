@@ -63,7 +63,10 @@ fn head_in_world(rig: &Rig, head: u16, a: &Anim, b: &ae_sdk::nav::Body, facing: 
         let mut g = vec![ae_model::anim::IDENTITY; rig.bones()];
         rig.globals(&pose, &mut g);
         let m = g[head as usize];
-        (glam::Mat3::from_cols_array(&[m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]]), glam::Vec3::new(m[3], m[7], m[11]))
+        (
+            glam::Mat3::from_cols_array(&[m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]]),
+            glam::Vec3::new(m[3], m[7], m[11]),
+        )
     };
     let ((now, at), (rest, _)) = (affine(Some(a)), affine(None));
     let carried = (now * rest.inverse() * glam::Vec3::X).normalize();
@@ -174,7 +177,13 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
     let (walk, head) = (rig.clip("Walk").unwrap(), rig.bone("b_Head_05").unwrap());
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let max = cores.clamp(1, 8);
-    let cfg = RuntimeConfig { max_workers: max, range_rows: 128, parallel_min_rows: 256, tick_hz: HZ, ..RuntimeConfig::default() };
+    let cfg = RuntimeConfig {
+        max_workers: max,
+        range_rows: 128,
+        parallel_min_rows: 256,
+        tick_hz: HZ,
+        ..RuntimeConfig::default()
+    };
     let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(plugin)])?;
 
     let mut order = vec![max];
@@ -202,36 +211,64 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
             // Spawned at tick 0, moved from tick 1; callins posted at the
             // last tick are seen at the last tick's resume.
             let (starts, stops) = transitions(index, 1, TICKS);
-            ensure!((l.starts, l.stops) == (starts, stops), "unit {e}: handled {} starts, {} stops; posted {starts}, {stops}", l.starts, l.stops);
+            ensure!(
+                (l.starts, l.stops) == (starts, stops),
+                "unit {e}: handled {} starts, {} stops; posted {starts}, {stops}",
+                l.starts,
+                l.stops
+            );
             if l.slept != 0 {
                 let ms = 100 + (index % 8) * 150;
                 let want = (ms * HZ).div_ceil(1000);
-                ensure!(l.slept == want, "unit {e}: slept {} ticks for {ms} ms, not {want}", l.slept);
+                ensure!(
+                    l.slept == want,
+                    "unit {e}: slept {} ticks for {ms} ms, not {want}",
+                    l.slept
+                );
             }
             ensure!(l.turn_min != 0, "unit {e}: a head turn was over the poll it was set");
         }
         for (e, s) in &r.scripts {
             ensure!(s.state == 1, "unit {e}: script not running: {s:?}");
             if s.due == u64::MAX {
-                ensure!(s.waits == 0b11, "unit {e}: waits only for callins, but not the two moves: {s:?}");
+                ensure!(
+                    s.waits == 0b11,
+                    "unit {e}: waits only for callins, but not the two moves: {s:?}"
+                );
             }
         }
         for (e, a) in &r.anims {
             let k = (TICKS - 1 + (*e as u32 as u64) * 7) % CYCLE;
             if (10..WALK_TICKS).contains(&k) {
-                ensure!(a.clip[1] == walk, "unit {e} at {k}: walking without the walk clip: {a:?}");
+                ensure!(
+                    a.clip[1] == walk,
+                    "unit {e} at {k}: walking without the walk clip: {a:?}"
+                );
             }
             if (WALK_TICKS + 2..CYCLE).contains(&k) {
-                ensure!(a.target[1] == 0.0 && a.is_manual(head), "unit {e} at {k}: standing, the walk fading and the head looking: {a:?}");
+                ensure!(
+                    a.target[1] == 0.0 && a.is_manual(head),
+                    "unit {e} at {k}: standing, the walk fading and the head looking: {a:?}"
+                );
             }
         }
-        ensure!(sum(|l| l.looks) > 0 && sum(|l| l.cut) > 0, "{w} workers: looks must both finish and be cut");
+        ensure!(
+            sum(|l| l.looks) > 0 && sum(|l| l.cut) > 0,
+            "{w} workers: looks must both finish and be cut"
+        );
         ensure!(sum(|l| l.backs) > 0, "{w} workers: no head turned back");
         ensure!(idle > 0, "{w} workers: no unit waits only for callins");
-        ensure!(polls < UNITS * TICKS / 2, "{w} workers: {polls} polls: units waiting for callins are polled");
+        ensure!(
+            polls < UNITS * TICKS / 2,
+            "{w} workers: {polls} polls: units waiting for callins are polled"
+        );
         match base {
             None => base = Some((w, r.digest)),
-            Some((bw, d)) => ensure!(r.digest == d, "{w} workers: digest {:032x}, {bw} workers {d:032x}", r.digest),
+            Some((bw, d)) => ensure!(
+                r.digest == d,
+                "{w} workers: digest {:032x}, {bw} workers {d:032x}",
+                r.digest
+            ),
         }
     }
 
@@ -240,18 +277,40 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
     for &w in &[max, 1] {
         let r = run(&mut rt, w, UNITS | CHURN)?;
         let n = UNITS as usize;
-        ensure!(r.scripts.len() == n - n.div_ceil(4) + n.div_ceil(4), "{w} workers: {} units after the churn", r.scripts.len());
-        let reused = r.scripts.iter().filter(|(e, _)| (*e as u32) % 4 == 0 && (*e as u32) < UNITS as u32 && (e >> 32) != 0).count();
-        eprintln!("churn, {w} worker(s): digest {:016x}; {reused} new units on old indices", r.digest as u64);
-        ensure!(reused > 0, "no new unit reused a despawned one's index (the stale slot path is not covered)");
+        ensure!(
+            r.scripts.len() == n - n.div_ceil(4) + n.div_ceil(4),
+            "{w} workers: {} units after the churn",
+            r.scripts.len()
+        );
+        let reused = r
+            .scripts
+            .iter()
+            .filter(|(e, _)| (*e as u32).is_multiple_of(4) && (*e as u32) < UNITS as u32 && (e >> 32) != 0)
+            .count();
+        eprintln!(
+            "churn, {w} worker(s): digest {:016x}; {reused} new units on old indices",
+            r.digest as u64
+        );
+        ensure!(
+            reused > 0,
+            "no new unit reused a despawned one's index (the stale slot path is not covered)"
+        );
         for (e, s) in &r.scripts {
-            ensure!(s.state == 1 && s.polls > 0, "unit {e}: script not running after the churn: {s:?}");
+            ensure!(
+                s.state == 1 && s.polls > 0,
+                "unit {e}: script not running after the churn: {s:?}"
+            );
         }
         for (e, l) in &r.logs {
             if (e >> 32) != 0 {
                 // Spawned at tick CHURN_AT + 1, moved from the tick after.
                 let (starts, stops) = transitions(*e as u32, CHURN_AT + 2, TICKS);
-                ensure!((l.starts, l.stops) == (starts, stops), "new unit {e}: handled {} starts, {} stops; posted {starts}, {stops}", l.starts, l.stops);
+                ensure!(
+                    (l.starts, l.stops) == (starts, stops),
+                    "new unit {e}: handled {} starts, {} stops; posted {starts}, {stops}",
+                    l.starts,
+                    l.stops
+                );
             }
         }
         match churned {
@@ -267,9 +326,15 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         let aims: u64 = r.logs.iter().map(|(_, l)| l.aims as u64).sum();
         let fewest = r.logs.iter().map(|(_, l)| l.aims).min().unwrap_or(0);
         let worst = r.logs.iter().map(|(_, l)| l.aim_err).fold(0.0f32, f32::max);
-        eprintln!("aim, {w} worker(s): digest {:016x}; {aims} answered aims measured (fewest {fewest} a unit), worst {worst:.5}°", r.digest as u64);
+        eprintln!(
+            "aim, {w} worker(s): digest {:016x}; {aims} answered aims measured (fewest {fewest} a unit), worst {worst:.5}°",
+            r.digest as u64
+        );
         ensure!(fewest >= 10, "{w} workers: a unit answered only {fewest} aims");
-        ensure!(worst < 0.01, "{w} workers: an answered aim is {worst}° off the head's forward");
+        ensure!(
+            worst < 0.01,
+            "{w} workers: an answered aim is {worst}° off the head's forward"
+        );
         for (e, a) in &r.anims {
             ensure!(a.is_manual(head), "unit {e}: the head not turned: {a:?}");
         }
@@ -279,9 +344,14 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         let at = target(last, UNITS as u32);
         let (mut looked, mut worst) = (0, 0.0f32);
         ensure!([r.bodies.len(), r.facings.len(), r.weapons.len()] == [r.anims.len(); 3]);
-        for (((e, a), (eb, b)), ((ef, f), (ew, wp))) in r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons)) {
+        for (((e, a), (eb, b)), ((ef, f), (ew, wp))) in
+            r.anims.iter().zip(&r.bodies).zip(r.facings.iter().zip(&r.weapons))
+        {
             ensure!([eb, ef, ew] == [e; 3], "rows out of step: {e} {eb} {ef} {ew}");
-            ensure!((wp.aim_from[0], wp.fire_from[0]) == (head, head), "unit {e}: the script did not name its aim-from and fire-from bones: {wp:?}");
+            ensure!(
+                (wp.aim_from[0], wp.fire_from[0]) == (head, head),
+                "unit {e}: the script did not name its aim-from and fire-from bones: {wp:?}"
+            );
             if wp.asked[0] == 0 || wp.aimed[0] != wp.asked[0] {
                 continue;
             }
@@ -294,7 +364,10 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         }
         eprintln!("aim, {w} worker(s): {looked} units looking at the target, worst {worst:.5}° (glam)");
         // The last request is a tick before the end: those whose turn was short.
-        ensure!(looked > UNITS as usize / 5, "{w} workers: only {looked} units answered the last request");
+        ensure!(
+            looked > UNITS as usize / 5,
+            "{w} workers: only {looked} units answered the last request"
+        );
         match aimed {
             None => aimed = Some(r.digest),
             Some(d) => ensure!(r.digest == d, "aim: {w} workers' digest differs"),

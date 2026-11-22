@@ -12,26 +12,26 @@
 //! are posed from it (`poser.rs`; the raw capture only, not yet an
 //! observer's view).
 
-use ae_nav::math::TICK_SECONDS;
-use ae_services::nav::{GroundFeed, Map, NavPlugin};
-use ae_services::spatial::SpatialPlugin;
-use ae_render::terrain::app::{VisionFeed, VisionFrame};
-use ae_render::terrain::renderer::VisionGrid;
-use ae_render::decals::{Blend, Decal, DecalFeed, layer};
-use ae_render::particles::{ParticleFeed, explosion};
-use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, AnimWrites, InstanceStream, NO_POSE, UnitClass, UnitFeed};
 use crate::poser::Poser;
 use ae_model::anim::Rig;
+use ae_nav::math::TICK_SECONDS;
+use ae_render::decals::{Blend, Decal, DecalFeed, layer};
+use ae_render::particles::{ParticleFeed, explosion};
+use ae_render::terrain::app::{VisionFeed, VisionFrame};
+use ae_render::terrain::renderer::VisionGrid;
+use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, AnimWrites, InstanceStream, NO_POSE, UnitClass, UnitFeed};
+use ae_sdk::Entity;
 use ae_sdk::anim::{Anim, model_id};
-use ae_services::anim::AnimPlugin;
+use ae_sdk::nav::MoveOrder;
 use ae_sensors::{Bits, SensorGrid};
+use ae_services::anim::AnimPlugin;
+use ae_services::nav::{GroundFeed, Map, NavPlugin};
+use ae_services::spatial::SpatialPlugin;
 use ae_services::view::{SENSOR_CELL, ViewPipeline};
-use ae_view::{Observer, RowState, ViewTable};
 use ae_sim::capture::{Capture, CaptureSpec};
 use ae_sim::input::{Command, TickBundle};
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
-use ae_sdk::Entity;
-use ae_sdk::nav::MoveOrder;
+use ae_view::{Observer, RowState, ViewTable};
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,14 @@ use std::time::{Duration, Instant};
 
 /// What the renderer needs of a unit, by field (`NavAgent.profile` but in
 /// the scripted game, whose units are all class 0).
-const FIELDS: [(&str, &str); 6] = [("Body", "x"), ("Body", "y"), ("Body", "vx"), ("Body", "vy"), ("Body", "radius"), ("NavAgent", "profile")];
+const FIELDS: [(&str, &str); 6] = [
+    ("Body", "x"),
+    ("Body", "y"),
+    ("Body", "vx"),
+    ("Body", "vy"),
+    ("Body", "radius"),
+    ("NavAgent", "profile"),
+];
 const F_X: usize = 0;
 const F_Y: usize = 1;
 const F_VX: usize = 2;
@@ -108,7 +115,10 @@ pub struct SimSpeed {
 
 impl Default for SimSpeed {
     fn default() -> Self {
-        Self { speed: Arc::new(AtomicU32::new(1.0f32.to_bits())), paused: Arc::new(AtomicBool::new(false)) }
+        Self {
+            speed: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -155,7 +165,12 @@ impl SimSpeed {
 }
 
 /// Looks of the skirmish game's `Look.class` (own; enemies tinted).
-const SKIRMISH_LOOKS: [[f32; 3]; 4] = [[0.55, 0.62, 0.75], [0.95, 0.75, 0.10], [0.20, 0.75, 0.30], [0.75, 0.20, 0.85]];
+const SKIRMISH_LOOKS: [[f32; 3]; 4] = [
+    [0.55, 0.62, 0.75],
+    [0.95, 0.75, 0.10],
+    [0.20, 0.75, 0.30],
+    [0.75, 0.20, 0.85],
+];
 
 /// Radius drawn for a blip (its real one is line-of-sight only).
 const BLIP_RADIUS: f32 = 5.0;
@@ -167,7 +182,11 @@ impl SimOptions {
     /// with the same rigs (`UnitsSetup::rigs`), so it samples the sim's
     /// clips and masks; both sides make them here.
     pub fn rigs(&self) -> Result<Vec<(String, Rig)>> {
-        let mut rigs: Vec<(String, Rig)> = self.models.iter().map(|m| (m.name.clone(), Rig::new(&m.model))).collect();
+        let mut rigs: Vec<(String, Rig)> = self
+            .models
+            .iter()
+            .map(|m| (m.name.clone(), Rig::new(&m.model)))
+            .collect();
         if !self.mounts.is_empty() {
             let mut vfs = ae_vfs::Vfs::new();
             for m in &self.mounts {
@@ -189,7 +208,10 @@ impl SimOptions {
             Some((terrain, starts)) => NavPlugin::loaded(terrain.clone(), starts.clone()),
             None => NavPlugin::new(self.map, self.map_cells),
         };
-        NavPlugin { teams: if self.skirmish() { 0 } else { self.teams }, ..base }
+        NavPlugin {
+            teams: if self.skirmish() { 0 } else { self.teams },
+            ..base
+        }
     }
 
     pub fn skirmish(&self) -> bool {
@@ -204,13 +226,21 @@ impl SimOptions {
     /// The vision grid of an observer (the copy layer's sensor grid).
     pub fn vision_grid(&self) -> VisionGrid {
         let g = SensorGrid::new(self.plugin().extent(), self.plugin().extent(), SENSOR_CELL);
-        VisionGrid { width: g.width, height: g.height, cell_size: g.cell_size }
+        VisionGrid {
+            width: g.width,
+            height: g.height,
+            cell_size: g.cell_size,
+        }
     }
 
     /// The game parameter: `--param`, or the game's default (crossing:
     /// unit count and quake tick; skirmish: the map side and 8 tanks each).
     pub fn param(&self) -> u64 {
-        self.param.unwrap_or(if self.skirmish() { (self.map_cells as u64 * 8) << 24 | 8 << 40 } else { self.units as u64 | (self.quake as u64) << 24 })
+        self.param.unwrap_or(if self.skirmish() {
+            (self.map_cells as u64 * 8) << 24 | 8 << 40
+        } else {
+            self.units as u64 | (self.quake as u64) << 24
+        })
     }
 
     /// One look per movement class of the map (the crossing game declares
@@ -225,16 +255,57 @@ impl SimOptions {
             return own;
         }
         let tint = |c: [f32; 3]| std::array::from_fn(|k| c[k] * 0.35 + ENEMY_TINT[k] * 0.65);
-        let enemy = own.iter().map(|c| UnitClass { color: tint(c.color), gamut: ae_render::colorspace::Gamut::Bt709, floats: c.floats });
-        own.iter().copied().chain(enemy).chain([UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.6, 0.6, 0.6], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 1.0, 1.0], floats: false }]).collect()
+        let enemy = own.iter().map(|c| UnitClass {
+            color: tint(c.color),
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: c.floats,
+        });
+        own.iter()
+            .copied()
+            .chain(enemy)
+            .chain([
+                UnitClass {
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    color: [0.6, 0.6, 0.6],
+                    floats: false,
+                },
+                UnitClass {
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    color: [1.0, 1.0, 1.0],
+                    floats: false,
+                },
+            ])
+            .collect()
     }
 
     fn own_classes(&self) -> Vec<UnitClass> {
-        const COLORS: [[f32; 3]; 5] = [[0.95, 0.75, 0.10], [0.80, 0.12, 0.08], [0.92, 0.92, 0.96], [0.10, 0.80, 0.90], [0.75, 0.20, 0.85]];
+        const COLORS: [[f32; 3]; 5] = [
+            [0.95, 0.75, 0.10],
+            [0.80, 0.12, 0.08],
+            [0.92, 0.92, 0.96],
+            [0.10, 0.80, 0.90],
+            [0.75, 0.20, 0.85],
+        ];
         if self.skirmish() {
-            return SKIRMISH_LOOKS.iter().map(|&color| UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color, floats: false }).collect();
+            return SKIRMISH_LOOKS
+                .iter()
+                .map(|&color| UnitClass {
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    color,
+                    floats: false,
+                })
+                .collect();
         }
-        self.plugin().map_profiles().iter().enumerate().map(|(i, p)| UnitClass { color: COLORS[i % COLORS.len()], gamut: ae_render::colorspace::Gamut::Bt709, floats: p.medium.on_surface() }).collect()
+        self.plugin()
+            .map_profiles()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| UnitClass {
+                color: COLORS[i % COLORS.len()],
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                floats: p.medium.on_surface(),
+            })
+            .collect()
     }
 }
 
@@ -293,7 +364,10 @@ impl Sim {
         };
         let nav = NavPlugin { ground, ..o.plugin() };
         let spatial = SpatialPlugin::square(nav.extent(), 64.0);
-        let cfg = RuntimeConfig { max_workers: o.workers, ..RuntimeConfig::default() };
+        let cfg = RuntimeConfig {
+            max_workers: o.workers,
+            ..RuntimeConfig::default()
+        };
         let mut plugins: Vec<Arc<dyn ae_sim::host::HostPlugin>> = vec![Arc::new(nav), Arc::new(spatial)];
         if !o.mounts.is_empty() {
             let mut vfs = ae_vfs::Vfs::new();
@@ -311,36 +385,94 @@ impl Sim {
         // The raw capture (no observer) draws units with a body; their
         // class is their nav agent's profile, but in the scripted game
         // (whose units have no nav agent, though the SDK declares it).
-        let spec = CaptureSpec::new(&rt.schema, &FIELDS[..if o.game == "scripted" { F_PROFILE } else { FIELDS.len() }])?;
+        let spec = CaptureSpec::new(
+            &rt.schema,
+            &FIELDS[..if o.game == "scripted" { F_PROFILE } else { FIELDS.len() }],
+        )?;
         // Units drawn with a model whose `Anim` names it are posed.
         // (the layout checked: the service's own check runs only when the
         // game schedules it).
         let has_anim = ae_sim::host::expect_component(&rt.schema, <Anim as ae_sdk::Component>::SCHEMA).is_ok();
         let poser = (has_anim && !o.models.is_empty()).then(|| {
-            let names = crate::models::names_per_class(&o.models, o.classes().len(), o.observer.map(|_| o.classes().len() - 2));
-            Poser::new(names.iter().map(|n| n.as_deref().map(model_id).filter(|&id| anim.rig(id).is_some())).collect())
+            let names =
+                crate::models::names_per_class(&o.models, o.classes().len(), o.observer.map(|_| o.classes().len() - 2));
+            Poser::new(
+                names
+                    .iter()
+                    .map(|n| n.as_deref().map(model_id).filter(|&id| anim.rig(id).is_some()))
+                    .collect(),
+            )
         });
         // Skirmish units draw by their `Look`, crossing units by class.
-        let (extra, class_field) = if o.skirmish() { ("Look", ("Look", "class")) } else { ("NavAgent", ("NavAgent", "profile")) };
+        let (extra, class_field) = if o.skirmish() {
+            ("Look", ("Look", "class"))
+        } else {
+            ("NavAgent", ("NavAgent", "profile"))
+        };
         let view = match o.observer {
             Some(ally) => {
                 anyhow::ensure!(ally < o.allies(), "observer {ally} of {} allyteams", o.allies());
                 let pipeline = ViewPipeline::new(&rt.schema, &[extra], o.allies() as usize, o.plugin().extent())?;
                 let field = |c: &str, f: &str| pipeline.field(c, f).with_context(|| format!("`{c}.{f}` is not viewed"));
-                let fields = [field("Body", "x")?, field("Body", "y")?, field("Body", "vx")?, field("Body", "vy")?, field("Body", "radius")?, field(class_field.0, class_field.1)?];
+                let fields = [
+                    field("Body", "x")?,
+                    field("Body", "y")?,
+                    field("Body", "vx")?,
+                    field("Body", "vy")?,
+                    field("Body", "radius")?,
+                    field(class_field.0, class_field.1)?,
+                ];
                 let grid = pipeline.coverage.grid;
-                Some(ViewState { pipeline, observer: [Observer::new(ally, 0x0B5E_4E00 ^ ally as u64)], explored: Bits::new(grid.width, grid.height), vision: None, table: ViewTable::default(), fields, ms: [0.0; 3], selected: Default::default() })
+                Some(ViewState {
+                    pipeline,
+                    observer: [Observer::new(ally, 0x0B5E_4E00 ^ ally as u64)],
+                    explored: Bits::new(grid.width, grid.height),
+                    vision: None,
+                    table: ViewTable::default(),
+                    fields,
+                    ms: [0.0; 3],
+                    selected: Default::default(),
+                })
             }
             None => None,
         };
         let classes = o.own_classes().len() as u32;
         let (bots, unit_command) = if o.skirmish() {
-            let bots = ae_bot::SkirmishBot::pair(&rt)?.into_iter().filter(|b| o.observer != Some(b.ally)).collect();
-            (bots, rt.schema.components.iter().find(|c| c.name == "UnitCommand").map(|c| c.id))
+            let bots = ae_bot::SkirmishBot::pair(&rt)?
+                .into_iter()
+                .filter(|b| o.observer != Some(b.ally))
+                .collect();
+            (
+                bots,
+                rt.schema
+                    .components
+                    .iter()
+                    .find(|c| c.name == "UnitCommand")
+                    .map(|c| c.id),
+            )
         } else {
             (Vec::new(), None)
         };
-        Ok(Self { world, rt, workers: o.workers, spec, capture: Capture::default(), streamer: Streamer { poser, ..Streamer::default() }, view, classes, bots, unit_command, effects: None, last_units: Vec::new(), last_los: None, pose_ms: 0.0, read_ms: 0.0 })
+        Ok(Self {
+            world,
+            rt,
+            workers: o.workers,
+            spec,
+            capture: Capture::default(),
+            streamer: Streamer {
+                poser,
+                ..Streamer::default()
+            },
+            view,
+            classes,
+            bots,
+            unit_command,
+            effects: None,
+            last_units: Vec::new(),
+            last_los: None,
+            pose_ms: 0.0,
+            read_ms: 0.0,
+        })
     }
 
     /// Publish the observer's vision here (with an observer).
@@ -364,7 +496,9 @@ impl Sim {
     fn emit_deaths(&mut self) {
         let Some(effects) = &self.effects else { return };
         let c = &self.capture;
-        let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len()).map(|r| (c.entities[r], c.f32(F_X, r), c.f32(F_Y, r), c.f32(F_RADIUS, r))).collect();
+        let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len())
+            .map(|r| (c.entities[r], c.f32(F_X, r), c.f32(F_Y, r), c.f32(F_RADIUS, r)))
+            .collect();
         now.sort_unstable_by_key(|u| u.0);
         let grid = self.view.as_ref().map(|v| v.pipeline.coverage.grid);
         let sites = deaths(&self.last_units, &now, |x, y| match (&self.last_los, grid) {
@@ -388,7 +522,10 @@ impl Sim {
     /// The observer's line of sight in the last view, and its grid.
     pub fn sight(&self) -> Option<(Bits, SensorGrid)> {
         let v = self.view.as_ref()?;
-        Some((v.pipeline.coverage.los[v.observer[0].ally as usize].clone(), v.pipeline.coverage.grid))
+        Some((
+            v.pipeline.coverage.los[v.observer[0].ally as usize].clone(),
+            v.pipeline.coverage.grid,
+        ))
     }
 
     /// Rows of each state in the last view: own, seen, blip, ghost.
@@ -417,9 +554,15 @@ impl Sim {
                 match *input {
                     UiInput::Select { x, y, radius } => {
                         let t = &v.table;
-                        let [fx, fy] = [v.fields[0], v.fields[1]].map(|f| t.fields.iter().position(|&c| c == f).unwrap());
+                        let [fx, fy] =
+                            [v.fields[0], v.fields[1]].map(|f| t.fields.iter().position(|&c| c == f).unwrap());
                         v.selected = (0..t.len())
-                            .filter(|&r| t.state[r] == RowState::Own && (f32::from_bits(t.columns[fx][r]) - x).hypot(f32::from_bits(t.columns[fy][r]) - y) <= radius)
+                            .filter(|&r| {
+                                t.state[r] == RowState::Own
+                                    && (f32::from_bits(t.columns[fx][r]) - x)
+                                        .hypot(f32::from_bits(t.columns[fy][r]) - y)
+                                        <= radius
+                            })
                             .map(|r| t.ids[r])
                             .collect();
                         eprintln!("selected {} units", v.selected.len());
@@ -429,11 +572,29 @@ impl Sim {
                         for &id in &v.selected {
                             let Some(e) = v.observer[0].entity_of(id) else { continue };
                             bundle.commands.push(match self.unit_command {
-                                Some(stream) => ae_bot::unit_command(ally, stream, e, if attack { ae_bot::ATTACK } else { ae_bot::MOVE }, append, x, y),
+                                Some(stream) => ae_bot::unit_command(
+                                    ally,
+                                    stream,
+                                    e,
+                                    if attack { ae_bot::ATTACK } else { ae_bot::MOVE },
+                                    append,
+                                    x,
+                                    y,
+                                ),
                                 None => {
                                     let order = MoveOrder::move_to(Entity(e), x, y, group);
-                                    let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
-                                    Command { player: ally, stream: ae_abi::engine::MOVE_ORDER, bytes }
+                                    let bytes = unsafe {
+                                        std::slice::from_raw_parts(
+                                            (&order as *const MoveOrder).cast::<u8>(),
+                                            size_of::<MoveOrder>(),
+                                        )
+                                        .to_vec()
+                                    };
+                                    Command {
+                                        player: ally,
+                                        stream: ae_abi::engine::MOVE_ORDER,
+                                        bytes,
+                                    }
                                 }
                             });
                         }
@@ -452,7 +613,9 @@ impl Sim {
     /// capture.
     pub fn moving(&self, class: u32) -> usize {
         let c = &self.capture;
-        (0..c.len()).filter(|&r| profile(c, r) == class && (c.f32(F_VX, r) != 0.0 || c.f32(F_VY, r) != 0.0)).count()
+        (0..c.len())
+            .filter(|&r| profile(c, r) == class && (c.f32(F_VX, r) != 0.0 || c.f32(F_VY, r) != 0.0))
+            .count()
     }
 
     /// Capture the world and build the stream (`tick_seconds` 0: no
@@ -468,7 +631,11 @@ impl Sim {
             let mut anims: Vec<(u64, &Anim)> = Vec::new();
             if self.streamer.poser.is_some() {
                 for (ids, bytes) in self.rt.chunks(&self.world, "Anim")? {
-                    anyhow::ensure!(bytes.len() == ids.len() * size_of::<Anim>() && bytes.as_ptr().align_offset(align_of::<Anim>()) == 0, "the `Anim` column is not `Anim`s");
+                    anyhow::ensure!(
+                        bytes.len() == ids.len() * size_of::<Anim>()
+                            && bytes.as_ptr().align_offset(align_of::<Anim>()) == 0,
+                        "the `Anim` column is not `Anim`s"
+                    );
                     // SAFETY: plain data, aligned, a row per id.
                     let rows = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<Anim>(), ids.len()) };
                     anims.extend(ids.iter().copied().zip(rows));
@@ -480,7 +647,9 @@ impl Sim {
                 }
             }
             self.read_ms = t0.elapsed().as_secs_f64() * 1e3;
-            let stream = self.streamer.stream(&self.capture, &anims, Instant::now(), tick_seconds);
+            let stream = self
+                .streamer
+                .stream(&self.capture, &anims, Instant::now(), tick_seconds);
             self.pose_ms = t0.elapsed().as_secs_f64() * 1e3;
             return Ok(stream);
         };
@@ -493,10 +662,16 @@ impl Sim {
         let coverage = &v.pipeline.coverage;
         v.explored.or(&coverage.los[ally]);
         if let Some(feed) = &v.vision {
-            feed.publish(Arc::new(VisionFrame { tick: self.world.tick, los: coverage.los[ally].words.clone(), explored: v.explored.words.clone() }));
+            feed.publish(Arc::new(VisionFrame {
+                tick: self.world.tick,
+                los: coverage.los[ally].words.clone(),
+                explored: v.explored.words.clone(),
+            }));
         }
         let t = &v.table;
-        let [fx, fy, fvx, fvy, fr, fp] = v.fields.map(|f| t.fields.iter().position(|&c| c == f).expect("viewed field"));
+        let [fx, fy, fvx, fvy, fr, fp] = v
+            .fields
+            .map(|f| t.fields.iter().position(|&c| c == f).expect("viewed field"));
         let rows: Vec<UnitRow> = (0..t.len())
             .map(|r| {
                 let shown = |c: usize| t.mask[r] & (1 << c) != 0;
@@ -519,12 +694,18 @@ impl Sim {
                 }
             })
             .collect();
-        let stream = self.streamer.stream_rows(self.capture.tick, &rows, &[], Instant::now(), tick_seconds);
+        let stream = self
+            .streamer
+            .stream_rows(self.capture.tick, &rows, &[], Instant::now(), tick_seconds);
         // After the rows: the last tick's line of sight decides, then
         // this one's is kept.
         self.emit_deaths();
         let v = self.view.as_mut().expect("observer");
-        v.ms = [(t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3];
+        v.ms = [
+            (t1 - t0).as_secs_f64() * 1e3,
+            (t2 - t1).as_secs_f64() * 1e3,
+            t2.elapsed().as_secs_f64() * 1e3,
+        ];
         Ok(stream)
     }
 
@@ -569,7 +750,11 @@ fn profile(c: &Capture, r: usize) -> u32 {
 /// Explosions (`(x, y, scale, seed)`) for the units of `last` missing from
 /// `now` (both sorted by entity: `(entity, x, y, radius)`) that stood where
 /// `seen(x, y)`.
-fn deaths(last: &[(u64, f32, f32, f32)], now: &[(u64, f32, f32, f32)], seen: impl Fn(f32, f32) -> bool) -> Vec<(f32, f32, f32, u32)> {
+fn deaths(
+    last: &[(u64, f32, f32, f32)],
+    now: &[(u64, f32, f32, f32)],
+    seen: impl Fn(f32, f32) -> bool,
+) -> Vec<(f32, f32, f32, u32)> {
     let mut sites = Vec::new();
     for &(id, x, y, radius) in last {
         if now.binary_search_by_key(&id, |u| u.0).is_err() && seen(x, y) {
@@ -636,7 +821,14 @@ impl Effects {
                 0 => (layer::SCORCH, Blend::Replace),
                 n => self.scars[(seed >> 7) as usize % n],
             };
-            feed.place(Decal::scar([x, z], 3.5 * scale, seed, DAMAGE_PER_SCALE * scale, layer, blend));
+            feed.place(Decal::scar(
+                [x, z],
+                3.5 * scale,
+                seed,
+                DAMAGE_PER_SCALE * scale,
+                layer,
+                blend,
+            ));
         }
     }
 }
@@ -692,7 +884,13 @@ impl Streamer {
     /// position in the previous capture (its current one if it is new);
     /// its heading is its velocity, or its last heading while it stands
     /// still.
-    pub fn stream(&mut self, capture: &Capture, anims: &[(u64, &Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
+    pub fn stream(
+        &mut self,
+        capture: &Capture,
+        anims: &[(u64, &Anim)],
+        published: Instant,
+        tick_seconds: f32,
+    ) -> InstanceStream {
         let n = capture.len();
         self.order.clear();
         self.order.extend(0..n as u32);
@@ -720,7 +918,14 @@ impl Streamer {
     /// The stream of `rows` (ascending by key), matched to the previous
     /// stream by key; a row whose state changed starts where it is. Rows
     /// whose key has channels in `anims` (ascending by key) are posed.
-    pub fn stream_rows(&mut self, tick: u64, rows: &[UnitRow], anims: &[(u64, &Anim)], published: Instant, tick_seconds: f32) -> InstanceStream {
+    pub fn stream_rows(
+        &mut self,
+        tick: u64,
+        rows: &[UnitRow],
+        anims: &[(u64, &Anim)],
+        published: Instant,
+        tick_seconds: f32,
+    ) -> InstanceStream {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = std::array::from_fn(|_| Vec::with_capacity(rows.len()));
         let mut anim = std::mem::take(&mut self.spare);
         let mut next = Vec::with_capacity(rows.len());
@@ -736,7 +941,11 @@ impl Streamer {
             let moved = before.filter(|b| b.state == row.state);
             let (x, y, vx, vy) = (row.x, row.y, row.vx, row.vy);
             let (px, py) = moved.map_or((x, y), |b| (b.x, b.y));
-            let (hx, hy) = if vx * vx + vy * vy > 1e-6 { (vx, vy) } else { before.map_or((1.0, 0.0), |b| (b.hx, b.hy)) };
+            let (hx, hy) = if vx * vx + vy * vy > 1e-6 {
+                (vx, vy)
+            } else {
+                before.map_or((1.0, 0.0), |b| (b.hx, b.hy))
+            };
             while a < anims.len() && anims[a].0 < row.key {
                 a += 1;
             }
@@ -744,11 +953,28 @@ impl Streamer {
                 posed.push(next.len());
                 units.push((row.key, row.class, *anim));
             }
-            let words = [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), hx.to_bits(), hy.to_bits(), row.radius, row.class, NO_POSE];
+            let words = [
+                x.to_bits(),
+                y.to_bits(),
+                px.to_bits(),
+                py.to_bits(),
+                hx.to_bits(),
+                hy.to_bits(),
+                row.radius,
+                row.class,
+                NO_POSE,
+            ];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
             }
-            next.push(Shown { key: row.key, x, y, hx, hy, state: row.state });
+            next.push(Shown {
+                key: row.key,
+                x,
+                y,
+                hx,
+                hy,
+                state: row.state,
+            });
         }
         if let Some(poser) = &mut self.poser {
             let t0 = Instant::now();
@@ -759,7 +985,14 @@ impl Streamer {
             }
         }
         self.previous = next;
-        InstanceStream { tick, published, tick_seconds, sim_seconds: TICK_SECONDS, columns, anim }
+        InstanceStream {
+            tick,
+            published,
+            tick_seconds,
+            sim_seconds: TICK_SECONDS,
+            columns,
+            anim,
+        }
     }
 }
 
@@ -792,7 +1025,15 @@ pub struct SimThread {
 impl SimThread {
     /// Build the world and tick it at the nav rate times `speed`,
     /// publishing units to `feed` and landed ground changes to `ground`.
-    pub fn start(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, effects: Option<Arc<Effects>>, ui: UiQueue, speed: SimSpeed) -> Self {
+    pub fn start(
+        o: SimOptions,
+        feed: Arc<UnitFeed>,
+        ground: Arc<GroundFeed>,
+        vision: Option<Arc<VisionFeed>>,
+        effects: Option<Arc<Effects>>,
+        ui: UiQueue,
+        speed: SimSpeed,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(SimStats::default()));
         let (stop2, stats2) = (stop.clone(), stats.clone());
@@ -807,7 +1048,11 @@ impl SimThread {
                 result
             })
             .expect("spawn the sim thread");
-        Self { stop, stats, handle: Some(handle) }
+        Self {
+            stop,
+            stats,
+            handle: Some(handle),
+        }
     }
 
     pub fn stats(&self) -> SimStats {
@@ -817,14 +1062,26 @@ impl SimThread {
     pub fn stop(mut self) -> Result<SimStats> {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            handle.join().map_err(|_| anyhow::anyhow!("the sim thread panicked"))??;
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("the sim thread panicked"))??;
         }
         Ok(self.stats())
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Option<Arc<VisionFeed>>, effects: Option<Arc<Effects>>, ui: UiQueue, speed: SimSpeed, stop: &AtomicBool, stats: &Mutex<SimStats>) -> Result<()> {
+fn run(
+    o: SimOptions,
+    feed: Arc<UnitFeed>,
+    ground: Arc<GroundFeed>,
+    vision: Option<Arc<VisionFeed>>,
+    effects: Option<Arc<Effects>>,
+    ui: UiQueue,
+    speed: SimSpeed,
+    stop: &AtomicBool,
+    stats: &Mutex<SimStats>,
+) -> Result<()> {
     let started = Instant::now();
     let mut sim = Sim::new(&o, Some(ground))?;
     if let Some(feed) = vision {
@@ -833,7 +1090,12 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Opti
     if let Some(effects) = effects {
         sim = sim.with_effects(effects);
     }
-    eprintln!("sim: {} game, {} workers, world built in {:.2} s", o.game, o.workers, started.elapsed().as_secs_f32());
+    eprintln!(
+        "sim: {} game, {} workers, world built in {:.2} s",
+        o.game,
+        o.workers,
+        started.elapsed().as_secs_f32()
+    );
     let mut rate = speed.current();
     let mut period = Duration::from_secs_f32(TICK_SECONDS / rate);
     let mut next = Instant::now();
@@ -874,9 +1136,23 @@ fn run(o: SimOptions, feed: Arc<UnitFeed>, ground: Arc<GroundFeed>, vision: Opti
         count += 1;
         let elapsed = report_started.elapsed().as_secs_f32();
         if count == 30 || (count > 0 && elapsed >= 0.5) {
-            let actual_speed = if elapsed > 0.0 { count as f32 * TICK_SECONDS / elapsed } else { 0.0 };
+            let actual_speed = if elapsed > 0.0 {
+                count as f32 * TICK_SECONDS / elapsed
+            } else {
+                0.0
+            };
             let mut s = stats.lock().unwrap_or_else(|p| p.into_inner());
-            *s = SimStats { tick, units, tick_ms: tick_sum / count as f64, capture_ms: capture_sum / count as f64, actual_speed, late, ready: true, failed: false, view };
+            *s = SimStats {
+                tick,
+                units,
+                tick_ms: tick_sum / count as f64,
+                capture_ms: capture_sum / count as f64,
+                actual_speed,
+                late,
+                ready: true,
+                failed: false,
+                view,
+            };
             (tick_sum, capture_sum, count) = (0.0, 0.0, 0);
             report_started = Instant::now();
         }
@@ -903,10 +1179,24 @@ mod tests {
     use ae_render::units::ATTRIBUTES;
 
     fn capture(tick: u64, rows: &[(u64, f32, f32, f32, f32)]) -> Capture {
-        let mut c = Capture { tick, entities: Vec::new(), columns: vec![Vec::new(); FIELDS.len()] };
+        let mut c = Capture {
+            tick,
+            entities: Vec::new(),
+            columns: vec![Vec::new(); FIELDS.len()],
+        };
         for &(e, x, y, vx, vy) in rows {
             c.entities.push(e);
-            for (f, word) in [x.to_bits(), y.to_bits(), vx.to_bits(), vy.to_bits(), 2.5f32.to_bits(), (e % 3) as u32].into_iter().enumerate() {
+            for (f, word) in [
+                x.to_bits(),
+                y.to_bits(),
+                vx.to_bits(),
+                vy.to_bits(),
+                2.5f32.to_bits(),
+                (e % 3) as u32,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 c.columns[f].push(word);
             }
         }
@@ -925,21 +1215,47 @@ mod tests {
     fn streams_match_rows_by_entity() {
         let mut s = Streamer::default();
         let now = Instant::now();
-        let first = s.stream(&capture(1, &[(9, 90.0, 0.0, 0.0, 1.0), (4, 40.0, 0.0, 1.0, 0.0)]), &[], now, 0.1);
+        let first = s.stream(
+            &capture(1, &[(9, 90.0, 0.0, 0.0, 1.0), (4, 40.0, 0.0, 1.0, 0.0)]),
+            &[],
+            now,
+            0.1,
+        );
         assert_eq!(column(&first, "x"), [40.0, 90.0]);
         assert_eq!(column(&first, "prev_x"), [40.0, 90.0], "first sight: no motion");
         // Table order changed, 4 stopped, 7 joined, 9 moved.
-        let second = s.stream(&capture(2, &[(7, 70.0, 5.0, 0.0, 0.0), (9, 91.0, 0.5, 0.0, 1.0), (4, 40.0, 0.0, 0.0, 0.0)]), &[], now, 0.1);
+        let second = s.stream(
+            &capture(
+                2,
+                &[
+                    (7, 70.0, 5.0, 0.0, 0.0),
+                    (9, 91.0, 0.5, 0.0, 1.0),
+                    (4, 40.0, 0.0, 0.0, 0.0),
+                ],
+            ),
+            &[],
+            now,
+            0.1,
+        );
         assert_eq!(column(&second, "x"), [40.0, 70.0, 91.0]);
         assert_eq!(column(&second, "prev_x"), [40.0, 70.0, 90.0]);
         assert_eq!(column(&second, "prev_y"), [0.0, 5.0, 0.0]);
-        assert_eq!(column(&second, "heading_x"), [1.0, 1.0, 0.0], "4 keeps its heading, 7 gets the default");
+        assert_eq!(
+            column(&second, "heading_x"),
+            [1.0, 1.0, 0.0],
+            "4 keeps its heading, 7 gets the default"
+        );
         assert_eq!(column(&second, "heading_y"), [0.0, 0.0, 1.0]);
         assert_eq!(second.columns[7], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
         assert_eq!(second.columns[8], [NO_POSE; 3], "no poses without models");
         // 9 left.
-        let third = s.stream(&capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]), &[], now, 0.1);
+        let third = s.stream(
+            &capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]),
+            &[],
+            now,
+            0.1,
+        );
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
     }
 
@@ -952,35 +1268,72 @@ mod tests {
         use ae_sdk::anim::{manual_flags, manual_kind};
         let arm = model_id("arm");
         // Class = entity % 3: class 0 is drawn with the arm, class 1 not.
-        let mut s = Streamer { poser: Some(Poser::new(vec![Some(arm), None])), ..Streamer::default() };
+        let mut s = Streamer {
+            poser: Some(Poser::new(vec![Some(arm), None])),
+            ..Streamer::default()
+        };
         let turned = |angle: f32, model: u64| {
             let mut a = Anim::new(model);
             (a.bone[0], a.manual_kind[0]) = (1, manual_kind::TURN);
             let (sn, c) = (angle * 0.5).sin_cos();
             a.value[0] = [0.0, sn, 0.0, c];
             // Not shown yet: not in the record.
-            (a.bone[1], a.manual_kind[1], a.manual_flags[1]) = (0, manual_kind::MOVE, manual_flags::FRESH | manual_flags::PENDING);
+            (a.bone[1], a.manual_kind[1], a.manual_flags[1]) =
+                (0, manual_kind::MOVE, manual_flags::FRESH | manual_flags::PENDING);
             (a.clip[2], a.mask[2], a.mode[2], a.kind[2], a.weight[2], a.phase[2]) = (3, 1, 2, 1, 0.5, 0.25);
             a
         };
         let record = crate::poser::record(&turned(0.1, arm), 7);
         assert_eq!(record[0], [7, 1, 0, 0], "the tick, one entry shown");
-        assert_eq!(record[3], [3 | 1 << 16, 2 | 1 << 8, 0.5f32.to_bits(), 0.25f32.to_bits()], "layer 2");
-        assert_eq!((record[1], record[5], record[7][1]), ([0; 4], [1 | (manual_kind::TURN as u32) << 16, 0, 0, 0], (0.05f32).sin().to_bits()));
-        let rows = [(3, 30.0, 0.0, 0.0, 0.0), (4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
+        assert_eq!(
+            record[3],
+            [3 | 1 << 16, 2 | 1 << 8, 0.5f32.to_bits(), 0.25f32.to_bits()],
+            "layer 2"
+        );
+        assert_eq!(
+            (record[1], record[5], record[7][1]),
+            (
+                [0; 4],
+                [1 | (manual_kind::TURN as u32) << 16, 0, 0, 0],
+                (0.05f32).sin().to_bits()
+            )
+        );
+        let rows = [
+            (3, 30.0, 0.0, 0.0, 0.0),
+            (4, 40.0, 0.0, 0.0, 0.0),
+            (6, 60.0, 0.0, 0.0, 0.0),
+        ];
         let now = Instant::now();
-        let anims = |angle: f32| vec![(3, turned(angle, arm)), (4, turned(angle, arm)), (6, turned(angle, model_id("other")))];
+        let anims = |angle: f32| {
+            vec![
+                (3, turned(angle, arm)),
+                (4, turned(angle, arm)),
+                (6, turned(angle, model_id("other"))),
+            ]
+        };
         fn refs(v: &[(u64, Anim)]) -> Vec<(u64, &Anim)> {
             v.iter().map(|(e, a)| (*e, a)).collect()
         }
         let mut table: Vec<Cell> = Vec::new();
         let ticks = |table: &[Cell]| (table[0][0], table[RECORD_CELLS][0]);
         let first = s.stream(&capture(10, &rows), &refs(&anims(0.1)), now, 0.1);
-        assert_eq!(first.columns[8], [POSE_MANUAL, NO_POSE, NO_POSE], "4 is drawn as a dart, 6 is another model; 3 shows a manual joint");
-        assert!(first.anim.reset && first.anim.at == (0..POSE_CELLS as u32).collect::<Vec<_>>(), "a new table, both records: {:?}", first.anim.at);
+        assert_eq!(
+            first.columns[8],
+            [POSE_MANUAL, NO_POSE, NO_POSE],
+            "4 is drawn as a dart, 6 is another model; 3 shows a manual joint"
+        );
+        assert!(
+            first.anim.reset && first.anim.at == (0..POSE_CELLS as u32).collect::<Vec<_>>(),
+            "a new table, both records: {:?}",
+            first.anim.at
+        );
         first.anim.apply(&mut table);
         assert_eq!(ticks(&table), (9, 10));
-        assert_eq!(table[1..RECORD_CELLS], table[RECORD_CELLS + 1..], "first posed: no motion");
+        assert_eq!(
+            table[1..RECORD_CELLS],
+            table[RECORD_CELLS + 1..],
+            "first posed: no motion"
+        );
         // The next tick's turn: the newer record is the last tick's, so
         // the new one goes over the older: its tick and the entry's value.
         let second = s.stream(&capture(11, &rows), &refs(&anims(0.2)), now, 0.1);
@@ -989,7 +1342,11 @@ mod tests {
         second.anim.apply(&mut table);
         assert_eq!(ticks(&table), (11, 10));
         // Held there: nothing written.
-        assert!(s.stream(&capture(12, &rows), &refs(&anims(0.2)), now, 0.1).anim.is_empty());
+        assert!(
+            s.stream(&capture(12, &rows), &refs(&anims(0.2)), now, 0.1)
+                .anim
+                .is_empty()
+        );
         // A tick later it turns back: the newer (11) stamped the last tick
         // (13, it held so), the new one over the older (which held that
         // turn already: only its tick).
@@ -998,13 +1355,22 @@ mod tests {
         fourth.anim.apply(&mut table);
         assert_eq!(ticks(&table), (13, 14));
         assert_eq!(table[RECORD_CELLS + 7][1], (0.05f32).sin().to_bits());
-        assert!(s.stream(&capture(15, &rows), &refs(&anims(0.1)), now, 0.1).anim.is_empty());
+        assert!(
+            s.stream(&capture(15, &rows), &refs(&anims(0.1)), now, 0.1)
+                .anim
+                .is_empty()
+        );
         // The reader missed writes: the whole table, as it stands.
         s.poser.as_mut().unwrap().write_whole();
         let whole = s.stream(&capture(16, &rows), &refs(&anims(0.1)), now, 0.1);
         assert!(whole.anim.reset && whole.anim.at.len() == POSE_CELLS);
         assert_eq!(whole.anim.cells, table, "the cells as written");
-        assert!(s.stream(&capture(17, &rows), &refs(&anims(0.1)), now, 0.1).anim.is_empty(), "then only what changes");
+        assert!(
+            s.stream(&capture(17, &rows), &refs(&anims(0.1)), now, 0.1)
+                .anim
+                .is_empty(),
+            "then only what changes"
+        );
         // Unit 3 gone, unit 6 now an arm: it takes the freed slot, fresh.
         let rows2 = [(4, 40.0, 0.0, 0.0, 0.0), (6, 60.0, 0.0, 0.0, 0.0)];
         let mut moved = anims(0.1);
@@ -1016,10 +1382,18 @@ mod tests {
         // Its manual joint gone: marked while the older record shows it.
         moved[2].1.manual_kind = [manual_kind::NONE; _];
         let seventh = s.stream(&capture(19, &rows2), &refs(&moved[1..]), now, 0.1);
-        assert_eq!(seventh.columns[8], [NO_POSE, POSE_MANUAL], "the older record still shows it");
+        assert_eq!(
+            seventh.columns[8],
+            [NO_POSE, POSE_MANUAL],
+            "the older record still shows it"
+        );
         // (Held, nothing is written and the older keeps it: as the table.)
         let eighth = s.stream(&capture(20, &rows2), &refs(&moved[1..]), now, 0.1);
-        assert_eq!(eighth.columns[8], [NO_POSE, POSE_MANUAL], "held: the records as they were");
+        assert_eq!(
+            eighth.columns[8],
+            [NO_POSE, POSE_MANUAL],
+            "held: the records as they were"
+        );
         moved[2].1.phase[2] = 0.5;
         let ninth = s.stream(&capture(21, &rows2), &refs(&moved[1..]), now, 0.1);
         assert_eq!(ninth.columns[8], [NO_POSE, 0], "neither does");
@@ -1029,13 +1403,22 @@ mod tests {
     /// observer saw there; units that stay or join do not.
     #[test]
     fn units_that_vanish_where_seen_explode() {
-        let last = [(1, 10.0, 10.0, 6.0), (2, 20.0, 20.0, 6.0), (3, -30.0, 30.0, 6.0), (5, 50.0, 50.0, 12.0)];
+        let last = [
+            (1, 10.0, 10.0, 6.0),
+            (2, 20.0, 20.0, 6.0),
+            (3, -30.0, 30.0, 6.0),
+            (5, 50.0, 50.0, 12.0),
+        ];
         let now = [(1, 11.0, 10.0, 6.0), (4, 40.0, 40.0, 6.0), (5, 51.0, 50.0, 12.0)];
         let sites = deaths(&last, &now, |x, _| x >= 0.0);
         assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
         assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
         // One explosion: flash, fire, sparks, smoke, and a scorch mark.
-        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), ..Effects::default() };
+        let effects = Effects {
+            particles: Some(Arc::default()),
+            decals: Some(Arc::default()),
+            ..Effects::default()
+        };
         effects.explode(20.0, 20.0, 1.0, sites[0].3);
         let bursts = effects.particles.as_ref().unwrap().take_all();
         assert_eq!(bursts.len(), 4, "flash, fire, sparks, smoke: {bursts:?}");
@@ -1043,7 +1426,11 @@ mod tests {
         let decals = effects.decals.as_ref().unwrap().take();
         assert_eq!(decals.len(), 1);
         assert_eq!(decals[0].pos, [20.0, 20.0]);
-        assert!(decals[0].glow > 0.5 && decals[0].glow_life > 0.0 && decals[0].layer == layer::SCORCH, "{:?}", decals[0]);
+        assert!(
+            decals[0].glow > 0.5 && decals[0].glow_life > 0.0 && decals[0].layer == layer::SCORCH,
+            "{:?}",
+            decals[0]
+        );
         assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
     }
 
@@ -1051,14 +1438,21 @@ mod tests {
     /// observer sees, particles and a scar; elsewhere neither.
     #[test]
     fn explosions_by_hand_go_off_only_in_sight() {
-        let effects = Effects { particles: Some(Arc::default()), decals: Some(Arc::default()), ..Effects::default() };
+        let effects = Effects {
+            particles: Some(Arc::default()),
+            decals: Some(Arc::default()),
+            ..Effects::default()
+        };
         assert!(effects.sees(500.0, 500.0), "no observer: everything is seen");
         let grid = SensorGrid::new(100.0, 100.0, 10.0);
         let mut los = Bits::new(grid.width, grid.height);
         los.set(2, 3);
         effects.set_sight(los, grid);
         assert!(!effects.explode_if_seen(55.0, 55.0, 1.0, 7));
-        assert!(effects.particles.as_ref().unwrap().take_all().is_empty() && effects.decals.as_ref().unwrap().take().is_empty());
+        assert!(
+            effects.particles.as_ref().unwrap().take_all().is_empty()
+                && effects.decals.as_ref().unwrap().take().is_empty()
+        );
         assert!(effects.explode_if_seen(25.0, 35.0, 1.0, 7));
         assert_eq!(effects.particles.as_ref().unwrap().take_all().len(), 4);
         assert_eq!(effects.decals.as_ref().unwrap().take().len(), 1);

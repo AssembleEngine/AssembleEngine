@@ -13,7 +13,12 @@
 //! peak scale together); the SDR one blends black over the target, where
 //! there is no display intermediate.
 
-use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, FrameInput, FrameOutput, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{
+    BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, FrameInput, FrameOutput, GLOW_NAME,
+    GraphBuilder, ImageSpec, LoadOp, PARTICLE_SHADOW_NAME, PassKind, PassWriter, Program, ProgramTable, RenderModule,
+    ResourceRef, Role, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec, glow_spec,
+    particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk,
+};
 
 const GRADE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grade.frag.spv"));
 const VIGNETTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vignette.frag.spv"));
@@ -48,7 +53,16 @@ impl RenderModule for Post {
         let mut p = ProgramTable::new();
         let leaves = library(&mut g, "terrain.leaves");
         let indirect = library(&mut g, "terrain.indirect");
-        let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
+        let depth = g.image(
+            "depth",
+            ImageSpec::depth_2d(
+                vk::FORMAT_D32_SFLOAT,
+                w,
+                h,
+                vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED,
+            ),
+            Class::Transient,
+        );
         let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
         // The glow (the bloom's input) and the quarter-size bloom buffers.
         let glow = g.image(GLOW_NAME, glow_spec(w, h), Class::Transient);
@@ -61,18 +75,49 @@ impl RenderModule for Post {
         let display = hdr.then(|| g.image(DISPLAY_NAME, display_spec(w, h), Class::Transient));
         let graded = hdr.then(|| g.image("display.graded", display_spec(w, h), Class::Transient));
         let vignetted = hdr.then(|| g.image("display.vignetted", display_spec(w, h), Class::Transient));
-        let ldr = (!hdr).then(|| g.image("ldr", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient));
+        let ldr = (!hdr).then(|| {
+            g.image(
+                "ldr",
+                ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED),
+                Class::Transient,
+            )
+        });
         let target = if env.readback {
-            g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
+            g.image(
+                "readback.target",
+                ImageSpec::color_2d(
+                    env.color_format,
+                    w,
+                    h,
+                    vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC,
+                ),
+                Class::External,
+            )
         } else {
-            g.image("target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT), Class::Backbuffer)
+            g.image(
+                "target",
+                ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT),
+                Class::Backbuffer,
+            )
         };
         // The unit buffers, then the units' shadow map.
-        let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts", "units.palette"].map(|name| library(&mut g, name)));
+        let units = env.units.then(|| {
+            [
+                "units.instances",
+                "units.visible",
+                "units.indirect",
+                "units.counts",
+                "units.palette",
+            ]
+            .map(|name| library(&mut g, name))
+        });
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
-        let particles = env.particles.then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
+        let particles = env
+            .particles
+            .then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
         // The particles' coloured shadows, with the map.
-        let tint = (map.is_some() && particles.is_some()).then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
+        let tint = (map.is_some() && particles.is_some())
+            .then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
         let maps = [map, tint];
         // The clustered lights: the list the host writes and each cluster's.
         let lights = [library(&mut g, "lights.list"), library(&mut g, "lights.clusters")];
@@ -90,7 +135,9 @@ impl RenderModule for Post {
                 .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
                 .id();
             let reset = p.library("units.reset");
-            g.pass("units reset", PassKind::Transfer, reset).access(draws, Role::TransferDst).id();
+            g.pass("units reset", PassKind::Transfer, reset)
+                .access(draws, Role::TransferDst)
+                .id();
             let cull = p.library("units.cull");
             g.pass("units cull", PassKind::Compute, cull)
                 .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
@@ -101,7 +148,10 @@ impl RenderModule for Post {
         // The lights' clusters, before anything lit.
         let cluster = p.library("lights.cluster");
         let write = Role::StorageBufferWrite(ShaderStage::Compute);
-        g.pass("lights", PassKind::Compute, cluster).access(lights[0], write).access(lights[1], write).id();
+        g.pass("lights", PassKind::Compute, cluster)
+            .access(lights[0], write)
+            .access(lights[1], write)
+            .id();
         // The units' shadows: the units drawn from the sun, before the
         // passes that sample the map.
         if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
@@ -153,18 +203,40 @@ impl RenderModule for Post {
             )
             .id();
             let count = p.library("units.count");
-            g.pass("units count", PassKind::Transfer, count).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
+            g.pass("units count", PassKind::Transfer, count)
+                .access(draws, Role::TransferSrc)
+                .discard(counts, Role::TransferDst)
+                .id();
             let read = p.library("host.read");
-            g.pass("units count read", PassKind::Transfer, read).access(counts, Role::HostRead).root().id();
+            g.pass("units count read", PassKind::Transfer, read)
+                .access(counts, Role::HostRead)
+                .root()
+                .id();
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).color(glow, LoadOp::Load).depth_read(depth), maps, lights).id();
+            receive(
+                g.pass("water", PassKind::Graphics, water)
+                    .color(scene, LoadOp::Load)
+                    .color(glow, LoadOp::Load)
+                    .depth_read(depth),
+                maps,
+                lights,
+            )
+            .id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
             let sim = p.library("particles.sim");
-            lit(g.pass("particles sim", PassKind::Compute, sim).access(state, write).access(keys, write).access(draws, write), lights, ShaderStage::Compute).id();
+            lit(
+                g.pass("particles sim", PassKind::Compute, sim)
+                    .access(state, write)
+                    .access(keys, write)
+                    .access(draws, write),
+                lights,
+                ShaderStage::Compute,
+            )
+            .id();
             let draw = p.library("particles.draw");
             g.pass("particles", PassKind::Graphics, draw)
                 .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
@@ -176,43 +248,92 @@ impl RenderModule for Post {
                 .id();
         }
         let downsample = p.library("bloom.downsample");
-        g.pass("bloom downsample", PassKind::Graphics, downsample).sampled(glow, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        g.pass("bloom downsample", PassKind::Graphics, downsample)
+            .sampled(glow, ShaderStage::Fragment)
+            .color(bloom0, LoadOp::DontCare)
+            .id();
         let blur_x = p.library("bloom.blur_x");
-        g.pass("bloom blur x", PassKind::Graphics, blur_x).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
+        g.pass("bloom blur x", PassKind::Graphics, blur_x)
+            .sampled(bloom0, ShaderStage::Fragment)
+            .color(bloom1, LoadOp::DontCare)
+            .id();
         let blur_y = p.library("bloom.blur_y");
-        g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        g.pass("bloom blur y", PassKind::Graphics, blur_y)
+            .sampled(bloom1, ShaderStage::Fragment)
+            .color(bloom0, LoadOp::DontCare)
+            .id();
         let tonemap = p.library("post.tonemap");
         let tonemap_out = display.or(ldr).expect("an HDR or an SDR tail");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(tonemap_out, LoadOp::DontCare).id();
-        let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
+        g.pass("tonemap", PassKind::Graphics, tonemap)
+            .sampled(scene, ShaderStage::Fragment)
+            .sampled(bloom0, ShaderStage::Fragment)
+            .color(tonemap_out, LoadOp::DontCare)
+            .id();
+        let grade = p.push(Program::Fullscreen {
+            label: "grade",
+            spirv: GRADE,
+            uniform_bytes: 32,
+        });
         match (display, graded, vignetted) {
             (Some(display), Some(graded), Some(vignetted)) => {
                 // The grade reads the display and writes the graded display;
                 // the vignette multiplies that into a third intermediate, and
                 // the encode is the only pass that writes the target.
-                g.pass("grade", PassKind::Graphics, grade).sampled(display, ShaderStage::Fragment).color(graded, LoadOp::DontCare).id();
-                self.vignette = p.push(Program::Fullscreen { label: "vignette_display", spirv: VIGNETTE_DISPLAY, uniform_bytes: 16 });
-                g.pass("vignette", PassKind::Graphics, self.vignette).sampled(graded, ShaderStage::Fragment).color(vignetted, LoadOp::DontCare).id();
+                g.pass("grade", PassKind::Graphics, grade)
+                    .sampled(display, ShaderStage::Fragment)
+                    .color(graded, LoadOp::DontCare)
+                    .id();
+                self.vignette = p.push(Program::Fullscreen {
+                    label: "vignette_display",
+                    spirv: VIGNETTE_DISPLAY,
+                    uniform_bytes: 16,
+                });
+                g.pass("vignette", PassKind::Graphics, self.vignette)
+                    .sampled(graded, ShaderStage::Fragment)
+                    .color(vignetted, LoadOp::DontCare)
+                    .id();
                 let encode = p.library("post.encode");
-                g.pass("encode", PassKind::Graphics, encode).sampled(vignetted, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+                g.pass("encode", PassKind::Graphics, encode)
+                    .sampled(vignetted, ShaderStage::Fragment)
+                    .color(target, LoadOp::DontCare)
+                    .id();
             }
             _ => {
                 let ldr = ldr.expect("an SDR tail has its intermediate");
-                g.pass("grade", PassKind::Graphics, grade).sampled(ldr, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
-                self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });
-                g.pass("vignette", PassKind::Graphics, self.vignette).color(target, LoadOp::Load).conditional().id();
+                g.pass("grade", PassKind::Graphics, grade)
+                    .sampled(ldr, ShaderStage::Fragment)
+                    .color(target, LoadOp::DontCare)
+                    .id();
+                self.vignette = p.push(Program::Fullscreen {
+                    label: "vignette",
+                    spirv: VIGNETTE,
+                    uniform_bytes: 16,
+                });
+                g.pass("vignette", PassKind::Graphics, self.vignette)
+                    .color(target, LoadOp::Load)
+                    .conditional()
+                    .id();
             }
         }
         self.hdr = hdr;
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");
-            g.pass("copy", PassKind::Transfer, copy).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
+            g.pass("copy", PassKind::Transfer, copy)
+                .access(target, Role::TransferSrc)
+                .discard(buffer, Role::TransferDst)
+                .id();
             let read = p.library("host.read");
-            g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
+            g.pass("host read", PassKind::Transfer, read)
+                .access(buffer, Role::HostRead)
+                .root()
+                .id();
         } else {
             let present = p.library("present");
-            g.pass("present", PassKind::Present, present).present(target).root().id();
+            g.pass("present", PassKind::Present, present)
+                .present(target)
+                .root()
+                .id();
         }
         Some(Declaration { graph: g, programs: p })
     }
@@ -244,7 +365,8 @@ fn receive(mut pass: PassWriter<'_>, maps: [Option<ResourceRef>; 2], lights: [Re
 
 /// A lit pass reads the light list and the clusters.
 fn lit(pass: PassWriter<'_>, lights: [ResourceRef; 2], stage: ShaderStage) -> PassWriter<'_> {
-    pass.access(lights[0], Role::StorageBufferRead(stage)).access(lights[1], Role::StorageBufferRead(stage))
+    pass.access(lights[0], Role::StorageBufferRead(stage))
+        .access(lights[1], Role::StorageBufferRead(stage))
 }
 
 render_module!(Post);

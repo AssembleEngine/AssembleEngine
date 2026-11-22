@@ -131,18 +131,20 @@ mod sim;
 mod watch;
 
 use ae_nav::terrain::{NO_WATER, Terrain};
-use ae_services::nav::{GroundFeed, Map};
 use ae_render::demo::DemoApp;
 use ae_render::particles::{ParticleFeed, ParticlesSetup};
 use ae_render::swapchain::{HdrRequest, PresentPolicy};
-use ae_render::terrain::app::{HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view};
+use ae_render::terrain::app::{
+    HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view,
+};
 use ae_render::terrain::edit::TerrainEditor;
-use ae_render::terrain::tileset::{self, Tileset};
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
+use ae_render::terrain::tileset::{self, Tileset};
 use ae_render::thread::{GpuRenderConfig, GpuRenderThread, HdrControl};
 use ae_render::units::{UnitFeed, UnitsSetup};
 use ae_render::window::{SdlWindow, keys};
+use ae_services::nav::{GroundFeed, Map};
 use anyhow::{Context, Result, bail};
 use glam::Vec2;
 use std::process::ExitCode;
@@ -244,7 +246,58 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { map: MapKind::Water, map_cells: 2560, relief: 1.0, camera: None, seconds: None, exercise: false, present: PresentPolicy::Fifo, frames_in_flight: 2, capture: None, units: 10_000, workers: default_workers(), ticks: 300, render_module: None, quake: 0, tileset: Some("temperate".into()), tileset_size: 512, weights: false, water: true, shadows: true, tone: ae_render::tonemap::ToneParams { auto: true, ..Default::default() }, particles: true, decals: true, scars: None, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, explode: 0, capture_frames: 60, lights: 0, bench: None, record_threads: 1, teams: 0, observer: None, game: "crossing".into(), content: None, param: None, packages: Vec::new(), package_dirs: Vec::new(), mounts: Vec::new(), wasm: None, loaded_map: None, models: Vec::new(), probe_display: false, working_space: Default::default(), display_gamut: None, hdr: HdrRequest::Auto, paper_white: None, peak: None }
+        Self {
+            map: MapKind::Water,
+            map_cells: 2560,
+            relief: 1.0,
+            camera: None,
+            seconds: None,
+            exercise: false,
+            present: PresentPolicy::Fifo,
+            frames_in_flight: 2,
+            capture: None,
+            units: 10_000,
+            workers: default_workers(),
+            ticks: 300,
+            render_module: None,
+            quake: 0,
+            tileset: Some("temperate".into()),
+            tileset_size: 512,
+            weights: false,
+            water: true,
+            shadows: true,
+            tone: ae_render::tonemap::ToneParams {
+                auto: true,
+                ..Default::default()
+            },
+            particles: true,
+            decals: true,
+            scars: None,
+            particles_full: false,
+            particle_blend: ae_render::particles::ParticleBlend::Sorted,
+            explode: 0,
+            capture_frames: 60,
+            lights: 0,
+            bench: None,
+            record_threads: 1,
+            teams: 0,
+            observer: None,
+            game: "crossing".into(),
+            content: None,
+            param: None,
+            packages: Vec::new(),
+            package_dirs: Vec::new(),
+            mounts: Vec::new(),
+            wasm: None,
+            loaded_map: None,
+            models: Vec::new(),
+            probe_display: false,
+            working_space: Default::default(),
+            display_gamut: None,
+            hdr: HdrRequest::Auto,
+            paper_white: None,
+            peak: None,
+        }
     }
 }
 
@@ -258,7 +311,9 @@ fn parse() -> Result<Options> {
     // order) it is the reference the scene is stored at.
     let (mut ev100_given, mut auto_given) = (false, false);
     let mut args = std::env::args().skip(1);
-    let value = |name: &str, args: &mut dyn Iterator<Item = String>| args.next().with_context(|| format!("{name} needs a value"));
+    let value = |name: &str, args: &mut dyn Iterator<Item = String>| {
+        args.next().with_context(|| format!("{name} needs a value"))
+    };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--map" => {
@@ -274,15 +329,31 @@ fn parse() -> Result<Options> {
             "--relief" => o.relief = value("--relief", &mut args)?.parse().context("--relief")?,
             "--camera" => {
                 let text = value("--camera", &mut args)?;
-                let parts: Vec<f32> = text.split(',').map(str::parse).collect::<Result<_, _>>().context("--camera X,Z,DIST,YAW,PITCH")?;
-                let parts: [f32; 5] = parts.try_into().map_err(|_| anyhow::anyhow!("--camera takes five numbers"))?;
+                let parts: Vec<f32> = text
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .context("--camera X,Z,DIST,YAW,PITCH")?;
+                let parts: [f32; 5] = parts
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("--camera takes five numbers"))?;
                 o.camera = Some(parts);
             }
             "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
             "--exercise" => o.exercise = true,
             "--probe-display" => o.probe_display = true,
-            "--working-space" => o.working_space = value("--working-space", &mut args)?.parse().context("--working-space")?,
-            "--display-gamut" => o.display_gamut = Some(value("--display-gamut", &mut args)?.parse().context("--display-gamut")?),
+            "--working-space" => {
+                o.working_space = value("--working-space", &mut args)?
+                    .parse()
+                    .context("--working-space")?
+            }
+            "--display-gamut" => {
+                o.display_gamut = Some(
+                    value("--display-gamut", &mut args)?
+                        .parse()
+                        .context("--display-gamut")?,
+                )
+            }
             "--hdr" => {
                 o.hdr = match value("--hdr", &mut args)?.as_str() {
                     "off" => HdrRequest::Off,
@@ -292,11 +363,18 @@ fn parse() -> Result<Options> {
                     other => bail!("--hdr {other:?}: expected off, auto, hdr10 or scrgb"),
                 }
             }
-            "--paper-white" => o.paper_white = Some(value("--paper-white", &mut args)?.parse().context("--paper-white")?),
+            "--paper-white" => {
+                o.paper_white = Some(value("--paper-white", &mut args)?.parse().context("--paper-white")?)
+            }
             "--peak" => o.peak = Some(value("--peak", &mut args)?.parse().context("--peak")?),
             "--capture" => o.capture = Some(value("--capture", &mut args)?),
             "--units" => o.units = value("--units", &mut args)?.parse().context("--units")?,
-            "--workers" => o.workers = value("--workers", &mut args)?.parse::<usize>().context("--workers")?.max(1),
+            "--workers" => {
+                o.workers = value("--workers", &mut args)?
+                    .parse::<usize>()
+                    .context("--workers")?
+                    .max(1)
+            }
             "--ticks" => o.ticks = value("--ticks", &mut args)?.parse().context("--ticks")?,
             "--render-module" => o.render_module = Some(value("--render-module", &mut args)?),
             "--tileset" => {
@@ -304,10 +382,15 @@ fn parse() -> Result<Options> {
                 o.tileset = match name.as_str() {
                     "none" => None,
                     n if ae_render::terrain::tileset::NAMES.contains(&n) => Some(name),
-                    n => bail!("--tileset {n:?}: expected one of {:?} or none", ae_render::terrain::tileset::NAMES),
+                    n => bail!(
+                        "--tileset {n:?}: expected one of {:?} or none",
+                        ae_render::terrain::tileset::NAMES
+                    ),
                 };
             }
-            "--tileset-size" => o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?,
+            "--tileset-size" => {
+                o.tileset_size = value("--tileset-size", &mut args)?.parse().context("--tileset-size")?
+            }
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
             "--no-shadows" => o.shadows = false,
@@ -332,17 +415,29 @@ fn parse() -> Result<Options> {
                 }
             }
             "--explode" => o.explode = value("--explode", &mut args)?.parse().context("--explode N")?,
-            "--capture-frames" => o.capture_frames = value("--capture-frames", &mut args)?.parse::<u32>().context("--capture-frames N")?.max(1),
+            "--capture-frames" => {
+                o.capture_frames = value("--capture-frames", &mut args)?
+                    .parse::<u32>()
+                    .context("--capture-frames N")?
+                    .max(1)
+            }
             "--lights" => o.lights = value("--lights", &mut args)?.parse().context("--lights N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
-            "--frames" => o.bench.get_or_insert_with(Default::default).frames = value("--frames", &mut args)?.parse().context("--frames")?,
-            "--warmup" => o.bench.get_or_insert_with(Default::default).warmup = value("--warmup", &mut args)?.parse().context("--warmup")?,
+            "--frames" => {
+                o.bench.get_or_insert_with(Default::default).frames =
+                    value("--frames", &mut args)?.parse().context("--frames")?
+            }
+            "--warmup" => {
+                o.bench.get_or_insert_with(Default::default).warmup =
+                    value("--warmup", &mut args)?.parse().context("--warmup")?
+            }
             "--label" => o.bench.get_or_insert_with(Default::default).label = Some(value("--label", &mut args)?),
             "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
             "--bench-output" => {
-                o.bench.get_or_insert_with(Default::default).output = match value("--bench-output", &mut args)?.as_str() {
+                o.bench.get_or_insert_with(Default::default).output = match value("--bench-output", &mut args)?.as_str()
+                {
                     "sdr" => ae_render::encode::OutputEncoding::Sdr,
                     "hdr10" => ae_render::encode::OutputEncoding::Hdr10Pq,
                     "scrgb" => ae_render::encode::OutputEncoding::ScRgb,
@@ -351,8 +446,13 @@ fn parse() -> Result<Options> {
             }
             "--bench-size" => {
                 let size = value("--bench-size", &mut args)?;
-                let (w, h) = size.split_once('x').with_context(|| format!("--bench-size {size}: expected WxH"))?;
-                o.bench.get_or_insert_with(Default::default).size = (w.parse().context("--bench-size W")?, h.parse().context("--bench-size H")?);
+                let (w, h) = size
+                    .split_once('x')
+                    .with_context(|| format!("--bench-size {size}: expected WxH"))?;
+                o.bench.get_or_insert_with(Default::default).size = (
+                    w.parse().context("--bench-size W")?,
+                    h.parse().context("--bench-size H")?,
+                );
             }
             "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
             "--game" => o.game = value("--game", &mut args)?,
@@ -368,10 +468,19 @@ fn parse() -> Result<Options> {
                     n => Some(n.parse().context("--observer N|all")?),
                 }
             }
-            "--record-threads" => o.record_threads = value("--record-threads", &mut args)?.parse::<usize>().context("--record-threads")?.max(1),
+            "--record-threads" => {
+                o.record_threads = value("--record-threads", &mut args)?
+                    .parse::<usize>()
+                    .context("--record-threads")?
+                    .max(1)
+            }
             "--fifo" => o.present = PresentPolicy::Fifo,
             "--mailbox" => o.present = PresentPolicy::Mailbox,
-            "--frames-in-flight" => o.frames_in_flight = value("--frames-in-flight", &mut args)?.parse().context("--frames-in-flight")?,
+            "--frames-in-flight" => {
+                o.frames_in_flight = value("--frames-in-flight", &mut args)?
+                    .parse()
+                    .context("--frames-in-flight")?
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -399,7 +508,16 @@ fn parse() -> Result<Options> {
         // The packages' defaults (start points, the game's own) rule, not
         // the client's: parameter 0 unless `--param` says otherwise.
         o.param.get_or_insert(0);
-        eprintln!("packages: {} mount(s), game {}, {}", o.mounts.len(), o.game, if o.loaded_map.is_some() { "map from a package" } else { "no map package" });
+        eprintln!(
+            "packages: {} mount(s), game {}, {}",
+            o.mounts.len(),
+            o.game,
+            if o.loaded_map.is_some() {
+                "map from a package"
+            } else {
+                "no map package"
+            }
+        );
     }
     if o.game == "skirmish" {
         o.teams = o.teams.max(2);
@@ -414,7 +532,9 @@ fn parse() -> Result<Options> {
         anyhow::ensure!(k < o.teams, "--observer {k} needs --teams of at least {}", k + 1);
     }
     if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
-        bail!("--frames, --warmup, --label, --out, --no-save, --bench-output and --bench-size go with --bench\n{USAGE}");
+        bail!(
+            "--frames, --warmup, --label, --out, --no-save, --bench-output and --bench-size go with --bench\n{USAGE}"
+        );
     }
     if auto_given {
         o.tone.auto = true;
@@ -440,14 +560,42 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Package => Map::Loaded,
         MapKind::Generated | MapKind::Demo => return None,
     };
-    let mounts = o.mounts.iter().cloned().chain(o.content.iter().map(Into::into)).collect();
-    (o.units > 0).then_some(sim::SimOptions { map, map_cells: o.map_cells, units: o.units, workers: o.workers, quake: o.quake, teams: o.teams, observer: o.observer, game: o.game.clone(), mounts, param: o.param, wasm: o.wasm.clone(), loaded_map: o.loaded_map.clone(), models: o.models.clone() })
+    let mounts = o
+        .mounts
+        .iter()
+        .cloned()
+        .chain(o.content.iter().map(Into::into))
+        .collect();
+    (o.units > 0).then_some(sim::SimOptions {
+        map,
+        map_cells: o.map_cells,
+        units: o.units,
+        workers: o.workers,
+        quake: o.quake,
+        teams: o.teams,
+        observer: o.observer,
+        game: o.game.clone(),
+        mounts,
+        param: o.param,
+        wasm: o.wasm.clone(),
+        loaded_map: o.loaded_map.clone(),
+        models: o.models.clone(),
+    })
 }
 
 fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> Result<UnitsSetup> {
     let classes = s.classes();
-    if let Some(c) = s.models.iter().filter_map(|m| m.class).find(|&c| c as usize >= classes.len()) {
-        bail!("--model {c}=...: there are {} unit classes (0 to {})", classes.len(), classes.len() - 1);
+    if let Some(c) = s
+        .models
+        .iter()
+        .filter_map(|m| m.class)
+        .find(|&c| c as usize >= classes.len())
+    {
+        bail!(
+            "--model {c}=...: there are {} unit classes (0 to {})",
+            classes.len(),
+            classes.len() - 1
+        );
     }
     // With an observer the classes end with the blips' and the selection's.
     let blip = s.observer.map(|_| classes.len() - 2);
@@ -457,9 +605,20 @@ fn units_setup(s: &sim::SimOptions, feed: Arc<UnitFeed>) -> Result<UnitsSetup> {
     let rigs: Vec<(String, Arc<ae_model::anim::Rig>)> = s.rigs()?.into_iter().map(|(n, r)| (n, Arc::new(r))).collect();
     let rigs = models::names_per_class(&s.models, classes.len(), blip)
         .into_iter()
-        .map(|name| rigs.iter().find(|(n, _)| Some(n) == name.as_ref()).map(|(_, r)| r.clone()))
+        .map(|name| {
+            rigs.iter()
+                .find(|(n, _)| Some(n) == name.as_ref())
+                .map(|(_, r)| r.clone())
+        })
         .collect();
-    Ok(UnitsSetup { feed, capacity: s.units, classes, min_pixels: 7.0, models, rigs })
+    Ok(UnitsSetup {
+        feed,
+        capacity: s.units,
+        classes,
+        min_pixels: 7.0,
+        models,
+        rigs,
+    })
 }
 
 /// Corner heightmap of the nav terrain's ground (bed under water), with
@@ -509,13 +668,24 @@ fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> 
         water.map(|w| format!(", water at {w:.0} m")).unwrap_or_default(),
         (started.elapsed() - generated).as_secs_f32()
     );
-    Ok((TerrainSource { heightmap, pyramid, info, materials }, nav))
+    Ok((
+        TerrainSource {
+            heightmap,
+            pyramid,
+            info,
+            materials,
+        },
+        nav,
+    ))
 }
 
 /// The material tileset of `--tileset`, generated (procedural layers).
 fn tileset(o: &Options) -> Result<Option<Arc<Tileset>>> {
     let Some(name) = &o.tileset else { return Ok(None) };
-    anyhow::ensure!(o.tileset_size.is_power_of_two() && o.tileset_size >= 4, "--tileset-size must be a power of two of at least 4");
+    anyhow::ensure!(
+        o.tileset_size.is_power_of_two() && o.tileset_size >= 4,
+        "--tileset-size must be a power of two of at least 4"
+    );
     let started = Instant::now();
     let t = tileset::by_name(name, o.tileset_size).context("unknown tileset")?;
     eprintln!(
@@ -587,11 +757,14 @@ const BUNDLED_SCARS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/d
 /// Every `NAME.tga` with a matching `NAME_normal.tga` is one scar; the
 /// normal map's green handedness is detected (`normal_green_up`), so both
 /// DirectX-style and OpenGL-style maps load.
-fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas, Vec<(u32, ae_render::decals::Blend)>)> {
+fn recoil_scars(
+    dir: &std::path::Path,
+) -> Result<(ae_render::decals::DecalAtlas, Vec<(u32, ae_render::decals::Blend)>)> {
     use ae_render::decals::{Blend, default_atlas, normal_green_up, read_tga};
     let read = |name: &str| -> Result<ae_render::decals::Image> {
         let path = dir.join(name);
-        read_tga(&std::fs::read(&path).with_context(|| path.display().to_string())?).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+        read_tga(&std::fs::read(&path).with_context(|| path.display().to_string())?)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
     };
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -601,7 +774,10 @@ fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas,
         .collect();
     names.sort();
     if names.is_empty() {
-        bail!("no scar colour maps (*.tga with a matching *_normal.tga) in {}", dir.display());
+        bail!(
+            "no scar colour maps (*.tga with a matching *_normal.tga) in {}",
+            dir.display()
+        );
     }
     let mut atlas = default_atlas(512);
     let mut scars = Vec::new();
@@ -610,7 +786,9 @@ fn recoil_scars(dir: &std::path::Path) -> Result<(ae_render::decals::DecalAtlas,
         let colour = read(name)?;
         let normal = read(&format!("{stem}_normal.tga"))?;
         let up = normal_green_up(&colour, &normal);
-        let layer = atlas.add_layer(&colour, Some((&normal, up))).map_err(anyhow::Error::msg)?;
+        let layer = atlas
+            .add_layer(&colour, Some((&normal, up)))
+            .map_err(anyhow::Error::msg)?;
         scars.push((layer, Blend::Modulate));
     }
     Ok((atlas, scars))
@@ -623,7 +801,10 @@ fn explode_around(effects: &sim::Effects, target: Vec2, count: u32, seed: u32) -
     for k in 0..count {
         let h = (seed ^ k.wrapping_mul(0x9e37_79b9)).wrapping_mul(0x85eb_ca6b);
         let spread = if count > 1 { 120.0 } else { 0.0 };
-        let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * spread, ((h >> 16) as f32 / 65535.0 - 0.5) * spread);
+        let (dx, dz) = (
+            ((h & 0xffff) as f32 / 65535.0 - 0.5) * spread,
+            ((h >> 16) as f32 / 65535.0 - 0.5) * spread,
+        );
         let scale = 0.8 + (h % 7) as f32 * 0.2;
         seen += u32::from(effects.explode_if_seen(target.x + dx, target.y + dz, scale, h));
     }
@@ -669,7 +850,14 @@ fn exercise(window: &mut SdlWindow, started: Instant, step: &mut usize) {
 }
 
 /// Camera and switches from this frame's input.
-fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mut TerrainView, source: &TerrainSource, dt: f32, sim_speed: &sim::SimSpeed) {
+fn steer(
+    window: &SdlWindow,
+    events: &ae_render::window::WindowEvents,
+    view: &mut TerrainView,
+    source: &TerrainSource,
+    dt: f32,
+    sim_speed: &sim::SimSpeed,
+) {
     let held = window.held();
     let camera = &mut view.camera;
     let speed = camera.distance * if held.fast { 2.5 } else { 0.9 } * dt;
@@ -680,7 +868,9 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     let (w, h) = source.info.extent();
     camera.target = (camera.target + pan * speed).clamp(Vec2::ZERO, Vec2::new(w, h));
     camera.yaw += (held.orbit_right as i32 - held.orbit_left as i32) as f32 * 1.5 * dt - events.drag.0 * 0.005;
-    camera.pitch = (camera.pitch + (held.tilt_up as i32 - held.tilt_down as i32) as f32 * 1.0 * dt + events.drag.1 * 0.004).clamp(0.08, 1.5);
+    camera.pitch =
+        (camera.pitch + (held.tilt_up as i32 - held.tilt_down as i32) as f32 * 1.0 * dt + events.drag.1 * 0.004)
+            .clamp(0.08, 1.5);
     camera.distance = (camera.distance * 0.88f32.powf(events.wheel)).clamp(20.0, w.max(h) * 2.0);
     if events.pressed & keys::PLUS != 0 {
         sim_speed.faster();
@@ -697,7 +887,11 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
         view.tau = (view.tau * 1.5).min(64.0);
     }
     if events.pressed & keys::T != 0 {
-        view.wireframe = if view.wireframe == Wireframe::Off { Wireframe::Triangles } else { Wireframe::Off };
+        view.wireframe = if view.wireframe == Wireframe::Off {
+            Wireframe::Triangles
+        } else {
+            Wireframe::Off
+        };
     }
     if events.pressed & keys::L != 0 {
         view.lod_colors = !view.lod_colors;
@@ -735,7 +929,10 @@ fn steer(window: &SdlWindow, events: &ae_render::window::WindowEvents, view: &mu
     }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;
-        println!("--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)", c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau);
+        println!(
+            "--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)",
+            c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau
+        );
     }
 }
 
@@ -759,7 +956,9 @@ fn scatter_lights(app: TerrainApp, n: u32) -> TerrainApp {
     }
     let target = app.view().lock().unwrap().camera.target;
     let source = app.source().clone();
-    app.with_lights(ae_render::lights::scatter(n, target, 400.0, 4.0, 7, &|p| source.height_at(p)))
+    app.with_lights(ae_render::lights::scatter(n, target, 400.0, 4.0, 7, &|p| {
+        source.height_at(p)
+    }))
 }
 
 fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, path: &str) -> Result<ExitCode> {
@@ -812,17 +1011,29 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         let stream = sim.stream(0.0)?;
         let streamed = t.elapsed();
         if let (Some([own, seen, blip, ghost]), Some([c, b, r])) = (sim.view_counts(), sim.view_ms()) {
-            eprintln!("observer {}: {own} own, {seen} seen, {blip} blips, {ghost} ghosts; capture + coverage {c:.3} ms, view {b:.3} ms, rows + stream {r:.3} ms", s.observer.unwrap_or(0));
+            eprintln!(
+                "observer {}: {own} own, {seen} seen, {blip} blips, {ghost} ghosts; capture + coverage {c:.3} ms, view {b:.3} ms, rows + stream {r:.3} ms",
+                s.observer.unwrap_or(0)
+            );
         }
         // Where each class is (to aim `--camera` at).
         let mut classes: Vec<(u32, f64, f64)> = vec![(0, 0.0, 0.0); s.classes().len()];
         for r in 0..stream.len() {
             if let Some(c) = classes.get_mut(stream.columns[7][r] as usize) {
-                *c = (c.0 + 1, c.1 + f32::from_bits(stream.columns[0][r]) as f64, c.2 + f32::from_bits(stream.columns[1][r]) as f64);
+                *c = (
+                    c.0 + 1,
+                    c.1 + f32::from_bits(stream.columns[0][r]) as f64,
+                    c.2 + f32::from_bits(stream.columns[1][r]) as f64,
+                );
             }
         }
         for (i, (n, x, y)) in classes.iter().enumerate().filter(|c| c.1.0 > 0) {
-            eprintln!("class {i}: {n} units, centre {:.0},{:.0}, {} moving", x / *n as f64, y / *n as f64, sim.moving(i as u32));
+            eprintln!(
+                "class {i}: {n} units, centre {:.0},{:.0}, {} moving",
+                x / *n as f64,
+                y / *n as f64,
+                sim.moving(i as u32)
+            );
         }
         sim_note = format!(
             "; sim: {} units at tick {}, world {:.2} s, {:.2} ms/tick, capture + stream {:.3} ms",
@@ -845,10 +1056,28 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
             eprintln!("--explode: {} of {} out of sight", o.explode - seen, o.explode);
         }
     }
-    let extent = ash::vk::Extent2D { width: 1280, height: 720 };
+    let extent = ash::vk::Extent2D {
+        width: 1280,
+        height: 720,
+    };
     app.create_offscreen(&gpu, extent)?;
-    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB, color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let executor = run_headless(&gpu, &mut app, target, o.capture_frames as usize, ExecutorConfig { frames_in_flight: o.frames_in_flight, profile: true, record_threads: o.record_threads, ..ExecutorConfig::default() })?;
+    let target = TargetInfo {
+        extent,
+        format: ash::vk::Format::R8G8B8A8_SRGB,
+        color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let executor = run_headless(
+        &gpu,
+        &mut app,
+        target,
+        o.capture_frames as usize,
+        ExecutorConfig {
+            frames_in_flight: o.frames_in_flight,
+            profile: true,
+            record_threads: o.record_threads,
+            ..ExecutorConfig::default()
+        },
+    )?;
     let pixels = app.readback().context("no readback")?;
     let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
     ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
@@ -859,23 +1088,44 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         let e = app.terrain_edits();
         let e = e.lock().unwrap();
         if e.applied > 0 {
-            eprintln!("terrain edits: {} applied (version {}), {} bytes uploaded in {:.2} ms", e.applied, e.version, e.last_bytes, e.last_ms);
+            eprintln!(
+                "terrain edits: {} applied (version {}), {} bytes uploaded in {:.2} ms",
+                e.applied, e.version, e.last_bytes, e.last_ms
+            );
         }
     }
     RenderApp::destroy(&mut app, &gpu);
     drop(gpu);
     let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
-    let gpu_ms: Vec<String> = executor.pass_names.iter().zip(&executor.pass_gpu_ms).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
+    let gpu_ms: Vec<String> = executor
+        .pass_names
+        .iter()
+        .zip(&executor.pass_gpu_ms)
+        .map(|(name, ms)| format!("{name} {ms:.3}"))
+        .collect();
     println!(
         "wrote {path}: {} leaves, {} drawn{}; GPU ms per pass: {}{sim_note}{}; {}",
         stats.leaves,
         stats.drawn,
-        counts.map(|(rows, visible)| format!(", {visible} of {rows} units visible")).unwrap_or_default(),
+        counts
+            .map(|(rows, visible)| format!(", {visible} of {rows} units visible"))
+            .unwrap_or_default(),
         gpu_ms.join(", "),
-        if o.record_threads > 1 { format!("; {} of {} frames recorded on {} threads", executor.parallel_frames, executor.frames, o.record_threads) } else { String::new() },
+        if o.record_threads > 1 {
+            format!(
+                "; {} of {} frames recorded on {} threads",
+                executor.parallel_frames, executor.frames, o.record_threads
+            )
+        } else {
+            String::new()
+        },
         validation_text(instance.validation, errors, warnings)
     );
-    Ok(if errors + warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    Ok(if errors + warnings > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn run(o: Options) -> Result<ExitCode> {
@@ -887,7 +1137,12 @@ fn run(o: Options) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     if let Some(b) = &o.bench {
-        return bench::run(&bench::BenchOptions { record_threads: o.record_threads, particles_full: o.particles_full, particle_blend: o.particle_blend, ..b.clone() });
+        return bench::run(&bench::BenchOptions {
+            record_threads: o.record_threads,
+            particles_full: o.particles_full,
+            particle_blend: o.particle_blend,
+            ..b.clone()
+        });
     }
     let (source, nav) = match o.map {
         MapKind::Demo => (None, None),
@@ -907,17 +1162,43 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut headroom = if hdr_capable { display_state.headroom } else { 1.0 };
     let mut display_peak = if hdr_capable { display_state.peak_nits() } else { 0.0 };
     let mut hdr_request = o.hdr;
-    let hdr_settings = Arc::new(Mutex::new(HdrSettings { paper_white: o.paper_white, peak: o.peak, headroom, display_peak }));
+    let hdr_settings = Arc::new(Mutex::new(HdrSettings {
+        paper_white: o.paper_white,
+        peak: o.peak,
+        headroom,
+        display_peak,
+    }));
     println!(
         "[hdr] --hdr {} | SDL HDR {} | SDR white {:.1} nits | headroom {:.3}x | paper white {} | peak {}",
-        match hdr_request { HdrRequest::Off => "off", HdrRequest::Auto => "auto", HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb" },
+        match hdr_request {
+            HdrRequest::Off => "off",
+            HdrRequest::Auto => "auto",
+            HdrRequest::Hdr10 => "hdr10",
+            HdrRequest::ScRgb => "scrgb",
+        },
         if display_state.enabled { "enabled" } else { "off" },
         display_state.paper_white_nits(),
         headroom,
-        o.paper_white.map(|n| format!("{n:.1} nits (--paper-white)")).unwrap_or_else(|| "the WSI's reference".into()),
-        o.peak.map(|n| format!("{n:.1} nits (--peak)")).unwrap_or_else(|| format!("paper white × headroom (the panel's {display_peak:.1} nits)")),
+        o.paper_white
+            .map(|n| format!("{n:.1} nits (--paper-white)"))
+            .unwrap_or_else(|| "the WSI's reference".into()),
+        o.peak
+            .map(|n| format!("{n:.1} nits (--peak)"))
+            .unwrap_or_else(|| format!("paper white × headroom (the panel's {display_peak:.1} nits)")),
     );
-    let config = GpuRenderConfig { frames_in_flight: o.frames_in_flight, present: o.present, max_fps: 0, profile: false, verbose: false, record_threads: o.record_threads, hdr: HdrControl { request: hdr_request, capable: hdr_capable, headroom } };
+    let config = GpuRenderConfig {
+        frames_in_flight: o.frames_in_flight,
+        present: o.present,
+        max_fps: 0,
+        profile: false,
+        verbose: false,
+        record_threads: o.record_threads,
+        hdr: HdrControl {
+            request: hdr_request,
+            capable: hdr_capable,
+            headroom,
+        },
+    };
     type Shared = (Arc<Mutex<TerrainView>>, Arc<Mutex<FrameStats>>);
     let mut terrain: Option<Shared> = None;
     let mut sim_thread = None;
@@ -931,7 +1212,14 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut thread = match &source {
         None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
         Some(source) => {
-            let (mut app, feed) = effects(with_look(TerrainApp::new(source.clone(), TerrainOutput::Present), tileset(&o)?, &o), &o);
+            let (mut app, feed) = effects(
+                with_look(
+                    TerrainApp::new(source.clone(), TerrainOutput::Present),
+                    tileset(&o)?,
+                    &o,
+                ),
+                &o,
+            );
             app = app.with_hdr(hdr_settings.clone());
             effects_feed = feed;
             if let Some(s) = sim_options(&o) {
@@ -943,14 +1231,31 @@ fn run(o: Options) -> Result<ExitCode> {
                 }
                 let ground = Arc::new(GroundFeed::default());
                 let shown = nav.clone().context("units need a crossing map")?;
-                ground_thread = Some(ground::GroundThread::start(ground.clone(), source.clone(), shown, o.relief, app.terrain_edits()));
+                ground_thread = Some(ground::GroundThread::start(
+                    ground.clone(),
+                    source.clone(),
+                    shown,
+                    o.relief,
+                    app.terrain_edits(),
+                ));
                 edits = Some(app.terrain_edits());
-                sim_thread = Some(sim::SimThread::start(s, feed, ground, vision, effects_feed.clone(), ui.clone(), sim_speed.clone()));
+                sim_thread = Some(sim::SimThread::start(
+                    s,
+                    feed,
+                    ground,
+                    vision,
+                    effects_feed.clone(),
+                    ui.clone(),
+                    sim_speed.clone(),
+                ));
             }
             if let Some(name) = &o.render_module {
                 let wasm = ae_render::module::build(name)?;
                 app = app.with_module(wasm.clone());
-                module = Some((watch::ModuleWatch::start(name.clone(), wasm, app.module_reload()), app.module_status()));
+                module = Some((
+                    watch::ModuleWatch::start(name.clone(), wasm, app.module_reload()),
+                    app.module_status(),
+                ));
             }
             place_camera(&app, o.camera);
             app = scatter_lights(app, o.lights);
@@ -992,9 +1297,28 @@ fn run(o: Options) -> Result<ExitCode> {
             next_hdr_toggle += hdr_toggle_seconds.unwrap_or(1.0);
         }
         if events.pressed & keys::U != 0 || hdr_toggle_due {
-            hdr_request = if hdr_request == HdrRequest::Off { o.hdr.toggled_on() } else { HdrRequest::Off };
-            println!("HDR {}", if hdr_request == HdrRequest::Off { "off (SDR)" } else { match hdr_request { HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb", _ => "auto" } });
-            thread.set_hdr(HdrControl { request: hdr_request, capable: hdr_capable, headroom });
+            hdr_request = if hdr_request == HdrRequest::Off {
+                o.hdr.toggled_on()
+            } else {
+                HdrRequest::Off
+            };
+            println!(
+                "HDR {}",
+                if hdr_request == HdrRequest::Off {
+                    "off (SDR)"
+                } else {
+                    match hdr_request {
+                        HdrRequest::Hdr10 => "hdr10",
+                        HdrRequest::ScRgb => "scrgb",
+                        _ => "auto",
+                    }
+                }
+            );
+            thread.set_hdr(HdrControl {
+                request: hdr_request,
+                capable: hdr_capable,
+                headroom,
+            });
         }
         if events.hdr_changed || events.display_changed {
             // The compositor's HDR switch or a display change: re-read SDL
@@ -1019,13 +1343,21 @@ fn run(o: Options) -> Result<ExitCode> {
                     display_peak,
                     if hdr_capable { "capable" } else { "SDR only" }
                 );
-                thread.set_hdr(HdrControl { request: hdr_request, capable: hdr_capable, headroom });
+                thread.set_hdr(HdrControl {
+                    request: hdr_request,
+                    capable: hdr_capable,
+                    headroom,
+                });
                 hdr_settle = None;
             }
         }
         if events.pressed & keys::V != 0 {
             vsync = !vsync;
-            thread.set_present(if vsync { PresentPolicy::Fifo } else { PresentPolicy::Mailbox });
+            thread.set_present(if vsync {
+                PresentPolicy::Fifo
+            } else {
+                PresentPolicy::Mailbox
+            });
             println!("vsync {}", if vsync { "on" } else { "off" });
         }
         // Clicks: left selects own units near the ground point, right
@@ -1033,8 +1365,23 @@ fn run(o: Options) -> Result<ExitCode> {
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let view = *view.lock().unwrap_or_else(|p| p.into_inner());
             for click in events.clicks.iter().flatten() {
-                let Some(at) = ground_at(&view, source, window.pixel_size(), click.x, click.y) else { continue };
-                let input = if click.button == ae_render::window::Click::LEFT { sim::UiInput::Select { x: at.x, y: at.y, radius: 120.0 } } else { sim::UiInput::Move { x: at.x, y: at.y, attack: click.ctrl, append: click.shift } };
+                let Some(at) = ground_at(&view, source, window.pixel_size(), click.x, click.y) else {
+                    continue;
+                };
+                let input = if click.button == ae_render::window::Click::LEFT {
+                    sim::UiInput::Select {
+                        x: at.x,
+                        y: at.y,
+                        radius: 120.0,
+                    }
+                } else {
+                    sim::UiInput::Move {
+                        x: at.x,
+                        y: at.y,
+                        attack: click.ctrl,
+                        append: click.shift,
+                    }
+                };
                 ui.lock().unwrap_or_else(|p| p.into_inner()).push(input);
             }
         }
@@ -1047,13 +1394,16 @@ fn run(o: Options) -> Result<ExitCode> {
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
             steer(&window, &events, &mut view, source, dt, &sim_speed);
-            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
-                if explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0 {
-                    println!("X: the camera target is out of sight; no explosion");
-                }
+            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0)
+                && explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0
+            {
+                println!("X: the camera target is out of sight; no explosion");
             }
             // The exercise keeps particles alive through its resizes.
-            if let Some(feed) = effects_feed.as_ref().filter(|_| o.exercise && !sim_speed.paused() && last_boom.elapsed().as_secs_f32() >= 1.0) {
+            if let Some(feed) = effects_feed
+                .as_ref()
+                .filter(|_| o.exercise && !sim_speed.paused() && last_boom.elapsed().as_secs_f32() >= 1.0)
+            {
                 explode_around(feed, view.camera.target, 3, started.elapsed().as_nanos() as u32);
                 last_boom = Instant::now();
             }
@@ -1080,15 +1430,33 @@ fn run(o: Options) -> Result<ExitCode> {
                     if s.failed {
                         " | sim failed (see the terminal)".into()
                     } else if s.ready {
-                        let view = s.view.map(|[own, seen, blip, _]| format!(", observer {}: {own} own, {seen} seen, {blip} blips", o.observer.unwrap_or(0))).unwrap_or_default();
-                        format!(" | {} units, tick {}, {:.1} ms/tick, {:.1}x({}) speed{view}", s.units, s.tick, s.tick_ms, s.actual_speed, sim_speed.label())
+                        let view = s
+                            .view
+                            .map(|[own, seen, blip, _]| {
+                                format!(
+                                    ", observer {}: {own} own, {seen} seen, {blip} blips",
+                                    o.observer.unwrap_or(0)
+                                )
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            " | {} units, tick {}, {:.1} ms/tick, {:.1}x({}) speed{view}",
+                            s.units,
+                            s.tick,
+                            s.tick_ms,
+                            s.actual_speed,
+                            sim_speed.label()
+                        )
                     } else {
                         " | building the world".into()
                     }
                 }
                 None => String::new(),
             };
-            let terrain_version = edits.as_ref().map(|e| e.lock().unwrap_or_else(|p| p.into_inner()).version).filter(|&v| v > 0);
+            let terrain_version = edits
+                .as_ref()
+                .map(|e| e.lock().unwrap_or_else(|p| p.into_inner()).version)
+                .filter(|&v| v > 0);
             let detail = detail + &sim + &terrain_version.map(|v| format!(" | terrain v{v}")).unwrap_or_default();
             let detail = match &module {
                 Some((_, status)) => {
@@ -1097,15 +1465,32 @@ fn run(o: Options) -> Result<ExitCode> {
                         eprintln!("{error}");
                     }
                     module_errors = s.errors.len();
-                    format!("{detail} | module {} (loads {})", o.render_module.as_deref().unwrap_or(""), s.loads)
+                    format!(
+                        "{detail} | module {} (loads {})",
+                        o.render_module.as_deref().unwrap_or(""),
+                        s.loads
+                    )
                 }
                 None => detail,
             };
             let detail = detail + if sim_speed.paused() { " | paused" } else { "" };
-            let detail = detail + if render.present_mode == "FIFO" { " | vsync on" } else { " | vsync off" };
+            let detail = detail
+                + if render.present_mode == "FIFO" {
+                    " | vsync on"
+                } else {
+                    " | vsync off"
+                };
             // What the swapchain carries, and what KWin/SDL report for the
             // display (the compositor maps the signal's white onto its own).
-            let display = if hdr_capable { format!(" -> display white {:.0}, peak {:.0} nits", display_peak / headroom, display_peak) } else { " (display SDR)".into() };
+            let display = if hdr_capable {
+                format!(
+                    " -> display white {:.0}, peak {:.0} nits",
+                    display_peak / headroom,
+                    display_peak
+                )
+            } else {
+                " (display SDR)".into()
+            };
             let detail = detail + &format!(" | {}{display}", render.output);
             window.set_title(&format!("AssembleEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
@@ -1117,7 +1502,10 @@ fn run(o: Options) -> Result<ExitCode> {
     if let Some(e) = &edits {
         let e = e.lock().unwrap_or_else(|p| p.into_inner());
         if e.applied > 0 {
-            println!("terrain edits: {} applied (version {}), last {} bytes uploaded in {:.2} ms", e.applied, e.version, e.last_bytes, e.last_ms);
+            println!(
+                "terrain edits: {} applied (version {}), last {} bytes uploaded in {:.2} ms",
+                e.applied, e.version, e.last_bytes, e.last_ms
+            );
         }
     }
     if let Some((_, status)) = &module {
@@ -1137,7 +1525,10 @@ fn run(o: Options) -> Result<ExitCode> {
         }
     }
     if o.record_threads > 1 {
-        println!("{} of {} frames recorded on {} threads", stats.executor.parallel_frames, stats.executor.frames, o.record_threads);
+        println!(
+            "{} of {} frames recorded on {} threads",
+            stats.executor.parallel_frames, stats.executor.frames, o.record_threads
+        );
     }
     println!(
         "{} frames in {:.1} s on {} ({}), {} swapchain recreates, {} graph bakes, {} acquire timeouts, {}",
@@ -1153,7 +1544,11 @@ fn run(o: Options) -> Result<ExitCode> {
     if let Some(error) = stats.error {
         bail!("render thread: {error}");
     }
-    Ok(if stats.validation_errors + stats.validation_warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    Ok(if stats.validation_errors + stats.validation_warnings > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// The terrain point under a click (`x`, `y` as fractions of the window):
@@ -1192,7 +1587,11 @@ fn ground_at(view: &TerrainView, source: &TerrainSource, (w, h): (u32, u32), x: 
 }
 
 fn validation_text(on: bool, errors: u64, warnings: u64) -> String {
-    if on { format!("validation: {errors} errors, {warnings} warnings") } else { "validation off (AE_VK_VALIDATION=1 turns it on)".into() }
+    if on {
+        format!("validation: {errors} errors, {warnings} warnings")
+    } else {
+        "validation off (AE_VK_VALIDATION=1 turns it on)".into()
+    }
 }
 
 fn main() -> ExitCode {
@@ -1226,8 +1625,14 @@ mod tests {
             let want = (ground(x - 1, y - 1) + ground(x, y - 1) + ground(x - 1, y) + ground(x, y)) / 4.0;
             assert!((world(x, y) - want).abs() < 1e-3 * scale.max(1.0), "corner ({x}, {y})");
         }
-        assert!((world(0, 0) - ground(0, 0)).abs() < 1e-3 * scale.max(1.0), "a map corner has one cell");
+        assert!(
+            (world(0, 0) - ground(0, 0)).abs() < 1e-3 * scale.max(1.0),
+            "a map corner has one cell"
+        );
         assert_eq!(water, Some(terrain.water_level as f32 * 0.2));
-        assert!(terrain.water_depth.iter().any(|&d| d > 0), "the map has water to subtract");
+        assert!(
+            terrain.water_depth.iter().any(|&d| d > 0),
+            "the map has water to subtract"
+        );
     }
 }

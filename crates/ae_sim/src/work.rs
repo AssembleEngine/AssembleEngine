@@ -25,14 +25,26 @@ unsafe impl Sync for WorkRange {}
 /// # Safety
 /// `world` and `query` must be live; the ranges are valid until the next
 /// structural change. Column storage must be in `memory` (the column arena).
-pub unsafe fn ranges(world: fb::World, query: fb::Query, terms: &[Term], range_rows: usize, memory: GuestMemory) -> Result<Vec<WorkRange>> {
+pub unsafe fn ranges(
+    world: fb::World,
+    query: fb::Query,
+    terms: &[Term],
+    range_rows: usize,
+    memory: GuestMemory,
+) -> Result<Vec<WorkRange>> {
     ensure!(range_rows > 0, "range_rows must be positive");
-    let sizes: Vec<usize> = terms.iter().map(|t| unsafe { fb::component_size(world, t.component) }).collect::<Result<_>>()?;
+    let sizes: Vec<usize> = terms
+        .iter()
+        .map(|t| unsafe { fb::component_size(world, t.component) })
+        .collect::<Result<_>>()?;
     let mut out = Vec::new();
     unsafe {
         fb::for_each_chunk(world, query, terms, |chunk| {
             for term in 0..terms.len() {
-                ensure!(ae_ecs::arena::contains(chunk.fields[term]), "a column is outside the column arena");
+                ensure!(
+                    ae_ecs::arena::contains(chunk.fields[term]),
+                    "a column is outside the column arena"
+                );
             }
             let mut first = 0;
             while first < chunk.count {
@@ -41,7 +53,12 @@ pub unsafe fn ranges(world: fb::World, query: fb::Query, terms: &[Term], range_r
                 for (term, size) in sizes.iter().enumerate() {
                     columns[term] = memory.offset(chunk.fields[term].add(first * size));
                 }
-                out.push(WorkRange { index: out.len() as u32, entities: chunk.entities.add(first), count: count as u32, columns });
+                out.push(WorkRange {
+                    index: out.len() as u32,
+                    entities: chunk.entities.add(first),
+                    count: count as u32,
+                    columns,
+                });
                 first += count;
             }
             Ok(())

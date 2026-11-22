@@ -26,7 +26,10 @@ fn check(threads: usize) {
     let actual = sim_golden(threads);
     assert_eq!(actual.len(), EXPECTED.len());
     for (&(tick, got), &(_, want)) in actual.iter().zip(EXPECTED) {
-        assert_eq!(got, want, "tick {tick} at {threads} thread(s): got {got:#018x}, want {want:#018x}");
+        assert_eq!(
+            got, want,
+            "tick {tick} at {threads} thread(s): got {got:#018x}, want {want:#018x}"
+        );
     }
 }
 

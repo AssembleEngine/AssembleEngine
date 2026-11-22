@@ -111,7 +111,39 @@ struct Opts {
 }
 
 fn parse() -> Result<Opts> {
-    let mut o = Opts { game: String::new(), units: 10_000, ticks: 300, workers: vec![1], digest: false, every: 0, fuel: false, range_rows: 1024, param_hi: 0, nav: None, map_cells: 2560, compare: false, overlap: true, teams: 0, observers: 0, record: None, replay: None, verify: false, script: Script::None, checkpoint_every: 30, bisect: false, inject: None, connect: None, content: Vec::new(), packages: Vec::new(), package_dirs: Vec::new(), player: 0, latency: 0, jitter: 0, loss: 0.0, seed: 1 };
+    let mut o = Opts {
+        game: String::new(),
+        units: 10_000,
+        ticks: 300,
+        workers: vec![1],
+        digest: false,
+        every: 0,
+        fuel: false,
+        range_rows: 1024,
+        param_hi: 0,
+        nav: None,
+        map_cells: 2560,
+        compare: false,
+        overlap: true,
+        teams: 0,
+        observers: 0,
+        record: None,
+        replay: None,
+        verify: false,
+        script: Script::None,
+        checkpoint_every: 30,
+        bisect: false,
+        inject: None,
+        connect: None,
+        content: Vec::new(),
+        packages: Vec::new(),
+        package_dirs: Vec::new(),
+        player: 0,
+        latency: 0,
+        jitter: 0,
+        loss: 0.0,
+        seed: 1,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -119,7 +151,12 @@ fn parse() -> Result<Opts> {
             "--game" => o.game = value()?,
             "--units" => o.units = value()?.parse()?,
             "--ticks" => o.ticks = value()?.parse()?,
-            "--workers" => o.workers = value()?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>()?,
+            "--workers" => {
+                o.workers = value()?
+                    .split(',')
+                    .map(|w| w.trim().parse())
+                    .collect::<Result<_, _>>()?
+            }
             "--every" => o.every = value()?.parse()?,
             "--range-rows" => o.range_rows = value()?.parse()?,
             "--param-hi" => o.param_hi = value()?.parse()?,
@@ -166,7 +203,13 @@ fn parse() -> Result<Opts> {
             _ => bail!("unknown argument {a}\n{USAGE}"),
         }
     }
-    if (o.game.is_empty() && o.packages.is_empty() && o.replay.is_none()) || o.workers.is_empty() || o.workers.contains(&0) || (o.compare && o.nav.is_none()) || o.observers > o.teams || (o.teams > 0 && o.nav.is_none() && o.packages.is_empty() && o.content.is_empty()) {
+    if (o.game.is_empty() && o.packages.is_empty() && o.replay.is_none())
+        || o.workers.is_empty()
+        || o.workers.contains(&0)
+        || (o.compare && o.nav.is_none())
+        || o.observers > o.teams
+        || (o.teams > 0 && o.nav.is_none() && o.packages.is_empty() && o.content.is_empty())
+    {
         bail!("{USAGE}");
     }
     Ok(o)
@@ -201,7 +244,10 @@ fn run() -> Result<bool> {
     }
     if let Some(path) = &o.replay {
         if o.bisect {
-            let inject = o.inject.as_ref().context("--bisect compares a run with --inject TICK:Component.field:ROW against a clean one")?;
+            let inject = o
+                .inject
+                .as_ref()
+                .context("--bisect compares a run with --inject TICK:Component.field:ROW against a clean one")?;
             return replay::bisect(&o, path, inject);
         }
         return replay::replay(&o, path, o.verify);
@@ -218,8 +264,16 @@ fn run() -> Result<bool> {
         ..RuntimeConfig::default()
     };
     if let Some(c) = &setup.content {
-        let packages = if c.packages.is_empty() { String::new() } else { format!(" (packages {})", c.packages.join(", ")) };
-        println!("content{packages}: {} defs, hash {:032x}", c.catalog.as_ref().map_or(0, |c| c.defs.len()), c.hash);
+        let packages = if c.packages.is_empty() {
+            String::new()
+        } else {
+            format!(" (packages {})", c.packages.join(", "))
+        };
+        println!(
+            "content{packages}: {} defs, hash {:032x}",
+            c.catalog.as_ref().map_or(0, |c| c.defs.len()),
+            c.hash
+        );
     }
     if let Some(n) = setup.nav.as_ref().filter(|n| n.map == Map::Loaded) {
         println!("map from a package: {} cells a side", n.map_cells);
@@ -232,7 +286,12 @@ fn run() -> Result<bool> {
         rt.schema.components.len(),
         rt.system_count(),
         rt.schedule.layers.len(),
-        rt.schedule.layers.iter().map(|l| l.iter().map(|&i| rt.system_name(i)).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | ")
+        rt.schedule
+            .layers
+            .iter()
+            .map(|l| l.iter().map(|&i| rt.system_name(i)).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ")
     );
     let mut results: Vec<RunResult> = Vec::new();
     let mut same = true;
@@ -240,7 +299,10 @@ fn run() -> Result<bool> {
         let built = Instant::now();
         let mut world = rt.world_for(o.units | (o.param_hi as u64) << 32, w)?;
         if setup.nav.is_some() {
-            println!("  {w}w: world with nav service built in {:.2} s", built.elapsed().as_secs_f64());
+            println!(
+                "  {w}w: world with nav service built in {:.2} s",
+                built.elapsed().as_secs_f64()
+            );
         }
         let mut totals = TickStats::default();
         let mut tick_ms = Vec::with_capacity(o.ticks as usize);
@@ -248,7 +310,9 @@ fn run() -> Result<bool> {
         let nav_index = (0..rt.system_count()).find(|&i| rt.is_host_system(i) && rt.system_name(i) == "nav");
         let mut view = if o.observers > 0 {
             let pipeline = ae_services::view::ViewPipeline::new(&rt.schema, &["NavAgent"], o.teams as usize, extent)?;
-            let observers: Vec<ae_view::Observer> = (0..o.observers).map(|a| ae_view::Observer::new(a, 0x5EED + a as u64)).collect();
+            let observers: Vec<ae_view::Observer> = (0..o.observers)
+                .map(|a| ae_view::Observer::new(a, 0x5EED + a as u64))
+                .collect();
             Some((pipeline, observers, Vec::new(), Vec::new(), [0usize; 4]))
         } else {
             None
@@ -310,11 +374,19 @@ fn run() -> Result<bool> {
             );
         }
         let digest = rt.digest(&world)?;
-        let units = rt.count(&world, "Position").or_else(|_| rt.count(&world, "Body")).unwrap_or(0);
+        let units = rt
+            .count(&world, "Position")
+            .or_else(|_| rt.count(&world, "Body"))
+            .unwrap_or(0);
         let ticks = o.ticks.max(1) as f64;
         let mut sorted = tick_ms.clone();
         sorted.sort_by(f64::total_cmp);
-        let pct = |p: f64| sorted.get(((sorted.len().saturating_sub(1)) as f64 * p).round() as usize).copied().unwrap_or(0.0);
+        let pct = |p: f64| {
+            sorted
+                .get(((sorted.len().saturating_sub(1)) as f64 * p).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
         println!(
             "{w:>2} worker(s): digest {:032x}  {units} units  tick median {:.3} ms p99 {:.3} max {:.3}  systems {:.3} host {:.3} apply {:.3} prepare {:.3} ms/tick  commands {} events {}",
             digest.total,
@@ -334,7 +406,11 @@ fn run() -> Result<bool> {
             }
         }
         for i in (0..rt.system_count()).filter(|&i| rt.is_host_system(i)) {
-            println!("    host {:<10} {:>8.3} ms/tick", rt.system_name(i), totals.host_system_ns[i] as f64 / ticks / 1e6);
+            println!(
+                "    host {:<10} {:>8.3} ms/tick",
+                rt.system_name(i),
+                totals.host_system_ns[i] as f64 / ticks / 1e6
+            );
         }
         if o.fuel {
             for i in 0..rt.system_count() {
@@ -346,8 +422,13 @@ fn run() -> Result<bool> {
             let odd: Vec<f64> = tick_ms.iter().skip(2).step_by(2).copied().collect();
             let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
             let over: usize = tick_ms.iter().skip(1).filter(|&&t| t > 2.0 * pct(0.5)).count();
-            println!("    ticks 1,3,5..: mean {:.3}  ticks 2,4,..: mean {:.3}  p90 {:.3}  ticks over 2x median: {over}  sum of those {:.1} ms", mean(&even), mean(&odd), pct(0.9),
-                tick_ms.iter().skip(1).filter(|&&t| t > 2.0 * pct(0.5)).sum::<f64>());
+            println!(
+                "    ticks 1,3,5..: mean {:.3}  ticks 2,4,..: mean {:.3}  p90 {:.3}  ticks over 2x median: {over}  sum of those {:.1} ms",
+                mean(&even),
+                mean(&odd),
+                pct(0.9),
+                tick_ms.iter().skip(1).filter(|&&t| t > 2.0 * pct(0.5)).sum::<f64>()
+            );
         }
         if o.compare {
             let nav = rt.host_digest(&world, "nav").map(|h| h as u64);
@@ -367,13 +448,22 @@ fn run() -> Result<bool> {
                 if same_nav { "equal" } else { "DIFFERS" }
             );
         }
-        results.push(RunResult { workers: w, digest: digest.total, wall_ms, tick_ms, totals });
+        results.push(RunResult {
+            workers: w,
+            digest: digest.total,
+            wall_ms,
+            tick_ms,
+            totals,
+        });
     }
     let base = &results[0];
     for r in &results[1..] {
         if r.digest != base.digest {
             same = false;
-            println!("DIGEST MISMATCH: {} worker(s) {:032x} vs {} worker(s) {:032x}", r.workers, r.digest, base.workers, base.digest);
+            println!(
+                "DIGEST MISMATCH: {} worker(s) {:032x} vs {} worker(s) {:032x}",
+                r.workers, r.digest, base.workers, base.digest
+            );
         }
     }
     if results.len() > 1 {
@@ -397,7 +487,14 @@ fn run() -> Result<bool> {
                 r.tick_ms[0]
             );
         }
-        println!("{}", if same { "digests equal at every worker count" } else { "DIGESTS DIFFER" });
+        println!(
+            "{}",
+            if same {
+                "digests equal at every worker count"
+            } else {
+                "DIGESTS DIFFER"
+            }
+        );
     }
     Ok(same)
 }

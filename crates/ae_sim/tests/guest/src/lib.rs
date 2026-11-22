@@ -29,7 +29,10 @@ impl Emit for GuestEmit {
         // Header, then two entries of 16 header bytes plus 8 data bytes.
         let mut record = [0u8; 8 + 2 * 24];
         put(&mut record, 0, &2u32.to_le_bytes());
-        for (index, (component, value)) in [(self.position, position), (self.velocity, velocity)].into_iter().enumerate() {
+        for (index, (component, value)) in [(self.position, position), (self.velocity, velocity)]
+            .into_iter()
+            .enumerate()
+        {
             let at = 8 + index * 24;
             put(&mut record, at, &component.to_le_bytes());
             put(&mut record, at + 8, &8u32.to_le_bytes());
@@ -66,7 +69,11 @@ pub unsafe extern "C" fn lifecycle(
     let positions = core::slice::from_raw_parts_mut(positions, n);
     let velocities = core::slice::from_raw_parts(velocities, n);
     let entities = core::slice::from_raw_parts(entities, n);
-    let mut emit = GuestEmit { position: position_component, velocity: velocity_component, stunned: stunned_component };
+    let mut emit = GuestEmit {
+        position: position_component,
+        velocity: velocity_component,
+        stunned: stunned_component,
+    };
     for i in 0..n {
         lifecycle_row(entities[i], tick, &mut positions[i], velocities[i], &mut emit);
     }

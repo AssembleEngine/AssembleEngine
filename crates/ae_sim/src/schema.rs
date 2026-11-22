@@ -84,7 +84,10 @@ pub struct Schema {
 
 /// Parse one component record (as `ae_sdk::Component::SCHEMA` holds it).
 pub fn component_record(rec: &[u8]) -> Result<ComponentDecl> {
-    ensure!(rec.len() >= 8 && abi::get_u32(rec, 0) == abi::KIND_COMPONENT && abi::get_u32(rec, 4) as usize == rec.len(), "not a component record");
+    ensure!(
+        rec.len() >= 8 && abi::get_u32(rec, 0) == abi::KIND_COMPONENT && abi::get_u32(rec, 4) as usize == rec.len(),
+        "not a component record"
+    );
     component(rec)
 }
 
@@ -110,7 +113,10 @@ pub fn custom_sections(wasm: &[u8], name: &str) -> Result<Vec<u8>> {
         let id = wasm[at];
         at += 1;
         let size = leb(&mut at)?;
-        let end = at.checked_add(size).filter(|&e| e <= wasm.len()).context("wasm section runs past the end")?;
+        let end = at
+            .checked_add(size)
+            .filter(|&e| e <= wasm.len())
+            .context("wasm section runs past the end")?;
         if id == 0 {
             let mut p = at;
             let len = leb(&mut p)?;
@@ -145,7 +151,9 @@ impl Reader<'_> {
     fn name(&mut self, len: usize) -> Result<String> {
         let end = self.at + len;
         ensure!(end <= self.rec.len(), "schema record truncated");
-        let s = std::str::from_utf8(&self.rec[self.at..end]).context("schema name is not UTF-8")?.to_string();
+        let s = std::str::from_utf8(&self.rec[self.at..end])
+            .context("schema name is not UTF-8")?
+            .to_string();
         self.at += abi::pad4(len);
         Ok(s)
     }
@@ -154,7 +162,11 @@ impl Reader<'_> {
         self.name(len)
     }
     fn done(&self) -> Result<()> {
-        ensure!(self.at == self.rec.len(), "schema record has {} unread bytes", self.rec.len().saturating_sub(self.at));
+        ensure!(
+            self.at == self.rec.len(),
+            "schema record has {} unread bytes",
+            self.rec.len().saturating_sub(self.at)
+        );
         Ok(())
     }
 }
@@ -169,17 +181,41 @@ fn component(rec: &[u8]) -> Result<ComponentDecl> {
         let fid = r.u64()?;
         let (offset, fsize, kind, fflags, fname_len, _) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
         let fname = r.name(fname_len as usize)?;
-        ensure!(offset as u64 + fsize as u64 <= size as u64, "{name}.{fname} lies outside the component");
-        fields.push(FieldDecl { id: fid, name: fname, offset, size: fsize, kind, flags: fflags });
+        ensure!(
+            offset as u64 + fsize as u64 <= size as u64,
+            "{name}.{fname} lies outside the component"
+        );
+        fields.push(FieldDecl {
+            id: fid,
+            name: fname,
+            offset,
+            size: fsize,
+            kind,
+            flags: fflags,
+        });
     }
     r.done()?;
-    ensure!(align.is_power_of_two() && size > 0 && size % align == 0, "{name}: bad size {size} / align {align}");
+    ensure!(
+        align.is_power_of_two() && size > 0 && size % align == 0,
+        "{name}: bad size {size} / align {align}"
+    );
     let mut ids = BTreeSet::new();
-    ensure!(fields.iter().all(|f| ids.insert(f.id)), "{name}: two fields share an id");
+    ensure!(
+        fields.iter().all(|f| ids.insert(f.id)),
+        "{name}: two fields share an id"
+    );
     let mut spans: Vec<(u32, u32)> = fields.iter().map(|f| (f.offset, f.offset + f.size)).collect();
     spans.sort_unstable();
     ensure!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{name}: fields overlap");
-    Ok(ComponentDecl { id, name, size, align, event: flags & abi::COMPONENT_EVENT != 0, command: flags & abi::COMPONENT_COMMAND != 0, fields })
+    Ok(ComponentDecl {
+        id,
+        name,
+        size,
+        align,
+        event: flags & abi::COMPONENT_EVENT != 0,
+        command: flags & abi::COMPONENT_COMMAND != 0,
+        fields,
+    })
 }
 
 fn system(rec: &[u8]) -> Result<SystemRecord> {
@@ -200,7 +236,10 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
         c => bail!("system `{name}`: unknown cadence {c}"),
     };
     ensure!(terms as usize <= abi::MAX_TERMS, "system `{name}`: {terms} terms");
-    ensure!(reads as usize <= abi::MAX_EVENT_READS, "system `{name}`: reads {reads} streams");
+    ensure!(
+        reads as usize <= abi::MAX_EVENT_READS,
+        "system `{name}`: reads {reads} streams"
+    );
     let terms = (0..terms)
         .map(|_| -> Result<(u64, Access)> {
             let id = r.u64()?;
@@ -217,13 +256,25 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
     let reads_events = (0..reads).map(|_| r.u64()).collect::<Result<_>>()?;
     let after = (0..after).map(|_| r.string()).collect::<Result<_>>()?;
     r.done()?;
-    Ok(SystemRecord { name, mode, cadence, terms, emits, reads_events, after })
+    Ok(SystemRecord {
+        name,
+        mode,
+        cadence,
+        terms,
+        emits,
+        reads_events,
+        after,
+    })
 }
 
 impl Schema {
     pub fn from_module(wasm: &[u8]) -> Result<Self> {
         let section = custom_sections(wasm, abi::SCHEMA_SECTION)?;
-        ensure!(!section.is_empty(), "module has no `{}` section: was it built with ae-sdk?", abi::SCHEMA_SECTION);
+        ensure!(
+            !section.is_empty(),
+            "module has no `{}` section: was it built with ae-sdk?",
+            abi::SCHEMA_SECTION
+        );
         Self::parse(&section)
     }
 
@@ -237,13 +288,22 @@ impl Schema {
         while at < section.len() {
             ensure!(at + 8 <= section.len(), "schema section truncated");
             let (kind, len) = (abi::get_u32(section, at), abi::get_u32(section, at + 4) as usize);
-            ensure!(len >= 8 && len % 4 == 0 && at + len <= section.len(), "bad schema record length {len}");
+            ensure!(
+                len >= 8 && len % 4 == 0 && at + len <= section.len(),
+                "bad schema record length {len}"
+            );
             let rec = &section[at..at + len];
             match kind {
                 abi::KIND_COMPONENT => {
                     let c = component(rec)?;
                     if let Some(old) = components.get(&c.id) {
-                        ensure!(*old == c, "components `{}` and `{}` share id {:#x}", old.name, c.name, c.id);
+                        ensure!(
+                            *old == c,
+                            "components `{}` and `{}` share id {:#x}",
+                            old.name,
+                            c.name,
+                            c.id
+                        );
                     }
                     components.insert(c.id, c);
                 }
@@ -266,7 +326,9 @@ impl Schema {
                     r.u32()?;
                     let start = abi::pad4(name_len) + 16;
                     ensure!(start <= rec.len(), "data record name overruns the record");
-                    let name = std::str::from_utf8(&rec[16..16 + name_len]).context("data record name is not UTF-8")?.to_string();
+                    let name = std::str::from_utf8(&rec[16..16 + name_len])
+                        .context("data record name is not UTF-8")?
+                        .to_string();
                     ensure!(!data.contains_key(&name), "data `{name}` declared twice");
                     data.insert(name, rec[start..].to_vec());
                 }
@@ -284,33 +346,63 @@ impl Schema {
         let mut hosts = BTreeSet::new();
         for name in &order {
             if let Some(host) = name.strip_prefix(abi::HOST_SYSTEM_PREFIX) {
-                ensure!(!systems.contains_key(host) && !ordered.iter().any(|s: &SystemRecord| s.name == host), "`{host}` is both a module system and a host system");
-                ensure!(hosts.insert(host.to_string()), "schedule! lists host system `{host}` twice");
+                ensure!(
+                    !systems.contains_key(host) && !ordered.iter().any(|s: &SystemRecord| s.name == host),
+                    "`{host}` is both a module system and a host system"
+                );
+                ensure!(
+                    hosts.insert(host.to_string()),
+                    "schedule! lists host system `{host}` twice"
+                );
                 slots.push(Slot::Host(host.to_string()));
                 continue;
             }
-            ensure!(!hosts.contains(name), "`{name}` is both a module system and a host system");
+            ensure!(
+                !hosts.contains(name),
+                "`{name}` is both a module system and a host system"
+            );
             slots.push(Slot::Module(ordered.len()));
-            ordered.push(systems.remove(name).with_context(|| format!("schedule! lists `{name}`, which is not a #[system]"))?);
+            ordered.push(
+                systems
+                    .remove(name)
+                    .with_context(|| format!("schedule! lists `{name}`, which is not a #[system]"))?,
+            );
         }
         if let Some(name) = systems.keys().next() {
             bail!("system `{name}` is missing from schedule!");
         }
-        let schema = Schema { components: components.into_values().collect(), systems: ordered, order: slots, data };
+        let schema = Schema {
+            components: components.into_values().collect(),
+            systems: ordered,
+            order: slots,
+            data,
+        };
         for s in &schema.systems {
             for (id, _) in &s.terms {
-                let c = schema.component(*id).with_context(|| format!("system `{}` queries unknown component {id:#x}", s.name))?;
+                let c = schema
+                    .component(*id)
+                    .with_context(|| format!("system `{}` queries unknown component {id:#x}", s.name))?;
                 ensure!(!c.event, "system `{}` queries event type `{}`", s.name, c.name);
             }
             for id in s.emits.iter().chain(&s.reads_events) {
-                let c = schema.component(*id).with_context(|| format!("system `{}` uses unknown event stream {id:#x}", s.name))?;
-                ensure!(c.event, "system `{}` uses component `{}` as an event stream", s.name, c.name);
+                let c = schema
+                    .component(*id)
+                    .with_context(|| format!("system `{}` uses unknown event stream {id:#x}", s.name))?;
+                ensure!(
+                    c.event,
+                    "system `{}` uses component `{}` as an event stream",
+                    s.name,
+                    c.name
+                );
             }
         }
         Ok(schema)
     }
 
     pub fn component(&self, id: u64) -> Option<&ComponentDecl> {
-        self.components.binary_search_by_key(&id, |c| c.id).ok().map(|i| &self.components[i])
+        self.components
+            .binary_search_by_key(&id, |c| c.id)
+            .ok()
+            .map(|i| &self.components[i])
     }
 }

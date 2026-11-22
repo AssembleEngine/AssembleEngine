@@ -32,7 +32,11 @@ fn lake_map() -> Terrain {
         for x in 0..W {
             let i = (y * W + x) as usize;
             tt.height[i] = if (40..88).contains(&x) {
-                if (50..58).contains(&y) { 160 } else { 100 }
+                if (50..58).contains(&y) {
+                    160
+                } else {
+                    100
+                }
             } else {
                 180
             };
@@ -60,19 +64,31 @@ fn paths_follow_each_medium() {
 
     for id in [SCOUT, HEAVY] {
         let cells = path(&t, &profiles[id as usize], west, east).expect("land units cross by the ford");
-        assert!(cells.iter().all(|&c| depth_at(&t, c) <= FORD_DEPTH), "profile {id} entered deep water");
-        assert!(cells.iter().any(|c| c.y >= 50), "profile {id} should detour through the ford");
+        assert!(
+            cells.iter().all(|&c| depth_at(&t, c) <= FORD_DEPTH),
+            "profile {id} entered deep water"
+        );
+        assert!(
+            cells.iter().any(|c| c.y >= 50),
+            "profile {id} should detour through the ford"
+        );
     }
     for id in [HOVER, AMPHIBIOUS] {
         let cells = path(&t, &profiles[id as usize], west, east).expect("crosses the lake");
-        assert!(cells.iter().all(|c| c.y < 50), "profile {id} should go straight across, not via the ford");
+        assert!(
+            cells.iter().all(|c| c.y < 50),
+            "profile {id} should go straight across, not via the ford"
+        );
         assert!(cells.iter().any(|&c| depth_at(&t, c) > FORD_DEPTH));
     }
     let ship = &profiles[SHIP as usize];
     assert!(path(&t, ship, west, east).is_none(), "ships cannot start on land");
     let cells = path(&t, ship, (48, 10), (80, 30)).expect("ships sail the lake");
     assert!(cells.iter().all(|&c| depth_at(&t, c) >= SHIP_DRAFT));
-    assert!(path(&t, ship, (48, 10), (48, 54)).is_none(), "the ford is too shallow for ships");
+    assert!(
+        path(&t, ship, (48, 10), (48, 54)).is_none(),
+        "the ford is too shallow for ships"
+    );
 }
 
 #[test]
@@ -83,7 +99,10 @@ fn dry_profiles_are_unchanged_on_dry_maps() {
     let mut wet = water_profiles(CELL)[SCOUT as usize].clone();
     let dry = ae_nav::nav::profiles_for(CELL, 1.0)[SCOUT as usize].clone();
     wet.medium = ae_nav::terrain::Medium::land(FORD_DEPTH);
-    assert_eq!(ProfileGrid::build(&t, &wet).passable, ProfileGrid::build(&t, &dry).passable);
+    assert_eq!(
+        ProfileGrid::build(&t, &wet).passable,
+        ProfileGrid::build(&t, &dry).passable
+    );
 }
 
 #[test]
@@ -92,11 +111,18 @@ fn surface_generator_makes_water_and_keeps_land_maps() {
     let dry = Terrain::generate(&cfg);
     cfg.water = WaterMode::Surface;
     let wet = Terrain::generate(&cfg);
-    let water_cells = (0..wet.len()).filter(|&i| wet.depth(i) > 0 && wet.blocked[i] == 0).count();
-    let deep_cells = (0..wet.len()).filter(|&i| wet.depth(i) >= SHIP_DRAFT && wet.blocked[i] == 0).count();
+    let water_cells = (0..wet.len())
+        .filter(|&i| wet.depth(i) > 0 && wet.blocked[i] == 0)
+        .count();
+    let deep_cells = (0..wet.len())
+        .filter(|&i| wet.depth(i) >= SHIP_DRAFT && wet.blocked[i] == 0)
+        .count();
     // About 1.8% of the map (two lakes and the river; 10,665 cells today).
     assert!(water_cells > 8_000, "expected real water, got {water_cells} cells");
-    assert!(deep_cells > 6_000, "expected water ships can use, got {deep_cells} cells");
+    assert!(
+        deep_cells > 6_000,
+        "expected water ships can use, got {deep_cells} cells"
+    );
     assert!((0..dry.len()).all(|i| dry.depth(i) == 0));
     assert_ne!(dry.digest(), wet.digest());
 }
@@ -113,7 +139,11 @@ struct Run {
 fn crossing(threads: usize) -> Run {
     let profiles = water_profiles(CELL);
     let cfg = NavConfig {
-        map_cells: W, cell_size: CELL, sector_cells: SECTOR, worker_count: threads, unit_count: 0,
+        map_cells: W,
+        cell_size: CELL,
+        sector_cells: SECTOR,
+        worker_count: threads,
+        unit_count: 0,
         ..NavConfig::default()
     };
     let mut nav = NavService::with_terrain(cfg, lake_map(), profiles.clone());
@@ -121,7 +151,12 @@ fn crossing(threads: usize) -> Run {
     let mut specs = Vec::new();
     let mut put = |profile: u8, x: i32, y: i32| {
         let p = &profiles[profile as usize];
-        specs.push(UnitSpec { pos: WorldPos::new((x as f32 + 0.5) * CELL, (y as f32 + 0.5) * CELL), radius: p.unit_radius, max_speed: p.base_speed, profile_id: profile });
+        specs.push(UnitSpec {
+            pos: WorldPos::new((x as f32 + 0.5) * CELL, (y as f32 + 0.5) * CELL),
+            radius: p.unit_radius,
+            max_speed: p.base_speed,
+            profile_id: profile,
+        });
     };
     for k in 0..12 {
         put(SCOUT, 4 + (k % 4) * 3, 8 + (k / 4) * 4);
@@ -139,19 +174,33 @@ fn crossing(threads: usize) -> Run {
         vy.push(0.0);
         radius.push(s.radius);
     }
-    let ids: Vec<u32> = (0..specs.len()).map(|k| nav.local_id(500 + k as u64).unwrap()).collect();
+    let ids: Vec<u32> = (0..specs.len())
+        .map(|k| nav.local_id(500 + k as u64).unwrap())
+        .collect();
     nav.in_pool(|nav| {
         nav.queue_command_at(CommandPayload {
-            id: 1, unit_ids: ids, kind: CommandKind::MoveTo,
-            requested_point: WorldPos::new(118.5 * CELL, 20.5 * CELL), corridor_tolerance_world: 48.0,
+            id: 1,
+            unit_ids: ids,
+            kind: CommandKind::MoveTo,
+            requested_point: WorldPos::new(118.5 * CELL, 20.5 * CELL),
+            corridor_tolerance_world: 48.0,
         });
         for tick in 1..=900 {
-            nav.step(&mut BodyColumns { pos_x: &mut px, pos_y: &mut py, vel_x: &mut vx, vel_y: &mut vy, radius: &radius });
+            nav.step(&mut BodyColumns {
+                pos_x: &mut px,
+                pos_y: &mut py,
+                vel_x: &mut vx,
+                vel_y: &mut vy,
+                radius: &radius,
+            });
             for (i, s) in specs.iter().enumerate() {
                 let c = terrain.geom.world_to_cell(WorldPos::new(px[i], py[i]));
                 let d = depth_at(&terrain, c);
                 match s.profile_id {
-                    SCOUT | HEAVY => assert!(d <= FORD_DEPTH, "tick {tick}: land unit {i} at {c:?} in {d} dm of water"),
+                    SCOUT | HEAVY => assert!(
+                        d <= FORD_DEPTH,
+                        "tick {tick}: land unit {i} at {c:?} in {d} dm of water"
+                    ),
                     SHIP => assert!(d >= SHIP_DRAFT, "tick {tick}: ship {i} at {c:?} in {d} dm of water"),
                     _ => {}
                 }
@@ -177,7 +226,11 @@ fn every_class_reaches_what_it_can() {
             // The goal is on land; ships end at the nearest deep water to it.
             assert!(cell > 78.0, "ship {i} should have sailed east, is at x cell {cell}");
         } else {
-            assert_eq!(run.modes[i], UnitMode::Arrived as u8, "unit {i} (profile {p}) did not arrive, at x cell {cell}");
+            assert_eq!(
+                run.modes[i],
+                UnitMode::Arrived as u8,
+                "unit {i} (profile {p}) did not arrive, at x cell {cell}"
+            );
         }
     }
 }
@@ -201,11 +254,14 @@ fn generated_crossing(threads: usize) -> (u64, Vec<u8>, [usize; 3]) {
     let start: Vec<WorldPos> = (0..s.bodies.len()).map(|i| s.bodies.pos(i)).collect();
     let mut wet = vec![false; s.bodies.len()];
     s.run(1500, |tick, _, b| {
-        for i in 0..b.len() {
+        for (i, &profile) in b.profile.iter().enumerate() {
             let c = terrain.geom.world_to_cell(b.pos(i));
             let d = depth_at(&terrain, c);
-            match b.profile[i] {
-                class::SCOUT | class::HEAVY => assert!(d <= FORD_DEPTH, "tick {tick}: land unit {i} at {c:?} in {d} dm of water"),
+            match profile {
+                class::SCOUT | class::HEAVY => assert!(
+                    d <= FORD_DEPTH,
+                    "tick {tick}: land unit {i} at {c:?} in {d} dm of water"
+                ),
                 class::SHIP => assert!(d >= SHIP_DRAFT, "tick {tick}: ship {i} at {c:?} in {d} dm"),
                 _ => wet[i] |= d > FORD_DEPTH,
             }
@@ -213,12 +269,16 @@ fn generated_crossing(threads: usize) -> (u64, Vec<u8>, [usize; 3]) {
     });
     let b = &s.bodies;
     let crossed_wet = (0..b.len()).filter(|&i| wet[i]).count();
-    let ships_moved = (0..b.len()).filter(|&i| b.profile[i] == class::SHIP && b.pos(i).dist(start[i]) > 20.0 * CELL).count();
+    let ships_moved = (0..b.len())
+        .filter(|&i| b.profile[i] == class::SHIP && b.pos(i).dist(start[i]) > 20.0 * CELL)
+        .count();
     let mut modes = vec![0; s.nav.len()];
     s.nav.write_modes(&mut modes);
     if std::env::var_os("AE_WATER_DEBUG").is_some() {
         let mut by = std::collections::BTreeMap::new();
-        for i in 0..b.len() { *by.entry((b.profile[i], modes[i])).or_insert(0) += 1; }
+        for (i, &profile) in b.profile.iter().enumerate() {
+            *by.entry((profile, modes[i])).or_insert(0) += 1;
+        }
         eprintln!("(profile, mode) -> count: {by:?}");
         for i in (0..b.len()).filter(|&i| b.profile[i] == class::SHIP).take(50) {
             let c = terrain.geom.world_to_cell(b.pos(i));
@@ -234,10 +294,22 @@ fn generated_crossing(threads: usize) -> (u64, Vec<u8>, [usize; 3]) {
 #[test]
 fn generated_water_map_crossing() {
     let (hash, modes, [crossed_wet, ships_moved, arrived]) = generated_crossing(1);
-    eprintln!("units {} arrived {arrived}, through deep water {crossed_wet}, ships moved {ships_moved}", modes.len());
-    assert!(crossed_wet > 20, "hovercraft and amphibious units should take the water, {crossed_wet} did");
-    assert!(ships_moved > 25, "most of the 50 ships should sail up the river, {ships_moved} did");
-    assert!(arrived > modes.len() / 2, "most units should arrive in 50 s, {arrived} did");
+    eprintln!(
+        "units {} arrived {arrived}, through deep water {crossed_wet}, ships moved {ships_moved}",
+        modes.len()
+    );
+    assert!(
+        crossed_wet > 20,
+        "hovercraft and amphibious units should take the water, {crossed_wet} did"
+    );
+    assert!(
+        ships_moved > 25,
+        "most of the 50 ships should sail up the river, {ships_moved} did"
+    );
+    assert!(
+        arrived > modes.len() / 2,
+        "most units should arrive in 50 s, {arrived} did"
+    );
     assert_eq!(hash, GENERATED_CROSSING_HASH, "generated crossing: got {hash:#018x}");
     assert_eq!(generated_crossing(4).0, hash, "thread count changed the result");
 }

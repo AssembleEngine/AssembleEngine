@@ -4,8 +4,8 @@ use super::Options;
 use crate::measure::time;
 use crate::record::Report;
 use ae_framegraph::{
-    AccessState, BakeOptions, descriptor, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, StateKey, bake,
-    barriers::plan_frame,
+    AccessState, BakeOptions, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, StateKey,
+    bake, barriers::plan_frame, descriptor,
 };
 use anyhow::{Result, anyhow};
 use ash::vk;
@@ -32,7 +32,10 @@ pub fn layered_graph(layers: usize, width: usize) -> FrameGraph {
             if layer > 0 {
                 pass = pass
                     .access(above[column], Role::StorageImageRead(ShaderStage::Compute))
-                    .access(above[(column + 1) % width], Role::StorageImageRead(ShaderStage::Compute));
+                    .access(
+                        above[(column + 1) % width],
+                        Role::StorageImageRead(ShaderStage::Compute),
+                    );
             }
             pass.discard(image, Role::StorageImageWrite(ShaderStage::Compute)).id();
             row.push(image);
@@ -41,7 +44,12 @@ pub fn layered_graph(layers: usize, width: usize) -> FrameGraph {
     }
     let back = graph.image(
         "backbuffer",
-        ImageDesc::color_2d(vk::Format::B8G8R8A8_UNORM, 1920, 1080, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+        ImageDesc::color_2d(
+            vk::Format::B8G8R8A8_UNORM,
+            1920,
+            1080,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
         ResourceClass::Backbuffer,
     );
     let mut composite = graph.pass("composite", PassKind::Graphics, ());
@@ -55,7 +63,11 @@ pub fn layered_graph(layers: usize, width: usize) -> FrameGraph {
 
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("framegraph-bake");
-    let shapes: &[(usize, usize)] = if options.small { &[(8, 4)] } else { &[(8, 4), (32, 8), (64, 16)] };
+    let shapes: &[(usize, usize)] = if options.small {
+        &[(8, 4)]
+    } else {
+        &[(8, 4), (32, 8), (64, 16)]
+    };
     for &(layers, width) in shapes {
         ae_profile::zone!("framegraph-bake shape");
         let tag = format!("{}p", layers * width + 2);
@@ -67,19 +79,38 @@ pub fn run(options: &Options) -> Result<Report> {
         report.counter(&format!("{tag}/physical_resources"), baked.physical.len() as u64, "");
         report.counter(&format!("{tag}/estimated_bytes"), baked.estimated_bytes(), "B");
         let barriers = plan_frame(&baked, &mut BTreeMap::<StateKey, AccessState>::new(), |_| false);
-        report.counter(&format!("{tag}/barriers_first_frame"), barriers.iter().map(Vec::len).sum::<usize>() as u64, "");
+        report.counter(
+            &format!("{tag}/barriers_first_frame"),
+            barriers.iter().map(Vec::len).sum::<usize>() as u64,
+            "",
+        );
 
-        report.time(&format!("{tag}/declare"), time(options.budget, || layered_graph(layers, width)));
+        report.time(
+            &format!("{tag}/declare"),
+            time(options.budget, || layered_graph(layers, width)),
+        );
         // A render module hands the host this declaration; the host decodes it before baking.
         let bytes = descriptor::encode(&graph, |_| 0);
         report.info(&format!("{tag}/descriptor_bytes"), bytes.len() as u64, "B");
-        report.time(&format!("{tag}/descriptor_decode"), time(options.budget, || descriptor::decode(&bytes)));
+        report.time(
+            &format!("{tag}/descriptor_decode"),
+            time(options.budget, || descriptor::decode(&bytes)),
+        );
         report.time(&format!("{tag}/signature"), time(options.budget, || graph.signature()));
-        report.time(&format!("{tag}/bake"), time(options.budget, || bake(&graph, BakeOptions::default())));
-        report.time(&format!("{tag}/bake_no_alias"), time(options.budget, || bake(&graph, BakeOptions { aliasing: false })));
+        report.time(
+            &format!("{tag}/bake"),
+            time(options.budget, || bake(&graph, BakeOptions::default())),
+        );
+        report.time(
+            &format!("{tag}/bake_no_alias"),
+            time(options.budget, || bake(&graph, BakeOptions { aliasing: false })),
+        );
         // Steady state: the store carries last frame's states into this one.
         let mut store = BTreeMap::<StateKey, AccessState>::new();
-        report.time(&format!("{tag}/plan_barriers"), time(options.budget, || plan_frame(&baked, &mut store, |_| false)));
+        report.time(
+            &format!("{tag}/plan_barriers"),
+            time(options.budget, || plan_frame(&baked, &mut store, |_| false)),
+        );
     }
     Ok(report)
 }
@@ -94,6 +125,9 @@ mod tests {
         let baked = bake(&graph, BakeOptions::default()).unwrap();
         assert_eq!(baked.passes.len(), 8 * 4 + 2, "no pass may be pruned");
         let unaliased = bake(&graph, BakeOptions { aliasing: false }).unwrap();
-        assert!(baked.physical.len() < unaliased.physical.len(), "aliasing should merge transients");
+        assert!(
+            baked.physical.len() < unaliased.physical.len(),
+            "aliasing should merge transients"
+        );
     }
 }

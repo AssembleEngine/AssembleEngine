@@ -17,7 +17,14 @@ pub fn repo_root() -> PathBuf {
 pub fn build_guest(manifest: &Path, crate_name: &str) -> Result<Vec<u8>> {
     let target_dir = repo_root().join("target/game-guests");
     let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release", "--quiet", "--target", GUEST_TARGET, "--manifest-path"])
+        .args([
+            "build",
+            "--release",
+            "--quiet",
+            "--target",
+            GUEST_TARGET,
+            "--manifest-path",
+        ])
         .arg(manifest)
         .arg("--target-dir")
         .arg(&target_dir)
@@ -26,7 +33,10 @@ pub fn build_guest(manifest: &Path, crate_name: &str) -> Result<Vec<u8>> {
         .status()
         .context("run cargo for the guest")?;
     ensure!(status.success(), "guest build failed: {}", manifest.display());
-    let wasm = target_dir.join(GUEST_TARGET).join("release").join(format!("{crate_name}.wasm"));
+    let wasm = target_dir
+        .join(GUEST_TARGET)
+        .join("release")
+        .join(format!("{crate_name}.wasm"));
     std::fs::read(&wasm).with_context(|| format!("read {}", wasm.display()))
 }
 
@@ -37,6 +47,10 @@ pub fn game(name: &str) -> Result<Vec<u8>> {
         return std::fs::read(name).with_context(|| format!("read {name}"));
     }
     let manifest = repo_root().join("games").join(name).join("Cargo.toml");
-    ensure!(manifest.exists(), "no game `{name}` (looked for {})", manifest.display());
+    ensure!(
+        manifest.exists(),
+        "no game `{name}` (looked for {})",
+        manifest.display()
+    );
     build_guest(&manifest, &format!("ae_game_{name}"))
 }

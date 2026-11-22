@@ -100,14 +100,29 @@ pub struct BenchOptions {
 
 impl Default for BenchOptions {
     fn default() -> Self {
-        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, output: OutputEncoding::Sdr, size: (1280, 720) }
+        Self {
+            target: String::new(),
+            frames: 300,
+            warmup: 60,
+            label: None,
+            out: PathBuf::from("bench/results"),
+            save: true,
+            record_threads: 1,
+            particles_full: false,
+            particle_blend: ae_render::particles::ParticleBlend::Sorted,
+            output: OutputEncoding::Sdr,
+            size: (1280, 720),
+        }
     }
 }
 
 /// The display levels every `--bench-output` run uses (M13 stage 5's
 /// reference: 203 nit paper white, 1.778 headroom). Fixed so the numbers do
 /// not move with the display the bench runs on.
-const BENCH_LEVELS: DisplayLevels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+const BENCH_LEVELS: DisplayLevels = DisplayLevels {
+    paper_white: 203.0,
+    peak: 361.0,
+};
 
 /// Set in the child processes [`run_isolated`] starts.
 const CHILD_ENV: &str = "AE_BENCH_SCENE_PROCESS";
@@ -123,18 +138,38 @@ const CHILD_ENV: &str = "AE_BENCH_SCENE_PROCESS";
 fn run_isolated(scenes: &[&Scene]) -> Result<ExitCode> {
     let exe = std::env::current_exe().context("the client's own path")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let at = args.iter().position(|a| a == "--bench").context("--bench in the arguments")? + 1;
+    let at = args
+        .iter()
+        .position(|a| a == "--bench")
+        .context("--bench in the arguments")?
+        + 1;
     let mut failed = Vec::new();
     for scene in scenes {
         let mut child_args = args.clone();
         child_args[at] = scene.name.to_string();
-        let status = std::process::Command::new(&exe).args(&child_args).env(CHILD_ENV, "1").status().with_context(|| format!("run scene {}", scene.name))?;
+        let status = std::process::Command::new(&exe)
+            .args(&child_args)
+            .env(CHILD_ENV, "1")
+            .status()
+            .with_context(|| format!("run scene {}", scene.name))?;
         if !status.success() {
             failed.push(scene.name);
         }
     }
-    println!("{} scenes, one process each; {}", scenes.len(), if failed.is_empty() { "all succeeded".to_string() } else { format!("failed: {}", failed.join(", ")) });
-    Ok(if failed.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    println!(
+        "{} scenes, one process each; {}",
+        scenes.len(),
+        if failed.is_empty() {
+            "all succeeded".to_string()
+        } else {
+            format!("failed: {}", failed.join(", "))
+        }
+    );
+    Ok(if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 /// How the camera moves while measuring.
@@ -204,22 +239,262 @@ const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 const FOX_PARAM: u64 = 10_000 | 12 << 32 | 144 << 40 | 1081 << 52;
 
 const SCENES: [Scene; 16] = [
-    Scene { name: "overview", about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "army", about: "water crossing map, the army from above (8.6k units visible), temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "orbit", about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45], path: Path::Orbit, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "close", about: "water crossing map, close-up of the ground, no units, temperate", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: CLOSE, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "palette", about: "as close, with the per-material palette instead of a tileset", map: MapKind::Water, map_cells: 2560, units: 0, tileset: None, camera: CLOSE, path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "battle", about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "scorched", about: "as battle without units, close (120 m), its 2 explosions a frame over 100 m: overlapping scorch marks fill most of the view (the decals' measure)", map: MapKind::Water, map_cells: 2560, units: 0, tileset: Some("temperate"), camera: [2900.0, 17900.0, 120.0, 0.4, 0.7], path: Path::Fixed, explosions: 2, spread: 100.0, fox: false, live: false, lights: 0, model_lights: false },
-    Scene { name: "army-fox", about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: false },
-    Scene { name: "army-model-lights", about: "as army-fox, each Fox carrying a point light: the pass appends one light per unit (10k, the list's 8192 cap drops the rest)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: true },
-    Scene { name: "live-fox", about: "as army-fox, the sim running: a tick every second frame, its animation records packed and uploaded", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: ARMY, path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: true, lights: 0, model_lights: false },
-    Scene { name: "near-fox", about: "as army-fox, closer (fewer units, larger on screen)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: true, live: false, lights: 0, model_lights: false },
-    Scene { name: "lights-200", about: "as battle without explosions, 200 fixed point lights over 800 m around the target (ranges 15-45 m)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 200, model_lights: false },
-    Scene { name: "lights-1000", about: "as lights-200 with 1000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 1000, model_lights: false },
-    Scene { name: "lights-4000", about: "as lights-200 with 4000 lights", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 900.0, 0.4, 0.7], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 4000, model_lights: false },
-    Scene { name: "lights-low", about: "1000 lights as lights-1000, the camera low (600 m, pitch 0.3: the view reaches far into the distance)", map: MapKind::Water, map_cells: 2560, units: 10_000, tileset: Some("temperate"), camera: [2900.0, 17900.0, 600.0, 0.4, 0.3], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 1000, model_lights: false },
-    Scene { name: "cliffs", about: "generated 1024 map, steep cliffs at a low angle, temperate", map: MapKind::Generated, map_cells: 1024, units: 0, tileset: Some("temperate"), camera: [4100.0, 4100.0, 900.0, 0.6, 0.45], path: Path::Fixed, explosions: 0, spread: 600.0, fox: false, live: false, lights: 0, model_lights: false },
+    Scene {
+        name: "overview",
+        about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [10240.0, 10240.0, 3000.0, 0.0, 0.9],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "army",
+        about: "water crossing map, the army from above (8.6k units visible), temperate",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: ARMY,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "orbit",
+        about: "water crossing map, one orbit around the river at a low angle, 10k units, temperate",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [10320.0, 13200.0, 1500.0, 0.0, 0.45],
+        path: Path::Orbit,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "close",
+        about: "water crossing map, close-up of the ground, no units, temperate",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 0,
+        tileset: Some("temperate"),
+        camera: CLOSE,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "palette",
+        about: "as close, with the per-material palette instead of a tileset",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 0,
+        tileset: None,
+        camera: CLOSE,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "battle",
+        about: "as army, closer, with 2 explosions a frame among the units (about 40k live particles; each leaves a scorch mark, so about 700 decals by the end)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 900.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 2,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "scorched",
+        about: "as battle without units, close (120 m), its 2 explosions a frame over 100 m: overlapping scorch marks fill most of the view (the decals' measure)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 0,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 120.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 2,
+        spread: 100.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "army-fox",
+        about: "as army, 10k Foxes (1,728 vertices, 24 joints) animated by the sim (the scripted game)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: ARMY,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: true,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "army-model-lights",
+        about: "as army-fox, each Fox carrying a point light: the pass appends one light per unit (10k, the list's 8192 cap drops the rest)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: ARMY,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: true,
+        live: false,
+        lights: 0,
+        model_lights: true,
+    },
+    Scene {
+        name: "live-fox",
+        about: "as army-fox, the sim running: a tick every second frame, its animation records packed and uploaded",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: ARMY,
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: true,
+        live: true,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "near-fox",
+        about: "as army-fox, closer (fewer units, larger on screen)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 600.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: true,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
+        name: "lights-200",
+        about: "as battle without explosions, 200 fixed point lights over 800 m around the target (ranges 15-45 m)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 900.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 200,
+        model_lights: false,
+    },
+    Scene {
+        name: "lights-1000",
+        about: "as lights-200 with 1000 lights",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 900.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 1000,
+        model_lights: false,
+    },
+    Scene {
+        name: "lights-4000",
+        about: "as lights-200 with 4000 lights",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 900.0, 0.4, 0.7],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 4000,
+        model_lights: false,
+    },
+    Scene {
+        name: "lights-low",
+        about: "1000 lights as lights-1000, the camera low (600 m, pitch 0.3: the view reaches far into the distance)",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [2900.0, 17900.0, 600.0, 0.4, 0.3],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 1000,
+        model_lights: false,
+    },
+    Scene {
+        name: "cliffs",
+        about: "generated 1024 map, steep cliffs at a low angle, temperate",
+        map: MapKind::Generated,
+        map_cells: 1024,
+        units: 0,
+        tileset: Some("temperate"),
+        camera: [4100.0, 4100.0, 900.0, 0.6, 0.45],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 600.0,
+        fox: false,
+        live: false,
+        lights: 0,
+        model_lights: false,
+    },
 ];
 
 fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Options {
@@ -241,11 +516,17 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
     o
 }
 
+/// The terrain of a map and its nav terrain, built once per map.
+type Sources = BTreeMap<(u8, i32), (Arc<TerrainSource>, Option<Arc<Terrain>>)>;
+
+/// A scene's unit stream and its poser, built once per map and unit set.
+type Streams = BTreeMap<(u8, i32, u32, bool), (Arc<InstanceStream>, Option<Posing>)>;
+
 /// Map sources and unit streams, built once per map.
 #[derive(Default)]
 struct Cache {
-    sources: BTreeMap<(u8, i32), (Arc<TerrainSource>, Option<Arc<Terrain>>)>,
-    streams: BTreeMap<(u8, i32, u32, bool), (Arc<InstanceStream>, Option<Posing>)>,
+    sources: Sources,
+    streams: Streams,
     fox: Option<ClassModel>,
     fox_light: Option<ClassModel>,
 }
@@ -253,9 +534,9 @@ struct Cache {
 impl Cache {
     fn source(&mut self, o: &Options) -> Result<Arc<TerrainSource>> {
         let key = (o.map as u8, o.map_cells);
-        if !self.sources.contains_key(&key) {
+        if let std::collections::btree_map::Entry::Vacant(e) = self.sources.entry(key) {
             let (source, nav) = terrain_source(o)?;
-            self.sources.insert(key, (Arc::new(source), nav));
+            e.insert((Arc::new(source), nav));
         }
         Ok(self.sources[&key].0.clone())
     }
@@ -287,14 +568,27 @@ impl Cache {
             }
         }
         let mut stream = stream.context("no ticks")?;
-        let posing = posed.then(|| Posing { pack: ns(&mut pose_ms[1..].to_vec()), writes: median(&mut writes[1..].to_vec()), cells: table.len() as u64 });
+        let posing = posed.then(|| Posing {
+            pack: ns(&mut pose_ms[1..].to_vec()),
+            writes: median(&mut writes[1..].to_vec()),
+            cells: table.len() as u64,
+        });
         stream.anim = AnimWrites::whole(&table);
         eprintln!(
             "sim: {} units at tick {} in {:.1} s{}",
             stream.len(),
             stream.tick,
             started.elapsed().as_secs_f32(),
-            if posed { format!(", {} animation cells, {} written in the last tick, packed in {:.2} ms", table.len(), writes.last().copied().unwrap_or(0.0), sim.pose_ms()) } else { String::new() }
+            if posed {
+                format!(
+                    ", {} animation cells, {} written in the last tick, packed in {:.2} ms",
+                    table.len(),
+                    writes.last().copied().unwrap_or(0.0),
+                    sim.pose_ms()
+                )
+            } else {
+                String::new()
+            }
         );
         let stream = Arc::new(stream);
         self.streams.insert(key, (stream.clone(), posing));
@@ -331,7 +625,12 @@ pub fn run(b: &BenchOptions) -> Result<ExitCode> {
         let names: Vec<&str> = b.target.split(',').collect();
         let mut picked = Vec::new();
         for name in names {
-            picked.push(SCENES.iter().find(|s| s.name == name).with_context(|| format!("unknown scene `{name}` (try --bench list)"))?);
+            picked.push(
+                SCENES
+                    .iter()
+                    .find(|s| s.name == name)
+                    .with_context(|| format!("unknown scene `{name}` (try --bench list)"))?,
+            );
         }
         picked
     };
@@ -359,8 +658,16 @@ pub fn run(b: &BenchOptions) -> Result<ExitCode> {
     }
     drop(gpu);
     let (errors, warnings) = (instance.counters.errors(), instance.counters.warnings());
-    println!("{} scenes; {}", reports.len(), super::validation_text(instance.validation, errors, warnings));
-    Ok(if errors + warnings > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    println!(
+        "{} scenes; {}",
+        reports.len(),
+        super::validation_text(instance.validation, errors, warnings)
+    );
+    Ok(if errors + warnings > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn ns(sample_ms: &mut [f64]) -> Sample {
@@ -377,10 +684,15 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     if scene.model_lights && cache.fox_light.is_none() {
         cache.fox_light = Some(models::fox_with_light()?);
     }
-    let fox = if scene.model_lights { cache.fox_light.clone() } else { cache.fox.clone() };
+    let fox = if scene.model_lights {
+        cache.fox_light.clone()
+    } else {
+        cache.fox.clone()
+    };
     let o = options_for(scene, b, fox);
     let source = cache.source(&o)?;
-    let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o).with_display(b.output, BENCH_LEVELS);
+    let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o)
+        .with_display(b.output, BENCH_LEVELS);
     let mut posing = None;
     // The live scenes' sim and feed: every stream is published (each
     // writes only the cells that changed).
@@ -414,7 +726,9 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let (mut live_pose, mut live_writes, mut live_publish) = (Vec::new(), Vec::new(), Vec::new());
     let (mut live_read, mut live_poser) = (Vec::new(), Vec::new());
     let mut tick_live = |frame: usize, measured: bool| -> Result<()> {
-        let Some((sim, feed)) = live.as_mut().filter(|_| frame % LIVE_FRAMES == 0) else { return Ok(()) };
+        let Some((sim, feed)) = live.as_mut().filter(|_| frame.is_multiple_of(LIVE_FRAMES)) else {
+            return Ok(());
+        };
         sim.tick()?;
         if feed.wants_whole() {
             sim.write_whole_anim();
@@ -446,12 +760,26 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     if scene.lights > 0 {
         let target = app.view().lock().unwrap().camera.target;
         let source = app.source().clone();
-        app = app.with_lights(ae_render::lights::scatter(scene.lights, target, 400.0, 4.0, 7, &|p| source.height_at(p)));
+        app = app.with_lights(ae_render::lights::scatter(scene.lights, target, 400.0, 4.0, 7, &|p| {
+            source.height_at(p)
+        }));
     }
-    let extent = ash::vk::Extent2D { width: b.size.0, height: b.size.1 };
+    let extent = ash::vk::Extent2D {
+        width: b.size.0,
+        height: b.size.1,
+    };
     app.create_offscreen(gpu, extent)?;
-    let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB, color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: true, record_threads: b.record_threads, ..ExecutorConfig::default() };
+    let target = TargetInfo {
+        extent,
+        format: ash::vk::Format::R8G8B8A8_SRGB,
+        color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: true,
+        record_threads: b.record_threads,
+        ..ExecutorConfig::default()
+    };
     let mut headless = Headless::new(gpu, &mut app, target, config)?;
     let view = app.view();
     let stats = app.stats();
@@ -466,8 +794,14 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let mut emit = || {
         let Some(feed) = &feed else { return };
         for _ in 0..scene.explosions {
-            let h = emitted.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15).wrapping_mul(0x85eb_ca6b);
-            let (dx, dz) = (((h & 0xffff) as f32 / 65535.0 - 0.5) * scene.spread, ((h >> 16) as f32 / 65535.0 - 0.5) * scene.spread);
+            let h = emitted
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(0x7f4a_7c15)
+                .wrapping_mul(0x85eb_ca6b);
+            let (dx, dz) = (
+                ((h & 0xffff) as f32 / 65535.0 - 0.5) * scene.spread,
+                ((h >> 16) as f32 / 65535.0 - 0.5) * scene.spread,
+            );
             let scale = 0.8 + (h % 7) as f32 * 0.2;
             feed.explode(scene.camera[0] + dx, scene.camera[1] + dz, scale, h);
             emitted += 1;
@@ -521,10 +855,18 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     // finished, since during the run it can come from an earlier frame.
     let visible = app.last_unit_counts().map_or(0, |(_, v)| v as u64);
     // Model units drawn into each shadow cascade (summed over classes).
-    let cascades = app.last_unit_cascade_counts().iter().fold([0u64; 3], |acc, c| std::array::from_fn(|k| acc[k] + c[k] as u64));
+    let cascades = app
+        .last_unit_cascade_counts()
+        .iter()
+        .fold([0u64; 3], |acc, c| std::array::from_fn(|k| acc[k] + c[k] as u64));
     let names = headless.stats().pass_names;
     gpu_frames.retain(|f| f.len() == names.len());
-    anyhow::ensure!(gpu_frames.len() >= b.frames / 2, "only {} of {} frames have GPU timestamps", gpu_frames.len(), b.frames);
+    anyhow::ensure!(
+        gpu_frames.len() >= b.frames / 2,
+        "only {} of {} frames have GPU timestamps",
+        gpu_frames.len(),
+        b.frames
+    );
     drop(headless);
     RenderApp::destroy(&mut app, gpu);
 
@@ -556,18 +898,36 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         report.info("anim_cells_uploaded", median(&mut uploaded), "");
     }
     let counted: Vec<bool> = names.iter().map(|n| !READBACK_PASSES.contains(&n.as_str())).collect();
-    let passes: Vec<(&String, Sample)> = names.iter().enumerate().filter(|(p, _)| counted[*p]).map(|(p, name)| {
-        let mut times: Vec<f64> = gpu_frames.iter().map(|f| f[p] as f64).collect();
-        (name, ns(&mut times))
-    }).collect();
+    let passes: Vec<(&String, Sample)> = names
+        .iter()
+        .enumerate()
+        .filter(|(p, _)| counted[*p])
+        .map(|(p, name)| {
+            let mut times: Vec<f64> = gpu_frames.iter().map(|f| f[p] as f64).collect();
+            (name, ns(&mut times))
+        })
+        .collect();
     // `gpu_total` is the sum of the passes' medians. The median of each
     // frame's sum moved 10-13% between runs while every pass agreed within
     // 2%: single passes spike in some frames (`terrain lod` ±79%), so the
     // sum's median falls between modes. The per-frame sums still give the
     // spread.
-    let mut total: Vec<f64> = gpu_frames.iter().map(|f| f.iter().zip(&counted).filter(|(_, c)| **c).map(|(&ms, _)| ms as f64).sum()).collect();
+    let mut total: Vec<f64> = gpu_frames
+        .iter()
+        .map(|f| {
+            f.iter()
+                .zip(&counted)
+                .filter(|(_, c)| **c)
+                .map(|(&ms, _)| ms as f64)
+                .sum()
+        })
+        .collect();
     let per_frame = ns(&mut total);
-    let summed = Sample { median_ns: passes.iter().map(|(_, s)| s.median_ns).sum(), min_ns: passes.iter().map(|(_, s)| s.min_ns).sum(), ..per_frame };
+    let summed = Sample {
+        median_ns: passes.iter().map(|(_, s)| s.median_ns).sum(),
+        min_ns: passes.iter().map(|(_, s)| s.min_ns).sum(),
+        ..per_frame
+    };
     report.time("gpu_total", summed);
     for (name, sample) in passes {
         // GPU timers tick in about a microsecond: allow a couple of ticks.

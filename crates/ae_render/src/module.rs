@@ -75,7 +75,9 @@ pub struct ModuleFrame {
 
 impl ModuleFrame {
     pub fn is_disabled(&self, program: u32) -> bool {
-        self.disabled.get(program as usize / 32).is_some_and(|w| w & (1 << (program % 32)) != 0)
+        self.disabled
+            .get(program as usize / 32)
+            .is_some_and(|w| w & (1 << (program % 32)) != 0)
     }
 }
 
@@ -137,38 +139,95 @@ pub struct WasmModule {
 
 impl WasmModule {
     pub fn load(engine: &Engine, bytes: &[u8]) -> Result<Self> {
-        let module = Module::new(engine, bytes).map_err(anyhow::Error::from).context("compiling the render module")?;
+        let module = Module::new(engine, bytes)
+            .map_err(anyhow::Error::from)
+            .context("compiling the render module")?;
         if let Some(import) = module.imports().next() {
-            bail!("render modules import nothing; this one imports `{}::{}`", import.module(), import.name());
+            bail!(
+                "render modules import nothing; this one imports `{}::{}`",
+                import.module(),
+                import.name()
+            );
         }
         let mut store = Store::new(engine, ());
-        let instance = Instance::new(&mut store, &module, &[]).map_err(anyhow::Error::from).context("instantiating the render module")?;
-        let memory = instance.get_memory(&mut store, "memory").context("the render module exports no `memory`")?;
-        let version = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_VERSION).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_VERSION))?;
-        let v = version.call(&mut store, ()).map_err(anyhow::Error::from).context("render module version")?;
+        let instance = Instance::new(&mut store, &module, &[])
+            .map_err(anyhow::Error::from)
+            .context("instantiating the render module")?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .context("the render module exports no `memory`")?;
+        let version = instance
+            .get_typed_func::<(), u32>(&mut store, abi::EXPORT_VERSION)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("export `{}`", abi::EXPORT_VERSION))?;
+        let v = version
+            .call(&mut store, ())
+            .map_err(anyhow::Error::from)
+            .context("render module version")?;
         // The version comes first: a module built for another ABI is refused
         // by number, never called with the wrong signature.
-        ensure!(v == abi::MODULE_VERSION, "render module ABI version {v}; this host runs {} (rebuild the module)", abi::MODULE_VERSION);
-        let declare_input_fn = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_DECLARE_INPUT).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_DECLARE_INPUT))?;
-        let declare_input = declare_input_fn.call(&mut store, ()).map_err(anyhow::Error::from).context("render module declaration input buffer")?;
-        let declare = instance.get_typed_func(&mut store, abi::EXPORT_DECLARE).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_DECLARE))?;
-        let frame = instance.get_typed_func(&mut store, abi::EXPORT_FRAME).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_FRAME))?;
-        let input_fn = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_INPUT).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_INPUT))?;
-        let input = input_fn.call(&mut store, ()).map_err(anyhow::Error::from).context("render module input buffer")?;
-        let mut m = Self { store, memory, declare, frame, declare_input, input, loaded: Instant::now() };
-        m.bytes(input, abi::FRAME_INPUT_BYTES as u32).context("the frame input buffer is outside the module's memory")?;
-        m.bytes(declare_input, abi::DECLARE_INPUT_BYTES as u32).context("the declaration input buffer is outside the module's memory")?;
+        ensure!(
+            v == abi::MODULE_VERSION,
+            "render module ABI version {v}; this host runs {} (rebuild the module)",
+            abi::MODULE_VERSION
+        );
+        let declare_input_fn = instance
+            .get_typed_func::<(), u32>(&mut store, abi::EXPORT_DECLARE_INPUT)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("export `{}`", abi::EXPORT_DECLARE_INPUT))?;
+        let declare_input = declare_input_fn
+            .call(&mut store, ())
+            .map_err(anyhow::Error::from)
+            .context("render module declaration input buffer")?;
+        let declare = instance
+            .get_typed_func(&mut store, abi::EXPORT_DECLARE)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("export `{}`", abi::EXPORT_DECLARE))?;
+        let frame = instance
+            .get_typed_func(&mut store, abi::EXPORT_FRAME)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("export `{}`", abi::EXPORT_FRAME))?;
+        let input_fn = instance
+            .get_typed_func::<(), u32>(&mut store, abi::EXPORT_INPUT)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("export `{}`", abi::EXPORT_INPUT))?;
+        let input = input_fn
+            .call(&mut store, ())
+            .map_err(anyhow::Error::from)
+            .context("render module input buffer")?;
+        let mut m = Self {
+            store,
+            memory,
+            declare,
+            frame,
+            declare_input,
+            input,
+            loaded: Instant::now(),
+        };
+        m.bytes(input, abi::FRAME_INPUT_BYTES as u32)
+            .context("the frame input buffer is outside the module's memory")?;
+        m.bytes(declare_input, abi::DECLARE_INPUT_BYTES as u32)
+            .context("the declaration input buffer is outside the module's memory")?;
         Ok(m)
     }
 
     fn bytes(&mut self, ptr: u32, len: u32) -> Result<Vec<u8>> {
         let data = self.memory.data(&self.store);
-        data.get(ptr as usize..ptr as usize + len as usize).map(<[u8]>::to_vec).with_context(|| format!("{len} bytes at {ptr:#x} are outside the module's memory ({} bytes)", data.len()))
+        data.get(ptr as usize..ptr as usize + len as usize)
+            .map(<[u8]>::to_vec)
+            .with_context(|| {
+                format!(
+                    "{len} bytes at {ptr:#x} are outside the module's memory ({} bytes)",
+                    data.len()
+                )
+            })
     }
 
     fn words<const N: usize>(&mut self, ptr: u32) -> Result<[u32; N]> {
         let bytes = self.bytes(ptr, 4 * N as u32)?;
-        Ok(std::array::from_fn(|i| u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())))
+        Ok(std::array::from_fn(|i| {
+            u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())
+        }))
     }
 
     /// Write the target and display spec the next `declare` reads.
@@ -176,28 +235,49 @@ impl WasmModule {
         let at = self.declare_input as usize;
         let bytes = target.to_abi().to_bytes();
         let memory = self.memory.data_mut(&mut self.store);
-        memory.get_mut(at..at + bytes.len()).context("the declaration input buffer is outside the module's memory")?.copy_from_slice(&bytes);
+        memory
+            .get_mut(at..at + bytes.len())
+            .context("the declaration input buffer is outside the module's memory")?
+            .copy_from_slice(&bytes);
         Ok(())
     }
 
     /// The module's graph for the target last written, `None` if it declines.
     pub fn declare(&mut self) -> Result<Option<Declared>> {
-        let ptr = self.declare.call(&mut self.store, ()).map_err(anyhow::Error::from).context("render module `declare`")?;
+        let ptr = self
+            .declare
+            .call(&mut self.store, ())
+            .map_err(anyhow::Error::from)
+            .context("render module `declare`")?;
         if ptr == 0 {
             return Ok(None);
         }
         let [gp, gl, pp, pl] = self.words::<4>(ptr)?;
-        Ok(Some(Declared { graph: self.bytes(gp, gl).context("graph declaration")?, programs: self.bytes(pp, pl).context("program table")? }))
+        Ok(Some(Declared {
+            graph: self.bytes(gp, gl).context("graph declaration")?,
+            programs: self.bytes(pp, pl).context("program table")?,
+        }))
     }
 
     pub fn frame(&mut self, input: &FrameInput) -> Result<ModuleFrame> {
         let at = self.input as usize;
         self.memory.data_mut(&mut self.store)[at..at + abi::FRAME_INPUT_BYTES].copy_from_slice(&input.to_bytes());
-        let ptr = self.frame.call(&mut self.store, ()).map_err(anyhow::Error::from).context("render module `frame`")?;
+        let ptr = self
+            .frame
+            .call(&mut self.store, ())
+            .map_err(anyhow::Error::from)
+            .context("render module `frame`")?;
         let [dp, dn, up, ul] = self.words::<4>(ptr)?;
         ensure!(dn <= 1 << 16, "{dn} words of disabled programs");
-        let disabled = self.bytes(dp, dn * 4)?.chunks(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-        Ok(ModuleFrame { disabled, uniforms: self.bytes(up, ul)? })
+        let disabled = self
+            .bytes(dp, dn * 4)?
+            .chunks(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        Ok(ModuleFrame {
+            disabled,
+            uniforms: self.bytes(up, ul)?,
+        })
     }
 }
 
@@ -231,18 +311,38 @@ pub fn build(name: &str) -> Result<Vec<u8>> {
         return crate::graph_file::inline(Path::new(name));
     }
     let manifest = module_dir(name).join("Cargo.toml");
-    ensure!(manifest.exists(), "no render module `{name}` (looked for {})", manifest.display());
+    ensure!(
+        manifest.exists(),
+        "no render module `{name}` (looked for {})",
+        manifest.display()
+    );
     let target_dir = repo_root().join("target/render-modules");
     let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release", "--quiet", "--target", MODULE_TARGET, "--manifest-path"])
+        .args([
+            "build",
+            "--release",
+            "--quiet",
+            "--target",
+            MODULE_TARGET,
+            "--manifest-path",
+        ])
         .arg(&manifest)
         .arg("--target-dir")
         .arg(&target_dir)
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
-        .map_err(anyhow::Error::from).context("run cargo for the render module")?;
-    ensure!(output.status.success(), "render module build failed ({}):\n{}", manifest.display(), String::from_utf8_lossy(&output.stderr));
-    let wasm = target_dir.join(MODULE_TARGET).join("release").join(format!("ae_render_{name}.wasm"));
+        .map_err(anyhow::Error::from)
+        .context("run cargo for the render module")?;
+    ensure!(
+        output.status.success(),
+        "render module build failed ({}):\n{}",
+        manifest.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let wasm = target_dir
+        .join(MODULE_TARGET)
+        .join("release")
+        .join(format!("ae_render_{name}.wasm"));
     std::fs::read(&wasm).with_context(|| format!("read {}", wasm.display()))
 }

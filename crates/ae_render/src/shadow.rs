@@ -78,11 +78,29 @@ impl ShadowMap {
     /// `SHADER_READ_ONLY_OPTIMAL`, the layout receivers bind it in when a
     /// graph does not draw it.
     pub fn new(gpu: &GpuDevice, real: bool) -> Result<Self> {
-        let (w, h) = if real { (m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT) } else { (1, 1) };
-        let desc = ImageDesc::depth_2d(format(), w, h, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+        let (w, h) = if real {
+            (m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT)
+        } else {
+            (1, 1)
+        };
+        let desc = ImageDesc::depth_2d(
+            format(),
+            w,
+            h,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        );
         let image = OwnedImage::new(gpu, desc, "unit shadow map")?;
-        let (cw, ch) = if real { (m::PARTICLE_SHADOW_WIDTH, m::PARTICLE_SHADOW_HEIGHT) } else { (1, 1) };
-        let color_desc = ImageDesc::color_2d(color_format(), cw, ch, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+        let (cw, ch) = if real {
+            (m::PARTICLE_SHADOW_WIDTH, m::PARTICLE_SHADOW_HEIGHT)
+        } else {
+            (1, 1)
+        };
+        let color_desc = ImageDesc::color_2d(
+            color_format(),
+            cw,
+            ch,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        );
         let color = OwnedImage::new(gpu, color_desc, "particle shadows")?;
         let to_sampled = |handle, range| {
             vk::ImageMemoryBarrier2::default()
@@ -94,8 +112,14 @@ impl ShadowMap {
                 .image(handle)
                 .subresource_range(range)
         };
-        let barriers = [to_sampled(image.image, image.range()), to_sampled(color.image, color.range())];
-        upload::one_shot(gpu, |cmd| unsafe { gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&barriers)) })?;
+        let barriers = [
+            to_sampled(image.image, image.range()),
+            to_sampled(color.image, color.range()),
+        ];
+        upload::one_shot(gpu, |cmd| unsafe {
+            gpu.device
+                .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&barriers))
+        })?;
         let info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -108,7 +132,13 @@ impl ShadowMap {
             .max_lod(0.0);
         let sampler = unsafe { gpu.device.create_sampler(&info, None) }?;
         let color_sampler = unsafe { gpu.device.create_sampler(&info.compare_enable(false), None) }?;
-        Ok(Self { image, sampler, color, color_sampler, real })
+        Ok(Self {
+            image,
+            sampler,
+            color,
+            color_sampler,
+            real,
+        })
     }
 
     /// Whether this is the full map (else the 1x1 stand-in).
@@ -139,7 +169,17 @@ impl ShadowMap {
 
     fn bind(image: &OwnedImage, identity: u64) -> ImageBinding {
         let d = &image.desc;
-        ImageBinding { image: image.image, view: image.view, format: d.format, extent: vk::Extent2D { width: d.width, height: d.height }, range: image.range(), identity }
+        ImageBinding {
+            image: image.image,
+            view: image.view,
+            format: d.format,
+            extent: vk::Extent2D {
+                width: d.width,
+                height: d.height,
+            },
+            range: image.range(),
+            identity,
+        }
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
@@ -189,7 +229,9 @@ pub struct CascadeUniforms {
 
 impl Cascades {
     pub fn uniforms(cascades: Option<&Cascades>) -> CascadeUniforms {
-        let Some(c) = cascades else { return CascadeUniforms::default() };
+        let Some(c) = cascades else {
+            return CascadeUniforms::default();
+        };
         CascadeUniforms {
             axes: std::array::from_fn(|k| c.axes[k].extend(if k == 0 && c.tinted { 1.0 } else { 0.0 }).to_array()),
             origin: std::array::from_fn(|k| c.origin[k].extend(c.texel[k]).to_array()),
@@ -215,7 +257,14 @@ pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun:
     let sun = sun.normalize();
     let (right, up) = light_basis(sun);
     let diagonal = tan_half.0 * tan_half.0 + tan_half.1 * tan_half.1;
-    let mut out = Cascades { matrices: [Mat4::IDENTITY; CASCADES], texel: [0.0; CASCADES], axes: [right, up, sun], origin: [Vec3::ZERO; CASCADES], scale: [Vec3::ZERO; CASCADES], tinted: false };
+    let mut out = Cascades {
+        matrices: [Mat4::IDENTITY; CASCADES],
+        texel: [0.0; CASCADES],
+        axes: [right, up, sun],
+        origin: [Vec3::ZERO; CASCADES],
+        scale: [Vec3::ZERO; CASCADES],
+        tinted: false,
+    };
     let mut near = 0.0f32;
     for (k, slice) in SLICES.iter().enumerate() {
         let far = slice * focus;
@@ -227,7 +276,12 @@ pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun:
         let (cx, cy, cz) = (snap(centre.dot(right)), snap(centre.dot(up)), centre.dot(sun));
         let (zmin, zmax) = (cz - radius, cz + radius + CASTER_REACH);
         let depth = zmax - zmin;
-        let rows = [(right / radius).extend(-cx / radius), (up / radius).extend(-cy / radius), (sun / depth).extend(-zmin / depth), Vec4::W];
+        let rows = [
+            (right / radius).extend(-cx / radius),
+            (up / radius).extend(-cy / radius),
+            (sun / depth).extend(-zmin / depth),
+            Vec4::W,
+        ];
         out.matrices[k] = Mat4::from_cols(rows[0], rows[1], rows[2], rows[3]).transpose();
         out.texel[k] = texel;
         out.origin[k] = Vec3::new(cx, cy, zmin);
@@ -245,10 +299,23 @@ mod tests {
 
     /// A camera's view-projection and its cascades.
     fn camera(yaw: f32, target: Vec2) -> (Mat4, Vec3, Cascades) {
-        let c = Camera { target, ground: 0.0, distance: 300.0, yaw, pitch: 0.75, fov_y: 0.8 };
+        let c = Camera {
+            target,
+            ground: 0.0,
+            distance: 300.0,
+            yaw,
+            pitch: 0.75,
+            fov_y: 0.8,
+        };
         let eye = c.eye(|_| 0.0);
         let tan = (c.fov_y * 0.5).tan();
-        let cascades = cascades(eye, (c.target3() - eye).normalize(), (tan * 16.0 / 9.0, tan), c.distance, crate::terrain::sun::direction());
+        let cascades = cascades(
+            eye,
+            (c.target3() - eye).normalize(),
+            (tan * 16.0 / 9.0, tan),
+            c.distance,
+            crate::terrain::sun::direction(),
+        );
         (c.proj(16.0 / 9.0) * c.view(eye), eye, cascades)
     }
 
@@ -290,7 +357,8 @@ mod tests {
             assert_eq!(a.texel[k], b.texel[k]);
             // The same world point moves by a whole number of texels.
             let p = Vec4::new(510.0, 3.0, 790.0, 1.0);
-            let shift = ((a.matrices[k] * p).truncate() - (b.matrices[k] * p).truncate()) * (CASCADE_TEXELS as f32 / 2.0);
+            let shift =
+                ((a.matrices[k] * p).truncate() - (b.matrices[k] * p).truncate()) * (CASCADE_TEXELS as f32 / 2.0);
             for v in [shift.x, shift.y] {
                 assert!((v - v.round()).abs() < 1e-2, "cascade {k}: shift {v} texels");
             }

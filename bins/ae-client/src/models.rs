@@ -28,11 +28,17 @@ pub struct ClassModel {
 /// `--model [CLASS=]FILE`.
 pub fn parse_arg(text: &str) -> Result<ClassModel> {
     let (class, file) = match text.split_once('=') {
-        Some((c, f)) if !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()) => (Some(c.parse().context("--model CLASS=FILE")?), f),
+        Some((c, f)) if !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()) => {
+            (Some(c.parse().context("--model CLASS=FILE")?), f)
+        }
         _ => (None, text),
     };
     let model = load(Path::new(file))?;
-    let name = Path::new(file).file_stem().and_then(|s| s.to_str()).context("model file name")?.to_ascii_lowercase();
+    let name = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("model file name")?
+        .to_ascii_lowercase();
     eprintln!(
         "model {name} ({file}): {} vertices, {} joints, {} clip(s){}{}",
         model.vertices.len(),
@@ -44,20 +50,33 @@ pub fn parse_arg(text: &str) -> Result<ClassModel> {
             n => format!(", {n} light(s)"),
         }
     );
-    Ok(ClassModel { class, name, model: Arc::new(model) })
+    Ok(ClassModel {
+        class,
+        name,
+        model: Arc::new(model),
+    })
 }
 
 fn clip_names(model: &Model) -> String {
     if model.clips.is_empty() {
         return String::new();
     }
-    let names: Vec<String> = model.clips.iter().enumerate().map(|(k, c)| format!("{} {}", k + 1, c.name)).collect();
+    let names: Vec<String> = model
+        .clips
+        .iter()
+        .enumerate()
+        .map(|(k, c)| format!("{} {}", k + 1, c.name))
+        .collect();
     format!(" ({})", names.join(", "))
 }
 
 /// Read an engine model, converting a glTF first.
 pub fn load(path: &Path) -> Result<Model> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let file = match ext.as_str() {
         "aemodel" => path.to_path_buf(),
         "glb" | "gltf" => converted(path)?,
@@ -73,7 +92,11 @@ fn repo_root() -> PathBuf {
 
 /// The Khronos Fox (the bench's model), as model `fox` for every class.
 pub fn fox() -> Result<ClassModel> {
-    Ok(ClassModel { class: None, name: "fox".into(), model: Arc::new(load(&repo_root().join("assets/models/khronos/Fox/Fox.glb"))?) })
+    Ok(ClassModel {
+        class: None,
+        name: "fox".into(),
+        model: Arc::new(load(&repo_root().join("assets/models/khronos/Fox/Fox.glb"))?),
+    })
 }
 
 /// The Fox with a point light on its first bone: the bench scene of the
@@ -107,7 +130,8 @@ fn converted(gltf: &Path) -> Result<PathBuf> {
     // Also when the cache is of another format version (a newer engine).
     let cached = || -> Option<u32> {
         let bytes = std::fs::read(&out).ok()?;
-        (bytes.len() >= 12 && bytes[..8] == ae_model::MAGIC).then(|| u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
+        (bytes.len() >= 12 && bytes[..8] == ae_model::MAGIC)
+            .then(|| u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
     };
     if modified(&out).is_some_and(|m| m >= source) && cached() == Some(ae_model::VERSION) {
         return Ok(out);
@@ -134,12 +158,18 @@ fn converted(gltf: &Path) -> Result<PathBuf> {
 /// every class but `blip`. Classes past `classes` are left out (the caller
 /// refuses them).
 pub fn per_class(models: &[ClassModel], classes: usize, blip: Option<usize>) -> Vec<Option<Arc<Model>>> {
-    assign(models, classes, blip).into_iter().map(|m| m.map(|m| m.model.clone())).collect()
+    assign(models, classes, blip)
+        .into_iter()
+        .map(|m| m.map(|m| m.model.clone()))
+        .collect()
 }
 
 /// As [`per_class`], each class's model name.
 pub fn names_per_class(models: &[ClassModel], classes: usize, blip: Option<usize>) -> Vec<Option<String>> {
-    assign(models, classes, blip).into_iter().map(|m| m.map(|m| m.name.clone())).collect()
+    assign(models, classes, blip)
+        .into_iter()
+        .map(|m| m.map(|m| m.name.clone()))
+        .collect()
 }
 
 fn assign(models: &[ClassModel], classes: usize, blip: Option<usize>) -> Vec<Option<&ClassModel>> {
@@ -171,10 +201,29 @@ mod tests {
     fn classes() {
         let a = Arc::new(Model::default());
         let b = Arc::new(Model::default());
-        let given = [ClassModel { class: None, name: "a".into(), model: a.clone() }, ClassModel { class: Some(1), name: "b".into(), model: b.clone() }];
+        let given = [
+            ClassModel {
+                class: None,
+                name: "a".into(),
+                model: a.clone(),
+            },
+            ClassModel {
+                class: Some(1),
+                name: "b".into(),
+                model: b.clone(),
+            },
+        ];
         let per = per_class(&given, 4, Some(3));
-        assert!(Arc::ptr_eq(per[0].as_ref().unwrap(), &a) && Arc::ptr_eq(per[1].as_ref().unwrap(), &b) && per[2].is_some() && per[3].is_none());
-        assert_eq!(names_per_class(&given, 4, Some(3)), [Some("a".to_string()), Some("b".into()), Some("a".into()), None]);
+        assert!(
+            Arc::ptr_eq(per[0].as_ref().unwrap(), &a)
+                && Arc::ptr_eq(per[1].as_ref().unwrap(), &b)
+                && per[2].is_some()
+                && per[3].is_none()
+        );
+        assert_eq!(
+            names_per_class(&given, 4, Some(3)),
+            [Some("a".to_string()), Some("b".into()), Some("a".into()), None]
+        );
         assert!(per_class(&[], 4, None).is_empty());
     }
 }

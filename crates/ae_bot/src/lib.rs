@@ -47,8 +47,17 @@ pub fn unit_command(player: u32, stream: u64, entity: u64, kind: u32, append: bo
 }
 
 fn field(rt: &Runtime, component: &str, name: &str) -> Result<usize> {
-    let c = rt.schema.components.iter().find(|c| c.name == component).with_context(|| format!("no component `{component}`: not the skirmish game?"))?;
-    Ok(c.fields.iter().find(|f| f.name == name).with_context(|| format!("no field `{component}.{name}`"))?.offset as usize)
+    let c = rt
+        .schema
+        .components
+        .iter()
+        .find(|c| c.name == component)
+        .with_context(|| format!("no component `{component}`: not the skirmish game?"))?;
+    Ok(c.fields
+        .iter()
+        .find(|f| f.name == name)
+        .with_context(|| format!("no field `{component}.{name}`"))?
+        .offset as usize)
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
@@ -63,13 +72,30 @@ fn f32_at(bytes: &[u8], at: usize) -> f32 {
 /// `None` before the game's first tick.
 pub fn bases(rt: &Runtime, world: &World) -> Result<Option<[(f32, f32); 2]>> {
     let (bx, by) = (field(rt, "Match", "base_x")?, field(rt, "Match", "base_y")?);
-    Ok(rt.rows(world, "Match")?.first().map(|(_, m)| [(f32_at(m, bx), f32_at(m, by)), (f32_at(m, bx + 4), f32_at(m, by + 4))]))
+    Ok(rt
+        .rows(world, "Match")?
+        .first()
+        .map(|(_, m)| [(f32_at(m, bx), f32_at(m, by)), (f32_at(m, bx + 4), f32_at(m, by + 4))]))
 }
 
 impl SkirmishBot {
     pub fn new(rt: &Runtime, ally: u32, wave: usize) -> Result<Self> {
-        let stream = rt.schema.components.iter().find(|c| c.name == "UnitCommand").context("no `UnitCommand` stream: not the skirmish game?")?.id;
-        Ok(Self { ally, wave, every: 30, stream, team_ally: field(rt, "Team", "ally")?, queue_len: field(rt, "Queue", "len")?, queue_state: field(rt, "Queue", "state")? })
+        let stream = rt
+            .schema
+            .components
+            .iter()
+            .find(|c| c.name == "UnitCommand")
+            .context("no `UnitCommand` stream: not the skirmish game?")?
+            .id;
+        Ok(Self {
+            ally,
+            wave,
+            every: 30,
+            stream,
+            team_ally: field(rt, "Team", "ally")?,
+            queue_len: field(rt, "Queue", "len")?,
+            queue_state: field(rt, "Queue", "state")?,
+        })
     }
 
     /// The standard pair: allyteam 0 attacks in waves of 8, allyteam 1 in
@@ -84,12 +110,22 @@ impl SkirmishBot {
         if world.tick % self.every != (7 + 11 * self.ally as u64) % self.every {
             return Ok(());
         }
-        let mut teams: Vec<(u64, u32)> = rt.rows(world, "Team")?.into_iter().map(|(e, b)| (e, u32_at(&b, self.team_ally))).collect();
+        let mut teams: Vec<(u64, u32)> = rt
+            .rows(world, "Team")?
+            .into_iter()
+            .map(|(e, b)| (e, u32_at(&b, self.team_ally)))
+            .collect();
         teams.sort_unstable();
         let mut idle: Vec<u64> = rt
             .rows(world, "Queue")?
             .into_iter()
-            .filter(|(e, b)| u32_at(b, self.queue_len) == 0 && u32_at(b, self.queue_state) != NEW && teams.binary_search_by_key(e, |t| t.0).is_ok_and(|k| teams[k].1 == self.ally))
+            .filter(|(e, b)| {
+                u32_at(b, self.queue_len) == 0
+                    && u32_at(b, self.queue_state) != NEW
+                    && teams
+                        .binary_search_by_key(e, |t| t.0)
+                        .is_ok_and(|k| teams[k].1 == self.ally)
+            })
             .map(|(e, _)| e)
             .collect();
         if idle.len() < self.wave {
@@ -98,7 +134,10 @@ impl SkirmishBot {
         idle.sort_unstable();
         let Some(bases) = bases(rt, world)? else { return Ok(()) };
         let (x, y) = bases[(self.ally as usize + 1) % 2];
-        out.extend(idle.into_iter().map(|e| unit_command(self.ally, self.stream, e, ATTACK, false, x, y)));
+        out.extend(
+            idle.into_iter()
+                .map(|e| unit_command(self.ally, self.stream, e, ATTACK, false, x, y)),
+        );
         Ok(())
     }
 }

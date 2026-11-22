@@ -19,6 +19,9 @@ use ae_nav::scenario::{Scenario, land_crossing, water_crossing};
 use anyhow::{Result, bail};
 use std::time::Instant;
 
+/// A scenario built for a worker count.
+type Build = fn(u32, i32, usize) -> Scenario;
+
 struct Run {
     tick_ns: Vec<f64>,
     hash: u64,
@@ -37,7 +40,10 @@ fn run_once(mut s: Scenario, ticks: u64) -> Run {
         let now = Instant::now();
         tick_ns.push((now - last).as_nanos() as f64);
         let p = &nav.stats().phases;
-        for (acc, v) in phases.iter_mut().zip([p.steer_ms, p.avoidance_ms, p.physics_ms, p.jobs_ms]) {
+        for (acc, v) in phases
+            .iter_mut()
+            .zip([p.steer_ms, p.avoidance_ms, p.physics_ms, p.jobs_ms])
+        {
             *acc += v;
         }
         last = Instant::now();
@@ -47,7 +53,12 @@ fn run_once(mut s: Scenario, ticks: u64) -> Run {
         tick_ns,
         hash: s.nav.state_hash(),
         phases: phases.map(|v| v / ticks as f64 * 1e6),
-        work: [stats.nav.fields_built, stats.nav.field_expansions, stats.nav.abstract_expansions, stats.nav.context_misses],
+        work: [
+            stats.nav.fields_built,
+            stats.nav.field_expansions,
+            stats.nav.abstract_expansions,
+            stats.nav.context_misses,
+        ],
         fallback_slots: stats.nav.fallback_slots,
         arrived: stats.arrived,
         unreachable: stats.unreachable,
@@ -55,12 +66,21 @@ fn run_once(mut s: Scenario, ticks: u64) -> Run {
 }
 
 fn exact(ns: f64, samples: usize) -> Sample {
-    Sample { median_ns: ns, min_ns: ns, spread: 0.0, samples }
+    Sample {
+        median_ns: ns,
+        min_ns: ns,
+        spread: 0.0,
+        samples,
+    }
 }
 
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("nav-sim");
-    let (units, map, ticks) = if options.small { (2_000, 768, 150) } else { (10_000, 2560, 600) };
+    let (units, map, ticks) = if options.small {
+        (2_000, 768, 150)
+    } else {
+        (10_000, 2560, 600)
+    };
     let mut workers = vec![1usize];
     for w in [2, 4, 8, 16] {
         if w <= options.threads {
@@ -70,7 +90,7 @@ pub fn run(options: &Options) -> Result<Report> {
     if options.threads > 1 && !workers.contains(&options.threads) {
         workers.push(options.threads);
     }
-    let scenarios: [(&str, fn(u32, i32, usize) -> Scenario); 2] = [("land", land_crossing), ("water", water_crossing)];
+    let scenarios: [(&str, Build); 2] = [("land", land_crossing), ("water", water_crossing)];
     for (name, build) in scenarios {
         let tag = format!("{name}_units{units}_map{map}_ticks{ticks}");
         let mut first: Option<(usize, Run)> = None;
@@ -87,7 +107,15 @@ pub fn run(options: &Options) -> Result<Report> {
             }
             match &first {
                 None => {
-                    for (counter, v) in ["fields_built", "field_expansions", "abstract_expansions", "contexts_built"].iter().zip(r.work) {
+                    for (counter, v) in [
+                        "fields_built",
+                        "field_expansions",
+                        "abstract_expansions",
+                        "contexts_built",
+                    ]
+                    .iter()
+                    .zip(r.work)
+                    {
                         report.counter(&format!("{tag}/{counter}"), v, "");
                     }
                     report.counter(&format!("{tag}/fallback_slots"), r.fallback_slots, "");
@@ -98,7 +126,11 @@ pub fn run(options: &Options) -> Result<Report> {
                 }
                 Some((w0, r0)) => {
                     if r.hash != r0.hash {
-                        bail!("{name}: state hash differs: {:#018x} at {w0} worker(s), {:#018x} at {w}", r0.hash, r.hash);
+                        bail!(
+                            "{name}: state hash differs: {:#018x} at {w0} worker(s), {:#018x} at {w}",
+                            r0.hash,
+                            r.hash
+                        );
                     }
                     if r.work != r0.work {
                         bail!("{name}: navigation work differs between {w0} and {w} worker(s)");

@@ -27,7 +27,10 @@ const ROWS: u64 = 4000;
 const MIB: f64 = (1 << 20) as f64;
 
 fn ticks() -> u64 {
-    std::env::var("AE_ALLOC_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(90)
+    std::env::var("AE_ALLOC_TICKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90)
 }
 
 struct Outcome {
@@ -50,9 +53,13 @@ fn inspect(rt: &Runtime, world: &World) -> Result<(u64, usize, usize)> {
     ensure!(lists.len() == blocks.len(), "every probe row has both components");
     // Lists { checksum: u64, len: u32, bad: u32 }; Blocks { checksum: u64,
     // held: u32, held_len: u32, held_seed: u32, bad: u32 }.
-    let bad = lists.iter().map(|(_, b)| u32_at(b, 12) as u64).sum::<u64>() + blocks.iter().map(|(_, b)| u32_at(b, 20) as u64).sum::<u64>();
+    let bad = lists.iter().map(|(_, b)| u32_at(b, 12) as u64).sum::<u64>()
+        + blocks.iter().map(|(_, b)| u32_at(b, 20) as u64).sum::<u64>();
     let big = blocks.iter().filter(|(_, b)| u32_at(b, 12) >= 64 << 10).count();
-    ensure!(blocks.iter().all(|(_, b)| u32_at(b, 8) != 0), "every row holds a block after it ran");
+    ensure!(
+        blocks.iter().all(|(_, b)| u32_at(b, 8) != 0),
+        "every row holds a block after it ran"
+    );
     Ok((bad, lists.len(), big))
 }
 
@@ -69,7 +76,13 @@ fn run(rt: &mut Runtime, workers: usize, ticks: u64) -> Result<Outcome> {
     }
     memory[2] = rt.memory_bytes();
     let (bad, rows, big) = inspect(rt, &world)?;
-    Ok(Outcome { digest: rt.digest(&world)?.total, bad, rows, big, memory })
+    Ok(Outcome {
+        digest: rt.digest(&world)?.total,
+        bad,
+        rows,
+        big,
+        memory,
+    })
 }
 
 #[test]
@@ -79,7 +92,12 @@ fn guest_heap_is_safe_from_parallel_systems() -> Result<()> {
     let max = cores.clamp(1, 8);
     // Small ranges: about 30 jobs per system per tick, so every layer runs
     // both systems on every worker at once.
-    let cfg = RuntimeConfig { max_workers: max, range_rows: 128, parallel_min_rows: 256, ..RuntimeConfig::default() };
+    let cfg = RuntimeConfig {
+        max_workers: max,
+        range_rows: 128,
+        parallel_min_rows: 256,
+        ..RuntimeConfig::default()
+    };
     let mut rt = Runtime::new(&wasm, cfg)?;
     let ticks = ticks();
     let start = rt.memory_bytes();
@@ -107,23 +125,49 @@ fn guest_heap_is_safe_from_parallel_systems() -> Result<()> {
             ticks / 2,
             end as f64 / MIB
         );
-        ensure!(r.bad == 0, "{w} workers: {} guest checks failed (heap corruption or a lost allocation)", r.bad);
+        ensure!(
+            r.bad == 0,
+            "{w} workers: {} guest checks failed (heap corruption or a lost allocation)",
+            r.bad
+        );
         ensure!(r.rows == ROWS as usize, "{w} workers: {} probe rows", r.rows);
-        ensure!(r.big > 0, "{w} workers: no big block held; the probe does not reach the grow path");
+        ensure!(
+            r.big > 0,
+            "{w} workers: no big block held; the probe does not reach the grow path"
+        );
         if k == 0 {
-            ensure!(w == 1 || yields > 0, "{w} workers never contended for the heap lock; the probe is not parallel enough");
+            ensure!(
+                w == 1 || yields > 0,
+                "{w} workers never contended for the heap lock; the probe is not parallel enough"
+            );
             // The heap grew while the parallel systems ran (tick 0 only spawns)...
-            ensure!(end > after0, "{w} workers: guest memory did not grow under parallel allocation ({after0} -> {end} bytes)");
+            ensure!(
+                end > after0,
+                "{w} workers: guest memory did not grow under parallel allocation ({after0} -> {end} bytes)"
+            );
             // ...and stops growing once it covers the working set: the second
             // half of the run adds at most a quarter of what the first did.
             let (first, second) = (mid.saturating_sub(after0), end.saturating_sub(mid));
-            ensure!(second <= first / 4 + (1 << 20), "{w} workers: guest memory keeps growing ({first} bytes in the first half, {second} in the second)");
+            ensure!(
+                second <= first / 4 + (1 << 20),
+                "{w} workers: guest memory keeps growing ({first} bytes in the first half, {second} in the second)"
+            );
         }
         match &base {
             None => base = Some((w, r)),
-            Some((bw, b)) => ensure!(r.digest == b.digest, "{w} workers: digest {:032x}, {bw} workers {:032x}", r.digest, b.digest),
+            Some((bw, b)) => ensure!(
+                r.digest == b.digest,
+                "{w} workers: digest {:032x}, {bw} workers {:032x}",
+                r.digest,
+                b.digest
+            ),
         }
     }
-    eprintln!("guest memory {:.1} MiB at start, {:.1} MiB after {} worlds", start as f64 / MIB, rt.memory_bytes() as f64 / MIB, order.len());
+    eprintln!(
+        "guest memory {:.1} MiB at start, {:.1} MiB after {} worlds",
+        start as f64 / MIB,
+        rt.memory_bytes() as f64 / MIB,
+        order.len()
+    );
     Ok(())
 }

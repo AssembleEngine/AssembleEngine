@@ -11,6 +11,7 @@ use lib::math::{CellPos, WorldPos};
 use lib::nav::{build_context, build_flow_field, context_key, default_profiles, field_recipe, NavHierarchy};
 use lib::par::Par;
 use lib::terrain::{Terrain, TerrainConfig};
+use std::ops::Sub;
 use std::sync::Arc;
 
 pub const GOLDEN_SEED: u64 = 0x601D_E2D1;
@@ -20,6 +21,12 @@ pub const GOLDEN_TICKS: usize = 60;
 
 /// FNV-1a over 64-bit words.
 pub struct Fnv(pub u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Fnv {
     pub fn new() -> Self { Fnv(0xCBF2_9CE4_8422_2325) }

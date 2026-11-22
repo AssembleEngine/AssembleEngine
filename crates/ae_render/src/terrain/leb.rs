@@ -32,7 +32,7 @@ pub const ROOT_SIZE: i32 = 1 << LATTICE_BITS;
 /// hypotenuse alike) is cut into the same number of segments, so a leaf and its
 /// one-level-different neighbour still share identical vertices along their common edge.
 pub const SUBMESH_LEVELS: u32 = 4;
-const _: () = assert!(SUBMESH_LEVELS % 2 == 0);
+const _: () = assert!(SUBMESH_LEVELS.is_multiple_of(2));
 /// Weight denominator of sub-mesh vertices (barycentric weights sum to this).
 pub const SUBMESH_DENOM: i32 = 1 << (SUBMESH_LEVELS / 2);
 
@@ -56,7 +56,11 @@ pub fn decode_triangle(id: u32) -> [IVec2; 3] {
     }
     for b in (0..depth - 1).rev() {
         let m = (v[0] + v[2]) / 2;
-        v = if bit(id, b) == 0 { [v[0], m, v[1]] } else { [v[1], m, v[2]] };
+        v = if bit(id, b) == 0 {
+            [v[0], m, v[1]]
+        } else {
+            [v[1], m, v[2]]
+        };
     }
     v
 }
@@ -126,7 +130,11 @@ impl Cbt {
 
     fn set_bit(&mut self, idx: u32, v: bool) {
         let w = &mut self.bits[(idx >> 5) as usize];
-        if v { *w |= 1 << (idx & 31) } else { *w &= !(1 << (idx & 31)) }
+        if v {
+            *w |= 1 << (idx & 31)
+        } else {
+            *w &= !(1 << (idx & 31))
+        }
     }
 
     pub fn reduce(&mut self) {
@@ -170,7 +178,7 @@ impl Cbt {
         while self.node_sum(id) > 1 {
             let c = self.node_sum(2 * id);
             if handle < c {
-                id = 2 * id;
+                id *= 2;
             } else {
                 handle -= c;
                 id = 2 * id + 1;
@@ -298,8 +306,7 @@ pub fn check_conforming(c: &Cbt) -> Result<u32, String> {
         return Err(format!("leaves do not tile the domain (2*area = {area2})"));
     }
     for ((p, q), n) in edges {
-        let boundary = (p.x == q.x && (p.x == 0 || p.x == ROOT_SIZE))
-            || (p.y == q.y && (p.y == 0 || p.y == ROOT_SIZE));
+        let boundary = (p.x == q.x && (p.x == 0 || p.x == ROOT_SIZE)) || (p.y == q.y && (p.y == 0 || p.y == ROOT_SIZE));
         if n != if boundary { 1 } else { 2 } {
             return Err(format!("T-junction at edge {p:?}-{q:?} (shared by {n})"));
         }
@@ -365,7 +372,7 @@ mod tests {
                     let ctr = (t[0] + t[1] + t[2]) / 3;
                     let d = (ctr - f).as_vec2().length() / ROOT_SIZE as f32;
                     let size = (depth_of(id) as f32 * -0.5).exp2();
-                    if size > d * 0.5 || hash(id as u64 ^ iter << 40) % 7 == 0 {
+                    if size > d * 0.5 || hash(id as u64 ^ iter << 40).is_multiple_of(7) {
                         c.split_conforming(id);
                     }
                 }
@@ -377,7 +384,7 @@ mod tests {
                     }
                     let (b, t) = diamond(id);
                     let key = b.min(t) as u64 | (b.max(t) as u64) << 32;
-                    if hash(key ^ iter) % 3 != 0 {
+                    if !hash(key ^ iter).is_multiple_of(3) {
                         merge_conforming(&mut c, id);
                     }
                 }
@@ -392,7 +399,10 @@ mod tests {
     fn submesh_is_uniform() {
         let (w, idx) = build_submesh();
         assert_eq!(idx.len() as u32, 3 << SUBMESH_LEVELS);
-        assert!(w.iter().all(|w| w.iter().sum::<i32>() == SUBMESH_DENOM && w.iter().all(|&x| x >= 0)));
+        assert!(
+            w.iter()
+                .all(|w| w.iter().sum::<i32>() == SUBMESH_DENOM && w.iter().all(|&x| x >= 0))
+        );
         // each edge of the reference triangle carries SUBMESH_DENOM + 1 vertices
         let on01 = w.iter().filter(|w| w[2] == 0).count();
         let on12 = w.iter().filter(|w| w[0] == 0).count();

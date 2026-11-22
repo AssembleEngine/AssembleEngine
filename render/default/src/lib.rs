@@ -10,7 +10,12 @@
 //! the engine declares natively (`ae_render::terrain::app::native_graph`),
 //! which the host's tests check pass for pass.
 
-use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{
+    BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME,
+    EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PARTICLE_SHADOW_NAME, PassKind, PassWriter,
+    ProgramTable, RenderModule, ResourceRef, Role, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec,
+    exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk,
+};
 
 #[derive(Default)]
 struct Scene;
@@ -27,28 +32,64 @@ impl RenderModule for Scene {
         let mut p = ProgramTable::new();
         let leaves = library(&mut g, "terrain.leaves");
         let indirect = library(&mut g, "terrain.indirect");
-        let depth = g.image("depth", ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
+        let depth = g.image(
+            "depth",
+            ImageSpec::depth_2d(
+                vk::FORMAT_D32_SFLOAT,
+                w,
+                h,
+                vk::USAGE_DEPTH_STENCIL_ATTACHMENT | vk::USAGE_SAMPLED,
+            ),
+            Class::Transient,
+        );
         let target = if env.readback {
-            g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
+            g.image(
+                "readback.target",
+                ImageSpec::color_2d(
+                    env.color_format,
+                    w,
+                    h,
+                    vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC,
+                ),
+                Class::External,
+            )
         } else {
-            g.image("target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT), Class::Backbuffer)
+            g.image(
+                "target",
+                ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT),
+                Class::Backbuffer,
+            )
         };
         // The HDR scene the draws write; `post.tonemap` turns it into the target.
         let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
         // An HDR output keeps the display intermediate (paper-white units,
         // working space): the tonemap writes it and `post.encode` maps it to
         // the target. SDR has neither and the tonemap writes the target.
-        let display = env.uses_display().then(|| g.image(DISPLAY_NAME, display_spec(w, h), Class::Transient));
+        let display = env
+            .uses_display()
+            .then(|| g.image(DISPLAY_NAME, display_spec(w, h), Class::Transient));
         // The glow (the bloom's input) and the quarter-size bloom buffers.
         let glow = g.image(GLOW_NAME, glow_spec(w, h), Class::Transient);
         let bloom0 = g.image(BLOOM_NAME, bloom_spec(w, h), Class::Transient);
         let bloom1 = g.image(BLOOM_SCRATCH_NAME, bloom_spec(w, h), Class::Transient);
         // The unit buffers, then the units' shadow map.
-        let units = env.units.then(|| ["units.instances", "units.visible", "units.indirect", "units.counts", "units.palette"].map(|name| library(&mut g, name)));
+        let units = env.units.then(|| {
+            [
+                "units.instances",
+                "units.visible",
+                "units.indirect",
+                "units.counts",
+                "units.palette",
+            ]
+            .map(|name| library(&mut g, name))
+        });
         let map = (env.units && env.shadows).then(|| g.image(SHADOW_MAP_NAME, shadow_map_spec(), Class::External));
-        let particles = env.particles.then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
+        let particles = env
+            .particles
+            .then(|| ["particles.state", "particles.keys", "particles.indirect"].map(|name| library(&mut g, name)));
         // The particles' coloured shadows, with the map.
-        let tint = (map.is_some() && particles.is_some()).then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
+        let tint = (map.is_some() && particles.is_some())
+            .then(|| g.image(PARTICLE_SHADOW_NAME, particle_shadow_spec(), Class::External));
         let maps = [map, tint];
         // The clustered lights: the list the host writes and each cluster's.
         let lights = [library(&mut g, "lights.list"), library(&mut g, "lights.clusters")];
@@ -70,7 +111,9 @@ impl RenderModule for Scene {
                 .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
                 .id();
             let reset = p.library("units.reset");
-            g.pass("units reset", PassKind::Transfer, reset).access(draws, Role::TransferDst).id();
+            g.pass("units reset", PassKind::Transfer, reset)
+                .access(draws, Role::TransferDst)
+                .id();
             let cull = p.library("units.cull");
             g.pass("units cull", PassKind::Compute, cull)
                 .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
@@ -81,7 +124,10 @@ impl RenderModule for Scene {
         // The lights' clusters, before anything lit.
         let cluster = p.library("lights.cluster");
         let write = Role::StorageBufferWrite(ShaderStage::Compute);
-        g.pass("lights", PassKind::Compute, cluster).access(lights[0], write).access(lights[1], write).id();
+        g.pass("lights", PassKind::Compute, cluster)
+            .access(lights[0], write)
+            .access(lights[1], write)
+            .id();
         // The units' shadows: the units drawn from the sun, before the
         // passes that sample the map.
         if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
@@ -133,18 +179,40 @@ impl RenderModule for Scene {
             )
             .id();
             let count = p.library("units.count");
-            g.pass("units count", PassKind::Transfer, count).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
+            g.pass("units count", PassKind::Transfer, count)
+                .access(draws, Role::TransferSrc)
+                .discard(counts, Role::TransferDst)
+                .id();
             let read = p.library("host.read");
-            g.pass("units count read", PassKind::Transfer, read).access(counts, Role::HostRead).root().id();
+            g.pass("units count read", PassKind::Transfer, read)
+                .access(counts, Role::HostRead)
+                .root()
+                .id();
         }
         if env.water {
             let water = p.library("water.draw");
-            receive(g.pass("water", PassKind::Graphics, water).color(scene, LoadOp::Load).color(glow, LoadOp::Load).depth_read(depth), maps, lights).id();
+            receive(
+                g.pass("water", PassKind::Graphics, water)
+                    .color(scene, LoadOp::Load)
+                    .color(glow, LoadOp::Load)
+                    .depth_read(depth),
+                maps,
+                lights,
+            )
+            .id();
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
             let sim = p.library("particles.sim");
-            lit(g.pass("particles sim", PassKind::Compute, sim).access(state, write).access(keys, write).access(draws, write), lights, ShaderStage::Compute).id();
+            lit(
+                g.pass("particles sim", PassKind::Compute, sim)
+                    .access(state, write)
+                    .access(keys, write)
+                    .access(draws, write),
+                lights,
+                ShaderStage::Compute,
+            )
+            .id();
             let draw = p.library("particles.draw");
             g.pass("particles", PassKind::Graphics, draw)
                 .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
@@ -159,7 +227,9 @@ impl RenderModule for Scene {
         // undo the fog of war's dimming), after every scene writer and before
         // the bloom and the tonemap.
         let clear = p.library("exposure.clear");
-        g.pass("exposure clear", PassKind::Transfer, clear).access(histogram, Role::TransferDst).id();
+        g.pass("exposure clear", PassKind::Transfer, clear)
+            .access(histogram, Role::TransferDst)
+            .id();
         let meter = p.library("exposure.meter");
         g.pass("exposure meter", PassKind::Compute, meter)
             .sampled(scene, ShaderStage::Compute)
@@ -173,27 +243,54 @@ impl RenderModule for Scene {
             .access(exposure, Role::StorageImageReadWrite(ShaderStage::Compute))
             .id();
         let downsample = p.library("bloom.downsample");
-        g.pass("bloom downsample", PassKind::Graphics, downsample).sampled(glow, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        g.pass("bloom downsample", PassKind::Graphics, downsample)
+            .sampled(glow, ShaderStage::Fragment)
+            .sampled(exposure, ShaderStage::Fragment)
+            .color(bloom0, LoadOp::DontCare)
+            .id();
         let blur_x = p.library("bloom.blur_x");
-        g.pass("bloom blur x", PassKind::Graphics, blur_x).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
+        g.pass("bloom blur x", PassKind::Graphics, blur_x)
+            .sampled(bloom0, ShaderStage::Fragment)
+            .color(bloom1, LoadOp::DontCare)
+            .id();
         let blur_y = p.library("bloom.blur_y");
-        g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
+        g.pass("bloom blur y", PassKind::Graphics, blur_y)
+            .sampled(bloom1, ShaderStage::Fragment)
+            .color(bloom0, LoadOp::DontCare)
+            .id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(display.unwrap_or(target), LoadOp::DontCare).id();
+        g.pass("tonemap", PassKind::Graphics, tonemap)
+            .sampled(scene, ShaderStage::Fragment)
+            .sampled(bloom0, ShaderStage::Fragment)
+            .sampled(exposure, ShaderStage::Fragment)
+            .color(display.unwrap_or(target), LoadOp::DontCare)
+            .id();
         if let Some(display) = display {
             // The display's light, in the output's encoding (PQ or scRGB).
             let encode = p.library("post.encode");
-            g.pass("encode", PassKind::Graphics, encode).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+            g.pass("encode", PassKind::Graphics, encode)
+                .sampled(display, ShaderStage::Fragment)
+                .color(target, LoadOp::DontCare)
+                .id();
         }
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");
-            g.pass("copy", PassKind::Transfer, copy).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
+            g.pass("copy", PassKind::Transfer, copy)
+                .access(target, Role::TransferSrc)
+                .discard(buffer, Role::TransferDst)
+                .id();
             let read = p.library("host.read");
-            g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
+            g.pass("host read", PassKind::Transfer, read)
+                .access(buffer, Role::HostRead)
+                .root()
+                .id();
         } else {
             let present = p.library("present");
-            g.pass("present", PassKind::Present, present).present(target).root().id();
+            g.pass("present", PassKind::Present, present)
+                .present(target)
+                .root()
+                .id();
         }
         Some(Declaration { graph: g, programs: p })
     }
@@ -209,7 +306,8 @@ fn receive(mut pass: PassWriter<'_>, maps: [Option<ResourceRef>; 2], lights: [Re
 
 /// A lit pass reads the light list and the clusters.
 fn lit(pass: PassWriter<'_>, lights: [ResourceRef; 2], stage: ShaderStage) -> PassWriter<'_> {
-    pass.access(lights[0], Role::StorageBufferRead(stage)).access(lights[1], Role::StorageBufferRead(stage))
+    pass.access(lights[0], Role::StorageBufferRead(stage))
+        .access(lights[1], Role::StorageBufferRead(stage))
 }
 
 render_module!(Scene);

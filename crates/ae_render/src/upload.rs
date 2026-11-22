@@ -16,18 +16,38 @@ pub fn one_shot(gpu: &GpuDevice, record: impl FnOnce(vk::CommandBuffer)) -> Resu
     let device = &gpu.device;
     unsafe {
         let pool = device
-            .create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(gpu.queue_family).flags(vk::CommandPoolCreateFlags::TRANSIENT), None)
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(gpu.queue_family)
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
+                None,
+            )
             .context("upload command pool")?;
         let result = (|| -> Result<()> {
-            let cmd = device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(1))?[0];
-            device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            let cmd = device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(1),
+            )?[0];
+            device.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
             record(cmd);
             device.end_command_buffer(cmd)?;
             let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
             let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
             let submit = vk::SubmitInfo2::default().command_buffer_infos(&cmds);
-            let submitted = device.queue_submit2(gpu.queue, &[submit], fence).map_err(fatal).context("upload submit");
-            let waited = submitted.and_then(|()| device.wait_for_fences(&[fence], true, u64::MAX).map_err(fatal).context("upload wait"));
+            let submitted = device
+                .queue_submit2(gpu.queue, &[submit], fence)
+                .map_err(fatal)
+                .context("upload submit");
+            let waited = submitted.and_then(|()| {
+                device
+                    .wait_for_fences(&[fence], true, u64::MAX)
+                    .map_err(fatal)
+                    .context("upload wait")
+            });
             device.destroy_fence(fence, None);
             waited
         })();
@@ -37,7 +57,10 @@ pub fn one_shot(gpu: &GpuDevice, record: impl FnOnce(vk::CommandBuffer)) -> Resu
 }
 
 fn staging(gpu: &GpuDevice, bytes: &[u8], name: &str) -> Result<OwnedBuffer> {
-    let desc = BufferDesc { size: bytes.len().max(4) as u64, usage: vk::BufferUsageFlags::TRANSFER_SRC };
+    let desc = BufferDesc {
+        size: bytes.len().max(4) as u64,
+        usage: vk::BufferUsageFlags::TRANSFER_SRC,
+    };
     let mut buffer = OwnedBuffer::new(gpu, desc, MemoryLocation::CpuToGpu, name)?;
     buffer.mapped().context("staging buffer is not host-visible")?[..bytes.len()].copy_from_slice(bytes);
     Ok(buffer)
@@ -50,15 +73,33 @@ pub fn buffer(gpu: &GpuDevice, bytes: &[u8], usage: vk::BufferUsageFlags, name: 
 
 /// A device-local buffer of `size` bytes starting with `bytes` (the rest
 /// undefined; `usage` gets `TRANSFER_DST` added).
-pub fn buffer_sized(gpu: &GpuDevice, size: u64, bytes: &[u8], usage: vk::BufferUsageFlags, name: &str) -> Result<OwnedBuffer> {
-    anyhow::ensure!(bytes.len() as u64 <= size, "{name}: {} bytes into a buffer of {size}", bytes.len());
-    let desc = BufferDesc { size: size.max(4), usage: usage | vk::BufferUsageFlags::TRANSFER_DST };
+pub fn buffer_sized(
+    gpu: &GpuDevice,
+    size: u64,
+    bytes: &[u8],
+    usage: vk::BufferUsageFlags,
+    name: &str,
+) -> Result<OwnedBuffer> {
+    anyhow::ensure!(
+        bytes.len() as u64 <= size,
+        "{name}: {} bytes into a buffer of {size}",
+        bytes.len()
+    );
+    let desc = BufferDesc {
+        size: size.max(4),
+        usage: usage | vk::BufferUsageFlags::TRANSFER_DST,
+    };
     let target = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuOnly, name)?;
     let mut source = staging(gpu, bytes, "staging")?;
     let size = bytes.len() as u64;
     let copied = one_shot(gpu, |cmd| unsafe {
         if size > 0 {
-            gpu.device.cmd_copy_buffer(cmd, source.buffer, target.buffer, &[vk::BufferCopy::default().size(size)]);
+            gpu.device.cmd_copy_buffer(
+                cmd,
+                source.buffer,
+                target.buffer,
+                &[vk::BufferCopy::default().size(size)],
+            );
         }
         // Visible to every later use on this queue.
         let barrier = [vk::MemoryBarrier2::default()
@@ -66,7 +107,8 @@ pub fn buffer_sized(gpu: &GpuDevice, size: u64, bytes: &[u8], usage: vk::BufferU
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barrier));
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barrier));
     });
     source.destroy(gpu);
     if let Err(err) = copied {
@@ -80,7 +122,10 @@ pub fn buffer_sized(gpu: &GpuDevice, size: u64, bytes: &[u8], usage: vk::BufferU
 /// `size` bytes of `buffer` from `offset`, copied to the host (for tests and
 /// tools: it waits for the device; `buffer` needs `TRANSFER_SRC`).
 pub fn read_buffer(gpu: &GpuDevice, buffer: vk::Buffer, offset: u64, size: u64) -> Result<Vec<u8>> {
-    let desc = BufferDesc { size: size.max(4), usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let desc = BufferDesc {
+        size: size.max(4),
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
     let mut host = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuToCpu, "readback")?;
     let copied = one_shot(gpu, |cmd| unsafe {
         // After every earlier use on this queue.
@@ -89,18 +134,26 @@ pub fn read_buffer(gpu: &GpuDevice, buffer: vk::Buffer, offset: u64, size: u64) 
             .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&before));
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&before));
         if size > 0 {
-            gpu.device.cmd_copy_buffer(cmd, buffer, host.buffer, &[vk::BufferCopy::default().src_offset(offset).size(size)]);
+            gpu.device.cmd_copy_buffer(
+                cmd,
+                buffer,
+                host.buffer,
+                &[vk::BufferCopy::default().src_offset(offset).size(size)],
+            );
         }
         let after = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::HOST)
             .dst_access_mask(vk::AccessFlags2::HOST_READ)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&after));
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&after));
     });
-    let bytes = copied.and_then(|()| Ok(host.mapped().context("readback buffer is not host-visible")?[..size as usize].to_vec()));
+    let bytes = copied
+        .and_then(|()| Ok(host.mapped().context("readback buffer is not host-visible")?[..size as usize].to_vec()));
     host.destroy(gpu);
     bytes
 }
@@ -108,17 +161,52 @@ pub fn read_buffer(gpu: &GpuDevice, buffer: vk::Buffer, offset: u64, size: u64) 
 /// A sampled 2D colour image with one mip per entry of `mips` (mip `i` is
 /// `width >> i` by `height >> i`, tightly packed), left in
 /// `SHADER_READ_ONLY_OPTIMAL`.
-pub fn image(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, mips: &[&[u8]], name: &str) -> Result<OwnedImage> {
-    image_layers(gpu, format, width, height, &[mips.to_vec()], vk::ImageViewType::TYPE_2D, name)
+pub fn image(
+    gpu: &GpuDevice,
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    mips: &[&[u8]],
+    name: &str,
+) -> Result<OwnedImage> {
+    image_layers(
+        gpu,
+        format,
+        width,
+        height,
+        &[mips.to_vec()],
+        vk::ImageViewType::TYPE_2D,
+        name,
+    )
 }
 
 /// A sampled 2D (array) colour image: `layers[l][m]` is mip `m` of layer
 /// `l` (every layer the same mip count), with a view of `view_type`, left
 /// in `SHADER_READ_ONLY_OPTIMAL`.
-pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, layers: &[Vec<&[u8]>], view_type: vk::ImageViewType, name: &str) -> Result<OwnedImage> {
+pub fn image_layers(
+    gpu: &GpuDevice,
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    layers: &[Vec<&[u8]>],
+    view_type: vk::ImageViewType,
+    name: &str,
+) -> Result<OwnedImage> {
     let mip_levels = layers.first().map_or(1, Vec::len) as u32;
-    anyhow::ensure!(!layers.is_empty() && layers.iter().all(|l| l.len() as u32 == mip_levels), "{name}: every layer needs the same mips");
-    let desc = ImageDesc { mip_levels, layers: layers.len() as u32, ..ImageDesc::color_2d(format, width, height, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST) };
+    anyhow::ensure!(
+        !layers.is_empty() && layers.iter().all(|l| l.len() as u32 == mip_levels),
+        "{name}: every layer needs the same mips"
+    );
+    let desc = ImageDesc {
+        mip_levels,
+        layers: layers.len() as u32,
+        ..ImageDesc::color_2d(
+            format,
+            width,
+            height,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        )
+    };
     let target = OwnedImage::with_view(gpu, desc, view_type, name)?;
     // Regions at 16-byte offsets (a multiple of any texel size here).
     let mut bytes = Vec::new();
@@ -129,8 +217,17 @@ pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
             regions.push(
                 vk::BufferImageCopy::default()
                     .buffer_offset(bytes.len() as u64)
-                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level as u32, base_array_layer: layer as u32, layer_count: 1 })
-                    .image_extent(vk::Extent3D { width: (width >> level).max(1), height: (height >> level).max(1), depth: 1 }),
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: level as u32,
+                        base_array_layer: layer as u32,
+                        layer_count: 1,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: (width >> level).max(1),
+                        height: (height >> level).max(1),
+                        depth: 1,
+                    }),
             );
             bytes.extend_from_slice(mip);
         }
@@ -147,8 +244,15 @@ pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(target.image)
             .subresource_range(range)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
-        gpu.device.cmd_copy_buffer_to_image(cmd, source.buffer, target.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
+        gpu.device.cmd_copy_buffer_to_image(
+            cmd,
+            source.buffer,
+            target.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
         let to_read = [vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -160,7 +264,8 @@ pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(target.image)
             .subresource_range(range)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
     });
     source.destroy(gpu);
     if let Err(err) = copied {
@@ -177,17 +282,33 @@ pub fn image_layers(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
 /// and tools: it waits for the device.
 pub fn read_image(gpu: &GpuDevice, image: &OwnedImage, texel_bytes: u64) -> Result<Vec<Vec<u8>>> {
     let desc = image.desc;
-    let sizes: Vec<u64> = (0..desc.mip_levels).map(|i| ((desc.width >> i).max(1) * (desc.height >> i).max(1)) as u64 * desc.layers as u64 * texel_bytes).collect();
-    let offsets: Vec<u64> = sizes.iter().scan(0u64, |at, &s| {
-        let o = *at;
-        *at = (o + s).next_multiple_of(16);
-        Some(o)
-    }).collect();
+    let sizes: Vec<u64> = (0..desc.mip_levels)
+        .map(|i| ((desc.width >> i).max(1) * (desc.height >> i).max(1)) as u64 * desc.layers as u64 * texel_bytes)
+        .collect();
+    let offsets: Vec<u64> = sizes
+        .iter()
+        .scan(0u64, |at, &s| {
+            let o = *at;
+            *at = (o + s).next_multiple_of(16);
+            Some(o)
+        })
+        .collect();
     let total = offsets.last().copied().unwrap_or(0) + sizes.last().copied().unwrap_or(0);
-    let mut host = OwnedBuffer::new(gpu, BufferDesc { size: total.max(4), usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "image readback")?;
+    let mut host = OwnedBuffer::new(
+        gpu,
+        BufferDesc {
+            size: total.max(4),
+            usage: vk::BufferUsageFlags::TRANSFER_DST,
+        },
+        MemoryLocation::GpuToCpu,
+        "image readback",
+    )?;
     let range = image.range();
     let copied = one_shot(gpu, |cmd| unsafe {
-        let layout = |from, to, src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+        let layout = |from,
+                      to,
+                      src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                      dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
             [vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(src.0)
                 .src_access_mask(src.1)
@@ -200,31 +321,69 @@ pub fn read_image(gpu: &GpuDevice, image: &OwnedImage, texel_bytes: u64) -> Resu
                 .image(image.image)
                 .subresource_range(range)]
         };
-        let any = (vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ);
+        let any = (
+            vk::PipelineStageFlags2::ALL_COMMANDS,
+            vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
+        );
         let copy = (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
-        let before = layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, any, copy);
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&before));
+        let before = layout(
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            any,
+            copy,
+        );
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&before));
         let regions: Vec<vk::BufferImageCopy> = (0..desc.mip_levels)
             .map(|i| {
                 vk::BufferImageCopy::default()
                     .buffer_offset(offsets[i as usize])
-                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: i, base_array_layer: 0, layer_count: desc.layers })
-                    .image_extent(vk::Extent3D { width: (desc.width >> i).max(1), height: (desc.height >> i).max(1), depth: 1 })
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: i,
+                        base_array_layer: 0,
+                        layer_count: desc.layers,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: (desc.width >> i).max(1),
+                        height: (desc.height >> i).max(1),
+                        depth: 1,
+                    })
             })
             .collect();
-        gpu.device.cmd_copy_image_to_buffer(cmd, image.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, host.buffer, &regions);
-        let after = layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, copy, (vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::SHADER_SAMPLED_READ));
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&after));
+        gpu.device.cmd_copy_image_to_buffer(
+            cmd,
+            image.image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            host.buffer,
+            &regions,
+        );
+        let after = layout(
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            copy,
+            (
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ),
+        );
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&after));
         let to_host = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::HOST)
             .dst_access_mask(vk::AccessFlags2::HOST_READ)];
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&to_host));
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&to_host));
     });
     let levels = copied.and_then(|()| {
         let bytes = host.mapped().context("readback buffer is not host-visible")?;
-        Ok(offsets.iter().zip(&sizes).map(|(&o, &s)| bytes[o as usize..(o + s) as usize].to_vec()).collect())
+        Ok(offsets
+            .iter()
+            .zip(&sizes)
+            .map(|(&o, &s)| bytes[o as usize..(o + s) as usize].to_vec())
+            .collect())
     });
     host.destroy(gpu);
     levels
@@ -269,24 +428,49 @@ fn storage_twin(format: vk::Format) -> vk::Format {
 /// the level above, clamped at its edge (so power-of-two sides tile exactly;
 /// an odd side drops its last row or column).
 #[allow(clippy::too_many_arguments)]
-pub fn image_mipped(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32, layers: &[&[u8]], filter: MipFilter, view_type: vk::ImageViewType, name: &str) -> Result<OwnedImage> {
+pub fn image_mipped(
+    gpu: &GpuDevice,
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    layers: &[&[u8]],
+    filter: MipFilter,
+    view_type: vk::ImageViewType,
+    name: &str,
+) -> Result<OwnedImage> {
     anyhow::ensure!(!layers.is_empty() && width > 0 && height > 0, "{name}: no texels");
     let twin = storage_twin(format);
     let srgb = twin != format;
     // The shader's store has no format qualifier: the format must say so.
     let mut props3 = vk::FormatProperties3::default();
     let mut props = vk::FormatProperties2::default().push_next(&mut props3);
-    unsafe { gpu.instance.instance.get_physical_device_format_properties2(gpu.physical, twin, &mut props) };
+    unsafe {
+        gpu.instance
+            .instance
+            .get_physical_device_format_properties2(gpu.physical, twin, &mut props)
+    };
     let features = props3.optimal_tiling_features;
     anyhow::ensure!(
-        features.contains(vk::FormatFeatureFlags2::STORAGE_IMAGE | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT),
+        features
+            .contains(vk::FormatFeatureFlags2::STORAGE_IMAGE | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT),
         "{name}: {twin:?} takes no formatless storage writes here, so its mips cannot be made"
     );
     let levels = mip_levels(width, height);
-    let flags = if srgb { vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE } else { vk::ImageCreateFlags::empty() };
+    let flags = if srgb {
+        vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE
+    } else {
+        vk::ImageCreateFlags::empty()
+    };
     // TRANSFER_SRC: [`read_image`] (tests).
-    let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::STORAGE;
-    let desc = ImageDesc { mip_levels: levels, layers: layers.len() as u32, ..ImageDesc::color_2d(format, width, height, usage) };
+    let usage = vk::ImageUsageFlags::SAMPLED
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | vk::ImageUsageFlags::TRANSFER_SRC
+        | vk::ImageUsageFlags::STORAGE;
+    let desc = ImageDesc {
+        mip_levels: levels,
+        layers: layers.len() as u32,
+        ..ImageDesc::color_2d(format, width, height, usage)
+    };
     let mut target = OwnedImage::with_view_flags(gpu, desc, view_type, flags, name)?;
     let mut bytes = Vec::new();
     let mut regions = Vec::new();
@@ -295,8 +479,17 @@ pub fn image_mipped(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
         regions.push(
             vk::BufferImageCopy::default()
                 .buffer_offset(bytes.len() as u64)
-                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: layer as u32, layer_count: 1 })
-                .image_extent(vk::Extent3D { width, height, depth: 1 }),
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: layer as u32,
+                    layer_count: 1,
+                })
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                }),
         );
         bytes.extend_from_slice(texels);
     }
@@ -304,7 +497,10 @@ pub fn image_mipped(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
     let made = MipGen::new(gpu, &target, twin, levels).and_then(|mut mipgen| {
         let range = target.range();
         let image = target.image;
-        let barrier = |src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2), layouts: (vk::ImageLayout, vk::ImageLayout), range: vk::ImageSubresourceRange| {
+        let barrier = |src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                       dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                       layouts: (vk::ImageLayout, vk::ImageLayout),
+                       range: vk::ImageSubresourceRange| {
             vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(src.0)
                 .src_access_mask(src.1)
@@ -319,31 +515,78 @@ pub fn image_mipped(gpu: &GpuDevice, format: vk::Format, width: u32, height: u32
         };
         let none = (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE);
         let copy_write = (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE);
-        let compute_write = (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE);
-        let compute_rw = (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
+        let compute_write = (
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        );
+        let compute_rw = (
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        );
         let general = vk::ImageLayout::GENERAL;
-        let level = |i: u32| vk::ImageSubresourceRange { base_mip_level: i, level_count: 1, ..range };
+        let level = |i: u32| vk::ImageSubresourceRange {
+            base_mip_level: i,
+            level_count: 1,
+            ..range
+        };
         let push = [filter as u32, u32::from(srgb)];
         let done = one_shot(gpu, |cmd| unsafe {
             let d = &gpu.device;
-            let to_dst = [barrier(none, copy_write, (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL), range)];
+            let to_dst = [barrier(
+                none,
+                copy_write,
+                (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
+                range,
+            )];
             d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
-            d.cmd_copy_buffer_to_image(cmd, source.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
+            d.cmd_copy_buffer_to_image(
+                cmd,
+                source.buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
             // The whole chain in GENERAL while it is made: level i - 1 is
             // read sampled while level i is written as storage.
-            let to_general = [barrier(copy_write, compute_rw, (vk::ImageLayout::TRANSFER_DST_OPTIMAL, general), range)];
+            let to_general = [barrier(
+                copy_write,
+                compute_rw,
+                (vk::ImageLayout::TRANSFER_DST_OPTIMAL, general),
+                range,
+            )];
             d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_general));
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, mipgen.pipeline);
-            d.cmd_push_constants(cmd, mipgen.layout, vk::ShaderStageFlags::COMPUTE, 0, crate::pipeline::push_bytes(&push));
+            d.cmd_push_constants(
+                cmd,
+                mipgen.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                crate::pipeline::push_bytes(&push),
+            );
             for i in 1..levels {
-                d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, mipgen.layout, 0, &[mipgen.sets[i as usize - 1]], &[]);
+                d.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    mipgen.layout,
+                    0,
+                    &[mipgen.sets[i as usize - 1]],
+                    &[],
+                );
                 let (w, h) = ((width >> i).max(1), (height >> i).max(1));
                 d.cmd_dispatch(cmd, w.div_ceil(8), h.div_ceil(8), layers.len() as u32);
                 let written = [barrier(compute_write, compute_rw, (general, general), level(i))];
                 d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&written));
             }
-            let all = (vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::SHADER_SAMPLED_READ);
-            let to_read = [barrier(compute_rw, all, (general, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL), range)];
+            let all = (
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+            );
+            let to_read = [barrier(
+                compute_rw,
+                all,
+                (general, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                range,
+            )];
             d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
         });
         mipgen.destroy(gpu);
@@ -384,7 +627,13 @@ impl MipGen {
         };
         let built = (|| -> Result<()> {
             let compute = vk::ShaderStageFlags::COMPUTE;
-            m.set_layout = crate::pipeline::set_layout(d, &[(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, compute), (vk::DescriptorType::STORAGE_IMAGE, compute)])?;
+            m.set_layout = crate::pipeline::set_layout(
+                d,
+                &[
+                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, compute),
+                    (vk::DescriptorType::STORAGE_IMAGE, compute),
+                ],
+            )?;
             m.layout = crate::pipeline::pipeline_layout(d, &[m.set_layout], 8, compute)?;
             m.pipeline = crate::pipeline::compute_pipeline(d, crate::pipeline::spirv!("mipgen.comp"), m.layout)?;
             if levels < 2 {
@@ -392,34 +641,79 @@ impl MipGen {
             }
             let count = levels - 1;
             unsafe {
-                m.sampler = d.create_sampler(&vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST).max_lod(vk::LOD_CLAMP_NONE), None)?;
-                let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: count }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: count }];
-                m.pool = d.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(count).pool_sizes(&sizes), None)?;
+                m.sampler = d.create_sampler(
+                    &vk::SamplerCreateInfo::default()
+                        .mag_filter(vk::Filter::NEAREST)
+                        .min_filter(vk::Filter::NEAREST)
+                        .max_lod(vk::LOD_CLAMP_NONE),
+                    None,
+                )?;
+                let sizes = [
+                    vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        descriptor_count: count,
+                    },
+                    vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::STORAGE_IMAGE,
+                        descriptor_count: count,
+                    },
+                ];
+                m.pool = d.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(count)
+                        .pool_sizes(&sizes),
+                    None,
+                )?;
                 let layouts = vec![m.set_layout; count as usize];
-                m.sets = d.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(m.pool).set_layouts(&layouts))?;
+                m.sets = d.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(m.pool)
+                        .set_layouts(&layouts),
+                )?;
             }
             let range = target.range();
-            let view = |m: &mut MipGen, level: u32, format: vk::Format, usage: vk::ImageUsageFlags| -> Result<vk::ImageView> {
-                let mut usage = vk::ImageViewUsageCreateInfo::default().usage(usage);
-                let info = vk::ImageViewCreateInfo::default()
-                    .image(target.image)
-                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
-                    .format(format)
-                    .subresource_range(vk::ImageSubresourceRange { base_mip_level: level, level_count: 1, ..range })
-                    .push_next(&mut usage);
-                let v = unsafe { d.create_image_view(&info, None) }?;
-                m.views.push(v);
-                Ok(v)
-            };
+            let view =
+                |m: &mut MipGen, level: u32, format: vk::Format, usage: vk::ImageUsageFlags| -> Result<vk::ImageView> {
+                    let mut usage = vk::ImageViewUsageCreateInfo::default().usage(usage);
+                    let info = vk::ImageViewCreateInfo::default()
+                        .image(target.image)
+                        .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                        .format(format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            base_mip_level: level,
+                            level_count: 1,
+                            ..range
+                        })
+                        .push_next(&mut usage);
+                    let v = unsafe { d.create_image_view(&info, None) }?;
+                    m.views.push(v);
+                    Ok(v)
+                };
             for i in 1..levels {
                 let above = view(&mut m, i - 1, target.desc.format, vk::ImageUsageFlags::SAMPLED)?;
                 let here = view(&mut m, i, twin, vk::ImageUsageFlags::STORAGE)?;
-                let image_info = [vk::DescriptorImageInfo { sampler: m.sampler, image_view: above, image_layout: vk::ImageLayout::GENERAL }];
-                let storage_info = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: here, image_layout: vk::ImageLayout::GENERAL }];
+                let image_info = [vk::DescriptorImageInfo {
+                    sampler: m.sampler,
+                    image_view: above,
+                    image_layout: vk::ImageLayout::GENERAL,
+                }];
+                let storage_info = [vk::DescriptorImageInfo {
+                    sampler: vk::Sampler::null(),
+                    image_view: here,
+                    image_layout: vk::ImageLayout::GENERAL,
+                }];
                 let set = m.sets[i as usize - 1];
                 let writes = [
-                    vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image_info),
-                    vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(&storage_info),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&image_info),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .image_info(&storage_info),
                 ];
                 unsafe { d.update_descriptor_sets(&writes, &[]) };
             }
@@ -480,7 +774,11 @@ pub fn update_images(gpu: &GpuDevice, updates: &[(&OwnedImage, &[Region])]) -> R
         return Ok(());
     }
     let mut source = staging(gpu, &bytes, "staging")?;
-    let barrier = |image: &OwnedImage, old: vk::ImageLayout, new: vk::ImageLayout, src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+    let barrier = |image: &OwnedImage,
+                   old: vk::ImageLayout,
+                   new: vk::ImageLayout,
+                   src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                   dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
         vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src.0)
             .src_access_mask(src.1)
@@ -493,11 +791,27 @@ pub fn update_images(gpu: &GpuDevice, updates: &[(&OwnedImage, &[Region])]) -> R
             .image(image.image)
             .subresource_range(image.range())
     };
-    let read = (vk::PipelineStageFlags2::ALL_COMMANDS, vk::AccessFlags2::SHADER_SAMPLED_READ);
+    let read = (
+        vk::PipelineStageFlags2::ALL_COMMANDS,
+        vk::AccessFlags2::SHADER_SAMPLED_READ,
+    );
     let copy = (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE);
     let copied = one_shot(gpu, |cmd| unsafe {
-        let to_dst: Vec<_> = updates.iter().filter(|(_, r)| !r.is_empty()).map(|(image, _)| barrier(image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, read, copy)).collect();
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
+        let to_dst: Vec<_> = updates
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(image, _)| {
+                barrier(
+                    image,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    read,
+                    copy,
+                )
+            })
+            .collect();
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
         let mut offsets = offsets.iter();
         for (image, regions) in updates {
             let copies: Vec<vk::BufferImageCopy> = regions
@@ -505,17 +819,49 @@ pub fn update_images(gpu: &GpuDevice, updates: &[(&OwnedImage, &[Region])]) -> R
                 .map(|r| {
                     vk::BufferImageCopy::default()
                         .buffer_offset(*offsets.next().expect("an offset per region"))
-                        .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: r.mip, base_array_layer: 0, layer_count: 1 })
-                        .image_offset(vk::Offset3D { x: r.x as i32, y: r.y as i32, z: 0 })
-                        .image_extent(vk::Extent3D { width: r.width, height: r.height, depth: 1 })
+                        .image_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: r.mip,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .image_offset(vk::Offset3D {
+                            x: r.x as i32,
+                            y: r.y as i32,
+                            z: 0,
+                        })
+                        .image_extent(vk::Extent3D {
+                            width: r.width,
+                            height: r.height,
+                            depth: 1,
+                        })
                 })
                 .collect();
             if !copies.is_empty() {
-                gpu.device.cmd_copy_buffer_to_image(cmd, source.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &copies);
+                gpu.device.cmd_copy_buffer_to_image(
+                    cmd,
+                    source.buffer,
+                    image.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &copies,
+                );
             }
         }
-        let to_read: Vec<_> = updates.iter().filter(|(_, r)| !r.is_empty()).map(|(image, _)| barrier(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, copy, read)).collect();
-        gpu.device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
+        let to_read: Vec<_> = updates
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(image, _)| {
+                barrier(
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    copy,
+                    read,
+                )
+            })
+            .collect();
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_read));
     });
     source.destroy(gpu);
     copied

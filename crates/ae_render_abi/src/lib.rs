@@ -101,7 +101,17 @@ wire_enum!(
 impl RoleKind {
     pub fn takes_stage(self) -> bool {
         use RoleKind::*;
-        matches!(self, Sampled | StorageImageRead | StorageImageWrite | StorageImageReadWrite | StorageBufferRead | StorageBufferWrite | StorageBufferReadWrite | UniformBuffer)
+        matches!(
+            self,
+            Sampled
+                | StorageImageRead
+                | StorageImageWrite
+                | StorageImageReadWrite
+                | StorageBufferRead
+                | StorageBufferWrite
+                | StorageBufferReadWrite
+                | UniformBuffer
+        )
     }
 }
 
@@ -158,7 +168,11 @@ impl Role {
 
     /// The access replaces previous contents (mirrors the host rule).
     pub fn implies_discard(self) -> bool {
-        matches!(self, Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare) | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare))
+        matches!(
+            self,
+            Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare)
+                | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare)
+        )
     }
 }
 
@@ -179,13 +193,25 @@ pub struct ImageSpec {
 impl ImageSpec {
     /// Single mip, single layer, single sample, colour aspect.
     pub fn color_2d(format: u32, width: u32, height: u32, usage: u32) -> Self {
-        Self { format, width, height, usage, mip_levels: 1, layers: 1, samples: 1, aspect: 1 }
+        Self {
+            format,
+            width,
+            height,
+            usage,
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            aspect: 1,
+        }
     }
 
     /// Single mip, single layer, single sample, depth aspect (a combined
     /// depth-stencil format needs `aspect: 2 | 4`).
     pub fn depth_2d(format: u32, width: u32, height: u32, usage: u32) -> Self {
-        Self { aspect: 2, ..Self::color_2d(format, width, height, usage) }
+        Self {
+            aspect: 2,
+            ..Self::color_2d(format, width, height, usage)
+        }
     }
 }
 
@@ -231,7 +257,21 @@ impl GraphBuilder {
     pub fn image_scoped(&mut self, name: &str, spec: ImageSpec, class: Class, scope: u32) -> ResourceRef {
         let (offset, len) = self.name(name);
         let s = spec;
-        self.resources.push([RESOURCE_IMAGE, class as u32, scope, offset, len, s.format, s.width, s.height, s.usage, s.mip_levels, s.layers, s.samples, s.aspect]);
+        self.resources.push([
+            RESOURCE_IMAGE,
+            class as u32,
+            scope,
+            offset,
+            len,
+            s.format,
+            s.width,
+            s.height,
+            s.usage,
+            s.mip_levels,
+            s.layers,
+            s.samples,
+            s.aspect,
+        ]);
         ResourceRef(self.resources.len() as u32 - 1)
     }
 
@@ -241,7 +281,21 @@ impl GraphBuilder {
 
     pub fn buffer_scoped(&mut self, name: &str, size: u64, usage: u32, class: Class, scope: u32) -> ResourceRef {
         let (offset, len) = self.name(name);
-        self.resources.push([RESOURCE_BUFFER, class as u32, scope, offset, len, size as u32, (size >> 32) as u32, usage, 0, 0, 0, 0, 0]);
+        self.resources.push([
+            RESOURCE_BUFFER,
+            class as u32,
+            scope,
+            offset,
+            len,
+            size as u32,
+            (size >> 32) as u32,
+            usage,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
         ResourceRef(self.resources.len() as u32 - 1)
     }
 
@@ -266,7 +320,10 @@ impl GraphBuilder {
             self.intents.len() as u32,
             self.names.len() as u32,
         ];
-        let words = header.len() + self.resources.len() * RESOURCE_WORDS + self.passes.len() * PASS_WORDS + self.intents.len() * INTENT_WORDS;
+        let words = header.len()
+            + self.resources.len() * RESOURCE_WORDS
+            + self.passes.len() * PASS_WORDS
+            + self.intents.len() * INTENT_WORDS;
         let mut out = Vec::with_capacity(words * 4 + self.names.len());
         let mut put = |w: &u32| out.extend_from_slice(&w.to_le_bytes());
         header.iter().for_each(&mut put);

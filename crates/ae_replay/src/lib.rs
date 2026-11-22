@@ -47,10 +47,25 @@ impl Header {
     /// The difference that keeps this replay from playing on `world`'s
     /// header, if any.
     pub fn check(&self, world: &Header) -> Result<()> {
-        ensure!(self.engine == world.engine, "the replay was recorded with engine {}, this is {}", self.engine, world.engine);
-        ensure!(self.module_hash == world.module_hash, "the game module differs (replay {:032x}, here {:032x})", self.module_hash, world.module_hash);
+        ensure!(
+            self.engine == world.engine,
+            "the replay was recorded with engine {}, this is {}",
+            self.engine,
+            world.engine
+        );
+        ensure!(
+            self.module_hash == world.module_hash,
+            "the game module differs (replay {:032x}, here {:032x})",
+            self.module_hash,
+            world.module_hash
+        );
         ensure!(self.schema_hash == world.schema_hash, "the game schema differs");
-        ensure!(self.param == world.param, "game parameter {:#x} in the replay, {:#x} here", self.param, world.param);
+        ensure!(
+            self.param == world.param,
+            "game parameter {:#x} in the replay, {:#x} here",
+            self.param,
+            world.param
+        );
         for (k, v) in &self.config {
             match world.config.get(k) {
                 Some(here) if here == v => {}
@@ -80,7 +95,11 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     pub fn of(tick: u64, d: &Digest) -> Self {
-        Self { tick, total: d.total, parts: d.parts.clone() }
+        Self {
+            tick,
+            total: d.total,
+            parts: d.parts.clone(),
+        }
     }
 
     /// Parts whose hash or row count differ from `other`'s (by name; a part
@@ -88,7 +107,11 @@ impl Checkpoint {
     pub fn differing(&self, other: &Checkpoint) -> Vec<String> {
         let theirs: BTreeMap<&str, (u128, u64)> = other.parts.iter().map(|(n, h, r)| (n.as_str(), (*h, *r))).collect();
         let ours: BTreeMap<&str, (u128, u64)> = self.parts.iter().map(|(n, h, r)| (n.as_str(), (*h, *r))).collect();
-        let mut out: Vec<String> = ours.iter().filter(|(n, v)| theirs.get(*n) != Some(v)).map(|(n, _)| n.to_string()).collect();
+        let mut out: Vec<String> = ours
+            .iter()
+            .filter(|(n, v)| theirs.get(*n) != Some(v))
+            .map(|(n, _)| n.to_string())
+            .collect();
         out.extend(theirs.keys().filter(|n| !ours.contains_key(*n)).map(|n| n.to_string()));
         out
     }
@@ -107,7 +130,10 @@ pub struct Replay {
 impl Replay {
     /// The bundle for `tick` (empty when the replay has none).
     pub fn bundle(&self, tick: u64) -> TickBundle {
-        self.bundles.get(&tick).cloned().unwrap_or_else(|| TickBundle::new(tick))
+        self.bundles
+            .get(&tick)
+            .cloned()
+            .unwrap_or_else(|| TickBundle::new(tick))
     }
 
     pub fn header(&self) -> Result<&Header> {
@@ -129,7 +155,9 @@ impl Replay {
             ensure!(at + 5 <= bytes.len(), "truncated record header at byte {at}");
             let kind = bytes[at];
             let len = u32::from_le_bytes(bytes[at + 1..at + 5].try_into().unwrap()) as usize;
-            let payload = bytes.get(at + 5..at + 5 + len).with_context(|| format!("truncated record at byte {at}"))?;
+            let payload = bytes
+                .get(at + 5..at + 5 + len)
+                .with_context(|| format!("truncated record at byte {at}"))?;
             at += 5 + len;
             let mut p = Reader { bytes: payload, at: 0 };
             match kind {
@@ -143,12 +171,27 @@ impl Replay {
                         config.insert(p.string()?, p.string()?);
                     }
                     let checkpoint_every = p.u64()?;
-                    r.header = Some(Header { engine, module_hash, schema_hash, param, config, checkpoint_every });
+                    r.header = Some(Header {
+                        engine,
+                        module_hash,
+                        schema_hash,
+                        param,
+                        config,
+                        checkpoint_every,
+                    });
                 }
                 BUNDLE => {
                     let (b, used) = TickBundle::decode(payload)?;
-                    ensure!(used == payload.len(), "bundle record with {} spare bytes", payload.len() - used);
-                    ensure!(r.bundles.last_key_value().is_none_or(|(t, _)| *t < b.tick), "bundles out of tick order at tick {}", b.tick);
+                    ensure!(
+                        used == payload.len(),
+                        "bundle record with {} spare bytes",
+                        payload.len() - used
+                    );
+                    ensure!(
+                        r.bundles.last_key_value().is_none_or(|(t, _)| *t < b.tick),
+                        "bundles out of tick order at tick {}",
+                        b.tick
+                    );
                     r.bundles.insert(b.tick, b);
                 }
                 CHECKPOINT => {
@@ -166,7 +209,11 @@ impl Replay {
                 }
                 other => bail!("unknown record kind {other}"),
             }
-            ensure!(p.at == payload.len() || kind == BUNDLE, "record kind {kind} has {} spare bytes", payload.len() - p.at);
+            ensure!(
+                p.at == payload.len() || kind == BUNDLE,
+                "record kind {kind} has {} spare bytes",
+                payload.len() - p.at
+            );
         }
         ensure!(r.header.is_some(), "the replay has no header");
         ensure!(ended, "the replay has no end record (recording stopped early?)");
@@ -278,28 +325,60 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("map".into(), "water".into());
         config.insert("map_cells".into(), "2560".into());
-        Header { engine: "0.0.1".into(), module_hash: 1, schema_hash: 2, param: 10_000, config, checkpoint_every: 30 }
+        Header {
+            engine: "0.0.1".into(),
+            module_hash: 1,
+            schema_hash: 2,
+            param: 10_000,
+            config,
+            checkpoint_every: 30,
+        }
     }
 
     #[test]
     fn replays_round_trip_and_headers_name_differences() {
         let mut rec = Recorder::new(Vec::new(), &header()).unwrap();
         rec.bundle(&TickBundle::new(3)).unwrap(); // empty: not written
-        let b = TickBundle { tick: 5, commands: vec![Command { player: 1, stream: 4, bytes: vec![9; 8] }] };
+        let b = TickBundle {
+            tick: 5,
+            commands: vec![Command {
+                player: 1,
+                stream: 4,
+                bytes: vec![9; 8],
+            }],
+        };
         rec.bundle(&b).unwrap();
-        let c = Checkpoint { tick: 30, total: 77, parts: vec![("Body".into(), 5, 100), ("nav".into(), 6, 0)] };
+        let c = Checkpoint {
+            tick: 30,
+            total: 77,
+            parts: vec![("Body".into(), 5, 100), ("nav".into(), 6, 0)],
+        };
         rec.checkpoint(&c).unwrap();
         let bytes = rec.finish(60).unwrap();
         let r = Replay::decode(&bytes).unwrap();
         assert_eq!(r.header.as_ref(), Some(&header()));
-        assert_eq!((r.bundles.len(), r.bundle(5), r.bundle(3).commands.len(), r.end), (1, b, 0, 60));
+        assert_eq!(
+            (r.bundles.len(), r.bundle(5), r.bundle(3).commands.len(), r.end),
+            (1, b, 0, 60)
+        );
         assert_eq!(r.checkpoints, vec![c.clone()]);
         assert!(Replay::decode(&bytes[..bytes.len() - 3]).is_err(), "truncated");
-        assert!(Replay::decode(&bytes[..bytes.len() - 13]).unwrap_err().to_string().contains("end record"));
+        assert!(
+            Replay::decode(&bytes[..bytes.len() - 13])
+                .unwrap_err()
+                .to_string()
+                .contains("end record")
+        );
 
         let mut other = header();
         other.config.insert("map_cells".into(), "512".into());
-        assert!(header().check(&other).unwrap_err().to_string().contains("map_cells = 2560 in the replay, 512 here"));
+        assert!(
+            header()
+                .check(&other)
+                .unwrap_err()
+                .to_string()
+                .contains("map_cells = 2560 in the replay, 512 here")
+        );
         other = header();
         other.param = 3;
         assert!(header().check(&other).unwrap_err().to_string().contains("parameter"));

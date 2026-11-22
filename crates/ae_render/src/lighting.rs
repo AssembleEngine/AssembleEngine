@@ -102,7 +102,11 @@ pub fn target_ev100(scene_ev100: f32, mean_log2: f32) -> f32 {
 /// `shaders/exposure_adapt.comp`.
 pub fn adapt_ev100(current: f32, target: f32, dt: f32) -> f32 {
     let target = target.clamp(MIN_EV100, MAX_EV100);
-    let rate = if target > current { TOWARD_BRIGHTER_PER_SECOND } else { TOWARD_DARKER_PER_SECOND };
+    let rate = if target > current {
+        TOWARD_BRIGHTER_PER_SECOND
+    } else {
+        TOWARD_DARKER_PER_SECOND
+    };
     let blend = 1.0 - (-rate * dt).exp();
     (current + (target - current) * blend).clamp(MIN_EV100, MAX_EV100)
 }
@@ -155,11 +159,17 @@ mod tests {
 
     #[test]
     fn tints_keep_their_luminance() {
-        for space in [crate::colorspace::WorkingSpace::Bt709, crate::colorspace::WorkingSpace::Bt2020] {
+        for space in [
+            crate::colorspace::WorkingSpace::Bt709,
+            crate::colorspace::WorkingSpace::Bt2020,
+        ] {
             assert!((space.gamut().luminance(sun_tint(space)) - 1.0).abs() < 1e-5);
             assert!((space.gamut().luminance(sky_tint(space)) - 1.0).abs() < 1e-5);
             // The same physical colour: white and luminance kept.
-            assert!((space.gamut().luminance(sky_radiance(space)) - super::SKY_ILLUMINANCE / std::f32::consts::PI).abs() < 1e-2);
+            assert!(
+                (space.gamut().luminance(sky_radiance(space)) - super::SKY_ILLUMINANCE / std::f32::consts::PI).abs()
+                    < 1e-2
+            );
         }
     }
 

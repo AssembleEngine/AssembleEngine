@@ -19,7 +19,10 @@ struct Record {
 
 impl Record {
     fn new(kind: u32) -> Self {
-        let mut r = Record { bytes: Vec::new(), patches: Vec::new() };
+        let mut r = Record {
+            bytes: Vec::new(),
+            patches: Vec::new(),
+        };
         r.u32(kind);
         r.u32(0); // length, fixed in finish()
         r
@@ -43,12 +46,14 @@ impl Record {
     fn patch_u32(&mut self, value: Tokens) {
         let at = self.bytes.len();
         self.u32(0);
-        self.patches.push(quote! { ::ae_sdk::abi::put_u32(&mut __b, #at, (#value) as u32); });
+        self.patches
+            .push(quote! { ::ae_sdk::abi::put_u32(&mut __b, #at, (#value) as u32); });
     }
     fn patch_u64(&mut self, value: Tokens) {
         let at = self.bytes.len();
         self.u64(0);
-        self.patches.push(quote! { ::ae_sdk::abi::put_u64(&mut __b, #at, (#value) as u64); });
+        self.patches
+            .push(quote! { ::ae_sdk::abi::put_u64(&mut __b, #at, (#value) as u64); });
     }
     /// A `const` expression of type `[u8; N]`.
     fn finish(mut self) -> (usize, Tokens) {
@@ -57,7 +62,10 @@ impl Record {
         let n = self.bytes.len();
         let bytes = &self.bytes;
         let patches = &self.patches;
-        (n, quote! { { let mut __b: [u8; #n] = [#(#bytes),*]; #(#patches)* __b } })
+        (
+            n,
+            quote! { { let mut __b: [u8; #n] = [#(#bytes),*]; #(#patches)* __b } },
+        )
     }
 }
 
@@ -113,7 +121,10 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
         })?;
     }
     if !repr_c {
-        return Err(Error::new_spanned(ty, "components need #[repr(C)]: the host and other modules read their layout"));
+        return Err(Error::new_spanned(
+            ty,
+            "components need #[repr(C)]: the host and other modules read their layout",
+        ));
     }
     let name = ty.to_string();
     let mut id = abi::name_id(&name);
@@ -134,12 +145,22 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
         })?;
     }
     if command && !event {
-        return Err(Error::new_spanned(ty, "`command` needs `event`: commands are events players send"));
+        return Err(Error::new_spanned(
+            ty,
+            "`command` needs `event`: commands are events players send",
+        ));
     }
-    let Data::Struct(data) = &input.data else { return Err(Error::new_spanned(ty, "components must be structs")) };
-    let Fields::Named(fields) = &data.fields else { return Err(Error::new_spanned(ty, "components need named fields")) };
+    let Data::Struct(data) = &input.data else {
+        return Err(Error::new_spanned(ty, "components must be structs"));
+    };
+    let Fields::Named(fields) = &data.fields else {
+        return Err(Error::new_spanned(ty, "components need named fields"));
+    };
     if fields.named.is_empty() {
-        return Err(Error::new_spanned(ty, "components need at least one field (tags are not supported yet)"));
+        return Err(Error::new_spanned(
+            ty,
+            "components need at least one field (tags are not supported yet)",
+        ));
     }
 
     let mut r = Record::new(abi::KIND_COMPONENT);
@@ -173,10 +194,13 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
                     bytes = true;
                 } else if m.path.is_ident("view") {
                     let lit: syn::LitStr = m.value()?.parse()?;
-                    let class = abi::view_class(&lit.value()).ok_or_else(|| m.error("view classes: never, always, owner, los, radar, ghost"))?;
+                    let class = abi::view_class(&lit.value())
+                        .ok_or_else(|| m.error("view classes: never, always, owner, los, radar, ghost"))?;
                     flags = (flags & !abi::FIELD_VIEW_MASK) | class << abi::FIELD_VIEW_SHIFT;
                 } else {
-                    return Err(m.error("expected `id = N`, `unhashed`, `unsynced`, `unsaved`, `bytes` or `view = \"...\"`"));
+                    return Err(
+                        m.error("expected `id = N`, `unhashed`, `unsynced`, `unsaved`, `bytes` or `view = \"...\"`")
+                    );
                 }
                 Ok(())
             })?;
@@ -199,7 +223,11 @@ fn derive(input: DeriveInput) -> syn::Result<Tokens> {
         r.raw_name(&fname_s);
     }
     let (n, value) = r.finish();
-    let trait_path = if event { quote!(::ae_sdk::Event) } else { quote!(::ae_sdk::Component) };
+    let trait_path = if event {
+        quote!(::ae_sdk::Event)
+    } else {
+        quote!(::ae_sdk::Component)
+    };
     let section = section_static(&format_ident!("__AE_SCHEMA_{}", ty), n, quote!(<#ty>::__AE_SCHEMA));
     Ok(quote! {
         impl #ty {
@@ -232,7 +260,9 @@ struct SystemArgs {
 fn list<T: syn::parse::Parse>(m: &syn::meta::ParseNestedMeta) -> syn::Result<Vec<T>> {
     let content;
     parenthesized!(content in m.input);
-    Ok(Punctuated::<T, Token![,]>::parse_terminated(&content)?.into_iter().collect())
+    Ok(Punctuated::<T, Token![,]>::parse_terminated(&content)?
+        .into_iter()
+        .collect())
 }
 
 /// `#[system(...)]` on `fn name(run: &ae_sdk::Run)`. Exports
@@ -249,7 +279,11 @@ pub fn system(args: TokenStream, item: TokenStream) -> TokenStream {
     let parser = syn::meta::parser(|m| {
         let is = |s: &str| m.path.is_ident(s);
         if is("write") || is("read") {
-            let access = if is("write") { abi::ACCESS_WRITE } else { abi::ACCESS_READ };
+            let access = if is("write") {
+                abi::ACCESS_WRITE
+            } else {
+                abi::ACCESS_READ
+            };
             for p in list::<Path>(&m)? {
                 a.terms.push((p, access));
             }
@@ -266,7 +300,10 @@ pub fn system(args: TokenStream, item: TokenStream) -> TokenStream {
         } else if is("once") {
             a.cadence = (abi::CADENCE_ONCE, 0, 0);
         } else if is("every") || is("staggered") {
-            let nums: Vec<u32> = list::<LitInt>(&m)?.iter().map(|l| l.base10_parse()).collect::<syn::Result<_>>()?;
+            let nums: Vec<u32> = list::<LitInt>(&m)?
+                .iter()
+                .map(|l| l.base10_parse())
+                .collect::<syn::Result<_>>()?;
             a.cadence = match (is("every"), nums.as_slice()) {
                 (true, [n]) => (abi::CADENCE_EVERY, *n, 0),
                 (true, [n, p]) => (abi::CADENCE_EVERY, *n, *p),
@@ -286,13 +323,30 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
     let name = &func.sig.ident;
     let name_s = name.to_string();
     if a.terms.len() > abi::MAX_TERMS {
-        return Err(Error::new_spanned(name, format!("at most {} query terms", abi::MAX_TERMS)));
+        return Err(Error::new_spanned(
+            name,
+            format!("at most {} query terms", abi::MAX_TERMS),
+        ));
     }
     if a.reads.len() > abi::MAX_EVENT_READS {
-        return Err(Error::new_spanned(name, format!("at most {} event streams read", abi::MAX_EVENT_READS)));
+        return Err(Error::new_spanned(
+            name,
+            format!("at most {} event streams read", abi::MAX_EVENT_READS),
+        ));
     }
     let mut r = Record::new(abi::KIND_SYSTEM);
-    for v in [a.mode, a.cadence.0, a.cadence.1, a.cadence.2, a.terms.len() as u32, a.emits.len() as u32, a.reads.len() as u32, a.after.len() as u32, name_s.len() as u32, 0] {
+    for v in [
+        a.mode,
+        a.cadence.0,
+        a.cadence.1,
+        a.cadence.2,
+        a.terms.len() as u32,
+        a.emits.len() as u32,
+        a.reads.len() as u32,
+        a.after.len() as u32,
+        name_s.len() as u32,
+        0,
+    ] {
         r.u32(v);
     }
     r.raw_name(&name_s);

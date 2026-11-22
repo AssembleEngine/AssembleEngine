@@ -29,12 +29,26 @@ pub const SCENE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DemoPass {
     /// Copy the per-frame parameters from staging.
-    Upload { src: ResourceId, dst: ResourceId },
+    Upload {
+        src: ResourceId,
+        dst: ResourceId,
+    },
     Triangle,
     /// Filter `mode` from `src` to `dst` (see `demo_filter.comp`).
-    Filter { mode: i32, src: ResourceId, dst: ResourceId, params: ResourceId },
-    Composite { left: ResourceId, right: ResourceId },
-    Readback { src: ResourceId, dst: ResourceId },
+    Filter {
+        mode: i32,
+        src: ResourceId,
+        dst: ResourceId,
+        params: ResourceId,
+    },
+    Composite {
+        left: ResourceId,
+        right: ResourceId,
+    },
+    Readback {
+        src: ResourceId,
+        dst: ResourceId,
+    },
     /// Terminal host-visibility pass for the readback buffer (records
     /// nothing; its barrier makes the copy visible to the host).
     HostRead,
@@ -82,11 +96,20 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
     let work_usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
     let scene = graph.image(
         "scene",
-        ImageDesc::color_2d(SCENE_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | work_usage),
+        ImageDesc::color_2d(
+            SCENE_FORMAT,
+            width,
+            height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | work_usage,
+        ),
         ResourceClass::Transient,
     );
     let work = |graph: &mut FrameGraph<DemoPass>, name: &str| {
-        graph.image(name, ImageDesc::color_2d(SCENE_FORMAT, width, height, work_usage), ResourceClass::Transient)
+        graph.image(
+            name,
+            ImageDesc::color_2d(SCENE_FORMAT, width, height, work_usage),
+            ResourceClass::Transient,
+        )
     };
     let params_staging = graph.buffer(
         "params staging",
@@ -141,11 +164,21 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
     };
 
     graph
-        .pass("upload params", PassKind::Transfer, DemoPass::Upload { src: params_staging, dst: params })
+        .pass(
+            "upload params",
+            PassKind::Transfer,
+            DemoPass::Upload {
+                src: params_staging,
+                dst: params,
+            },
+        )
         .access(params_staging, Role::TransferSrc)
         .discard(params, Role::TransferDst)
         .id();
-    graph.pass("triangle", PassKind::Graphics, DemoPass::Triangle).color(scene, LoadOp::Clear).id();
+    graph
+        .pass("triangle", PassKind::Graphics, DemoPass::Triangle)
+        .color(scene, LoadOp::Clear)
+        .id();
     let filter = |graph: &mut FrameGraph<DemoPass>, name: &str, mode, src, dst| {
         graph
             .pass(name, PassKind::Compute, DemoPass::Filter { mode, src, dst, params })
@@ -159,7 +192,11 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
     filter(&mut graph, "invert", 2, scene, b1);
     filter(&mut graph, "tint", 3, b1, b2);
     graph
-        .pass("composite", PassKind::Graphics, DemoPass::Composite { left: a2, right: b2 })
+        .pass(
+            "composite",
+            PassKind::Graphics,
+            DemoPass::Composite { left: a2, right: b2 },
+        )
         .sampled(a2, ShaderStage::Fragment)
         .sampled(b2, ShaderStage::Fragment)
         .color(target, LoadOp::DontCare)
@@ -167,7 +204,14 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
     match readback {
         Some(buffer) => {
             graph
-                .pass("readback", PassKind::Transfer, DemoPass::Readback { src: target, dst: buffer })
+                .pass(
+                    "readback",
+                    PassKind::Transfer,
+                    DemoPass::Readback {
+                        src: target,
+                        dst: buffer,
+                    },
+                )
                 .access(target, Role::TransferSrc)
                 .discard(buffer, Role::TransferDst)
                 .id();
@@ -178,7 +222,11 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
                 .id();
         }
         None => {
-            graph.pass("present", PassKind::Present, DemoPass::Present).present(target).root().id();
+            graph
+                .pass("present", PassKind::Present, DemoPass::Present)
+                .present(target)
+                .root()
+                .id();
         }
     }
     (
@@ -197,8 +245,8 @@ mod gpu {
     use super::*;
     use crate::device::GpuDevice;
     use crate::executor::{PassContext, Recorder};
-    use ae_framegraph::PassId;
     use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
+    use ae_framegraph::PassId;
     use anyhow::Result;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -244,8 +292,14 @@ mod gpu {
             let composite_set_layout = pipeline::set_layout(
                 device,
                 &[
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT),
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, vk::ShaderStageFlags::FRAGMENT),
+                    (
+                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        vk::ShaderStageFlags::FRAGMENT,
+                    ),
+                    (
+                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        vk::ShaderStageFlags::FRAGMENT,
+                    ),
                 ],
             )?;
             let compute_layout =
@@ -531,7 +585,12 @@ mod gpu {
     impl crate::thread::RenderApp for DemoApp {
         type Pass = DemoPass;
 
-        fn create(&mut self, gpu: &Arc<GpuDevice>, target: crate::thread::TargetInfo, frames_in_flight: usize) -> Result<()> {
+        fn create(
+            &mut self,
+            gpu: &Arc<GpuDevice>,
+            target: crate::thread::TargetInfo,
+            frames_in_flight: usize,
+        ) -> Result<()> {
             let format = target.format;
             self.renderer = Some(DemoRenderer::new(gpu.clone(), format, frames_in_flight)?);
             self.staging = (0..frames_in_flight)
@@ -550,10 +609,7 @@ mod gpu {
             Ok(())
         }
 
-        fn declare(
-            &mut self,
-            target: crate::thread::TargetInfo,
-        ) -> Result<(FrameGraph<DemoPass>, Option<ResourceId>)> {
+        fn declare(&mut self, target: crate::thread::TargetInfo) -> Result<(FrameGraph<DemoPass>, Option<ResourceId>)> {
             let (graph, resources) = build_demo_graph(target.extent, DemoOutput::Present { format: target.format });
             self.params_staging = Some(resources.params_staging);
             Ok((graph, Some(resources.target)))
@@ -636,7 +692,12 @@ mod tests {
     #[test]
     fn demo_graph_bakes_and_aliases() {
         let extent = vk::Extent2D { width: 64, height: 32 };
-        for output in [DemoOutput::Readback, DemoOutput::Present { format: vk::Format::B8G8R8A8_SRGB }] {
+        for output in [
+            DemoOutput::Readback,
+            DemoOutput::Present {
+                format: vk::Format::B8G8R8A8_SRGB,
+            },
+        ] {
             let (graph, _) = build_demo_graph(extent, output);
             let plain = bake(&graph, BakeOptions { aliasing: false }).expect("bakes");
             let aliased = bake(&graph, BakeOptions::default()).expect("bakes");

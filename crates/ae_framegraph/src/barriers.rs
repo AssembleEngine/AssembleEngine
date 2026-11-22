@@ -141,7 +141,11 @@ pub fn transition(state: &mut AccessState, usage: Usage, image: bool, discard: b
         } else {
             state.layout
         },
-        new_layout: if image { usage.layout } else { vk::ImageLayout::UNDEFINED },
+        new_layout: if image {
+            usage.layout
+        } else {
+            vk::ImageLayout::UNDEFINED
+        },
     };
     let layout_change = image && state.layout != usage.layout;
     let barrier = if layout_change {
@@ -229,9 +233,7 @@ pub fn plan_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        BakeOptions, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, bake,
-    };
+    use crate::{BakeOptions, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, ShaderStage, bake};
     use std::collections::BTreeMap;
 
     type Store = BTreeMap<StateKey, AccessState>;
@@ -243,13 +245,28 @@ mod tests {
     #[test]
     fn read_after_read_emits_nothing() {
         let mut state = AccessState::default();
-        let write = transition(&mut state, usage(Role::StorageImageWrite(ShaderStage::Compute)), true, true);
+        let write = transition(
+            &mut state,
+            usage(Role::StorageImageWrite(ShaderStage::Compute)),
+            true,
+            true,
+        );
         assert!(write.is_some(), "UNDEFINED -> GENERAL");
-        let first = transition(&mut state, usage(Role::StorageImageRead(ShaderStage::Compute)), true, false);
+        let first = transition(
+            &mut state,
+            usage(Role::StorageImageRead(ShaderStage::Compute)),
+            true,
+            false,
+        );
         let barrier = first.expect("write -> read needs visibility");
         assert_eq!(barrier.src_access, vk::AccessFlags2::SHADER_STORAGE_WRITE);
         assert_eq!(barrier.old_layout, barrier.new_layout, "no layout change");
-        let second = transition(&mut state, usage(Role::StorageImageRead(ShaderStage::Compute)), true, false);
+        let second = transition(
+            &mut state,
+            usage(Role::StorageImageRead(ShaderStage::Compute)),
+            true,
+            false,
+        );
         assert_eq!(second, None, "read after read");
     }
 
@@ -261,16 +278,36 @@ mod tests {
         let to_transfer = transition(&mut state, usage(Role::TransferSrc), true, false).unwrap();
         assert_eq!(to_transfer.old_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         assert_eq!(to_transfer.new_layout, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        assert!(to_transfer.src_stages.contains(vk::PipelineStageFlags2::FRAGMENT_SHADER));
+        assert!(
+            to_transfer
+                .src_stages
+                .contains(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        );
     }
 
     #[test]
     fn discard_uses_undefined_and_write_after_read_syncs() {
         let mut state = AccessState::default();
-        transition(&mut state, usage(Role::StorageImageWrite(ShaderStage::Compute)), true, true);
-        transition(&mut state, usage(Role::StorageImageRead(ShaderStage::Fragment)), true, false);
+        transition(
+            &mut state,
+            usage(Role::StorageImageWrite(ShaderStage::Compute)),
+            true,
+            true,
+        );
+        transition(
+            &mut state,
+            usage(Role::StorageImageRead(ShaderStage::Fragment)),
+            true,
+            false,
+        );
         // Same layout, a write after a read: WAR dependency, no transition.
-        let war = transition(&mut state, usage(Role::StorageImageWrite(ShaderStage::Compute)), true, true).unwrap();
+        let war = transition(
+            &mut state,
+            usage(Role::StorageImageWrite(ShaderStage::Compute)),
+            true,
+            true,
+        )
+        .unwrap();
         assert!(war.src_stages.contains(vk::PipelineStageFlags2::FRAGMENT_SHADER));
         assert_eq!(war.new_layout, vk::ImageLayout::GENERAL);
         // A discarding change of layout starts from UNDEFINED.
@@ -291,22 +328,38 @@ mod tests {
             .expect("the fragment stage has not seen the write");
         assert_eq!(second.old_layout, second.new_layout, "no second transition");
         assert_eq!(second.src_access, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
-        assert!(second.src_stages.contains(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT));
+        assert!(
+            second
+                .src_stages
+                .contains(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        );
         assert!(second.src_stages.contains(vk::PipelineStageFlags2::VERTEX_SHADER));
         assert_eq!(second.dst_stages, vk::PipelineStageFlags2::FRAGMENT_SHADER);
         let third = transition(&mut state, usage(Role::Sampled(ShaderStage::Fragment)), true, false);
         assert_eq!(third, None, "read after read");
         // A later write waits for both read stages and the transition.
         let war = transition(&mut state, usage(Role::ColorAttachment(LoadOp::Clear)), true, true).unwrap();
-        assert!(war.src_stages.contains(vk::PipelineStageFlags2::VERTEX_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER));
+        assert!(
+            war.src_stages
+                .contains(vk::PipelineStageFlags2::VERTEX_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        );
     }
 
     #[test]
     fn buffers_never_change_layout_and_first_use_is_free() {
         let mut state = AccessState::default();
         assert_eq!(transition(&mut state, usage(Role::TransferDst), false, true), None);
-        let read = transition(&mut state, usage(Role::StorageBufferRead(ShaderStage::Vertex)), false, false).unwrap();
-        assert_eq!((read.old_layout, read.new_layout), (vk::ImageLayout::UNDEFINED, vk::ImageLayout::UNDEFINED));
+        let read = transition(
+            &mut state,
+            usage(Role::StorageBufferRead(ShaderStage::Vertex)),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (read.old_layout, read.new_layout),
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::UNDEFINED)
+        );
         assert_eq!(read.src_access, vk::AccessFlags2::TRANSFER_WRITE);
     }
 
@@ -320,10 +373,19 @@ mod tests {
         );
         let back = graph.image(
             "backbuffer",
-            ImageDesc::color_2d(vk::Format::B8G8R8A8_UNORM, 16, 16, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+            ImageDesc::color_2d(
+                vk::Format::B8G8R8A8_UNORM,
+                16,
+                16,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            ),
             ResourceClass::Backbuffer,
         );
-        graph.pass("scene", PassKind::Graphics, ()).color(scene, LoadOp::Clear).conditional().id();
+        graph
+            .pass("scene", PassKind::Graphics, ())
+            .color(scene, LoadOp::Clear)
+            .conditional()
+            .id();
         graph
             .pass("composite", PassKind::Graphics, ())
             .sampled(scene, ShaderStage::Fragment)
@@ -348,7 +410,11 @@ mod tests {
             vk::ImageLayout::UNDEFINED,
             "a clear discards, but syncs with last frame's sampling"
         );
-        assert!(frame2[0][0].src_stages.contains(vk::PipelineStageFlags2::FRAGMENT_SHADER));
+        assert!(
+            frame2[0][0]
+                .src_stages
+                .contains(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        );
         let present = frame2[2][0];
         assert_eq!(present.new_layout, vk::ImageLayout::PRESENT_SRC_KHR);
     }
@@ -366,6 +432,10 @@ mod tests {
         assert!(skipped[0].is_empty());
         // The composite still samples `scene` in its existing layout: no
         // transition, and the write from frame 1 is already visible.
-        assert!(skipped[1].iter().all(|barrier| barrier.resource != graph.passes[0].intents[0].resource));
+        assert!(
+            skipped[1]
+                .iter()
+                .all(|barrier| barrier.resource != graph.passes[0].intents[0].resource)
+        );
     }
 }

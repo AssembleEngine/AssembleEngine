@@ -19,14 +19,21 @@ use std::path::Path;
 use std::process::Command;
 
 fn headless(args: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_ae-headless")).args(args).output().expect("run ae-headless");
+    let out = Command::new(env!("CARGO_BIN_EXE_ae-headless"))
+        .args(args)
+        .output()
+        .expect("run ae-headless");
     let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (out.status.success(), text)
 }
 
 /// The `--digest` part lines (name, rows, hash), without the event store's.
 fn parts(out: &str) -> Vec<String> {
-    let p: Vec<String> = out.lines().filter(|l| l.starts_with("    ") && l.contains(" rows ") && !l.contains("(events)")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    let p: Vec<String> = out
+        .lines()
+        .filter(|l| l.starts_with("    ") && l.contains(" rows ") && !l.contains("(events)"))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
     assert!(p.len() > 10, "no digest parts in {out}");
     p
 }
@@ -41,7 +48,11 @@ fn a_skirmish_from_archives_alone() {
     let mut vfs = ae_vfs::Vfs::new();
     vfs.mount(root.join("maps/crossing")).unwrap();
     let map = ae_map::GameMap::load(&vfs).unwrap();
-    assert_eq!(map.to_terrain().digest(), ae_nav::scenario::land_crossing_terrain(256).digest(), "maps/crossing is the land crossing map at 256 cells");
+    assert_eq!(
+        map.to_terrain().digest(),
+        ae_nav::scenario::land_crossing_terrain(256).digest(),
+        "maps/crossing is the land crossing map at 256 cells"
+    );
 
     let mut game: BTreeMap<String, Vec<u8>> = ae_vfs::dir_files(&root.join("content")).unwrap();
     game.insert("module.wasm".into(), ae_sim::build::game("skirmish").unwrap());
@@ -59,18 +70,80 @@ fn a_skirmish_from_archives_alone() {
     // From source the map side and starting tanks come in the parameter;
     // from the archive, the map's start points and the game's defaults.
     let param_hi = (2048u64 >> 8 | 6 << 8).to_string();
-    let common = ["--units", "0", "--ticks", "6500", "--script", "bot", "--workers", "2", "--digest"];
-    let (ok, from_source) = headless(&[&common[..], &["--param-hi", &param_hi, "--game", "skirmish", "--nav", "land", "--map-cells", "256", "--content", root.join("content").to_str().unwrap()]].concat());
+    let common = [
+        "--units",
+        "0",
+        "--ticks",
+        "6500",
+        "--script",
+        "bot",
+        "--workers",
+        "2",
+        "--digest",
+    ];
+    let (ok, from_source) = headless(
+        &[
+            &common[..],
+            &[
+                "--param-hi",
+                &param_hi,
+                "--game",
+                "skirmish",
+                "--nav",
+                "land",
+                "--map-cells",
+                "256",
+                "--content",
+                root.join("content").to_str().unwrap(),
+            ],
+        ]
+        .concat(),
+    );
     assert!(ok, "{from_source}");
     let (ok, from_archive) = headless(&[&common[..], &["--package", one.to_str().unwrap()]].concat());
     assert!(ok, "{from_archive}");
-    assert_eq!(parts(&from_archive), parts(&from_source), "archive:\n{from_archive}\nsource:\n{from_source}");
-    let total = from_archive.split(" digest ").nth(1).and_then(|r| r.split_whitespace().next()).unwrap();
-    assert_eq!(total, "5bdc31cf5379b7760c4b88f1e82fe5e4", "the archive's golden bot match:\n{from_archive}");
+    assert_eq!(
+        parts(&from_archive),
+        parts(&from_source),
+        "archive:\n{from_archive}\nsource:\n{from_source}"
+    );
+    let total = from_archive
+        .split(" digest ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .unwrap();
+    assert_eq!(
+        total, "5bdc31cf5379b7760c4b88f1e82fe5e4",
+        "the archive's golden bot match:\n{from_archive}"
+    );
 
     // Two packages in a library: recorded, replayed by name.
-    let packages = ["--package", "skirmish", "--package", "skirmish-crossing", "--packages", lib_s];
-    let (ok, out) = headless(&[&["--units", "0", "--ticks", "1500", "--script", "bot", "--workers", "2", "--record", rec], &packages[..]].concat());
+    let packages = [
+        "--package",
+        "skirmish",
+        "--package",
+        "skirmish-crossing",
+        "--packages",
+        lib_s,
+    ];
+    let (ok, out) = headless(
+        &[
+            &[
+                "--units",
+                "0",
+                "--ticks",
+                "1500",
+                "--script",
+                "bot",
+                "--workers",
+                "2",
+                "--record",
+                rec,
+            ],
+            &packages[..],
+        ]
+        .concat(),
+    );
     assert!(ok, "{out}");
     let (ok, out) = headless(&["--replay", rec, "--packages", lib_s, "--verify", "--workers", "1"]);
     assert!(ok && out.contains("50 checkpoints match"), "{out}");

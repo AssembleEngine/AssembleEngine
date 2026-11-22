@@ -42,7 +42,12 @@ pub struct Report {
 
 impl Report {
     pub fn new(suite: &str) -> Self {
-        Self { suite: suite.to_string(), commit: current_commit(), machine: machine_id(), records: Vec::new() }
+        Self {
+            suite: suite.to_string(),
+            commit: current_commit(),
+            machine: machine_id(),
+            records: Vec::new(),
+        }
     }
 
     pub fn time(&mut self, metric: &str, sample: crate::measure::Sample) {
@@ -71,7 +76,14 @@ impl Report {
     }
 
     fn push_exact(&mut self, metric: &str, kind: Kind, value: u64, unit: &str) {
-        self.records.push(Record { metric: metric.to_string(), kind, value: value as f64, unit: unit.to_string(), spread: 0.0, tolerance: None });
+        self.records.push(Record {
+            metric: metric.to_string(),
+            kind,
+            value: value as f64,
+            unit: unit.to_string(),
+            spread: 0.0,
+            tolerance: None,
+        });
     }
 
     /// Write to `<dir>/<label>/<suite>.json` and return the path.
@@ -79,7 +91,8 @@ impl Report {
         let dir = dir.join(label);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let path = dir.join(format!("{}.json", self.suite));
-        std::fs::write(&path, serde_json::to_string_pretty(self)? + "\n").with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(&path, serde_json::to_string_pretty(self)? + "\n")
+            .with_context(|| format!("write {}", path.display()))?;
         Ok(path)
     }
 
@@ -130,7 +143,12 @@ pub fn format_value(value: f64, unit: &str) -> String {
 /// Short commit hash, with `-dirty` when the tree has uncommitted changes.
 fn current_commit() -> String {
     let git = |args: &[&str]| {
-        Command::new("git").args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
     match git(&["rev-parse", "--short", "HEAD"]) {
         Some(hash) if !hash.is_empty() => {

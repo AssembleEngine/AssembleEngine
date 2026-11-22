@@ -30,11 +30,23 @@ impl CaptureSpec {
         let mut components = Vec::new();
         let mut out = Vec::new();
         for &(component, field) in fields {
-            let ci = schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
+            let ci = schema
+                .components
+                .iter()
+                .position(|c| c.name == component)
+                .with_context(|| format!("no component `{component}`"))?;
             let decl = &schema.components[ci];
             ensure!(!decl.event, "`{component}` is an event stream");
-            let f = decl.fields.iter().find(|f| f.name == field).with_context(|| format!("`{component}` has no field `{field}`"))?;
-            ensure!(f.size == 4, "`{component}.{field}` is {} bytes; captures take 4-byte fields", f.size);
+            let f = decl
+                .fields
+                .iter()
+                .find(|f| f.name == field)
+                .with_context(|| format!("`{component}` has no field `{field}`"))?;
+            ensure!(
+                f.size == 4,
+                "`{component}.{field}` is {} bytes; captures take 4-byte fields",
+                f.size
+            );
             let term = match components.iter().position(|&c| c == ci) {
                 Some(t) => t,
                 None => {
@@ -44,9 +56,17 @@ impl CaptureSpec {
             };
             out.push((term, f.offset as usize));
         }
-        ensure!(components.len() <= ae_ecs::MAX_QUERY_TERMS, "a capture spans at most {} components", ae_ecs::MAX_QUERY_TERMS);
+        ensure!(
+            components.len() <= ae_ecs::MAX_QUERY_TERMS,
+            "a capture spans at most {} components",
+            ae_ecs::MAX_QUERY_TERMS
+        );
         let sizes = components.iter().map(|&c| schema.components[c].size as usize).collect();
-        Ok(Self { components, fields: out, sizes })
+        Ok(Self {
+            components,
+            fields: out,
+            sizes,
+        })
     }
 
     pub fn field_count(&self) -> usize {

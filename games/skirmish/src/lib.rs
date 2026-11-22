@@ -39,11 +39,56 @@ use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, MapStart, MoveOrder, MovementClass
 use ae_sdk::{Component, Entity, Run, Spawn, despawn, emit, schedule, system};
 
 ae_sdk::movement_classes![
-    MovementClass { name: "Scout", clearance_cells: 1, max_slope: 135, radius: CELL_SIZE * 0.34, speed: CELL_SIZE * 14.0, min_depth: 0, max_depth: 20, hover: false },
-    MovementClass { name: "Heavy", clearance_cells: 2, max_slope: 95, radius: CELL_SIZE * 0.52, speed: CELL_SIZE * 10.0, min_depth: 0, max_depth: 20, hover: false },
-    MovementClass { name: "Ship", clearance_cells: 2, max_slope: 60, radius: CELL_SIZE * 0.62, speed: CELL_SIZE * 9.0, min_depth: 30, max_depth: ANY_DEPTH, hover: false },
-    MovementClass { name: "Hover", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.40, speed: CELL_SIZE * 13.0, min_depth: 0, max_depth: ANY_DEPTH, hover: true },
-    MovementClass { name: "Amphibious", clearance_cells: 1, max_slope: 110, radius: CELL_SIZE * 0.48, speed: CELL_SIZE * 9.0, min_depth: 0, max_depth: ANY_DEPTH, hover: false },
+    MovementClass {
+        name: "Scout",
+        clearance_cells: 1,
+        max_slope: 135,
+        radius: CELL_SIZE * 0.34,
+        speed: CELL_SIZE * 14.0,
+        min_depth: 0,
+        max_depth: 20,
+        hover: false
+    },
+    MovementClass {
+        name: "Heavy",
+        clearance_cells: 2,
+        max_slope: 95,
+        radius: CELL_SIZE * 0.52,
+        speed: CELL_SIZE * 10.0,
+        min_depth: 0,
+        max_depth: 20,
+        hover: false
+    },
+    MovementClass {
+        name: "Ship",
+        clearance_cells: 2,
+        max_slope: 60,
+        radius: CELL_SIZE * 0.62,
+        speed: CELL_SIZE * 9.0,
+        min_depth: 30,
+        max_depth: ANY_DEPTH,
+        hover: false
+    },
+    MovementClass {
+        name: "Hover",
+        clearance_cells: 1,
+        max_slope: 110,
+        radius: CELL_SIZE * 0.40,
+        speed: CELL_SIZE * 13.0,
+        min_depth: 0,
+        max_depth: ANY_DEPTH,
+        hover: true
+    },
+    MovementClass {
+        name: "Amphibious",
+        clearance_cells: 1,
+        max_slope: 110,
+        radius: CELL_SIZE * 0.48,
+        speed: CELL_SIZE * 9.0,
+        min_depth: 0,
+        max_depth: ANY_DEPTH,
+        hover: false
+    },
 ];
 
 // The engine services' components (Def, Team and Body are only ever
@@ -267,7 +312,13 @@ fn bases(run: &Run, starts: &[MapStart]) -> [(f32, f32); ALLIES as usize] {
 }
 
 fn spawn(def: &str, ally: u32, x: f32, y: f32) {
-    emit(&SpawnRequest { def: def_id(def), ally, reserved: 0, x, y });
+    emit(&SpawnRequest {
+        def: def_id(def),
+        ally,
+        reserved: 0,
+        x,
+        y,
+    });
 }
 
 #[system(reads_events(MapStart), emits(SpawnRequest))]
@@ -276,7 +327,15 @@ fn start(run: &Run) {
         return;
     }
     let at = bases(run, run.events::<MapStart>());
-    Spawn::new().with(&Match { winner: NO_WINNER, reserved: 0, ended_at: 0, base_x: at.map(|b| b.0), base_y: at.map(|b| b.1) }).submit();
+    Spawn::new()
+        .with(&Match {
+            winner: NO_WINNER,
+            reserved: 0,
+            ended_at: 0,
+            base_x: at.map(|b| b.0),
+            base_y: at.map(|b| b.1),
+        })
+        .submit();
     let tanks = match (run.param() >> 40) & 0xFF {
         0 => START_TANKS,
         n => n,
@@ -323,7 +382,13 @@ fn produce(run: &Run) {
         } else if f.progress >= f.build_ticks {
             f.progress = 0;
             let b = bodies[i];
-            emit(&SpawnRequest { def: f.builds, ally: teams[i].ally, reserved: 0, x: b.x + b.radius + 12.0, y: b.y + b.radius + 12.0 });
+            emit(&SpawnRequest {
+                def: f.builds,
+                ally: teams[i].ally,
+                reserved: 0,
+                x: b.x + b.radius + 12.0,
+                y: b.y + b.radius + 12.0,
+            });
         } else {
             f.progress += 1;
         }
@@ -336,7 +401,11 @@ fn publish_bases(run: &Run) {
     let matches = run.read::<Match>();
     for i in run.rows() {
         for ally in 0..ALLIES {
-            emit(&Base { ally, x: matches[i].base_x[ally as usize], y: matches[i].base_y[ally as usize] });
+            emit(&Base {
+                ally,
+                x: matches[i].base_x[ally as usize],
+                y: matches[i].base_y[ally as usize],
+            });
         }
     }
 }
@@ -400,16 +469,37 @@ fn push(q: &mut Queue, kind: u32, x: f32, y: f32) {
 ///
 /// Runs after `scan` (this tick's `Presence`); nav takes its orders next
 /// tick.
-#[system(serial, read(Team, Body, NavAgent, Weapon), write(Queue), reads_events(UnitCommand, Presence, Base), emits(MoveOrder))]
+#[system(
+    serial,
+    read(Team, Body, NavAgent, Weapon),
+    write(Queue),
+    reads_events(UnitCommand, Presence, Base),
+    emits(MoveOrder)
+)]
 fn orders(run: &Run) {
-    let (teams, bodies, agents, weapons, queues, ids) = (run.read::<Team>(), run.read::<Body>(), run.read::<NavAgent>(), run.read::<Weapon>(), run.write::<Queue>(), run.entities());
+    let (teams, bodies, agents, weapons, queues, ids) = (
+        run.read::<Team>(),
+        run.read::<Body>(),
+        run.read::<NavAgent>(),
+        run.read::<Weapon>(),
+        run.write::<Queue>(),
+        run.entities(),
+    );
     let tick = run.tick();
-    let mut cmds: Vec<(u64, usize)> = run.events::<UnitCommand>().iter().enumerate().map(|(k, c)| (c.entity.0, k)).collect();
+    let mut cmds: Vec<(u64, usize)> = run
+        .events::<UnitCommand>()
+        .iter()
+        .enumerate()
+        .map(|(k, c)| (c.entity.0, k))
+        .collect();
     cmds.sort_unstable();
     let all = run.events::<UnitCommand>();
     let seen = run.events::<Presence>();
     let bases = run.events::<Base>();
-    let mut groups = Groups { tick, points: Vec::new() };
+    let mut groups = Groups {
+        tick,
+        points: Vec::new(),
+    };
     for i in run.rows() {
         let (q, e, ally, b) = (&mut queues[i], ids[i], teams[i].ally, bodies[i]);
         if q.state == state::NEW
@@ -499,11 +589,23 @@ fn orders(run: &Run) {
 fn scan(run: &Run) {
     let (teams, bodies, ids) = (run.read::<Team>(), run.read::<Body>(), run.entities());
     for i in run.rows() {
-        emit(&Presence { entity: ids[i], ally: teams[i].ally, reserved: 0, x: bodies[i].x, y: bodies[i].y });
+        emit(&Presence {
+            entity: ids[i],
+            ally: teams[i].ally,
+            reserved: 0,
+            x: bodies[i].x,
+            y: bodies[i].y,
+        });
     }
 }
 
-#[system(serial, read(Team, Body), write(Weapon), reads_events(Presence), emits(DamageRequest))]
+#[system(
+    serial,
+    read(Team, Body),
+    write(Weapon),
+    reads_events(Presence),
+    emits(DamageRequest)
+)]
 fn fire(run: &Run) {
     let (teams, bodies, weapons) = (run.read::<Team>(), run.read::<Body>(), run.write::<Weapon>());
     let seen = run.events::<Presence>();
@@ -528,7 +630,11 @@ fn fire(run: &Run) {
             }
         }
         if let Some((_, target)) = best {
-            emit(&DamageRequest { target, amount: w.damage, ally: me });
+            emit(&DamageRequest {
+                target,
+                amount: w.damage,
+                ally: me,
+            });
             w.cooldown = w.reload;
         }
     }
@@ -540,20 +646,35 @@ fn armor(run: &Run) {
     let mut by_entity: Vec<(u64, u32)> = run.rows().map(|i| (ids[i].0, armors[i].value)).collect();
     by_entity.sort_unstable();
     for r in run.events::<DamageRequest>() {
-        let a = by_entity.binary_search_by_key(&r.target.0, |e| e.0).map_or(0, |k| by_entity[k].1);
-        emit(&Damage { target: r.target, amount: r.amount.saturating_sub(a).max(1), ally: r.ally });
+        let a = by_entity
+            .binary_search_by_key(&r.target.0, |e| e.0)
+            .map_or(0, |k| by_entity[k].1);
+        emit(&Damage {
+            target: r.target,
+            amount: r.amount.saturating_sub(a).max(1),
+            ally: r.ally,
+        });
     }
 }
 
 #[system(serial, read(Team), write(Health), reads_events(Damage))]
 fn apply(run: &Run) {
     let (teams, health, ids) = (run.read::<Team>(), run.write::<Health>(), run.entities());
-    let mut hits: Vec<(u64, u32, u32)> = run.events::<Damage>().iter().map(|d| (d.target.0, d.ally, d.amount)).collect();
+    let mut hits: Vec<(u64, u32, u32)> = run
+        .events::<Damage>()
+        .iter()
+        .map(|d| (d.target.0, d.ally, d.amount))
+        .collect();
     hits.sort_unstable();
     for i in run.rows() {
         let e = ids[i].0;
         let from = hits.partition_point(|h| h.0 < e);
-        let total: u32 = hits[from..].iter().take_while(|h| h.0 == e).filter(|h| h.1 != teams[i].ally).map(|h| h.2).fold(0, u32::saturating_add);
+        let total: u32 = hits[from..]
+            .iter()
+            .take_while(|h| h.0 == e)
+            .filter(|h| h.1 != teams[i].ally)
+            .map(|h| h.2)
+            .fold(0, u32::saturating_add);
         if total == 0 {
             continue;
         }
@@ -574,7 +695,10 @@ fn census(run: &Run) {
         }
     }
     for (ally, count) in count.into_iter().enumerate() {
-        emit(&FactoryCount { ally: ally as u32, count });
+        emit(&FactoryCount {
+            ally: ally as u32,
+            count,
+        });
     }
 }
 
@@ -599,4 +723,19 @@ fn judge(run: &Run) {
     }
 }
 
-schedule!(host(map_starts), start, publish_bases, produce, host(catalog_spawn), host(nav), host(spatial), scan, orders, fire, armor, apply, census, judge);
+schedule!(
+    host(map_starts),
+    start,
+    publish_bases,
+    produce,
+    host(catalog_spawn),
+    host(nav),
+    host(spatial),
+    scan,
+    orders,
+    fire,
+    armor,
+    apply,
+    census,
+    judge
+);

@@ -55,7 +55,12 @@ pub fn to_dot_with_times<R>(graph: &FrameGraph<R>, baked: &BakedGraph, times_ms:
             .iter()
             .map(|member| escape(graph.resource_name(*member)))
             .collect();
-        let _ = writeln!(out, "  // physical {index} {:?}: {}", physical.class, members.join(" -> "));
+        let _ = writeln!(
+            out,
+            "  // physical {index} {:?}: {}",
+            physical.class,
+            members.join(" -> ")
+        );
     }
     for handoff in &baked.handoffs {
         let _ = writeln!(
