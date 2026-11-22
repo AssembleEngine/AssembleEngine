@@ -215,6 +215,15 @@ Goal: catch regressions and find bottlenecks per subsystem, without launching th
 - Wall-time benches run on one pinned machine (nightly); counter benches run on every PR.
 - Each milestone's exit numbers (10k/50k digests and timings) become permanent scenario benches.
 
+**Consent before measuring**
+- No performance measurement or benchmark runs without the user's explicit consent, given for that
+  run. The user may have other work running on the machine, and wall times taken alongside it are
+  inconclusive.
+- Before measuring, ask the user to stop whatever else runs and to commit the machine to the
+  benchmark. If they do not, postpone every measurement to the last stage of the task.
+- Deterministic counters (fuel, expansions, command counts) and digests are not timings. Tests that
+  check them run without asking.
+
 **Tracy (optional, cargo feature `tracy`; zero cost when off)**
 - `ae_profile` crate: thin macros over `tracy-client`, compiled to nothing without the feature.
 - Zones: tick phases, each schedule layer, each system, each row-range job per worker, command merge, each
@@ -293,7 +302,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
 | **M17** Formatting + lints (done) | rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
-| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (in design) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (done) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M17 — Formatting, lints and the commit gate (done)
 
@@ -2620,7 +2629,7 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M16 (M11, M12, M13 done; M14 in design)
+## Planned milestones M11–M16 (M11, M12, M13, M14 done)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
@@ -3656,7 +3665,7 @@ Steps (commit and stop for compaction after each):
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
 
-### M14 — Unit scripts (in design)
+### M14 — Unit scripts (done)
 
 What a unit does with its model in a given situation: choose, blend and hold clips; turn joints;
 aim (possibly a sequence: take the rifle off the back, turn the body, then aim); fire with a
@@ -4299,8 +4308,11 @@ Design:
       (the script kicks the head and re-aims). At tick 180 `fate` kills A;
       `steer` has `without(Dying)`. The death script stops the upper layer,
       plays Survey once, falls 90° about `FORWARD` (720°/s²), emits
-      `"smoke"` at the spine, waits 1.5 s and returns: A despawned at about
-      tick 276 (+ stagger). `STUCK` makes it wait for the SDK's 5 s cap.
+      `"smoke"` at the spine when the fall ends (tick 199 for pair 0), waits
+      for Survey's end and 1.5 s more and returns: A despawned at tick 328
+      (+ stagger), about 4.9 s after the kill. The game's cap is 8 s
+      (`CAP_MS`; 5 s at first, which a normal death cleared by only 3 ticks).
+      `STUCK` makes it wait for the cap.
     - Parameter bits: bit 16 `STUCK`, bit 17 `BACKWARDS` (A faces +x and walks
       -x, its `Orientation` against its velocity), bit 18 `STANDING` (A at
       rest: no clips, the exact aim).
@@ -4315,7 +4327,10 @@ Design:
       running aim 4.2212° (the measured bound is 8°); `STANDING` answers to
       0.0000° (its bound 1e-3°), `BACKWARDS` 7.7682° with every flash behind
       the start and A's forward still +x; `STUCK` despawns exactly at
-      `killed_at` + 150 ticks (the 5 s cap), the others before it. The same
+      `killed_at` + 240 ticks (the 8 s cap), the others before it. `check`
+      counts A in its own spatial results (`found_a`, asserted 0): without
+      `without(Dying)` on spatial the test fails with A found at every
+      check. The same
       test covers the death edge cases on `death_guest`: a kill before the
       first poll, a kill twice (one death, the first `killed_at` kept) and a
       kill after `life` returned.
@@ -4326,11 +4341,15 @@ Design:
     - The ae-client GPU test (ignored, `--ignored --test-threads=1`): one
       pair on a land map, 1280×720, a fixed camera. At each of the three
       flashes the centroid of the flash's bright pixels is within 12 px of
-      the simulated effect's projection (forwards and `BACKWARDS`); two
-      frames between the death clip's end and the despawn are identical in
-      A's box (particles off); after the despawn under 1% of that box's
-      pixels differ from the terrain alone (no vanish explosion); validation
-      reports nothing.
+      the simulated effect's projection (forwards and `BACKWARDS`). With
+      particles off, in an 80 px box centred on A's last ground point:
+      two frames in the still time before the despawn (10 and 11 ticks
+      before it, after Survey's end) are identical; at the despawn the box
+      changes (28 of 6400 px); no burst reaches the particle feed at the
+      despawn (the vanish explosion; the test fails with 4 bursts when the
+      client's `Dying` skip is removed). B can stand in A's box (A runs
+      towards it), so the box is not compared with the bare terrain.
+      Validation reports nothing.
     - `live-puppet` (new scene, `army-fox`/`live-fox` re-recorded in the
       same run, `bench/results/m14-step6`): `pass/units pose` 0.3148 ms
       against M11's 0.31 ms and this run's live-fox 0.3157 ms (baseline
@@ -4349,6 +4368,380 @@ Design:
       is not reported without a profiler build (`ae-tool --features tracy`).
     - Still waiting for M9: save → load → continue with scripts suspended,
       a death sequence among them.
+
+#### M14 step 6 — design (2026-11-22; built, see "Step 6, A0" to "Step 6, F" above)
+
+Kept as the design the steps were built from; where they differ, the progress notes above say
+what was built.
+
+The death sequence and the test unit, with the three pieces they need first: the renderer
+drawing `Orientation` (renamed from `Facing` in A0), scripts reading other units, and effects
+at joints. Written for the agent that implements it. Steps A0 and A–F, in this order, each
+committed with its own `docs:` commit.
+Nav writing `Orientation` and posting the move callins stays optional and is not part of step 6.
+
+Decisions for the user. Each is my default, not yet confirmed, and is marked where it is used:
+
+1. `Orientation` is drawn as a plain f32 quaternion in four attributes, snapped per tick and not
+   interpolated (A; decided with the user, 2026-11-22: a quaternion, no angles and no packing).
+   Snapping is still my default.
+2. Effects reach the client through a sink host system `host(fx)`. A burst may start up to one
+   tick before the drawn unit reaches its spot (B).
+3. A system term `get(T)` and the import `ae_get` read other entities, but only components the
+   calling system does not write (C).
+4. Death is SDK code (`script::resume_with_death`), and the time cap lives in the SDK. The
+   engine has no backstop for a game that does not use it (D).
+5. A dying unit is excluded by a new `without(T)` query term, not by removing its components
+   (D).
+6. A corpse is the entity kept with `Dying`, its script done. There is no corpse model (D).
+7. The test unit is the Fox with stand-ins: no new clips, and masks come from a new rig file
+   (E).
+8. A new game, `games/duel`, and a new bench scene, `live-puppet` (E, F).
+9. The client does not set off the vanish explosion for a unit that died by script (D).
+
+**What exists that this builds on** (checked 2026-11-22):
+
+- The renderer's heading is 2D: attributes `heading_x` and `heading_y` (`ae_render::units::
+  ATTRIBUTES`). It is used in `units_common.glsl`, `units_dart.glsl`, `units_models.glsl` and
+  `units_lights.comp`. The client sets it from the velocity, or the last heading while a unit
+  stands (`bins/ae-client/src/sim.rs`, `Streamer::stream_rows`).
+- The client reads `Anim` apart from the capture, with `Runtime::chunks`, merged by entity. That
+  is the pattern for `Orientation` and `Dying`. The observer path passes no `Anim` (`&[]`).
+- Events nobody reads are dropped at append (`ae_sim::events::EventStore::append`), and the
+  client has no API to read a stream. Reader cursors are part of the digest.
+- `WorkerCtx` (`ae_sim/src/imports.rs`) has no world handle. Imports reach the memory, the
+  command buffer, the id map and the batch's spatial index. `Runtime::poke` resolves an entity
+  to its row on the host side.
+- Query terms are AND only. `ae_ecs::Access` is `Read` or `Write`. Spatial queries `BODY`; nav
+  queries `BODY` and `NAV_AGENT`, and drops a unit that leaves its rows.
+- `resume` drops callins that a script is not waiting for. `race(a, b)` polls `a` first.
+- The Fox has three clips (Survey, Walk, Run), with no aim or death clip. Masks exist only
+  through `Rig::add_mask` in code; `SimOptions::rigs` builds `Rig::new` with no masks for the
+  sim and the renderer alike.
+- No GPU test runs a sim. `ae_render` may not depend on `ae_sim`, so such a test belongs in
+  ae-client, which has no GPU tests yet. ae-client's `capture()` (`main.rs`) has the offscreen
+  pieces: `run_headless` and `TerrainOutput::Readback`.
+- `emit_deaths` in the client explodes every unit that vanishes where the observer saw it.
+
+**A0. Rename `Facing` to `Orientation`** (decided with the user, 2026-11-22; no digest
+change expected).
+
+- Why: the component is a full rotation, tilt included, not a heading. The rename also frees
+  "facing" for nav's `order::FACING`, a formation's facing point, which is unrelated.
+- `ae_sdk::aim::Facing` becomes `Orientation`; the field `rot` and the methods (`along`,
+  `then`, `to_unit`, `to_world`) keep their names. `ae_abi::engine::FACING` becomes
+  `ORIENTATION`, with the same id (`…0012`).
+- Callers: `sdk/ae-sdk/src/script.rs`, `games/puppet`, `crates/ae_services/tests/scripts.rs`,
+  `Anim::bone_world`'s signature, and the doc comments that name it.
+- The digest hashes components by id, not by name, so puppet's digests should not change.
+  Check that they don't.
+- Update the docs that describe what exists: "Step 5, part 2" above and
+  `docs/hybrid-animation.md`'s phase 4. Historical notes may keep the old name.
+
+**A. The renderer draws `Orientation`** (no digest change).
+
+- Attributes `heading_x` and `heading_y` become `rot_x`, `rot_y`, `rot_z` and `rot_w`: the
+  unit's rotation from its frame to the world's, the `Orientation` quaternion as four f32s
+  (decided with the user, 2026-11-22). The renderer gets no angles and no 2D heading, and
+  nothing is packed.
+  - `ATTRIBUTE_COUNT` goes from 9 to 11. The stream grows by 2 words a unit, 80 KB a tick at
+    10 000 units. The instance-column copy per frame slot (0.055 ms in `live-fox`) should grow
+    by about 0.01 ms; measure it.
+  - The frames match `Orientation`: forward +x, up +y, right +z. The identity faces +x, as heading
+    (1, 0) does today.
+  - One way to stage it: add the four rotation attributes first, move every consumer onto
+    them, then remove `heading_x` and `heading_y`. Keep `ATTR_POSE` and `ATTR_CLASS` in step
+    with the new column order.
+- Shaders: `unit.heading` becomes `unit.rot`, a vec4 read from the four attributes and
+  normalised (a zero quaternion reads as the identity). Forward, up and right come from
+  rotating the axes. The dart and the model matrix take all three (tilt included). So do the lights
+  and the cull, wherever a model's sphere centre is off its origin.
+- Order of transforms. The model matrix is the ground point, then the rotation, then
+  `ae_model::footprint`'s fit. That is the order `Anim::bone_world` uses (`Rig::bone_frame`).
+  Check both against each other in a test: a tilted unit's bone, CPU against GPU.
+- Snapped to the newer tick, as the heading is now; no interpolation. Interpolating would need
+  four more words (the previous rotation). Add them only if turning units show steps: at
+  180°/s a turn moves 6° a tick.
+- Client:
+  - `Streamer::stream` takes `facings: &[(u64, &Orientation)]`, read with
+    `rt.chunks(&world, "Orientation")` and merged by entity like `anims`.
+  - Add feature `aim` to ae-client's `ae-sdk`.
+  - A unit with a `Orientation` is drawn by it. Any other unit gets the yaw quaternion of its
+    velocity heading or its last one (`Orientation::along(hx, hy)`), as now.
+  - The observer path keeps the velocity yaw, because `Orientation` is not viewed. Record that
+    under "Not done".
+- Tests:
+  - `streams_match_rows_by_entity`, updated.
+  - New `streams_draw_facing`: a unit walking backwards is drawn by its `Orientation`, not its
+    velocity; a tilted `Orientation` reaches the stream bit-exact.
+  - GPU tests that build streams by hand are updated (`units_pose_models` and the dart and
+    model tests). A new GPU check compares a tilted model unit's bone, drawn, against
+    `Rig::bone_frame` with the fit.
+  - Run the goldens. If any change, only the attribute list and the stream size may differ. As of 2026-11-22 no
+    render module (`render/`, `ae_render_abi`, `ae-render-sdk`) and no golden names the
+    heading attributes, so the rename is not a render-module ABI break. The ids `…0014` and
+    `…0015` are free in `ae_abi`.
+
+**B. Effects at joints** (no digest change for games that do not schedule it).
+
+- Engine stream `ae_abi::engine::EFFECT` (`…0014`). SDK `ae_sdk::fx::Effect` (feature `fx`,
+  which pulls in `aim`) has these fields:
+  - `entity: u64`, `tick: u64`;
+  - `pos: [f32; 3]`: world nav x, the height above the unit's ground point, nav y. This is what
+    `bone_world` gives;
+  - `dir: [f32; 3]`: the bone's world forward; zero for none;
+  - `effect: u64`: `name_id` of the effect's name (`"flash"`, `"fire"`, …). The sim knows no
+    renderer indices;
+  - `count: u32`, `scale: f32`, `seed: u32`, `bone: u16`, `flags: u16`.
+- The helper `Anim::effect_at(bone, offset, &Body, &Orientation, effect, count, scale)`:
+  - `offset` is in the unit-frame axes as the bone carries them (`BoneWorld::dir`), so
+    0.3 m along `FORWARD` puts the flash at a muzzle ahead of the bone's origin;
+  - it emits the event, with the seed hashed from entity, tick and effect;
+  - the emitting system declares `emits(Effect)`, and from a script that is the scripts
+    system.
+- Sink: `ae_services::fx::FxPlugin`, host system `fx`, with `reads_events(EFFECT)`. It pushes
+  each tick's events into an optional `Arc<FxFeed>`; in ae-headless the feed is `None` and
+  the events are dropped. This is my default (decision 2).
+  - Its reader cursor is in the digest, but it is the same with or without a feed. So the
+    client and ae-headless agree as long as both register the plugin. ae-headless must
+    register it.
+  - It is a one-way sink like the ground feed: nothing reaches the sim through it.
+  - Schedule it last.
+- Client:
+  - After each tick, `Sim::stream` takes the feed's effects.
+  - Each effect whose `(x, y)` the observer sees (`Effects::sees`) becomes
+    `ParticleFeed::emit(Burst { pos: [x, h, y], ground: true, effect, count, scale, seed })`.
+  - `effect` is the index of the name in the loaded effects (`EFFECT_NAMES` or the
+    catalogue's order). An unknown name is warned about once and skipped.
+  - `dir` is unused for now (a flash is spherical); it is kept for directional effects.
+  - The flash's `EffectLight` lights the ground around the muzzle.
+- Timing (my default, decision 2): an effect of tick N starts when the stream of tick N is
+  published. The unit is then drawn between N-1 and N, so the burst leads the drawn bone by
+  up to one tick of the unit's motion. The GPU test's tolerance covers that. The better fix,
+  a start time on `Burst` held until the drawn tick reaches N, goes under "Not built yet".
+- Tests:
+  - `ae_services/tests/fx.rs`. A test game emits effects at a bone. The feed gets them in key
+    order, the same at 1 and 8 workers. Each `pos` equals `bone_world` plus the offset at
+    that tick.
+  - An ae-client unit test: an effect becomes a `Burst` only where it is seen.
+
+**C. Queries of other units** (an ABI change; layering, and so digests, unchanged).
+
+- Term `get(T, ..)` in `#[system]` (`sdk/ae-sdk-macros`). It lets the system read `T` of any
+  entity during its run. It is a separate list in the system record, like `emits`, not a
+  query term, so it does not restrict the rows. The module ABI's system record changes;
+  bump its version.
+  - The scheduler counts it as a read of `T`, so writers of `T` go to other layers.
+  - Rejected at load: `T` among the system's own `write` terms or `creates`. Another range of
+    the same system could be writing `T` on another row in the same layer, so that read would
+    depend on the worker count.
+  - Example: puppet's `scripts` system writes `Anim`, so it cannot `get` another unit's
+    `Anim`. Reading another unit's `Body` and `Orientation` is fine.
+- Import `ae_get(entity: u64, component: u64, out: u32, len: u32) -> u32`:
+  - 1 when the component was copied; 0 when the entity is not alive or does not have it;
+  - a trap when the component is not in the calling system's `get` list, or the length is
+    wrong.
+- SDK: `run.get_of::<T>(e) -> Option<T>` and `Unit::get_of::<T>(e)`, which return copies, so
+  no borrow crosses an `await`.
+- Host side, my default (decision 3):
+  - Put a `*const ecs_world_t` in `WorkerCtx` and use flecs `ecs_get_id`. That is read-only
+    during a layer, since structural changes wait for the sync point.
+  - The pointer it returns is into guest memory (the column allocator); copy `len` bytes.
+  - Check that `set_overlap_hosts` never overlaps a guest layer with structural changes.
+  - Start from `Runtime::poke`.
+  - Fallback: a per-layer directory of entity to row, built on the coordinating thread for
+    the `get` components.
+- A dying target is still an entity, and `get` works on it. A caller that cares also lists
+  `Dying` in `get` and checks it.
+- Test `ae_sim/tests/gets.rs` with a test guest:
+  - A system reads other entities' component that an earlier layer wrote, and gets those
+    writes.
+  - A despawned id gives `None`.
+  - `get` of a written component is rejected at load.
+  - Digests are equal at 1, 2, 4 and 8 workers.
+
+**D. Death** (a new component under an opt-in feature; existing games' digests unchanged).
+
+- Engine component `Dying { killed_at: u64, cause: u32, flags: u32 }` (`…0015`,
+  `ae_sdk::life`, feature `life`). It is opt-in like `aim`, because every component compiled
+  in takes an entity id in the module.
+- Killing:
+  - `life::kill(entity, &mut Callins, tick, cause)` posts `KILLED` and adds `Dying` by command
+    (`ae_add`). The unit is excluded from the next sync point on.
+  - Killing is the game's: its damage system, as skirmish's hp reaching 0.
+  - `kill` does nothing if `Dying` is already there. A unit with no `Script` the game
+    despawns as it does now.
+- Exclusion (my default, decision 5):
+  - A new query term `without(T)`: `ae_ecs::Access::Without`, a flecs `EcsNot` term, and the
+    ABI access value `ACCESS_WITHOUT`. It is neither a read nor a write, so the scheduler
+    ignores it; table membership changes only at sync points.
+  - `spatial` queries `(BODY, Read), (DYING, Without)`, so spatial queries do not find a
+    dying unit (not targetable).
+  - `nav` adds `(DYING, Without)`, so nav drops the unit as if it were gone. It is not moved
+    and does not collide; check that nav's reconcile frees what a despawn frees.
+  - Crossing, sandbox, skirmish, scripted and puppet must keep their digests.
+    `HostPlugin::systems()` sees no schema, and the runtime rejects a host query term the
+    module does not declare (`Runtime::with_hosts`: "queries component …, which the module
+    does not declare"). So the runtime drops a `Without` term whose component the schema
+    lacks: a NOT of a component nothing can have is always true.
+  - A `Without` term has no column. Keep it out of `term_ids` and the host system's column
+    indices (`chunk.column::<T>(k)`).
+  - Game systems that target or damage units add `without(Dying)` themselves.
+  - Not chosen: removing `NavAgent` and similar on kill. Spatial would still find the unit.
+- The death script, in the SDK (my default, decision 4).
+  `script::resume_with_death(run, life, death, cap_ms)` runs one composite future per unit:
+
+  ```rust
+  async move {
+      loop {
+          // KILLED first: race polls its left arm first.
+          match race(u.callin(callin::KILLED), life(u)).await {
+              Either::Left(_) => break,
+              // Life ended on its own: wait for a kill all the same.
+              Either::Right(()) => { u.callin(callin::KILLED).await; break; }
+          }
+      }
+      // death(u) returns its fate; the cap running out means Remove.
+      let fate = match race(death(u), u.sleep(cap_ms)).await {
+          Either::Left(fate) => fate,
+          Either::Right(()) => Fate::Remove,
+      };
+      if fate == Fate::Remove {
+          despawn(u.entity());
+      }
+  }
+  ```
+  - `KILLED` is never dropped. `resume` drops callins the script does not wait for, but the
+    `KILLED` arm is pending at every await of `life`, so `Script::waits` always holds it.
+  - The `KILLED` arm comes first, so a `life` that waits for `callin::ALL` does not take it.
+  - `life` is dropped where it waits, as with any `race` (Recoil's `Signal`).
+  - A kill before the first poll works: the new future is polled at once and sees the
+    pending bit.
+  - `script_slots!` takes the composite. Add a form such as
+    `script_slots!(SLOTS, with_death(unit, killed))`, so the slot size is the composite's.
+  - The cap is per call; the duel game uses 8 s. Not built: an engine backstop that despawns a
+    `Dying` unit N ticks after `killed_at` whatever its script does. That backstop is
+    decision 4.
+  - Corpse (decision 6): with `Fate::Corpse` the entity stays, its script `DONE` and `Dying`
+    kept, so it stays excluded, its last frame held by `Anim`. The game despawns it later.
+- Client (decision 9):
+  - `emit_deaths` skips units that had `Dying` in the last capture. Read `Dying` by
+    `rt.chunks` into a sorted id set.
+  - Their death effects are their script's `Effect`s.
+  - A dying unit is otherwise drawn as any other, by its `Anim`, until it is despawned.
+
+**E. The test game `games/duel`** (new; `scripted` and `puppet` untouched).
+
+- E0, masks from content (the hidden prerequisite):
+  - A rig file next to the model: `models/<name>.rig.json` in content, or for `--model FILE`
+    the file of the same stem beside it.
+  - Format: `{"masks": [{"name": "upper", "roots": ["b_Spine01_02"]}, {"name": "lower",
+    "roots": ["b_Hip_01"], "minus": ["upper"]}]}`. Per-joint weights and the pointing axis
+    are optional fields for later.
+  - One function in `ae_model::anim` applies it to a `Rig` through `add_mask` and
+    `subtree`.
+  - `SimOptions::rigs` calls it, so the sim's `AnimPlugin` and the renderer
+    (`UnitsSetup::rigs`) get the same masks. ae-headless's rigs and the `ae_services` tests
+    call it too.
+  - Add `Fox.rig.json` beside `assets/models/khronos/Fox/Fox.glb`. Verify the hierarchy with
+    `Rig::subtree`. The spine subtree should hold the neck, head and front legs. The hip's
+    other children should be the tail and the hind legs.
+- Client: `FIELDS` drops `NavAgent.profile` for `scripted` by name. Make it "the schema has no
+  `NavAgent`", so `duel` works too.
+- Units: pairs of an actor A (the Fox, radius 1, `Script`, `Weapons`) and a target B (the Fox
+  standing at rest, no script). B stands 12 m ahead and 6 m to the left of A. Game parameter
+  bits 0..16 are the pair count, in a grid; timelines are staggered by pair for the
+  determinism runs, and pair 0 is unstaggered for the GPU test. Bit 16 `STUCK`: the death
+  script never ends, to test the cap. Bit 17 `BACKWARDS`: A walks backwards, so its `Orientation`
+  is against its velocity (A's regression). Bit 18 `STANDING`: A aims while standing at rest,
+  for the exact aim bound (F).
+- Timeline at 30 Hz (scripts use milliseconds):
+  - 0: spawn. A faces +x.
+  - 0–45: `steer` moves A at walking speed and posts `STARTED_MOVING`. The script plays Walk
+    on layer 0, `per_metre`.
+  - 45: A stops (`STOPPED_MOVING`). Layer 0 blends to Survey.
+  - 75: A runs (`STARTED_MOVING`). Run on layer 0.
+  - From 90, every 3 ticks: the game's `asker`, scheduled before `scripts`
+    (`read(Body, Anim, Orientation)`, `write(Weapons, Callins)`, `get(Body, Orientation)`), asks weapon
+    0 to aim. The direction runs from A's aim-from bone (`bone_world`) to B's chest: B's
+    `Body` through `get_of` (C), plus a height. It posts `AIM`.
+  - Aiming in several steps, while the legs keep running:
+    1. `play(1, SURVEY).mask(UPPER).blend_in(250)` and `sleep(250)`. This stands for taking
+       the rifle off the back.
+    2. Turn `b_Spine02_03` about `UP` by `aim_angle(UP, FORWARD, dir_in(SPINE2, d))` at
+       180°/s with a ramp, and await `turned`.
+    3. Turn the head with `turn_toward(HEAD, FORWARD, dir_in(HEAD, d))`, short, await it,
+       then `set_aimed`. A newer request cuts a turn short, as in puppet.
+  - Once `is_aimed(0)`, the game's `firer` fires 3 shots 10 ticks apart. Each emits `Effect`
+    `"flash"` at fire-from = head, offset 0.3 m along `FORWARD`, and posts `FIRED`. The script
+    kicks the head (`turn_by(HEAD, RIGHT, -6°)`, fast) and re-aims.
+    - `firer` is scheduled after `host(anim)`, as puppet's `check` is. Its `bone_world` then
+      sees this tick's channels, the ones the renderer draws for tick N. Before `scripts` it
+      would place the flash at the pose of tick N-1.
+  - 180: the game's `fate` system kills A (`life::kill`). `steer` has `without(Dying)`, so A
+    stops.
+  - The death script:
+    - stop layer 1 (`blend_out` 200);
+    - play Survey `.once()` on layer 0, which ends and holds its last frame;
+    - turn `b_Root_00` about `FORWARD` by 90°, accelerating (720°/s²), so A falls on its side;
+    - emit `"smoke"` at `b_Spine01_02` when the fall ends;
+    - await `turned(root)` and `ended(0)`, then `sleep(1500)`, then return, and A is
+      despawned (about tick 240).
+  - A `check` system: from tick 181, a spatial query at A's position does not find A but does
+    find B.
+
+**F. Tests and numbers.**
+
+- `ae_services/tests/duel.rs` (sim only, 200 pairs, staggered):
+  - every callin handled;
+  - aim accuracy, checked independently in glam, as in puppet. The bound depends on the
+    variant:
+    - With bit 18 `STANDING`, A aims from the rest pose, and each answered aim is within
+      1e-3° of the direction to B.
+    - While A runs, clips move the aim chain's parents between the solve (`dir_in`) and the
+      answer: Run drives `b_Hip_01`, and Survey on the upper mask drives `b_Spine01_02` and
+      `b_Neck_04`. The design says so above: exact aim keeps the aim chain manual. Measure
+      that error first and set a loose bound from it. Making `b_Neck_04` manual too shortens
+      the clipped part of the chain.
+  - 3 flashes per actor, each at the head's `bone_world` plus the offset at its tick;
+  - A not in spatial results from the tick after the kill;
+  - despawned at the death's end, and with `STUCK` exactly at `killed_at` + the cap;
+  - a kill before the first poll, a kill twice, and a kill after `life` returned;
+  - digests equal at 1, 2, 4 and 8 workers.
+
+  A nav case goes in `ae_services` nav tests: a `Dying` agent leaves nav's rows, is not moved
+  by a `MoveOrder`, and a neighbour's path goes through its cell.
+- ae-client GPU test, `#[ignore]`d (run with `--ignored --test-threads=1`). It lives in a test
+  module of ae-client: one pair, the Fox with its rig file, offscreen 1280×720 through the
+  `capture()` pieces, on a land map (water animates inside A's box), a fixed camera on A,
+  frames at chosen ticks saved under `AE_TEST_CAPTURE_DIR`. `capture()` renders
+  `capture_frames` (60 by default) before reading back, and particle time advances every
+  frame. So each readback counts the frames rendered since the burst was emitted. Asserted:
+  - (a) at each shot, read back within the flash's life: the centroid of the flash's
+    brightest pixels lies within one tick of A's motion, projected to pixels, of the projected
+    effect position (ground height added). The same holds with `BACKWARDS`, which fails
+    without A;
+  - (b) two frames between the death clip's end and the despawn are identical in A's screen
+    box. Run with particles off, so the smoke does not count;
+  - (c) after the despawn A's box shows no unit and no explosion (decision 9);
+  - zero validation messages.
+
+  The walking, aiming and running frames are saved to look at, not asserted. The pose itself
+  is `units_pose_models`' job.
+- Numbers: "army-fox with scripts" is a new scene `live-puppet` (decision 8): as `live-fox`,
+  but the puppet game's 10 000 scripted Foxes. Record:
+  - `units pose`, against M11's 0.31 ms and `live-fox`'s 0.37 ms;
+  - `cpu_anim_pack`;
+  - the sim's tick and the `scripts` system's share: `ae-headless --game puppet --units 10000
+    --ticks 600 --workers 1,2,4,8 --digest`.
+
+  Compare runs with `ae-tool bench-diff`. Ask before re-taking `bench/results/baseline`.
+- Docs: PLAN progress per step, and the "Not built yet" items (interpolated facing, bursts
+  held to the drawn tick, the engine death backstop, the observer path's `Orientation`, and
+  corpse models). README's milestone status. The architecture doc's "Reading the code" rows
+  for `get`, `without`, `fx` and `life`.
+- Still waiting for M9: save → load → continue with scripts suspended, a death sequence
+  among them.
 
 ### M15 — Fully bindless resources (priority: medium)
 
@@ -4620,30 +5013,12 @@ From the M14 coroutine spike (2026-11-19):
   `Awake` tag through commands, the resume system querying `(Script, Awake)`; it costs tag
   churn every tick and is not needed while the scan is cheap.
 
-From M14 step 5 (2026-11-19); the rest of M14, moved here, not a priority now:
+From M14 step 5 (2026-11-19):
 
-- **The renderer drawing `Facing`.** The client still draws each unit's heading from its
-  velocity. The client reads unit data with one query that requires every component it lists,
-  so adding `Facing` to it would drop units that have none. `Facing` needs its own read, merged
-  by entity, the way animation data is already read. Step 6 can't start without this: the muzzle
-  flash would be drawn in the wrong place on any unit whose facing differs from its movement.
-- **Queries of other units.** A script needs to read a component of another entity, such as a
-  target's position or `Facing`, that its own system doesn't list. This needs a new host import,
-  and aiming at another unit depends on it.
-- **Effects at joints.** The sim would emit an event at a bone's world position, such as a
-  muzzle flash or particles. The sim side can be done now; drawing it fits with step 6.
+- The renderer drawing `Facing` (now `Orientation`), queries of other units, effects at
+  joints and step 6 itself: done in M14 step 6 (2026-11-22).
 - Optional: **nav writing `Facing` and posting the start/stop moving callins.** Right now the
   game does both itself.
-- **Step 6: the death sequence and the test unit.**
-  - Death: a killed unit stays in the sim, can't be targeted and doesn't collide, until its
-    `Killed` script ends (with a time cap). Then it's removed or leaves a corpse.
-  - Test unit, in a GPU test: it walks, stops and aims in several steps while running (an
-    upper-body clip on top of the running clip, plus script-driven turns on bones the clips
-    don't move); it fires with a flash at the muzzle; it dies holding the last frame.
-  - Checks: digests equal at 1, 2, 4 and 8 workers, and `army-fox` with scripts measured against
-    the M11 numbers.
-  - The save → load → continue check with scripts suspended has to wait for M9, since saving
-    doesn't exist yet.
 
 From M12 (2026-11-19):
 
