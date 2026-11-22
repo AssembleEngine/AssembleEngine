@@ -337,6 +337,10 @@ pub struct Sim {
     last_los: Option<Bits>,
     /// The module declares `Orientation` (its units may be drawn by it).
     has_orientation: bool,
+    /// The module declares `Dying` (a killed unit's script plays its death).
+    has_dying: bool,
+    /// Entities with `Dying` in the last capture, ascending.
+    last_dying: Vec<u64>,
     /// The effects the sim's `fx` system published since the last stream.
     fx: Option<Arc<FxFeed>>,
     /// Effect names already warned about (not in the effects catalogue).
@@ -412,6 +416,8 @@ impl Sim {
         let has_anim = ae_sim::host::expect_component(&rt.schema, <Anim as ae_sdk::Component>::SCHEMA).is_ok();
         let has_orientation =
             ae_sim::host::expect_component(&rt.schema, <Orientation as ae_sdk::Component>::SCHEMA).is_ok();
+        let has_dying =
+            ae_sim::host::expect_component(&rt.schema, <ae_sdk::life::Dying as ae_sdk::Component>::SCHEMA).is_ok();
         let poser = (has_anim && !o.models.is_empty()).then(|| {
             let names =
                 crate::models::names_per_class(&o.models, o.classes().len(), o.observer.map(|_| o.classes().len() - 2));
@@ -490,6 +496,8 @@ impl Sim {
             last_units: Vec::new(),
             last_los: None,
             has_orientation,
+            has_dying,
+            last_dying: Vec::new(),
             fx: Some(fx),
             warned_fx: Vec::new(),
             pose_ms: 0.0,
@@ -515,7 +523,9 @@ impl Sim {
     /// Units gone from the capture since the last tick (despawned: dead)
     /// that stood in the observer's line of sight of that tick explode.
     /// Only what the observer saw: a unit dying in the fog leaves nothing.
-    fn emit_deaths(&mut self) {
+    /// A unit that died by script (it had `Dying` in the last capture) is
+    /// skipped: its effects are its death script's.
+    fn emit_deaths(&mut self, dying: &[u64]) {
         let Some(effects) = &self.effects else { return };
         let c = &self.capture;
         let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len())
@@ -523,17 +533,19 @@ impl Sim {
             .collect();
         now.sort_unstable_by_key(|u| u.0);
         let grid = self.view.as_ref().map(|v| v.pipeline.coverage.grid);
-        let sites = deaths(&self.last_units, &now, |x, y| match (&self.last_los, grid) {
+        let seen = |x, y| match (&self.last_los, grid) {
             (Some(los), Some(grid)) => {
                 let (cx, cy) = grid.cell(x, y);
                 los.get(cx, cy)
             }
             _ => true,
-        });
+        };
+        let sites = deaths(&self.last_units, &now, &self.last_dying, seen);
         for &(x, y, scale, seed) in &sites {
             effects.explode(x, y, scale, seed);
         }
         self.last_units = now;
+        self.last_dying = dying.to_vec();
         if let Some(v) = &self.view {
             let los = v.pipeline.coverage.los[v.observer[0].ally as usize].clone();
             effects.set_sight(los.clone(), v.pipeline.coverage.grid);
@@ -645,8 +657,15 @@ impl Sim {
     pub fn stream(&mut self, tick_seconds: f32) -> Result<InstanceStream> {
         self.emit_fx();
         self.rt.capture(&self.world, &self.spec, &mut self.capture)?;
+        let mut dying = Vec::new();
+        if self.has_dying {
+            for (ids, _) in self.rt.chunks(&self.world, "Dying")? {
+                dying.extend_from_slice(ids);
+            }
+            dying.sort_unstable();
+        }
         if self.view.is_none() {
-            self.emit_deaths();
+            self.emit_deaths(&dying);
         }
         let Some(v) = self.view.as_mut() else {
             let t0 = Instant::now();
@@ -741,7 +760,7 @@ impl Sim {
             .stream_rows(self.capture.tick, &rows, &[], &[], Instant::now(), tick_seconds);
         // After the rows: the last tick's line of sight decides, then
         // this one's is kept.
-        self.emit_deaths();
+        self.emit_deaths(&dying);
         let v = self.view.as_mut().expect("observer");
         v.ms = [
             (t1 - t0).as_secs_f64() * 1e3,
@@ -813,11 +832,12 @@ fn profile(c: &Capture, r: usize) -> u32 {
 fn deaths(
     last: &[(u64, f32, f32, f32)],
     now: &[(u64, f32, f32, f32)],
+    dying: &[u64],
     seen: impl Fn(f32, f32) -> bool,
 ) -> Vec<(f32, f32, f32, u32)> {
     let mut sites = Vec::new();
     for &(id, x, y, radius) in last {
-        if now.binary_search_by_key(&id, |u| u.0).is_err() && seen(x, y) {
+        if now.binary_search_by_key(&id, |u| u.0).is_err() && dying.binary_search(&id).is_err() && seen(x, y) {
             sites.push((x, y, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
         }
     }
@@ -1569,8 +1589,12 @@ mod tests {
             (5, 50.0, 50.0, 12.0),
         ];
         let now = [(1, 11.0, 10.0, 6.0), (4, 40.0, 40.0, 6.0), (5, 51.0, 50.0, 12.0)];
-        let sites = deaths(&last, &now, |x, _| x >= 0.0);
+        let sites = deaths(&last, &now, &[], |x, _| x >= 0.0);
         assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
+        assert!(
+            deaths(&last, &now, &[2], |x, _| x >= 0.0).is_empty(),
+            "2 died by script (it had Dying): its death effects are its script's"
+        );
         assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
         // One explosion: flash, fire, sparks, smoke, and a scorch mark.
         let effects = Effects {
@@ -1590,7 +1614,7 @@ mod tests {
             "{:?}",
             decals[0]
         );
-        assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
+        assert!(deaths(&last, &last, &[], |_, _| true).is_empty(), "nobody died");
     }
 
     /// A sim effect becomes a burst only where the observer sees it, with

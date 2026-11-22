@@ -23,6 +23,10 @@ pub struct ComponentId(pub u64);
 pub enum Access {
     Read,
     Write,
+    /// The rows must not have the component. A NOT term: it has no column,
+    /// and it is neither a read nor a write (table membership changes only
+    /// at structural sync points).
+    Without,
 }
 
 /// One AND term of a query: a component and how it is accessed.

@@ -255,7 +255,12 @@ impl HostPlugin for NavPlugin {
         }
         spawn.cadence = Cadence::Once;
         let mut nav = HostDecl::new("nav");
-        nav.query = vec![(BODY, Access::Write), (NAV_AGENT, Access::Write)];
+        // A dying unit leaves the service's rows: not moved, not colliding.
+        nav.query = vec![
+            (BODY, Access::Write),
+            (NAV_AGENT, Access::Write),
+            (ae_abi::engine::DYING, Access::Without),
+        ];
         nav.reads_events = vec![MOVE_ORDER, ORDER_POINT, TERRAIN_EDIT, COST_OVERLAY];
         nav.emits = vec![TERRAIN_CHANGED];
         let mut starts = HostDecl::new("map_starts");

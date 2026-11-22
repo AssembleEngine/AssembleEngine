@@ -270,8 +270,9 @@ fn list<T: syn::parse::Parse>(m: &syn::meta::ParseNestedMeta) -> syn::Result<Vec
 /// `ae_sys_name(desc: u32)` and records the declaration.
 ///
 /// Arguments, any order: `write(A, ..)`, `read(B, ..)` (query terms, in the
-/// order written), `emits(E, ..)`, `reads_events(E, ..)`, `get(T, ..)`
-/// (components read of other entities during the run, not query terms),
+/// order written), `without(C, ..)` (query terms the rows must not have; no
+/// column), `emits(E, ..)`, `reads_events(E, ..)`, `get(T, ..)` (components
+/// read of other entities during the run, not query terms),
 /// `after(system, ..)`, `serial`, and one cadence: `every(n)`,
 /// `every(n, phase)`, `staggered(n)` or `once`.
 #[proc_macro_attribute]
@@ -288,6 +289,10 @@ pub fn system(args: TokenStream, item: TokenStream) -> TokenStream {
             };
             for p in list::<Path>(&m)? {
                 a.terms.push((p, access));
+            }
+        } else if is("without") {
+            for p in list::<Path>(&m)? {
+                a.terms.push((p, abi::ACCESS_WITHOUT));
             }
         } else if is("emits") {
             a.emits.extend(list::<Path>(&m)?);

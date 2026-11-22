@@ -256,6 +256,7 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
             let access = match r.u32()? {
                 abi::ACCESS_READ => Access::Read,
                 abi::ACCESS_WRITE => Access::Write,
+                abi::ACCESS_WITHOUT => Access::Without,
                 a => bail!("system `{name}`: unknown access {a}"),
             };
             r.u32()?;

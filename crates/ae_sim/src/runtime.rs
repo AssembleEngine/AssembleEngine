@@ -94,7 +94,11 @@ enum Kind {
 struct SystemRt {
     name: Arc<str>,
     decl: SystemDecl,
-    /// Stable component ids of the query terms, and which are written.
+    /// Leading `decl.terms` that are real query terms (a host system's
+    /// `creates` follow them, for ordering only).
+    query_len: usize,
+    /// Stable component ids of the readable query terms (no `Without`),
+    /// and which are written.
     term_ids: Vec<u64>,
     write_mask: u32,
     kind: Kind,
@@ -247,11 +251,14 @@ impl Runtime {
                         mode: s.mode,
                         cadence: s.cadence,
                     };
+                    let readable: Vec<(u64, Access)> =
+                        s.terms.iter().copied().filter(|t| t.1 != Access::Without).collect();
                     systems.push(SystemRt {
                         name: s.name.as_str().into(),
                         decl,
-                        term_ids: s.terms.iter().map(|t| t.0).collect(),
-                        write_mask: write_mask(&s.terms),
+                        query_len: s.terms.len(),
+                        term_ids: readable.iter().map(|t| t.0).collect(),
+                        write_mask: write_mask(&readable),
                         kind: Kind::Module(*i),
                     });
                 }
@@ -276,7 +283,16 @@ impl Runtime {
                         decl.query.len() <= MAX_TERMS && decl.reads_events.len() <= MAX_EVENT_READS,
                         "host system `{name}`: too many terms or streams"
                     );
-                    for &(id, _) in &decl.query {
+                    // A `Without` term whose component the module does not
+                    // declare is dropped: a NOT of a component nothing can
+                    // have is always true.
+                    let query: Vec<(u64, Access)> = decl
+                        .query
+                        .iter()
+                        .copied()
+                        .filter(|&(id, access)| access != Access::Without || schema.component(id).is_some())
+                        .collect();
+                    for &(id, _) in &query {
                         ensure!(
                             schema.component(id).is_some_and(|c| !c.event),
                             "host system `{name}` queries component {id:#x}, which the module does not declare"
@@ -288,8 +304,7 @@ impl Runtime {
                             "host system `{name}` uses event stream {id:#x}, which the module does not declare"
                         );
                     }
-                    let mut terms: Vec<Term> = decl
-                        .query
+                    let mut terms: Vec<Term> = query
                         .iter()
                         .map(|&(id, access)| Term {
                             component: ComponentId(id),
@@ -300,7 +315,7 @@ impl Runtime {
                     terms.extend(
                         decl.creates
                             .iter()
-                            .filter(|id| !decl.query.iter().any(|q| q.0 == **id))
+                            .filter(|id| !query.iter().any(|q| q.0 == **id))
                             .map(|&id| Term {
                                 component: ComponentId(id),
                                 access: Access::Write,
@@ -316,11 +331,14 @@ impl Runtime {
                         mode: Mode::Serial,
                         cadence: decl.cadence,
                     };
+                    let readable: Vec<(u64, Access)> =
+                        query.iter().copied().filter(|t| t.1 != Access::Without).collect();
                     systems.push(SystemRt {
                         name: name.as_str().into(),
                         decl: sd,
-                        term_ids: decl.query.iter().map(|t| t.0).collect(),
-                        write_mask: write_mask(&decl.query),
+                        query_len: query.len(),
+                        term_ids: readable.iter().map(|t| t.0).collect(),
+                        write_mask: write_mask(&readable),
                         kind: Kind::Host(hosts.len()),
                     });
                     hosts.push(HostSlot { plugin, decl });
@@ -519,7 +537,7 @@ impl Runtime {
         for s in &self.systems {
             // Query terms come first; a host system's `creates` follow them
             // for scheduling only.
-            let query = &s.decl.terms[..s.term_ids.len()];
+            let query = &s.decl.terms[..s.query_len];
             if query.is_empty() {
                 queries.push(None);
                 continue;
@@ -857,6 +875,7 @@ impl Runtime {
             Some((q, terms)) => {
                 let sizes = terms
                     .iter()
+                    .filter(|t| t.access != Access::Without)
                     .map(|t| unsafe { fb::component_size(w.world, t.component) })
                     .collect::<Result<Vec<_>>>()?;
                 (unsafe { ranges(w.world, *q, terms, usize::MAX, self.memory)? }, sizes)

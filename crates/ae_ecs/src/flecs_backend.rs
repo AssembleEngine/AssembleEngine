@@ -15,7 +15,8 @@ pub type World = *mut ecs_world_t;
 pub type Query = *mut ecs_query_t;
 pub type Table = *mut ecs_table_t;
 
-// Values of flecs' `ecs_inout_kind_t` (EcsInOut, EcsIn).
+// Values of flecs' `ecs_inout_kind_t` (EcsInOutNone, EcsInOut, EcsIn).
+const FLECS_INOUT_NONE: i16 = 1;
 const FLECS_INOUT: i16 = 3;
 const FLECS_IN: i16 = 4;
 
@@ -238,10 +239,14 @@ unsafe fn query_with_cache(world: World, terms: &[Term], cache: ecs_query_cache_
     let mut desc = unsafe { MaybeUninit::<ecs_query_desc_t>::zeroed().assume_init() };
     for (slot, term) in desc.terms.iter_mut().zip(terms.iter()) {
         slot.id = term.component.0;
-        slot.inout = match term.access {
-            Access::Read => FLECS_IN,
-            Access::Write => FLECS_INOUT,
-        };
+        match term.access {
+            Access::Read => slot.inout = FLECS_IN,
+            Access::Write => slot.inout = FLECS_INOUT,
+            Access::Without => {
+                slot.inout = FLECS_INOUT_NONE;
+                slot.oper = ecs_oper_kind_t_EcsNot as i16;
+            }
+        }
     }
     desc.cache_kind = cache;
     let query = unsafe { ecs_query_init(world, &desc) };
@@ -288,6 +293,10 @@ pub unsafe fn for_each_chunk(
             fields: [ptr::null_mut(); MAX_QUERY_TERMS],
         };
         for (index, term) in terms.iter().enumerate() {
+            if term.access == Access::Without {
+                // A NOT term has no column; `fields` stays null for it.
+                continue;
+            }
             let column = unsafe { ecs_table_get_id(world, iter.table, term.component.0, 0) };
             if column.is_null() {
                 bail!("query component {} has no table column", term.component.0);

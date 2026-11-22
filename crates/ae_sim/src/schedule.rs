@@ -120,6 +120,9 @@ impl SystemDecl {
                 match term.access {
                     Access::Read => reads.insert(r),
                     Access::Write => writes.insert(r),
+                    // No column, neither a read nor a write: membership
+                    // changes only at a sync point.
+                    Access::Without => false,
                 };
             }
             for &s in &self.emits {

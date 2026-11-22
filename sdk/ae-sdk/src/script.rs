@@ -219,6 +219,20 @@ pub const fn slot_bytes(sizes: &[u32]) -> u32 {
 /// (every function the module passes to [`resume`]).
 #[macro_export]
 macro_rules! script_slots {
+    // The death composite ([`resume_with_death`]): its slot holds one
+    // `with_death` future per unit.
+    ($slots:expr, with_death($life:expr, $death:expr) $(,)?) => {
+        const _: () = {
+            #[used]
+            #[cfg_attr(target_family = "wasm", unsafe(link_section = "ae.schema"))]
+            static RECORD: [u8; $crate::script::RECORD_LEN] = $crate::script::slots_record(
+                $crate::script::slot_bytes(&[$crate::script::future_bytes(&(
+                    |u: $crate::script::Unit| $crate::script::with_death(u, $life, $death, 0u32)
+                ))]),
+                $slots,
+            );
+        };
+    };
     ($slots:expr, $($script:expr),+ $(,)?) => {
         const _: () = {
             #[used]
@@ -743,6 +757,48 @@ pub fn resume<Fut: Future<Output = ()> + 'static>(run: &Run, script: impl Fn(Uni
             s.waits = waits;
         }
         unsafe { row.write(s) };
+    }
+}
+
+/// [`resume`] for a death sequence ([`with_death`]): one composite future a
+/// unit. `script_slots!` takes `with_death(life, death)` for its slot.
+#[cfg(feature = "life")]
+pub fn resume_with_death<LF, DF, L, D>(run: &Run, life: LF, death: DF, cap_ms: u32)
+where
+    LF: Fn(Unit) -> L + Copy + 'static,
+    DF: Fn(Unit) -> D + Copy + 'static,
+    L: Future<Output = ()> + 'static,
+    D: Future<Output = crate::life::Fate> + 'static,
+{
+    resume(run, move |u| with_death(u, life, death, cap_ms));
+}
+
+/// One unit's death: wait for `KILLED` (its `life` ending on its own still
+/// waits for the kill), then run `death(u)`, cut by `cap_ms` (the cap
+/// running out means [`Fate::Remove`]); a [`Fate::Remove`] despawns the
+/// unit. The `KILLED` arm comes first, so a `life` that waits for
+/// `callin::ALL` does not take it.
+#[cfg(feature = "life")]
+pub async fn with_death<LF, DF, L, D>(u: Unit, life: LF, death: DF, cap_ms: u32)
+where
+    LF: Fn(Unit) -> L,
+    DF: Fn(Unit) -> D,
+    L: Future<Output = ()>,
+    D: Future<Output = crate::life::Fate>,
+{
+    match race(u.callin(callin::KILLED), life(u)).await {
+        Either::Left(_) => {}
+        // Life ended on its own: wait for a kill all the same.
+        Either::Right(()) => {
+            u.callin(callin::KILLED).await;
+        }
+    }
+    let fate = match race(death(u), u.sleep(cap_ms)).await {
+        Either::Left(fate) => fate,
+        Either::Right(()) => crate::life::Fate::Remove,
+    };
+    if fate == crate::life::Fate::Remove {
+        crate::despawn(u.entity());
     }
 }
 

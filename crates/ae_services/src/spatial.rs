@@ -46,7 +46,8 @@ impl SpatialPlugin {
 impl HostPlugin for SpatialPlugin {
     fn systems(&self) -> Vec<HostDecl> {
         let mut d = HostDecl::new("spatial");
-        d.query = vec![(BODY, Access::Read)];
+        // A dying unit is not targetable: not in the spatial index.
+        d.query = vec![(BODY, Access::Read), (ae_abi::engine::DYING, Access::Without)];
         vec![d]
     }
 

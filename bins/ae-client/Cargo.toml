@@ -16,7 +16,7 @@ ae_bot.workspace = true
 ae_map.workspace = true
 ae_model.workspace = true
 ae_abi.workspace = true
-ae-sdk = { workspace = true, features = ["nav", "anim", "aim"] }
+ae-sdk = { workspace = true, features = ["nav", "anim", "aim", "life"] }
 ae_services.workspace = true
 ae_sim.workspace = true
 ae_render = { path = "../../crates/ae_render" }

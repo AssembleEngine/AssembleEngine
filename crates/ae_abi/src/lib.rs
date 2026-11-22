@@ -97,6 +97,9 @@ pub const FIELD_ARRAY: u32 = 1 << 8;
 
 pub const ACCESS_READ: u32 = 0;
 pub const ACCESS_WRITE: u32 = 1;
+/// A query term the rows must not have (a flecs NOT term): no column, and
+/// neither a read nor a write for the scheduler.
+pub const ACCESS_WITHOUT: u32 = 2;
 
 pub const MODE_PARALLEL: u32 = 0;
 pub const MODE_SERIAL: u32 = 1;
@@ -380,6 +383,10 @@ pub mod engine {
     /// count: u32, scale: f32, seed: u32, bone: u16, flags: u16 }`: a
     /// particle effect at a bone, in the world (M14; `ae_sdk::fx::Effect`).
     pub const EFFECT: u64 = 0xAE00_0000_0000_0014;
+    /// `Dying { killed_at: u64, cause: u32, flags: u32 }`: a unit killed,
+    /// excluded by `without(Dying)` from spatial and nav (M14;
+    /// `ae_sdk::life::Dying`).
+    pub const DYING: u64 = 0xAE00_0000_0000_0015;
 }
 
 /// The sim's own names (`ae_lookup` scope [`SCOPE`](sim::SCOPE)), the same
