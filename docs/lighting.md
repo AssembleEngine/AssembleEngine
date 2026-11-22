@@ -333,15 +333,18 @@ resolution, so its glow cannot be recovered from the composited colour:
 that buffer holds every particle's premultiplied RGBA at once, and its
 alpha is the accumulated smoke coverage, not a label for “emission”. The
 sorted draw therefore writes a second half-resolution `B10G11R11` target
-in the same sorted order: an emissive puff (alpha 0) adds its light, a
-medium writes black and masks the light behind it by its coverage. The
+in the same sorted order: an emissive puff adds its light (and masks the
+light behind it by its cover, `EffectDef::cover`), a medium writes black
+and masks the light behind it by its coverage. The
 composite upsamples that target with the same depth-aware weights as the
 colour into the graph's glow; only the accumulated coverage masks the
 scene's glow behind the particles. A fire in front of smoke keeps its
 bloom, smoke in front of a fire takes its share, and smoke behind a fire
 does not. Every particle is either emissive or a medium
-(`EffectDef::emissive`), so “alpha 0” is a type, not a fade; the 0.5/255
-test is that classifier. The test-only OIT blends (`Moments`, `Slices`,
+(`EffectDef::emissive`). The flag travels to the fragment with the
+particle (the third component of its depth varying; `PackedPuff.ext.w`
+for the packets), not as alpha 0: since 2026-11-22 fire and flash cover
+what is behind them (alpha > 0) and still bloom. The test-only OIT blends (`Moments`, `Slices`,
 `Reference`, `Volume`, `Froxels`) do not write the per-particle glow; the
 composite clears it and adds no emission (their tests run with the bloom
 off).

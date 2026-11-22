@@ -1817,7 +1817,8 @@ Particles, first step (`cargo test -p ae_render --test gpu particles -- --ignore
   - **`particles.draw`** (graphics) is one indirect instanced draw of camera-facing quads.
 - **One sorted list, one blend.**
   - All particles are sorted back to front by centre and drawn premultiplied. Emissive particles
-    write alpha 0, so they add light, and fire behind smoke is dimmed by it.
+    add light and cover what is behind them by their effect's `cover` (0: alpha 0, light only;
+    fire 0.5 and flash 0.3 since 2026-11-22), and fire behind smoke is dimmed by it.
   - The key is `(far-to-near log depth, 16 bits) << 16 | slot`. Unique keys make the order
     independent of the order the simulation's invocations appended them in: the same bursts give
     the same frame. Particles in one depth bucket fall back to slot order, which follows the order
@@ -2979,7 +2980,7 @@ Steps (commit and stop for compaction after each):
   - **The glow** (`GLOW_NAME`, `B10G11R11`, the scene's second colour attachment): every
     `terrain.draw`, `units.draw`, `water.draw` and `particles.draw` writes it. The terrain writes
     a decal's black-body glow after vision and fog; a model material writes its emissive; the
-    water writes only its crisp glints; a particle writes its emission (alpha 0) and smoke
+    water writes only its crisp glints; an emissive particle writes its emission (masking by its cover) and smoke
     writes black with its coverage, so it hides the light behind it. Darts, the sky and every
     lit surface write 0. The buffer is exposed radiance, like the scene.
   - **The bloom** (`bloom.downsample`, `bloom.blur_x`, `bloom.blur_y`; `ae_render::bloom`,
@@ -3572,6 +3573,29 @@ Steps (commit and stop for compaction after each):
   without `--explode 12 --capture-frames 10`) compare equal with `cmp`. 58 GPU tests pass
   with validation (unchanged), 73 lib tests, 3 ABI, module 3, golden 1 (16 cases),
   graph_file 2; `cargo test --workspace` is clean.
+- **Fire covers the ground** (2026-11-22). In HDR10 a fireball looked transparent: the scorch
+  mark and a fox behind it showed through. Fire and flash were purely additive (alpha 0), so
+  nothing behind them was ever hidden; SDR's clip at 1.0 turned the sum into a flat white disc,
+  HDR's clip at the peak (361 / 203 = 1.78× paper white on the reference panel) kept the
+  ground's variation, and the scorch mark had faded in fully after 0.4 s while the fire burns
+  0.35–0.9 s. Two changes:
+  - `EffectDef::cover` (0..1 of the opacity, `#[serde(default)]` 0, emissive effects only):
+    an emissive particle's alpha. Fire 0.5, flash 0.3 (`assets/effects.json`). The glow
+    classifier no longer reads alpha 0 as emissive: the flag is the third component of the
+    particle's depth varying (a separate flat varying draws a performance warning from the
+    layer in every pass that does not read it) and `PackedPuff.ext.w` for the packets; the
+    moments blend counts an emissive particle's cover as black media.
+  - `Decal::scorch` (and so every scar) fades in over `SCORCH_FADE_IN`, 1 s (was 0.4 s).
+
+  Measured by `explosion_fire_covers_the_ground` (flat ground at 320×240, camera 80 m at pitch
+  0.9, one scale-1 explosion's flash and 24 fire puffs, their emission and lights off so only
+  what they cover shows, half-resolution sorted blend, bloom off): the share of the ground
+  left in a 6 px disc at the burst is 0.030 at 0.10 s, 0.102 at 0.30 s and 0.731 at 0.60 s
+  (the fire has risen and faded; the decal's fade-in takes over), within 20 px 0.619, 0.603
+  and 0.860. With cover 0 it is 1.000. Fire 0.8 would give 0.004 / 0.026 / 0.603; 0.5 keeps
+  the fireball's rim translucent. 58 GPU tests pass with validation (one new), 68 lib tests,
+  golden 1; a 3 s HDR10 window with `--explode 6` reports 0 errors, 0 warnings. Not yet
+  looked at on the panel.
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.

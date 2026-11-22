@@ -2,9 +2,12 @@
 //! back to front by their centres and blended over the scene.
 //!
 //! * One blend for every particle: premultiplied "over". An *emissive*
-//!   effect (fire, sparks, flashes) writes alpha 0, so it adds light, and
-//!   it is still sorted with the rest: fire behind smoke is dimmed by the
-//!   smoke in front of it. *Media* (smoke, dust) cover what is behind them.
+//!   effect (fire, sparks, flashes) adds its light and covers what is
+//!   behind it by its [`EffectDef::cover`] (alpha; 0: it only adds light),
+//!   and it is still sorted with the rest: fire behind smoke is dimmed by
+//!   the smoke in front of it. *Media* (smoke, dust) cover what is behind
+//!   them by their opacity. Whether a particle is emissive travels with it
+//!   to the fragment (alpha is no longer the label).
 //! * The sort key is `(far-to-near depth, 16 bits) << 16 | slot`. Keys are
 //!   unique, so the radix sort orders them the same whatever order the
 //!   simulation appended them in: frames are deterministic for a given
@@ -31,7 +34,8 @@
 //! the nearest-depth texel across an edge (no smoke bleeding onto a unit or
 //! a cliff in front of it). The sorted draw also writes a half-resolution
 //! `B10G11R11` glow target, per particle in the same order: emissive puffs
-//! add their light, media write black and mask the light behind them. The
+//! add their light (and mask the light behind them by their cover), media
+//! write black and mask the light behind them. The
 //! composite upsamples that into the scene's glow, so a fire in front of
 //! smoke keeps its bloom and smoke still hides the glints behind it. All of
 //! it records inside the `particles` pass.
