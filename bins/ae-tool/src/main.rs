@@ -11,6 +11,7 @@
 //! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ae-tool model convert IN.gltf|IN.glb OUT.aemodel  # glTF 2.0 to the engine model (M11)
 //! ae-tool model info FILE.aemodel      # its parts, sizes and load time
+//! ae-tool hooks install                # point git at the tracked .githooks/
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
 //! (`bench/results/<label>`). `bench-diff` exits with status 1 on a regression.
@@ -19,9 +20,9 @@ use ae_bench::Report;
 use ae_bench::diff::{Thresholds, diff};
 use ae_bench::measure::Budget;
 use ae_bench::suites::{self, Options};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 const USAGE: &str = "usage:
   ae-tool bench list
@@ -33,7 +34,8 @@ const USAGE: &str = "usage:
   ae-tool map-export land|water CELLS DIR [NAME]
   ae-tool unpack-list FILE
   ae-tool model convert IN.gltf|IN.glb OUT.aemodel
-  ae-tool model info FILE.aemodel";
+  ae-tool model info FILE.aemodel
+  ae-tool hooks install";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
 /// (`cargo build --release -p ae_nav --bin navbench`), passing the arguments
@@ -166,6 +168,49 @@ fn model_info(file: &str) -> Result<()> {
     Ok(())
 }
 
+/// `ae-tool hooks install`: point git at the tracked hooks directory.
+///
+/// Git does not clone hooks, so the repository carries them in `.githooks/` and
+/// every clone runs this once: `git config core.hooksPath .githooks`. Safe to
+/// run twice; the hook itself refuses a commit the formatter or clippy rejects.
+fn hooks_install() -> Result<()> {
+    let root = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("run git rev-parse --show-toplevel")?;
+    ensure!(root.status.success(), "not a git repository");
+    let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let hook = root.join(".githooks").join("pre-commit");
+    ensure!(
+        hook.is_file(),
+        "{} is missing; run this from the AssembleEngine checkout",
+        hook.display()
+    );
+
+    let current = Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .context("run git config")?;
+    let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    if current == ".githooks" {
+        println!("core.hooksPath is already .githooks; the pre-commit hook is installed");
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .args(["config", "core.hooksPath", ".githooks"])
+        .status()
+        .context("run git config core.hooksPath")?;
+    ensure!(status.success(), "git config core.hooksPath .githooks failed");
+    if current.is_empty() {
+        println!("core.hooksPath = .githooks: the pre-commit hook is installed");
+    } else {
+        println!("core.hooksPath = .githooks (was {current}): the pre-commit hook is installed");
+    }
+    println!("it checks `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings`");
+    println!("on the staged files' kinds; `git commit --no-verify` skips it");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -177,6 +222,13 @@ fn main() -> ExitCode {
         Some("map-export") => map_export(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("model") => model(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("hooks") => match args[1..] {
+            [ref cmd] if cmd == "install" => hooks_install().map(|()| ExitCode::SUCCESS),
+            _ => {
+                eprintln!("usage: ae-tool hooks install");
+                Ok(ExitCode::from(2))
+            }
+        },
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

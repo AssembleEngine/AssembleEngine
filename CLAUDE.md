@@ -32,14 +32,18 @@ Where to look:
 
 Requirements:
 
-- Rust 1.98 with the `wasm32-wasip1-threads` target (sim guests) and `wasm32-unknown-unknown`
-  (render modules).
+- Rust 1.98.1, pinned by `rust-toolchain.toml` with `rustfmt`, `clippy` and both wasm targets
+  (`wasm32-wasip1-threads` for sim guests, `wasm32-unknown-unknown` for render modules).
 - A C compiler, for flecs.
 - `glslc`, to build `ae_render`. Its `build.rs` compiles the shaders.
 - To run the client or the GPU tests: SDL3, a Vulkan 1.3 driver and `VK_LAYER_KHRONOS_validation`.
 
 ```sh
 cargo test --workspace                                   # everything; builds test guests on the fly
+tools/fmt.sh                                             # format the workspace and the guests
+tools/fmt.sh --check                                     # the same, read-only (the hook runs this)
+cargo clippy --workspace --all-targets -- -D warnings    # the lint gate
+ae-tool hooks install                                    # once per clone: git config core.hooksPath .githooks
 cargo test -p ae_sim --test sandbox                      # one integration test file
 cargo test -p ae_sim --test sandbox -- some_test_name    # one test
 cargo test -p ae_render --test gpu -- --ignored --test-threads=1   # GPU tests (see below)
@@ -64,7 +68,14 @@ cargo build --release -p ae-headless && ./target/release/ae-headless --game sand
   - `ae-client --bench` never compares runs. Judge regressions with
     `ae-tool bench-diff <base> <head>`, which exits 1 on a regression.
   - Set `AE_BENCH_MACHINE` so wall times are compared only within one machine.
-- No rustfmt/clippy config and no CI exist yet; use default `cargo fmt` and `cargo clippy`.
+- The pinned toolchain (`rust-toolchain.toml`, channel 1.98.1) formats and lints: `tools/fmt.sh`
+  (`--check` is the read-only form; `cargo fmt --all` would follow the flecs path dependency into
+  `vendor/`, which stays unformatted) and `cargo clippy --workspace --all-targets -- -D warnings`.
+  A clippy fix must not change bits; a float suggestion that would gets a scoped `#[allow]` with the
+  reason. The pre-commit hook (`.githooks/pre-commit`, installed with `ae-tool hooks install` or
+  `git config core.hooksPath .githooks`) gates both: 5 ms for a docs-only commit, and clippy on a
+  code commit (about 15 s after edits, 2 s when nothing changed). `git commit --no-verify` skips
+  it; such a commit must be re-run through the hook before it is shared.
 
 ## Architecture rules that constrain changes
 
