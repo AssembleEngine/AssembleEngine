@@ -3344,8 +3344,17 @@ Steps (commit and stop for compaction after each):
   is enabled on the instance (with a surface) and `VK_EXT_hdr_metadata` on the device, and
   `vkSetHdrMetadataEXT` runs after every recreate. The swapchain is recreated on
   `SDL_EVENT_WINDOW_HDR_STATE_CHANGED`, display/monitor events and the `U` toggle key;
-  the app is rebuilt and the graph redeclared on a change of the (format, colour space)
-  pair. The app takes its encoding from the swapchain's colour space and its levels from
+  on a change of the (format, colour space) pair the app is retargeted and the graph
+  redeclared. `RenderApp::retarget` destroys and creates the app by default; the terrain
+  app rebuilds only the tonemap, `post.encode` and the render module's programs, and
+  keeps the terrain renderer, units, particles, lights and exposure (fixed 2026-11-22:
+  the full rebuild restarted the terrain's tree at 4 leaves, which took ~18 frames to
+  refine back to ~700 on the default map, so the ground and water visibly settled on
+  every `U` press, and the sim's ground edits went back to the loaded map; with the
+  retarget the per-frame leaf count stays at 700 through the toggles, and a 11 s
+  validated window toggling every 2 s reports 6 recreates and 0 errors/warnings). The
+  window title shows the output and its levels beside the display's, e.g. `HDR10 (PQ),
+  white 203, peak 361 nits -> display white 248, peak 441 nits`. The app takes its encoding from the swapchain's colour space and its levels from
   `HdrSettings` (paper white 203 from the WSI's description, peak 203 × SDL's headroom
   = 361 in the signal's nits, shown at the panel's 441);
   `--paper-white`/`--peak` override, `--display-gamut` keeps its stage-3 meaning (P3 by
