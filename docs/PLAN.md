@@ -4233,6 +4233,37 @@ Design:
       reads); the digests and every row are equal at 8, 1, 2 and 4 workers.
       `gets_bad_guest`, whose system gets the component it writes, is
       rejected when it loads. No existing game's digest changes.
+  - Step 6, D: death — done (2026-11-22).
+    - Component `Dying { killed_at, cause, flags }` (`…0015`,
+      `ae_sdk::life`, feature `life` = `aim` + `script`, opt-in: every
+      component a module compiles takes an id). `life::kill(entity,
+      callins, tick, cause)` posts `KILLED` and adds `Dying` by command, so
+      the unit is excluded from the next sync point on. It does nothing when
+      it is already `Dying`, checked through `ae_get`: the calling system
+      declares `get(Dying)` and `write(Callins)`.
+    - Exclusion: `without(T)`, a query term with no column
+      (`ae_ecs::Access::Without`, flecs `EcsNot`, `ACCESS_WITHOUT`), neither
+      a read nor a write for the scheduler (membership changes only at a
+      sync point). `spatial` queries `(Body, Read), (Dying, Without)` and
+      `nav` adds `(Dying, Without)`: a dying unit is not targetable and
+      leaves nav's rows like a despawn. The runtime drops a host `Without`
+      term whose component the module does not declare (a NOT of a component
+      nothing can have is always true), so a game without `Dying` keeps its
+      digest; the workspace's pinned digests pass unchanged.
+    - The death script, in the SDK: `script::resume_with_death(run, life,
+      death, cap_ms)` runs one `with_death` future per unit: wait for
+      `KILLED` (a `life` that ends on its own still waits for the kill),
+      then `death`, cut by the cap (the cap running out is `Fate::Remove`),
+      then despawn unless the fate is `Fate::Corpse` (the entity stays,
+      `Dying` kept, its last frame held by `Anim`). The cap is per call; the
+      engine has no backstop (decision 4).
+      `script_slots!(SLOTS, with_death(life, death))` sizes the composite's
+      slot.
+    - Client: `Dying` is read apart from the capture (as `Orientation`);
+      `emit_deaths` skips a unit that had `Dying` in the last capture: its
+      explosion is its death script's effects, not the vanish explosion.
+    - Covered in step 6, F: the duel death sequence, the nav case, and the
+      client's checks.
 
 ### M15 — Fully bindless resources (priority: medium)
 
@@ -4486,6 +4517,9 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
   on `Burst`, held until the drawn tick reaches it, fixes it.
 - **The observer path's `Orientation`** (step 6, A): `Orientation` is not a viewed field, so an
   observer's units are still turned by their velocity.
+- **An engine death backstop** (step 6, D): a game whose death script never
+  ends keeps its unit `Dying` forever; the cap lives in the SDK's
+  `resume_with_death`, and only a game that uses it has one.
 
 From the M14 coroutine spike (2026-11-19):
 
