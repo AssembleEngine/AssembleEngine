@@ -1,0 +1,8 @@
+# One canonical format, defined by the pinned toolchain (rust-toolchain.toml).
+#
+# The tree was hand-wrapped mostly at 120 columns or less, so `max_width = 120`
+# makes the one-time reformat the smallest available and matches the style
+# already there. Every other option stays at its default: no configuration
+# drift, nothing to bikeshed.
+max_width = 120
+# `edition` is not set here: each crate's manifest carries it.
