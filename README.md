@@ -100,7 +100,7 @@ rig file beside the model (`Fox.rig.json`: upper and lower bodies). Units have a
 effects at a bone go through the `Effect` stream and an `fx` sink to the client's particles, and a
 killed unit (`Dying`, excluded by `without(Dying)` from spatial queries and nav) runs its death
 script under a time cap. `games/duel` is the test game (walk, stop, run, a two-step aim while
-running, three shots, death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
+running, three shots that hit and kill the target, its death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
 
 | Crate | What it is | Origin |
 |---|---|---|

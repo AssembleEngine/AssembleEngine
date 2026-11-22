@@ -4288,7 +4288,8 @@ Design:
       mask yet).
   - Step 6, E: the duel game — done (2026-11-22).
     - `games/duel`: pairs of an actor A (the Fox, radius 1, `Script`,
-      `Weapons`, `Pair`) and a target B (the Fox at rest, with `B`); B stands
+      `Weapons`, `Pair`) and a target B (the Fox, with `B`, `Script` and
+      `Health`, idling on Survey); B stands
       12 m ahead and 6 m to A's left; a 10-wide grid of 24 m pairs. A `Pair`
       carries the chest to aim at and the target entity, found at tick 1
       through the spatial index (spawns have no ids yet).
@@ -4304,15 +4305,25 @@ Design:
       from `b_Spine02_03` (a stable origin, so the head follows the
       spine-to-target line) and fired from the head.
     - Once aimed, `firer` (after `host(anim)`) fires 3 shots 10 ticks apart,
-      each a `"flash"` 0.3 m `FORWARD` from the head and a `FIRED` callin
-      (the script kicks the head and re-aims). At tick 180 `fate` kills A;
-      `steer` has `without(Dying)`. The death script stops the upper layer,
-      plays Survey once, falls 90° about `FORWARD` (720°/s²), emits
-      `"smoke"` at the spine when the fall ends (tick 199 for pair 0), waits
-      for Survey's end and 1.5 s more and returns: A despawned at tick 328
-      (+ stagger), about 4.9 s after the kill. The game's cap is 8 s
-      (`CAP_MS`; 5 s at first, which a normal death cleared by only 3 ticks).
-      `STUCK` makes it wait for the cap.
+      each a `"flash"` 0.3 m `FORWARD` from the head, a `Hit` event on the
+      target and a `FIRED` callin (the script kicks the head and re-aims).
+    - The shots kill B (changed with the user, 2026-11-22: at first a `fate`
+      system killed A at tick 180, which read as A dying for no reason). B
+      has 3 hit points; `damage` (serial, `reads_events(Hit)`) takes one a
+      hit, posts `HIT` (B's script flinches its head up 15° and back) and
+      on the third calls `life::kill`. Pair 0's B is killed at tick 141.
+      `steer` stops A for good (posting `STOPPED_MOVING`) once its target is
+      `Dying`, and `asker` stops asking; A lives on. A and B each have a
+      script (`scripts`, `targets`), so `script_slots!` lists both
+      composites as closures.
+    - B's death script stops the upper layer, plays Survey once, falls 90°
+      about `FORWARD` (720°/s²), emits `"smoke"` at the spine when the fall
+      ends (tick 160 for pair 0), waits for Survey's end and 1.5 s more and
+      returns: B despawned at tick 289 (+ stagger), about 4.9 s after the
+      kill. `damage` runs after B's script in the tick, so the death and its
+      cap start the tick after the kill. The game's cap is 8 s (`CAP_MS`;
+      5 s at first, which a normal death cleared by only 3 ticks). `STUCK`
+      makes it wait for the cap.
     - Parameter bits: bit 16 `STUCK`, bit 17 `BACKWARDS` (A faces +x and walks
       -x, its `Orientation` against its velocity), bit 18 `STANDING` (A at
       rest: no clips, the exact aim).
@@ -4323,14 +4334,17 @@ Design:
   - Step 6, F: tests and numbers — done (2026-11-22).
     - `ae_services/tests/duel.rs`: 200 staggered pairs, 760 ticks. The
       digests, logs, every flash and every answered aim's error are equal at
-      8, 1, 2 and 4 workers; 600 flashes, 1400 answered aims, the worst
+      8, 1, 2 and 4 workers; 600 flashes, 800 answered aims (1400 while A
+      was the one killed: it now stops aiming when B goes down), the worst
       running aim 4.2212° (the measured bound is 8°); `STANDING` answers to
       0.0000° (its bound 1e-3°), `BACKWARDS` 7.7682° with every flash behind
-      the start and A's forward still +x; `STUCK` despawns exactly at
-      `killed_at` + 240 ticks (the 8 s cap), the others before it. `check`
-      counts A in its own spatial results (`found_a`, asserted 0): without
-      `without(Dying)` on spatial the test fails with A found at every
-      check. The same
+      the start and A's forward still +x. Each A kills its B with the third
+      shot, and moving actors see two stops (the walk's end, B down). `STUCK`
+      despawns B exactly at `killed_at` + 1 + 240 ticks (the 8 s cap), the
+      others before it. From the tick after the kill (the index can be
+      built in the kill's layer), `check` queries spatial at B's place: A is
+      found every time and the dying B never (`found_b`, asserted 0);
+      without `without(Dying)` on spatial the test fails with B found. The same
       test covers the death edge cases on `death_guest`: a kill before the
       first poll, a kill twice (one death, the first `killed_at` kept) and a
       kill after `life` returned.
@@ -4342,13 +4356,13 @@ Design:
       pair on a land map, 1280×720, a fixed camera. At each of the three
       flashes the centroid of the flash's bright pixels is within 12 px of
       the simulated effect's projection (forwards and `BACKWARDS`). With
-      particles off, in an 80 px box centred on A's last ground point:
-      two frames in the still time before the despawn (10 and 11 ticks
-      before it, after Survey's end) are identical; at the despawn the box
-      changes (28 of 6400 px); no burst reaches the particle feed at the
-      despawn (the vanish explosion; the test fails with 4 bursts when the
-      client's `Dying` skip is removed). B can stand in A's box (A runs
-      towards it), so the box is not compared with the bare terrain.
+      particles off, in a 48 px box centred on B's last ground point (A,
+      idling 51 px away, is asserted to stand clear of it): two frames in
+      the still time before the despawn (10 and 11 ticks before it, after
+      Survey's end) are identical; at the despawn the box changes (24 of
+      2304 px); no burst reaches the particle feed at the despawn (the
+      vanish explosion; the test fails with 4 bursts when the client's
+      `Dying` skip is removed).
       Validation reports nothing.
     - `live-puppet` (new scene, `army-fox`/`live-fox` re-recorded in the
       same run, `bench/results/m14-step6`): `pass/units pose` 0.3148 ms
