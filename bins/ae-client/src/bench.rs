@@ -20,6 +20,15 @@
 //!   `frames`, `width`, `height`: the workload; a change means times are
 //!   not comparable.
 //!
+//! `--bench-output sdr|hdr10|scrgb` renders the readback in that encoding
+//! (M13: the HDR graph adds `post.encode` and a 10-bit or 16F target); the
+//! levels are fixed at the client's 203/361 signal nits, so runs are
+//! reproducible whatever the display. `--bench-size WxH` sets the extent
+//! (default 1280x720). The readback copy's passes (`copy`, `host read`) are
+//! reported as `pass/copy` and `pass/host read` with a 50% tolerance: their
+//! time follows the host bus, and they are still left out of `gpu_total`,
+//! so the total stays comparable with earlier records.
+//!
 //! Units come from the crossing game run headless to tick 300 (once per
 //! map, shared by its scenes), as `--capture` does. A scene with
 //! explosions emits that many every frame (warm-up included, so the
@@ -53,6 +62,7 @@ use ae_bench::diff::Thresholds;
 use ae_bench::measure::{Sample, summarise};
 use ae_nav::terrain::Terrain;
 use ae_render::device::{GpuDevice, GpuInstance};
+use ae_render::encode::{DisplayLevels, OutputEncoding};
 use ae_render::executor::ExecutorConfig;
 use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
 use ae_render::thread::{Headless, RenderApp, TargetInfo};
@@ -78,13 +88,22 @@ pub struct BenchOptions {
     pub particles_full: bool,
     /// `--particle-blend`.
     pub particle_blend: ae_render::particles::ParticleBlend,
+    /// `--bench-output`: what the readback target encodes (M13).
+    pub output: OutputEncoding,
+    /// `--bench-size`: the offscreen extent.
+    pub size: (u32, u32),
 }
 
 impl Default for BenchOptions {
     fn default() -> Self {
-        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted }
+        Self { target: String::new(), frames: 300, warmup: 60, label: None, out: PathBuf::from("bench/results"), save: true, record_threads: 1, particles_full: false, particle_blend: ae_render::particles::ParticleBlend::Sorted, output: OutputEncoding::Sdr, size: (1280, 720) }
     }
 }
+
+/// The display levels every `--bench-output` run uses (M13 stage 5's
+/// reference: 203 nit paper white, 1.778 headroom). Fixed so the numbers do
+/// not move with the display the bench runs on.
+const BENCH_LEVELS: DisplayLevels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
 
 /// How the camera moves while measuring.
 #[derive(Clone, Copy)]
@@ -124,9 +143,14 @@ struct Scene {
 const LIVE_FRAMES: usize = 2;
 
 /// The passes the offscreen graph adds to copy the image to the host
-/// (`TerrainOutput::Readback`): left out of the report, since their time
-/// follows the host bus (±25% between runs).
+/// (`TerrainOutput::Readback`): left out of `gpu_total`, since their time
+/// follows the host bus (±25% between runs), but reported on their own with
+/// that tolerance (the copy is the target's bandwidth measured, M13 stage
+/// 7).
 const READBACK_PASSES: [&str; 2] = ["copy", "host read"];
+
+/// `bench-diff` tolerance of the readback passes.
+const READBACK_TOLERANCE: f64 = 0.5;
 
 /// `bench-diff` tolerance of the CPU times: tens of microseconds, whose
 /// medians vary by up to 30% between runs on a desktop (thread migration,
@@ -321,7 +345,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let fox = if scene.model_lights { cache.fox_light.clone() } else { cache.fox.clone() };
     let o = options_for(scene, b, fox);
     let source = cache.source(&o)?;
-    let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o);
+    let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o).with_display(b.output, BENCH_LEVELS);
     let mut posing = None;
     // The live scenes' sim and feed: every stream is published (each
     // writes only the cells that changed).
@@ -389,7 +413,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         let source = app.source().clone();
         app = app.with_lights(ae_render::lights::scatter(scene.lights, target, 400.0, 4.0, 7, &|p| source.height_at(p)));
     }
-    let extent = ash::vk::Extent2D { width: 1280, height: 720 };
+    let extent = ash::vk::Extent2D { width: b.size.0, height: b.size.1 };
     app.create_offscreen(gpu, extent)?;
     let target = TargetInfo { extent, format: ash::vk::Format::R8G8B8A8_SRGB, color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR };
     let config = ExecutorConfig { frames_in_flight: 2, profile: true, record_threads: b.record_threads, ..ExecutorConfig::default() };
@@ -500,6 +524,13 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
             report.time(&format!("pass/{name}"), sample);
         }
     }
+    // The readback copy, on its own: outside `gpu_total` (host bus), but
+    // measured for the target's bandwidth (M13 stage 7).
+    for (p, name) in names.iter().enumerate().filter(|(p, _)| !counted[*p]) {
+        let mut times: Vec<f64> = gpu_frames.iter().map(|f| f[p] as f64).collect();
+        report.time_with_tolerance(&format!("pass/{name}"), ns(&mut times), READBACK_TOLERANCE);
+    }
+    report.info("bytes_per_pixel", b.output.bytes_per_pixel(), "B/px");
     report.time_with_tolerance("cpu_frame", ns(&mut cpu_frame), CPU_TOLERANCE);
     report.time_with_tolerance("cpu_record", ns(&mut cpu_record), CPU_TOLERANCE);
     report.counter("leaves", leaves, "");

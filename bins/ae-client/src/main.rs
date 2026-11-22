@@ -249,7 +249,7 @@ impl Default for Options {
 }
 
 const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--tonemap clamp|lottes] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
-       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save]";
+       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH]";
 
 fn parse() -> Result<Options> {
     let mut o = Options::default();
@@ -348,6 +348,19 @@ fn parse() -> Result<Options> {
             "--label" => o.bench.get_or_insert_with(Default::default).label = Some(value("--label", &mut args)?),
             "--out" => o.bench.get_or_insert_with(Default::default).out = value("--out", &mut args)?.into(),
             "--no-save" => o.bench.get_or_insert_with(Default::default).save = false,
+            "--bench-output" => {
+                o.bench.get_or_insert_with(Default::default).output = match value("--bench-output", &mut args)?.as_str() {
+                    "sdr" => ae_render::encode::OutputEncoding::Sdr,
+                    "hdr10" => ae_render::encode::OutputEncoding::Hdr10Pq,
+                    "scrgb" => ae_render::encode::OutputEncoding::ScRgb,
+                    other => bail!("--bench-output {other}: expected sdr, hdr10 or scrgb"),
+                }
+            }
+            "--bench-size" => {
+                let size = value("--bench-size", &mut args)?;
+                let (w, h) = size.split_once('x').with_context(|| format!("--bench-size {size}: expected WxH"))?;
+                o.bench.get_or_insert_with(Default::default).size = (w.parse().context("--bench-size W")?, h.parse().context("--bench-size H")?);
+            }
             "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
             "--game" => o.game = value("--game", &mut args)?,
             "--package" => o.packages.push(value("--package", &mut args)?),
@@ -408,7 +421,7 @@ fn parse() -> Result<Options> {
         anyhow::ensure!(k < o.teams, "--observer {k} needs --teams of at least {}", k + 1);
     }
     if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
-        bail!("--frames, --warmup, --label, --out and --no-save go with --bench\n{USAGE}");
+        bail!("--frames, --warmup, --label, --out, --no-save, --bench-output and --bench-size go with --bench\n{USAGE}");
     }
     if auto_given {
         o.tone.auto = true;
