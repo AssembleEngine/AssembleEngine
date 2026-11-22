@@ -640,6 +640,11 @@ Two rules keep this from tangling:
 | graph validation | `crates/ae_framegraph/src/{descriptor,bake,barriers}.rs` |
 | the render module contract | `crates/ae_render_abi/src/`, `ae_render/src/module.rs` |
 | content packaging | `crates/ae_vfs/src/lib.rs`, `ae_catalog/src/lib.rs` |
+| what a unit's script does, or what a script can wait for | `sdk/ae-sdk/src/script.rs`, `games/puppet`, `games/duel` |
+| reading another entity's component (`get`, `ae_get`) | `sdk/ae-sdk-macros/src/lib.rs`, `crates/ae_sim/src/{schema,imports,runtime}.rs` |
+| a killed unit, its exclusion (`Dying`, `without`) and the death script | `sdk/ae-sdk/src/life.rs`, `crates/ae_ecs/src/flecs_backend.rs`, `crates/ae_services/src/{spatial,nav}.rs` |
+| effects at joints (`Effect`, the `fx` sink, bursts) | `sdk/ae-sdk/src/fx.rs`, `crates/ae_services/src/fx.rs`, `bins/ae-client/src/sim.rs` |
+| a model's joint masks (its rig file) | `crates/ae_model/src/anim.rs` (`Rig::apply_rig_file`), `assets/models/khronos/Fox/Fox.rig.json` |
 
 ## Not built yet
 

@@ -4308,6 +4308,47 @@ Design:
       (crossing, skirmish); `scripted` and `duel` have no nav rows, so `duel`
       runs without a per-game name (the schema declares `NavAgent` in both,
       so the schema alone cannot say).
+  - Step 6, F: tests and numbers — done (2026-11-22).
+    - `ae_services/tests/duel.rs`: 200 staggered pairs, 760 ticks. The
+      digests, logs, every flash and every answered aim's error are equal at
+      8, 1, 2 and 4 workers; 600 flashes, 1400 answered aims, the worst
+      running aim 4.2212° (the measured bound is 8°); `STANDING` answers to
+      0.0000° (its bound 1e-3°), `BACKWARDS` 7.7682° with every flash behind
+      the start and A's forward still +x; `STUCK` despawns exactly at
+      `killed_at` + 150 ticks (the 5 s cap), the others before it. The same
+      test covers the death edge cases on `death_guest`: a kill before the
+      first poll, a kill twice (one death, the first `killed_at` kept) and a
+      kill after `life` returned.
+    - `ae_services/tests/nav_dying.rs` on `nav_dying_guest`: with the middle
+      unit despawned or made `Dying`, the two neighbours' positions and modes
+      are identical tick for tick, the dying unit is not moved by its
+      `MoveOrder` and stays (its `Dying` kept).
+    - The ae-client GPU test (ignored, `--ignored --test-threads=1`): one
+      pair on a land map, 1280×720, a fixed camera. At each of the three
+      flashes the centroid of the flash's bright pixels is within 12 px of
+      the simulated effect's projection (forwards and `BACKWARDS`); two
+      frames between the death clip's end and the despawn are identical in
+      A's box (particles off); after the despawn under 1% of that box's
+      pixels differ from the terrain alone (no vanish explosion); validation
+      reports nothing.
+    - `live-puppet` (new scene, `army-fox`/`live-fox` re-recorded in the
+      same run, `bench/results/m14-step6`): `pass/units pose` 0.3148 ms
+      against M11's 0.31 ms and this run's live-fox 0.3157 ms (baseline
+      0.3175); `cpu_anim_pack` 1.122 ms (live-fox 1.108, baseline 0.911);
+      `gpu_total` 8.573 ms (live-fox 8.859 against the baseline's 8.610,
+      army-fox 8.960 against 8.594). `bench-diff` reports only
+      `pass/terrain` and `pass/water` in army-fox and live-fox (+38 to +86%),
+      passes the change does not touch, and on a second run the same; they
+      fit the known two-mode `pass/water` (3–4 µs against about 180–340 µs)
+      and the unexplained fox-scene rise in the M14 TODO. The baseline was
+      not re-taken.
+    - `ae-headless --game puppet --units 10000 --ticks 600 --workers
+      1,2,4,8 --digest` (content: the Fox model): digests equal; mean tick
+      1.116 ms at 1 worker and 0.370 ms at 8 (3.02×), `host anim` 0.222 ms a
+      tick, the systems phase 0.152 ms at 8. The `scripts` system's own share
+      is not reported without a profiler build (`ae-tool --features tracy`).
+    - Still waiting for M9: save → load → continue with scripts suspended,
+      a death sequence among them.
 
 ### M15 — Fully bindless resources (priority: medium)
 
@@ -4547,6 +4588,9 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
   decompression that the consuming pass's barriers pay (the begin timestamp is written before
   them), depending on where the image's memory landed. A flagged `pass/water` or `cliffs`
   exposure meter is checked against this before it is called a regression.
+  At 2026-11-22 (step 6, F) army-fox and live-fox measured `pass/terrain`
+  +38–44% and `pass/water` +22–86% against the 335e770 baseline, the same in
+  two runs; no step 6 change touches those passes.
 - **Why scenes slow down inside one bench process** (2026-11-22). After the fox and model
   scenes, later scenes in the same process measured up to 3x slow in some runs, at full clocks
   and with VRAM to spare; the bench now runs one process per scene instead. Conditions for
@@ -4564,6 +4608,9 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
 - **An engine death backstop** (step 6, D): a game whose death script never
   ends keeps its unit `Dying` forever; the cap lives in the SDK's
   `resume_with_death`, and only a game that uses it has one.
+- **Corpse models** (step 6, D/F): a `Fate::Corpse` keeps the entity and its
+  last frame; there is no corpse model or per-model pose for one.
+- **The death sequence across save → load** (step 6, F): waits for M9.
 
 From the M14 coroutine spike (2026-11-19):
 

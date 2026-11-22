@@ -89,6 +89,19 @@ P3 by default for HDR10). Render modules declare the same tail (the render ABI's
 SDR at the defaults is unchanged. Details: [docs/PLAN.md](docs/PLAN.md) "M13 progress";
 [docs/lighting.md](docs/lighting.md) for the colour and exposure numbers.
 
+M14 (unit scripts) is done. A unit's model is driven by a script: a plain Rust `async fn` per
+unit, its future in a deterministic slot of the shared memory and resumed on any worker (callins,
+`race`/`join`, waits on turns and clips), so a walk, an aim in steps, a shot with a muzzle flash at
+a joint and a death fall are all synced and replay bit-identically. The pose is a pure function of
+synced channels (clips by layer and mask, manual joint turns/moves/scales); the animation service
+advances it on the CPU and the client's `units pose` pass builds the palettes. Masks come from a
+rig file beside the model (`Fox.rig.json`: upper and lower bodies). Units have a synced
+`Orientation` (a quaternion, drawn with tilt), systems can read other units' components (`get`),
+effects at a bone go through the `Effect` stream and an `fx` sink to the client's particles, and a
+killed unit (`Dying`, excluded by `without(Dying)` from spatial queries and nav) runs its death
+script under a time cap. `games/duel` is the test game (walk, stop, run, a two-step aim while
+running, three shots, death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
+
 | Crate | What it is | Origin |
 |---|---|---|
 | `crates/ae_ecs` | Storage and query layer; flecs behind `flecs_backend`; the column arena | ecs_sim (`flecs.rs`, vendored flecs 4.1.6 + patch) |
