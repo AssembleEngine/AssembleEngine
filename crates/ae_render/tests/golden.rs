@@ -10,6 +10,7 @@
 //! `AE_UPDATE_GOLDEN=1 cargo test -p ae_render --test golden`.
 
 use ae_framegraph::{BakeOptions, BufferDesc, FrameGraph, bake, dot};
+use ae_render::bindless::graph_indices;
 use ae_render::demo::{DemoOutput, build_demo_graph};
 use ae_render::encode::{DisplayLevels, OutputEncoding};
 use ae_render::library::{LibraryEnv, LibraryPass, LibraryResource, resolve};
@@ -21,7 +22,8 @@ use std::path::PathBuf;
 
 fn dot_of<R>(graph: &FrameGraph<R>) -> String {
     let baked = bake(graph, BakeOptions::default()).expect("the graph bakes");
-    dot::to_dot(graph, &baked)
+    let indices = graph_indices(graph, &baked);
+    dot::to_dot_with_indices(graph, &baked, &indices)
 }
 
 fn scene(units: bool, water: bool, shadows: bool, output: TerrainOutput) -> String {

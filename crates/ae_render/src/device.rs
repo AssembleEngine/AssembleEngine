@@ -275,6 +275,7 @@ impl GpuDevice {
         let vk_instance = &instance.instance;
         let physicals = unsafe { vk_instance.enumerate_physical_devices() }?;
         let mut candidates = Vec::new();
+        let mut rejected: Option<String> = None;
         for physical in physicals {
             let properties = unsafe { vk_instance.get_physical_device_properties(physical) };
             if properties.api_version < vk::API_VERSION_1_3 {
@@ -337,6 +338,37 @@ impl GpuDevice {
             let gpu_driven = base.multi_draw_indirect == vk::TRUE
                 && features11.shader_draw_parameters == vk::TRUE
                 && features12b.descriptor_binding_partially_bound == vk::TRUE;
+            // M15: the global set's four arrays. Vulkan 1.3 makes the minimum
+            // descriptor-indexing set mandatory (given the promoted
+            // VK_EXT_descriptor_indexing), but not the storage-image
+            // dynamic/non-uniform flags, so they are checked here too.
+            let bindless = features12b.descriptor_indexing == vk::TRUE
+                && features12b.runtime_descriptor_array == vk::TRUE
+                && features12b.descriptor_binding_partially_bound == vk::TRUE
+                && features12b.shader_sampled_image_array_non_uniform_indexing == vk::TRUE
+                && features12b.shader_storage_buffer_array_non_uniform_indexing == vk::TRUE
+                && features12b.shader_storage_image_array_non_uniform_indexing == vk::TRUE
+                && base.shader_sampled_image_array_dynamic_indexing == vk::TRUE
+                && base.shader_storage_buffer_array_dynamic_indexing == vk::TRUE
+                && base.shader_storage_image_array_dynamic_indexing == vk::TRUE;
+            if !bindless {
+                let name = properties
+                    .device_name_as_c_str()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                rejected.get_or_insert_with(|| {
+                    format!(
+                        "{name} lacks the descriptor-indexing feature subset M15 needs \
+                         (runtimeDescriptorArray, partially bound, and dynamic/non-uniform \
+                         sampled-image, storage-image and storage-buffer arrays)"
+                    )
+                });
+                continue;
+            }
+            if let Err(err) = crate::bindless::check_limits(&properties.limits) {
+                rejected.get_or_insert(err);
+                continue;
+            }
             let optional = (
                 base.fill_mode_non_solid == vk::TRUE,
                 base.fragment_stores_and_atomics == vk::TRUE,
@@ -349,7 +381,7 @@ impl GpuDevice {
         let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores, texture_compression_bc, gpu_driven)) = candidates
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances, storage images of any format and a graphics+compute queue"))?;
+            .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances, storage images of any format, a graphics+compute queue and the M15 descriptor-indexing set{}", rejected.map(|why| format!(": {why}")).unwrap_or_default()))?;
         let device_name = properties
             .device_name_as_c_str()
             .map(|name| name.to_string_lossy().into_owned())
@@ -406,7 +438,12 @@ impl GpuDevice {
             .compute_full_subgroups(compute_subgroups_32);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
-            .descriptor_binding_partially_bound(gpu_driven);
+            .descriptor_indexing(true)
+            .runtime_descriptor_array(true)
+            .descriptor_binding_partially_bound(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .shader_storage_buffer_array_non_uniform_indexing(true)
+            .shader_storage_image_array_non_uniform_indexing(true);
         let mut features11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(gpu_driven);
         // Clip distances: the terrain clips its power-of-two LEB square to the map.
         let base_features = vk::PhysicalDeviceFeatures::default()
@@ -419,7 +456,10 @@ impl GpuDevice {
             .fill_mode_non_solid(fill_mode_non_solid)
             .fragment_stores_and_atomics(fragment_stores)
             .texture_compression_bc(texture_compression_bc)
-            .multi_draw_indirect(gpu_driven);
+            .multi_draw_indirect(gpu_driven)
+            .shader_sampled_image_array_dynamic_indexing(true)
+            .shader_storage_buffer_array_dynamic_indexing(true)
+            .shader_storage_image_array_dynamic_indexing(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&extensions)

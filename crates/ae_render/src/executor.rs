@@ -10,14 +10,17 @@
 //! image with `image_available(slot)` → `execute` (records, submits with the
 //! caller's waits/signals, fences the slot) → caller presents.
 
+use crate::bindless::{Bindless, BufferHandle, ImageHandle, SampledKind, StorageImageHandle};
 use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
 use ae_framegraph::barriers::{AccessState, BarrierDesc, StateKey, StateStore, pass_barriers};
-use ae_framegraph::{BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, bake};
+use ae_framegraph::{
+    BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, Role, bake,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +34,10 @@ pub struct ImageBinding {
     /// Unique per bound object; keys the access state of external images
     /// (e.g. one state per swapchain image).
     pub identity: u64,
+    /// The global sampled-image index, when the resource has one.
+    pub sampled: Option<u32>,
+    /// The global storage-image index, when the resource has one.
+    pub storage: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +46,8 @@ pub struct BufferBinding {
     pub offset: u64,
     pub size: u64,
     pub identity: u64,
+    /// The global storage-buffer index, when the resource has one.
+    pub storage: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +63,14 @@ impl Binding {
             Binding::Buffer(buffer) => buffer.identity,
         }
     }
+}
+
+/// The graph handles a resource keeps across bakes, keyed by name.
+#[derive(Clone, Copy, Debug, Default)]
+struct GraphHandles {
+    sampled: Option<ImageHandle>,
+    storage: Option<StorageImageHandle>,
+    buffer: Option<BufferHandle>,
 }
 
 /// What a pass may see while recording: its command buffer, its render
@@ -160,6 +177,11 @@ pub struct ExecutorStats {
     pub pass_gpu_ms: Vec<f32>,
     /// Names of the baked passes, baked order (as `pass_gpu_ms`).
     pub pass_names: Vec<String>,
+    /// Descriptor writes the bindless registry has applied.
+    pub bindless_writes: u64,
+    /// Live bindless entries, binding order (sampled images, samplers,
+    /// storage images, storage buffers).
+    pub bindless_live: [u32; 4],
 }
 
 struct Physical {
@@ -216,6 +238,8 @@ pub struct Executor<R> {
     graph: FrameGraph<R>,
     baked: Option<BakedGraph>,
     slots: Vec<Slot>,
+    bindless: Bindless,
+    graph_handles: BTreeMap<String, GraphHandles>,
     external_states: BTreeMap<u64, AccessState>,
     frame: u64,
     stats: ExecutorStats,
@@ -269,12 +293,15 @@ impl<R> Executor<R> {
                 pass_cmds: Vec::new(),
             });
         }
+        let bindless = Bindless::new(&gpu, config.frames_in_flight)?;
         Ok(Self {
             gpu,
             config,
             graph: FrameGraph::new(),
             baked: None,
             slots,
+            bindless,
+            graph_handles: BTreeMap::new(),
             external_states: BTreeMap::new(),
             frame: 0,
             stats: ExecutorStats::default(),
@@ -317,7 +344,17 @@ impl<R> Executor<R> {
             .flat_map(|b| b.order())
             .map(|p| self.graph.passes[p.0 as usize].name.clone())
             .collect();
+        stats.bindless_live = self.bindless.live();
         stats
+    }
+
+    /// The global descriptor set's registry.
+    pub fn bindless(&self) -> &Bindless {
+        &self.bindless
+    }
+
+    pub fn bindless_mut(&mut self) -> &mut Bindless {
+        &mut self.bindless
     }
 
     /// Install the declarations for the next frames. Rebakes and
@@ -334,7 +371,15 @@ impl<R> Executor<R> {
 
     pub fn set_graph(&mut self, graph: FrameGraph<R>) -> Result<bool> {
         let signature = graph.signature();
-        if self.baked.as_ref().is_some_and(|baked| baked.signature == signature) {
+        if let Some(baked) = self.baked.clone()
+            && baked.signature == signature
+        {
+            // Names are not part of the signature, so a renamed resource
+            // still needs its handles re-keyed even though nothing rebaked.
+            // Direct descriptor writes need an idle device, which a rebake
+            // waits for anyway.
+            self.gpu.wait_idle();
+            self.sync_graph_handles(&graph, &baked)?;
             self.graph = graph;
             return Ok(false);
         }
@@ -396,6 +441,7 @@ impl<R> Executor<R> {
                 }
             }
         }
+        self.sync_graph_handles(&graph, &baked)?;
         self.stats.bakes += 1;
         self.stats.physical_resources = baked.physical.len();
         self.stats.estimated_bytes = baked.estimated_bytes();
@@ -404,6 +450,151 @@ impl<R> Executor<R> {
         self.baked = Some(baked);
         self.graph = graph;
         Ok(true)
+    }
+
+    /// Keep each graph resource's name and handles across bakes. The GPU is
+    /// idle here, so the new physical views can be written into every slot
+    /// directly.
+    fn sync_graph_handles(&mut self, graph: &FrameGraph<R>, baked: &BakedGraph) -> Result<()> {
+        let mut old = std::mem::take(&mut self.graph_handles);
+        let mut new = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for (index, resource) in baked.resources.iter().enumerate() {
+            if !resource.reachable {
+                continue;
+            }
+            let Some(physical) = resource.physical else {
+                continue;
+            };
+            let id = ResourceId(index as u32);
+            let name = graph.resource_name(id).to_string();
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let mut handles = old.remove(&name).unwrap_or_default();
+            match baked.physical[physical as usize].desc {
+                ResourceDesc::Image(image) => {
+                    if image.usage.contains(vk::ImageUsageFlags::SAMPLED) {
+                        let views: Vec<vk::ImageView> = self
+                            .slots
+                            .iter()
+                            .map(|slot| {
+                                slot.physical[physical as usize]
+                                    .image
+                                    .as_ref()
+                                    .expect("a physical image")
+                                    .view
+                            })
+                            .collect();
+                        let layout = sampled_layout(baked, id);
+                        let kind = if image.layers > 1 {
+                            SampledKind::Image2DArray
+                        } else {
+                            SampledKind::Image2D
+                        };
+                        match handles.sampled {
+                            Some(handle) => {
+                                self.bindless
+                                    .update_graph_sampled(&self.gpu.device, handle, &views, layout);
+                            }
+                            None => {
+                                handles.sampled = Some(self.bindless.register_graph_sampled(
+                                    &self.gpu.device,
+                                    kind,
+                                    &views,
+                                    layout,
+                                )?);
+                            }
+                        }
+                    } else if let Some(handle) = handles.sampled.take() {
+                        self.bindless.retire_sampled(handle);
+                    }
+                    if image.usage.contains(vk::ImageUsageFlags::STORAGE) {
+                        let views: Vec<vk::ImageView> = self
+                            .slots
+                            .iter()
+                            .map(|slot| {
+                                slot.physical[physical as usize]
+                                    .image
+                                    .as_ref()
+                                    .expect("a physical image")
+                                    .view
+                            })
+                            .collect();
+                        match handles.storage {
+                            Some(handle) => {
+                                self.bindless.update_graph_storage_image(
+                                    &self.gpu.device,
+                                    handle,
+                                    &views,
+                                    vk::ImageLayout::GENERAL,
+                                );
+                            }
+                            None => {
+                                handles.storage = Some(self.bindless.register_graph_storage_image(
+                                    &self.gpu.device,
+                                    &views,
+                                    vk::ImageLayout::GENERAL,
+                                )?);
+                            }
+                        }
+                    } else if let Some(handle) = handles.storage.take() {
+                        self.bindless.retire_storage_image(handle);
+                    }
+                }
+                ResourceDesc::Buffer(buffer) => {
+                    if buffer.usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER) {
+                        let buffers: Vec<(vk::Buffer, u64, u64)> = self
+                            .slots
+                            .iter()
+                            .map(|slot| {
+                                let buffer = slot.physical[physical as usize]
+                                    .buffer
+                                    .as_ref()
+                                    .expect("a physical buffer");
+                                (buffer.buffer, 0, buffer.size)
+                            })
+                            .collect();
+                        match handles.buffer {
+                            Some(handle) => {
+                                self.bindless.update_graph_buffer(&self.gpu.device, handle, &buffers);
+                            }
+                            None => {
+                                handles.buffer = Some(self.bindless.register_graph_buffer(&self.gpu.device, &buffers)?);
+                            }
+                        }
+                    } else if let Some(handle) = handles.buffer.take() {
+                        self.bindless.retire_buffer(handle);
+                    }
+                }
+            }
+            new.insert(name, handles);
+        }
+        for (_, handles) in old {
+            if let Some(handle) = handles.sampled {
+                self.bindless.retire_sampled(handle);
+            }
+            if let Some(handle) = handles.storage {
+                self.bindless.retire_storage_image(handle);
+            }
+            if let Some(handle) = handles.buffer {
+                self.bindless.retire_buffer(handle);
+            }
+        }
+        self.graph_handles = new;
+        Ok(())
+    }
+
+    /// A graph resource's bindless indices by name, for tests and tools:
+    /// `[sampled, storage image, storage buffer]`.
+    pub fn graph_index(&self, name: &str) -> Option<[Option<u32>; 3]> {
+        self.graph_handles.get(name).map(|handles| {
+            [
+                handles.sampled.map(|handle| handle.index),
+                handles.storage.map(|handle| handle.index),
+                handles.buffer.map(|handle| handle.index),
+            ]
+        })
     }
 
     fn release_physical(&mut self) {
@@ -427,6 +618,9 @@ impl<R> Executor<R> {
         let slot = &mut self.slots[slot_index];
         wait_fence(&self.gpu, slot.fence).context("waiting for a frame fence")?;
         self.stats.wait_ms = started.elapsed().as_secs_f32() * 1000.0;
+        // The slot's fence has signalled, so its set is idle: applying the
+        // queued writes here needs no update-after-bind feature.
+        self.stats.bindless_writes += self.bindless.begin_frame(&self.gpu.device, slot_index);
         if slot.pending_queries > 0 {
             let mut data = vec![0u64; slot.pending_queries as usize];
             let result = unsafe {
@@ -514,6 +708,11 @@ impl<R> Executor<R> {
                 Some(physical) => {
                     let entry = &slot.physical[physical as usize];
                     let identity = (u64::from(token.slot as u32) << 32) | physical as u64;
+                    let handles = self
+                        .graph_handles
+                        .get(graph.resource_name(ResourceId(index as u32)))
+                        .copied()
+                        .unwrap_or_default();
                     if let Some(image) = &entry.image {
                         Some(Binding::Image(ImageBinding {
                             image: image.image,
@@ -522,6 +721,8 @@ impl<R> Executor<R> {
                             extent: image.desc.extent(),
                             range: image.range(),
                             identity,
+                            sampled: handles.sampled.map(|handle| handle.index),
+                            storage: handles.storage.map(|handle| handle.index),
                         }))
                     } else {
                         entry.buffer.as_ref().map(|buffer| {
@@ -530,6 +731,7 @@ impl<R> Executor<R> {
                                 offset: 0,
                                 size: buffer.size,
                                 identity,
+                                storage: handles.buffer.map(|handle| handle.index),
                             })
                         })
                     }
@@ -875,6 +1077,20 @@ impl FrameRecording<'_> {
     }
 }
 
+/// The layout the graph's sampled access transitions an image to. A
+/// sampled depth image is read in the depth read-only layout; everything
+/// else is `SHADER_READ_ONLY_OPTIMAL`.
+fn sampled_layout(baked: &BakedGraph, id: ResourceId) -> vk::ImageLayout {
+    for pass in &baked.passes {
+        for access in &pass.accesses {
+            if access.resource == id && matches!(access.role, Role::Sampled(_) | Role::DepthRead) {
+                return access.usage.layout;
+            }
+        }
+    }
+    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+}
+
 fn emit_barriers(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -927,6 +1143,7 @@ impl<R> Drop for Executor<R> {
     fn drop(&mut self) {
         self.gpu.wait_idle();
         self.release_physical();
+        self.bindless.destroy(&self.gpu);
         let device = &self.gpu.device;
         for mut slot in self.slots.drain(..) {
             destroy_pass_cmds(device, &mut slot.pass_cmds);

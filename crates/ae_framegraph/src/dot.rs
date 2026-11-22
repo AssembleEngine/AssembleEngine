@@ -3,6 +3,7 @@
 //! alias groups. Deterministic for a given graph and plan.
 
 use super::{BakedGraph, FrameGraph, PassKind};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 fn escape(text: &str) -> String {
@@ -10,12 +11,32 @@ fn escape(text: &str) -> String {
 }
 
 pub fn to_dot<R>(graph: &FrameGraph<R>, baked: &BakedGraph) -> String {
-    to_dot_with_times(graph, baked, &[])
+    to_dot_annotated(graph, baked, &[], &BTreeMap::new())
 }
 
 /// As `to_dot`, annotating pass `i` (baked order) with `times_ms[i]` when
 /// present (GPU timestamp averages).
 pub fn to_dot_with_times<R>(graph: &FrameGraph<R>, baked: &BakedGraph, times_ms: &[f32]) -> String {
+    to_dot_annotated(graph, baked, times_ms, &BTreeMap::new())
+}
+
+/// As `to_dot`, adding each resource's bindless indices (`[sampled,
+/// storage image, storage buffer]` by resource name). This is what the
+/// frame-graph goldens use: a rebake must keep surviving names' indices.
+pub fn to_dot_with_indices<R>(
+    graph: &FrameGraph<R>,
+    baked: &BakedGraph,
+    indices: &BTreeMap<String, [Option<u32>; 3]>,
+) -> String {
+    to_dot_annotated(graph, baked, &[], indices)
+}
+
+fn to_dot_annotated<R>(
+    graph: &FrameGraph<R>,
+    baked: &BakedGraph,
+    times_ms: &[f32],
+    indices: &BTreeMap<String, [Option<u32>; 3]>,
+) -> String {
     let mut out = String::from("digraph frame_graph {\n  rankdir=LR;\n  node [shape=box, style=filled];\n");
     for (index, pass) in baked.passes.iter().enumerate() {
         let color = match pass.kind {
@@ -61,6 +82,20 @@ pub fn to_dot_with_times<R>(graph: &FrameGraph<R>, baked: &BakedGraph, times_ms:
             physical.class,
             members.join(" -> ")
         );
+        for member in &physical.members {
+            let name = graph.resource_name(*member);
+            if let Some([sampled, storage, buffer]) = indices.get(name) {
+                let show = |index: Option<u32>| index.map_or_else(|| "-".to_string(), |i| i.to_string());
+                let _ = writeln!(
+                    out,
+                    "  // resource {}: sampled {}, storage image {}, storage buffer {}",
+                    escape(name),
+                    show(*sampled),
+                    show(*storage),
+                    show(*buffer)
+                );
+            }
+        }
     }
     for handoff in &baked.handoffs {
         let _ = writeln!(

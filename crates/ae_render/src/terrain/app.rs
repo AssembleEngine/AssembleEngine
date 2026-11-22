@@ -1411,6 +1411,8 @@ impl RenderApp for TerrainApp {
                     extent: o.extent,
                     range: o.image.range(),
                     identity: (0xAE7 << 40) | 10,
+                    sampled: None,
+                    storage: None,
                 })
             }
             LibraryResource::ReadbackBuffer => {
@@ -1420,6 +1422,7 @@ impl RenderApp for TerrainApp {
                     offset: 0,
                     size: o.buffer.size,
                     identity: (0xAE7 << 40) | 11,
+                    storage: None,
                 })
             }
             LibraryResource::ShadowMap => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().binding()),

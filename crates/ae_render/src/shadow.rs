@@ -179,6 +179,8 @@ impl ShadowMap {
             },
             range: image.range(),
             identity,
+            sampled: None,
+            storage: None,
         }
     }
 

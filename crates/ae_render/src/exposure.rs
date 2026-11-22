@@ -334,6 +334,8 @@ impl Exposure {
             extent: vk::Extent2D { width: 1, height: 1 },
             range: self.image.range(),
             identity: IDENTITY_EXPOSURE,
+            sampled: None,
+            storage: None,
         }
     }
 
@@ -344,6 +346,7 @@ impl Exposure {
             offset: 0,
             size: self.histogram.size,
             identity: IDENTITY_HISTOGRAM,
+            storage: None,
         }
     }
 

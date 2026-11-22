@@ -4,7 +4,7 @@
 //! Every test runs with validation (including synchronization validation)
 //! and fails on any validation error or warning.
 
-use ae_framegraph::{BakeOptions, BufferDesc, ImageDesc, ResourceClass};
+use ae_framegraph::{BakeOptions, BufferDesc, FrameGraph, ImageDesc, PassKind, ResourceClass, ShaderStage};
 use ae_render::demo::{DemoOutput, DemoRenderer, build_demo_graph};
 use ae_render::device::{GpuDevice, GpuInstance};
 use ae_render::executor::{Binding, BufferBinding, Executor, ExecutorConfig, ImageBinding};
@@ -44,6 +44,53 @@ fn yaw(hx: f32, hy: f32) -> [f32; 4] {
     let q = [0.0, -s, 0.0, 1.0 + c];
     let n = (q[1] * q[1] + q[3] * q[3]).sqrt();
     [0.0, q[1] / n, 0.0, q[3] / n]
+}
+
+/// A graph with one sampled image, for the bindless rebake test.
+fn one_sampled_graph(extent: u32, extra: bool) -> FrameGraph<()> {
+    let mut graph = FrameGraph::<()>::new();
+    let tex = graph.image(
+        "tex",
+        ImageDesc::color_2d(vk::Format::R8G8B8A8_UNORM, extent, extent, vk::ImageUsageFlags::SAMPLED),
+        ResourceClass::Persistent,
+    );
+    let _ = extra;
+    graph
+        .pass("sample", PassKind::Compute, ())
+        .sampled(tex, ShaderStage::Compute)
+        .root();
+    graph
+}
+
+#[test]
+#[ignore]
+fn graph_handles_survive_resize_and_rebake() {
+    let gpu = gpu();
+    let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    executor.set_graph(one_sampled_graph(4, false)).unwrap();
+    assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
+    // Same topology: no rebake, same index.
+    assert!(!executor.set_graph(one_sampled_graph(4, false)).unwrap());
+    assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
+    // A resize rebakes and recreates the physical image; the name keeps
+    // its index.
+    assert!(executor.set_graph(one_sampled_graph(8, false)).unwrap());
+    assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
+    // A second resource takes the next index in declaration order.
+    let mut graph = one_sampled_graph(8, false);
+    let other = graph.image(
+        "other",
+        ImageDesc::color_2d(vk::Format::R8G8B8A8_UNORM, 8, 8, vk::ImageUsageFlags::SAMPLED),
+        ResourceClass::Persistent,
+    );
+    graph
+        .pass("sample2", PassKind::Compute, ())
+        .sampled(other, ShaderStage::Compute)
+        .root();
+    assert!(executor.set_graph(graph).unwrap());
+    assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
+    assert_eq!(executor.graph_index("other"), Some([Some(4), None, None]));
+    assert_clean(&gpu);
 }
 
 fn assert_clean(gpu: &GpuDevice) {
@@ -108,12 +155,15 @@ fn run_demo(
         extent,
         range: target.range(),
         identity: 1 << 48,
+        sampled: None,
+        storage: None,
     });
     let readback_binding = Binding::Buffer(BufferBinding {
         buffer: readback.buffer,
         offset: 0,
         size,
         identity: (1 << 48) + 1,
+        storage: None,
     });
     let mut params = OwnedBuffer::new(
         gpu,
@@ -131,6 +181,7 @@ fn run_demo(
         offset: 0,
         size: 16,
         identity: (1 << 48) + 2,
+        storage: None,
     });
     let params_id = resources.params_staging;
     let target_id = resources.target;
@@ -345,12 +396,15 @@ fn first_use_load_becomes_a_clear() {
             extent,
             range: image.range(),
             identity: 1 << 48,
+            sampled: None,
+            storage: None,
         }),
         Binding::Buffer(BufferBinding {
             buffer: buffer.buffer,
             offset: 0,
             size,
             identity: (1 << 48) + 1,
+            storage: None,
         }),
     ];
     let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
@@ -527,7 +581,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
     let depth = graph.image(
         "depth",
         ImageDesc::depth_2d(depth_format, SIZE, SIZE, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT),
-        ResourceClass::Transient,
+        ResourceClass::Persistent,
     );
     graph
         .pass("near", PassKind::Graphics, 0)
@@ -604,6 +658,8 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
             extent,
             range: image.range(),
             identity,
+            sampled: None,
+            storage: None,
         })
     };
     let bindings = [
@@ -614,6 +670,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
             offset: 0,
             size: 2 * bytes,
             identity: (1 << 48) + 2,
+            storage: None,
         }),
     ];
     let mut executor = Executor::new(
@@ -2857,6 +2914,8 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             extent,
             range: image.range(),
             identity: (0x6EA7E << 40) | 1,
+            sampled: None,
+            storage: None,
         }),
         Binding::Image(ImageBinding {
             image: graded_image.image,
@@ -2865,6 +2924,8 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             extent,
             range: graded_image.range(),
             identity: (0x6EA7E << 40) | 2,
+            sampled: None,
+            storage: None,
         }),
         Binding::Image(ImageBinding {
             image: out.image,
@@ -2873,12 +2934,15 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             extent,
             range: out.range(),
             identity: (0x6EA7E << 40) | 3,
+            sampled: None,
+            storage: None,
         }),
         Binding::Buffer(BufferBinding {
             buffer: readback.buffer,
             offset: 0,
             size: buffer_desc.size,
             identity: (0x6EA7E << 40) | 4,
+            storage: None,
         }),
     ];
     let sampler_info = vk::SamplerCreateInfo::default()
@@ -3528,12 +3592,15 @@ fn parallel_recording_matches_serial() {
                 extent,
                 range: image.range(),
                 identity: 1 << 48,
+                sampled: None,
+                storage: None,
             }),
             Binding::Buffer(BufferBinding {
                 buffer: buffer.buffer,
                 offset: 0,
                 size: bytes,
                 identity: (1 << 48) + 1,
+                storage: None,
             }),
         ];
         let mut graph = FrameGraph::<u16>::new();
@@ -10013,6 +10080,8 @@ fn encode_values(
             extent,
             range: image.range(),
             identity: (0xBEEF << 40) | 1,
+            sampled: None,
+            storage: None,
         }),
         Binding::Image(ImageBinding {
             image: out.image,
@@ -10021,12 +10090,15 @@ fn encode_values(
             extent,
             range: out.range(),
             identity: (0xBEEF << 40) | 2,
+            sampled: None,
+            storage: None,
         }),
         Binding::Buffer(BufferBinding {
             buffer: readback.buffer,
             offset: 0,
             size,
             identity: (0xBEEF << 40) | 3,
+            storage: None,
         }),
     ];
     let sampler_info = vk::SamplerCreateInfo::default()

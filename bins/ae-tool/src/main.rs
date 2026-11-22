@@ -11,6 +11,7 @@
 //! ae-tool unpack-list FILE             # an archive's files and content hash
 //! ae-tool model convert IN.gltf|IN.glb OUT.aemodel  # glTF 2.0 to the engine model (M11)
 //! ae-tool model info FILE.aemodel      # its parts, sizes and load time
+//! ae-tool capture-diff DIR-A DIR-B      # compare AE_TEST_CAPTURE_DIR PPMs byte for byte
 //! ae-tool hooks install                # point git at the tracked .githooks/
 //! ```
 //! `<base>` and `<head>` are report files or directories of reports
@@ -35,6 +36,7 @@ const USAGE: &str = "usage:
   ae-tool unpack-list FILE
   ae-tool model convert IN.gltf|IN.glb OUT.aemodel
   ae-tool model info FILE.aemodel
+  ae-tool capture-diff DIR-A DIR-B
   ae-tool hooks install";
 
 /// Runs `ae_nav`'s `navbench` binary from the same target directory
@@ -222,6 +224,7 @@ fn main() -> ExitCode {
         Some("map-export") => map_export(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("unpack-list") => unpack_list(&args[1..]).map(|()| ExitCode::SUCCESS),
         Some("model") => model(&args[1..]).map(|()| ExitCode::SUCCESS),
+        Some("capture-diff") => capture_diff(&args[1..]),
         Some("hooks") => match args[1..] {
             [ref cmd] if cmd == "install" => hooks_install().map(|()| ExitCode::SUCCESS),
             _ => {
@@ -238,6 +241,65 @@ fn main() -> ExitCode {
         eprintln!("error: {error:#}");
         ExitCode::from(2)
     })
+}
+
+/// `ae-tool capture-diff DIR-A DIR-B`: the binary PPMs written by two
+/// `AE_TEST_CAPTURE_DIR` runs, compared byte for byte. Exits 1 when a file
+/// is missing, extra or different.
+fn capture_diff(args: &[String]) -> Result<ExitCode> {
+    let [a, b] = args else {
+        bail!("expected <dir-a> <dir-b>")
+    };
+    fn captures(root: &Path) -> Result<std::collections::BTreeMap<String, PathBuf>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, PathBuf>) -> Result<()> {
+            for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out)?;
+                } else if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ppm")) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                    out.insert(relative, path);
+                }
+            }
+            Ok(())
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out)?;
+        Ok(out)
+    }
+    let left = captures(Path::new(a))?;
+    let right = captures(Path::new(b))?;
+    let mut problems = 0u32;
+    for (name, path) in &left {
+        match right.get(name) {
+            None => {
+                println!("missing in {}: {name}", b);
+                problems += 1;
+            }
+            Some(other) => {
+                let mine = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+                let theirs = std::fs::read(other).with_context(|| format!("read {}", other.display()))?;
+                if mine != theirs {
+                    println!("differs: {name} ({} bytes vs {} bytes)", mine.len(), theirs.len());
+                    problems += 1;
+                }
+            }
+        }
+    }
+    for name in right.keys() {
+        if !left.contains_key(name) {
+            println!("missing in {a}: {name}");
+            problems += 1;
+        }
+    }
+    if problems == 0 {
+        println!("{} PPM capture(s) identical", left.len());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("{problems} capture difference(s)");
+        Ok(ExitCode::from(1))
+    }
 }
 
 /// Arguments split into positionals, value flags (`--name value`) and switches.

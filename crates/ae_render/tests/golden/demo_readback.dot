@@ -23,9 +23,15 @@ digraph frame_graph {
   p6 -> p7 [label="target"];
   p7 -> p8 [label="readback"];
   // physical 0 Transient: scene
+  // resource scene: sampled 3, storage image 1, storage buffer -
   // physical 1 Transient: params
+  // resource params: sampled -, storage image -, storage buffer -
   // physical 2 Transient: a1 -> b1
+  // resource a1: sampled 4, storage image 2, storage buffer -
+  // resource b1: sampled 6, storage image 4, storage buffer -
   // physical 3 Transient: a2
+  // resource a2: sampled 5, storage image 3, storage buffer -
   // physical 4 Transient: b2
+  // resource b2: sampled 7, storage image 5, storage buffer -
   // handoff physical 2: a1 -> b1 at pass 4
 }

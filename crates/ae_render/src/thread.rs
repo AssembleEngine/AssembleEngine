@@ -452,6 +452,8 @@ fn render_main<A: RenderApp>(
                 extent: swapchain.extent,
                 range: color_range(),
                 identity: (swapchain.generation << 32) | image as u64,
+                sampled: None,
+                storage: None,
             });
             let externals: Vec<Option<Binding>> = (0..resources as u32)
                 .map(|index| {

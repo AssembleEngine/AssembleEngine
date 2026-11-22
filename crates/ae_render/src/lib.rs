@@ -15,6 +15,7 @@
 //!
 //! Shaders in `shaders/` are compiled to SPIR-V by `build.rs` with `glslc`.
 
+pub mod bindless;
 pub mod bloom;
 pub mod colorspace;
 pub mod decals;

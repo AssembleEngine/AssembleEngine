@@ -1177,6 +1177,7 @@ impl UnitRenderer {
             offset: 0,
             size: b.size,
             identity: IDENTITY_COUNTS | slot as u64,
+            storage: None,
         }
     }
 
@@ -1262,6 +1263,7 @@ impl UnitRenderer {
             offset: 0,
             size: b.size,
             identity: IDENTITY_INSTANCES | slot as u64,
+            storage: None,
         }
     }
 
@@ -1279,6 +1281,7 @@ impl UnitRenderer {
             offset: 0,
             size: self.palette.size,
             identity: IDENTITY_PALETTE,
+            storage: None,
         }
     }
 
@@ -1296,6 +1299,7 @@ impl UnitRenderer {
             offset: 0,
             size: self.visible.size,
             identity: IDENTITY_VISIBLE,
+            storage: None,
         }
     }
 
@@ -1313,6 +1317,7 @@ impl UnitRenderer {
             offset: 0,
             size: self.indirect.size,
             identity: IDENTITY_INDIRECT,
+            storage: None,
         }
     }
 

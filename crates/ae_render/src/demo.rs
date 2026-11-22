@@ -644,6 +644,7 @@ mod gpu {
                     offset: 0,
                     size: PARAMS_BYTES,
                     identity: (7 << 40) | slot as u64,
+                    storage: None,
                 })
             })
         }

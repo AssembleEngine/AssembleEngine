@@ -606,6 +606,7 @@ impl LightRenderer {
             offset: 0,
             size: b.size,
             identity: IDENTITY_LIST | slot as u64,
+            storage: None,
         }
     }
 
@@ -623,6 +624,7 @@ impl LightRenderer {
             offset: 0,
             size: b.size,
             identity: IDENTITY_CLUSTERS | slot as u64,
+            storage: None,
         }
     }
 

@@ -79,8 +79,13 @@ digraph frame_graph {
   p19 -> p20 [label="bloom.0"];
   p20 -> p21 [label="target"];
   // physical 0 Transient: depth
+  // resource depth: sampled 3, storage image -, storage buffer -
   // physical 1 Transient: scene
+  // resource scene: sampled 4, storage image -, storage buffer -
   // physical 2 Transient: glow
+  // resource glow: sampled 5, storage image -, storage buffer -
   // physical 3 Transient: bloom.0
+  // resource bloom.0: sampled 6, storage image -, storage buffer -
   // physical 4 Transient: bloom.1
+  // resource bloom.1: sampled 7, storage image -, storage buffer -
 }

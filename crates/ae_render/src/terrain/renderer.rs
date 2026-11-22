@@ -1098,6 +1098,7 @@ impl TerrainRenderer {
             offset: 0,
             size: self.leaves.size,
             identity: IDENTITY_LEAVES,
+            storage: None,
         }
     }
 
@@ -1108,6 +1109,7 @@ impl TerrainRenderer {
             offset: 0,
             size: self.indirect.size,
             identity: IDENTITY_INDIRECT,
+            storage: None,
         }
     }
 

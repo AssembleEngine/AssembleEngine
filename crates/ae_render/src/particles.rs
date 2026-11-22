@@ -1825,6 +1825,7 @@ impl ParticleRenderer {
             offset: 0,
             size: self.state.size,
             identity: IDENTITY_STATE,
+            storage: None,
         }
     }
 
@@ -1841,6 +1842,7 @@ impl ParticleRenderer {
             offset: 0,
             size: self.keys.size,
             identity: IDENTITY_KEYS,
+            storage: None,
         }
     }
 
@@ -1857,6 +1859,7 @@ impl ParticleRenderer {
             offset: 0,
             size: self.indirect.size,
             identity: IDENTITY_INDIRECT,
+            storage: None,
         }
     }
 
