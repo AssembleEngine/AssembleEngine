@@ -3196,21 +3196,25 @@ Steps (commit and stop for compaction after each):
     mid-grey, no clamp to 1); new HDR `.dot` goldens.
   - **7. Measure and document.** Bench at 1440p and 3840×1600: tonemap and encode passes
     and the bandwidth of a 10-bit against a 16F swapchain, compared with `bench-diff`.
-- **Since 2026-11-22 the default is no curve** (the user's decision): `Curve::None` passes
-  the exposed colour as is, replacing `Clamp` (`--tonemap none|lottes`). The output is the
-  only clip: an SDR target saturates at 1, in HDR `post.encode` clips at the peak, so `U`
-  now shows highlights up to the peak (with `Clamp` HDR stopped at paper white and looked
-  the same as SDR). The exposure key (0.5) now displays at 0.5 instead of Lottes'
-  0.40, about 0.3 EV brighter mid-tones. Four GPU tests tuned under Lottes (the water's
-  waves, decals over cliffs, the particles' emission order, the ground specular) pin
-  it (`lottes_tone()`); under no curve the specular saturates at 255 and the waves change
-  34 of 1678 water pixels against 105. The sky test expects the pass-through. The GPU
-  bench now runs the default as well, so its tonemap pass differs from the baseline
-  (recorded under Lottes). Auto-exposure's key follows the curve: at Lottes' 0.5 with no
+- **The tone curve was removed on 2026-11-22** (the user's decision). In SDR Lottes fitted 16
+  scene units into white by lifting the darks (slope 1.29 at zero: scene 0.02 showed at
+  0.025) and flattening the midtones (1.0 at 0.58, 2.0 at 0.75): the default map's luma
+  spread at EV14 fell from 11.5 to 7.3 (5th-95th percentile 123-153 against 124-142), so
+  the frame looked washed out; at the reference panel's 1.78 headroom the HDR curve was
+  nearly linear to 1 and changed little. `Clamp` (its alternative) capped HDR at paper white,
+  so `U` showed no difference with it. `post.tonemap` keeps its name and now applies the
+  auto exposure, adds the bloom and maps the gamut (uniform 80 bytes, from 128); the output
+  is the only clip (SDR saturates at 1, `post.encode` clips at the peak). `--tonemap`,
+  `Curve`, `Lottes` and the crosstalk are gone. Auto-exposure's key is 0.32: at 0.5 with no
   curve the default map adapted brighter until its road and the lights on it clipped (mean
-  sRGB luma 150 at 0.5 s, 186 at 10 s, `--capture`, 1280×720, 10,000 units); at 0.32
-  (`KEY_LUMINANCE_NO_CURVE`) it settles at its start's look (143.5, then 152.8). Lottes
-  keeps 0.5, and `auto_exposure_holds_the_key_across_sunlight` runs under it.
+  sRGB luma 150 at 0.5 s, 186 at 10 s, `--capture`, 1280×720, 10,000 units); at 0.32 it
+  settles at its start's look (143.5, then 152.8), byte-identical before and after the
+  removal. GPU tests: `the_curve_places_the_sunlit_ground` is gone; five are retuned with
+  their measured reasons (the auto-exposure key test settles at the key, 0.297 against
+  0.32; the ground specular's light is 4 EV dimmer; particle emission order allows 3 codes;
+  decals allow 1 code of float noise outside their extent; the waves move 1 in 60 water
+  pixels, 34 of 1678, every change one code). 57 pass with validation. The GPU bench's
+  baseline was recorded with Lottes, so its `pass/tonemap` differs from it; not re-recorded.
 - **Stage 1 is done** (2026-11-21). Lottes 2016 (`x^a / ((x^a)^d * b + c)`) was then the
   default curve (`Clamp` stayed for exact linear reads). `a` and `d` are 1 (with these
   anchors a larger shoulder exponent makes the curve fall again past the peak, so values

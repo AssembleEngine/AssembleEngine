@@ -20,12 +20,12 @@ eased EV (Automatic exposure below).
 - Camera exposure is EV100 with `exposure = 1 / (1.2 * 2^EV100)`; the default
   is EV14 (≈ 5.086e-5), which keeps the old terrain look: a fully lit
   Lambertian surface gets `100000 * exposure / pi ≈ 1.62`, the old `1.6` sun
-  coefficient. The default is no tone curve (`--tonemap none`, since
-  2026-11-22): the exposed colour passes as is, an SDR target saturates at 1
-  and in HDR `post.encode` clips at the display's peak. Lottes 2016 (Colour
-  below) is `--tonemap lottes`.
+  coefficient. There is no tone curve (removed 2026-11-22 with Lottes 2016,
+  M13 stage 1's curve): the exposed colour passes as is, an SDR target
+  saturates at 1 and in HDR `post.encode` clips at the display's peak.
 - The exposure is applied by the scene passes before they store into the
-  RGBA16F scene; `post.tonemap` only curves. Every pass that writes the
+  RGBA16F scene; `post.tonemap` applies the automatic exposure's scale, adds
+  the bloom and maps the gamut. Every pass that writes the
   scene (terrain, units, water, the particle modes' final writes) uses the
   same per-frame value (`FrameParams::photometry`), resolved before light
   culling. This is the manual path (`ToneParams::auto` off) and the
@@ -37,14 +37,13 @@ Eye adaptation (`ae_render::exposure`, `ToneParams::auto`) closes the HDR
 loop on the GPU: the CPU never reads a value back, and a new EV takes effect
 in the same frame's bloom and tonemap.
 
-- **The key follows the curve** (`ToneParams::key`): Lottes keeps 0.5, its mid
-  anchor; with no curve (the default) it is 0.32 (`KEY_LUMINANCE_NO_CURVE`).
-  At 0.5 with no shoulder white is one stop above the mean, and the default
-  map adapted brighter than its start until its road and lights clipped
-  (mean sRGB luma 150 at 0.5 s, 186 at 10 s); at 0.32 it settles at its
-  start's look (143.5, then 152.8), and white is 1.6 stops above the key.
-  Measured with `ae-client --capture` (crossing water map, 10,000 units,
-  default camera, 1280×720, 30 and 600 frames at a fixed 1/60 s).
+- **The key is 0.32** (`KEY_LUMINANCE`), white 1.6 stops above it. At 0.5
+  (Lottes' mid anchor) with no curve white is one stop above the mean, and
+  the default map adapted brighter than its start until its road and lights
+  clipped (mean sRGB luma 150 at 0.5 s, 186 at 10 s); at 0.32 it settles at
+  its start's look (143.5, then 152.8). Measured with `ae-client --capture`
+  (crossing water map, 10,000 units, default camera, 1280×720, 30 and 600
+  frames at a fixed 1/60 s).
 
 - **Metering** (`exposure.meter`, compute): the scene is sampled at a
   quarter resolution (four taps per 4×4 block, averaged), and its Rec. 709
@@ -90,10 +89,11 @@ in the same frame's bloom and tonemap.
   (`METER_LOW_PERCENTILE`/`METER_HIGH_PERCENTILE`), so a small glint or a
   dark corner does not set the exposure — gives the target EV100
   `scene_ev100 + (mean_log2 - log2(KEY_LUMINANCE))`: a brighter scene needs
-  less exposure. `KEY_LUMINANCE` is 0.5 (pre-curve display-linear), what the
-  reference scene (untextured terrain under 100 000 lx) meters at EV14, so
-  adaptation settles on the calibrated look: the GPU test's auto capture
-  there has display mean 0.353 against 0.366 at manual EV14. The EV eases
+  less exposure. `KEY_LUMINANCE` is 0.32 (display-linear, above). The
+  reference scene (untextured terrain under 100 000 lx) is brighter than the
+  textured map: its manual EV14 frame has a display mean of 0.492, and
+  auto-exposure settles it at 0.297, at the key (the GPU test
+  `auto_exposure_holds_the_key_across_sunlight`). The EV eases
   exponentially in EV space,
   `ev += (target - ev) * (1 - exp(-rate * dt))` (`dt` is wall-clock time
   in the window, pauses included, so the eye keeps adapting on a paused
@@ -350,9 +350,9 @@ The bloom is three quarter-size passes (`bloom.downsample`,
 `bloom.blur_x`, `bloom.blur_y`, RA3-graphics' `bloom.comp`): the brightest
 of four 2×2 means per 4×4 block, then an 11-tap Gaussian (sigma 2
 quarter-size texels, ±5 is the 4% tail) along x and y. The result is added
-to the scene before the tone curve, scaled by `ToneParams::bloom` (0.3,
+to the exposed scene in `post.tonemap`, scaled by `ToneParams::bloom` (0.3,
 RA3's `kBloomStrength`; 0 turns it off, and the client's `Z` toggles it
-without changing the graph), so the curve rolls it off with the rest. The buffer is
+without changing the graph); the output clips it with the rest. The buffer is
 `RGBA16F` like the scene; a graph without a glow (and its three bloom
 passes) binds the scene to the second tonemap sampler and switches bloom
 off. The glow input is clamped at 4.0 exposed radiance (`BLOOM_CLAMP`), as
@@ -414,23 +414,15 @@ cached models of older versions are converted again.
   luminance (`ae_render::colorspace`). Nothing does
   `pow(2.2)`/`pow(1/2.2)` to convert colour space.
 - **The scene is exposed linear RGBA16F** at the camera's reference EV;
-  `post.tonemap` applies the automatic exposure's scale and the curve and
+  `post.tonemap` applies the automatic exposure's scale and the bloom and
   writes display-referred linear values, and the output attachment is
   `*_SRGB`, so the hardware performs the sRGB OETF on store.
-- **The tone curve is Lottes 2016** (`x^a / ((x^a)^d * b + c)`, GDC
-  "Advanced Techniques and Optimization of HDR"; M13 stage 1 replaced
-  Narkowicz's ACES fit). `a` (1.0) is the contrast, `d` (1.0) the shoulder,
-  and `b`, `c` are solved on the CPU from two anchors: the automatic
-  exposure's key (0.5 pre-curve) displays at 0.40 linear, and 16.0 displays
-  as white. With these anchors `d > 1` makes the curve fall again past the
-  peak (values above it would display darker than white), so 1 is the largest
-  monotone shoulder. The curve maps the max channel and scales the others
-  with it, so an emitter keeps its hue; from 2.0 to 16.0 scene units a
-  smoothstep-weighted share (up to 0.7) of the luminance-mapped grey joins
-  in, so a fireball's core whitens while its edge stays orange. At EV14 the
-  sunlit untextured ground displays at a mean of 0.366 linear (0.596 with
-  the fit), and the GPU test `the_curve_places_the_sunlit_ground` pins it.
-  In SDR the output attachment is a 0..1 sRGB image and the hardware
+- **There is no tone curve.** M13 stage 1's Lottes 2016 curve (which
+  replaced Narkowicz's ACES fit) was removed on 2026-11-22: in SDR it fitted
+  16 scene units into white by lifting the darks (slope 1.29 at zero) and
+  flattening the midtones (the default map's luma spread fell from 11.5 to
+  7.3 at EV14), and in HDR it changed little. Light above white clips at the
+  output. In SDR the output attachment is a 0..1 sRGB image and the hardware
   encodes it; HDR output keeps a display intermediate and encodes it
   (`post.encode`, HDR output below).
 - Readback is a raw copy of the output attachment, so SDR captures are
@@ -460,7 +452,7 @@ the output is mapped to (the *output gamut*, the display's primaries).
   each into the working space on entry. Colours the host passes as tints are
   normalised to unit luminance in the working space, so the illuminance
   scalars still are illuminances.
-- **The exposure meter and the curve's crosstalk use the working space's
+- **The exposure meter uses the working space's
   luminance row** (Rec. 709's 0.2126/0.7152/0.0722 or BT.2020's
   0.2627/0.6780/0.0593): the scene's stored light is measured in the space
   it is stored in.
@@ -489,7 +481,7 @@ the output is mapped to (the *output gamut*, the display's primaries).
   what it can). At the default BT.709 working space nothing is narrower than
   the default output gamuts, so no compression runs and the map is a pure
   re-expression.
-- **SDR has no encode pass**: `post.tonemap` maps the curve's result from
+- **SDR has no encode pass**: `post.tonemap` maps the exposed scene from
   the working space to BT.709 itself (and compresses into it when the
   working space is wider, with BT.709's luminance row). At the default BT.709
   working space the matrix is the identity and SDR captures are
@@ -568,32 +560,16 @@ changes.
   `LibraryEnv`/`TerrainApp::with_display`. SDR graphs have neither: the
   tonemap writes the sRGB target directly, so SDR output is byte-identical
   to what it was before HDR existed.
-- **The curve's white point stays at 16 scene units; what it displays at
-  rises.** `Lottes::peak_out` is the output of the peak anchor in
-  paper-white units: 1 in SDR and `peak / paper_white` in HDR. The mid anchor
-  stays the metered key at 0.40 of paper white in both, so the exposure
-  places the key where SDR does; above it the curve is deliberately
-  different, or the extra display range would go unused. Below it the
-  HDR curve is not the SDR one either: with `a = 1` the solved toe is
-  flatter (slope at zero `1 / c`: 1.29 in SDR, 1.00 at the reference panel's
-  headroom 1.778, which the client sends as 361/203 nits),
-  so the darks display about 17% darker than in SDR (scene 0.1: 0.115 SDR,
-  0.095 HDR; 0.25: 0.247 against 0.222) and the range from the key to paper
-  white brighter (scene 1.0: 0.579 against 0.667). An emitter between the two anchors (a
-  fireball is several scene units) displays above paper white on an HDR
-  display. The scene's peak (16) is a property of the content — stage 1 chose
-  it as the top of the scene's range — so it maps to the display's peak. The
-  alternative, moving the scene's peak to 16 × headroom, spends the top of
-  the display's range on scene light the content does not have and compresses
-  the emitters further; scaling both anchors with the headroom would brighten
-  every midtone. At `peak = paper_white` the curve is the SDR one exactly.
+- **Above paper white is the scene's own light.** With no tone curve the
+  display carries the exposed scene as is: anything above 1 (an emitter, a
+  glint, a bright sky) displays above paper white up to the display's peak
+  and clips there. Below paper white HDR and SDR are the same values.
 - **HDR10**: ST.2084 (PQ) in BT.2020 at `v * paper_white` nits, 10 bits per
   channel (`A2B10G10R10_UNORM_PACK32`). The display is mapped to the output
   gamut (P3 by default), compressed into it when the working space is wider,
   then re-expressed in BT.2020 (the container's primaries). The display's
   values are clamped at `peak / paper_white` before encoding, so no channel
-  encodes above the display's peak (the curve's asymptote is a few percent
-  above its peak anchor).
+  encodes above the display's peak.
 - **scRGB**: BT.709-relative linear light at `v * paper_white / 80` (1.0 =
   80 nits) in `R16G16B16A16_SFLOAT`; values below 0 are kept as out of
   gamut. At an 80-nit paper white the frame's values are the display's own;
@@ -730,6 +706,10 @@ changes.
 
 ## Verification
 
+Numbers recorded before 2026-11-22 were measured under the Lottes tone curve,
+since removed. The tests' thresholds hold with no curve; the ones retuned for
+it say so below and in `tests/gpu.rs`.
+
 - CPU: `ae_render::lighting` (tints keep unit luminance, EV14 is the
   reference, cull radius follows the exposure, the metered target EV and the
   two adaptation rates with their bounds); `lights::bounds` (intensity
@@ -771,8 +751,8 @@ changes.
 - GPU `bt2020_lit_content_differs_from_bt709_by_measured_numbers` (validation on):
   the same sunlit ground in the working spaces differs by a channel mean of 1.54
   codes, p99 2 and max 2 (46.3% of channels within 1 code): lighting multiplies each
-  colour in its own space and the curve maps the max channel, so lit content is close
-  but not identical, as expected.
+  colour in its own space (then under Lottes, which mapped the max channel), so lit
+  content is close but not identical, as expected.
 - GPU `auto_exposure_meters_bt2020_in_its_own_space` (validation on): the same sunlit
   ground, auto-exposed in BT.709 and BT.2020, settles at display means 0.3529 and
   0.3607 (ratio 1.022): the meter uses the space's own luminance row, and the residue
@@ -784,7 +764,7 @@ changes.
   into P3 (0.001, 0.955, 0.186), still outside BT.709, with its luminance and hue
   kept.
 - GPU `hdr10_bt2020_working_space_maps_to_the_output_once` (validation on): the
-  unlit sky through the whole HDR10 chain (203/1000 nits, clamp curve) decodes to the
+  unlit sky through the whole HDR10 chain (203/1000 nits, no curve) decodes to the
   same light in a BT.2020 working space as in BT.709, worst channel 1.04% apart (about
   one PQ code). Before the tonemap left the HDR display in the working space it was
   8.74%: the tonemap mapped to BT.709 and post.encode then read that as BT.2020.
@@ -799,21 +779,17 @@ changes.
 - GPU `hdr_emitters_reach_above_paper_white_and_stop_at_peak` (validation
   on): an explosion's core decodes to 437.7 nits with no channel above the
   441-nit peak.
-- GPU `the_curve_places_the_sunlit_ground` (validation on): flat untextured
-  ground under the full sun at the default exposure displays at a mean of
-  0.366 linear (0.596 under Narkowicz's fit), while the clamp curve reads the
-  same stored scene as before (0.492), so the curve moves the display and not
-  the exposure.
 - GPU `auto_exposure_holds_the_key_across_sunlight` (validation on): a flat
   ground lit by 100 000 and 25 000 lx, looked at straight down, converges
-  over 5 s of the readback clock to display means within 0.3% of each other
-  (0.353 and 0.353, ratio 1.000), while at a manual EV14 the same change
-  gives 1.73. Both are in range, so it is the eased EV and not a clamp.
+  over 10 s of the readback clock to display means 0.297 and 0.282 (ratio
+  1.051, at the 0.32 key within 10%), while at a manual EV14 the same change
+  gives 2.317 (0.492 and 0.212). Both are in range, so it is the eased EV and
+  not a clip.
 - GPU `photometric_sun_exposure_and_inverse_square` (validation on): the sun
   scales with its illuminance and one EV doubles the stored scene (so the
-  exposure happens before storage, and the tonemap only curves); a white
+  exposure happens before storage, and the tonemap does not change it); a white
   100 000 cd light adds a quarter at 4 m of what it adds at 2 m (inverse
-  square, read through the clamp curve); a source radius larger than the
+  square, read with no tone curve); a source radius larger than the
   range clamps the near field without extinguishing the light.
 - GPU `particles_light_by_illuminance`: an opaque smoke puff lit 10 m away
   by 1 000 000 cd and by 4 000 000 cd adds 4:1 the light (at 10 000 and
@@ -831,6 +807,9 @@ changes.
   light's diffuse) and 250 with the light at the mirror. (The waves put a
   glint wherever a normal meets a light's half vector, so the water test
   compares against no light; the flat model top pins the mirror geometry.)
+  With no tone curve (2026-11-22) the ground test's 2 000 000 000 cd light
+  filled the range with its diffuse alone (252.6 at the opposite azimuth),
+  so it uses 125 000 000 cd: 171.8 at the mirror against 147.2 opposite.
 - The decals' modulate threshold was re-baselined: a quarter-grey decal now
   leaves 0.63 of the ground instead of 0.51, because the specular's ambient
   floor does not scale with the albedo.

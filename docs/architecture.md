@@ -634,7 +634,7 @@ Two rules keep this from tangling:
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
 | how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
 | the working space, the gamut map and its compression | `crates/ae_render/src/colorspace.rs`, `encode.rs` |
-| the tone curve, the display intermediate and the encode | `crates/ae_render/src/tonemap.rs`, `encode.rs`, `library.rs` |
+| the exposure and bloom tail (`post.tonemap`, no curve), the display intermediate and the encode | `crates/ae_render/src/tonemap.rs`, `encode.rs`, `library.rs` |
 | HDR levels, the swapchain's colour space and its metadata | `crates/ae_render/src/swapchain.rs`, `display.rs`, `bins/ae-client/src/main.rs` |
 | a particle effect's look, or the gamut an authored colour is in | `assets/effects.json` (parsed by `crates/ae_render/src/particles.rs`), `colorspace.rs` |
 | graph validation | `crates/ae_framegraph/src/{descriptor,bake,barriers}.rs` |
