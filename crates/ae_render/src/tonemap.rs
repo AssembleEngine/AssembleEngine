@@ -29,11 +29,13 @@ use ash::vk;
 /// The tone curve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Curve {
-    /// Clamped at 1: what the 8-bit scene gave before the HDR target, and
-    /// what tests read linear values through.
-    Clamp,
-    /// Lottes 2016 (the default; see [`Lottes`]).
+    /// No curve (the default): the exposed colour passes as is. The output
+    /// limits it: an SDR target saturates at 1 (paper white), and in HDR
+    /// `post.encode` clips at the display's peak.
     #[default]
+    None,
+    /// Lottes 2016 (see [`Lottes`]): a toe and a shoulder that roll the
+    /// scene off into the output's peak.
     Lottes,
 }
 
@@ -128,7 +130,7 @@ impl Lottes {
 
     /// The curve at `x` (display-linear in, display-linear out).
     pub fn map(&self, x: f32) -> f32 {
-        let Some((b, c)) = self.solve() else { return x.min(1.0) };
+        let Some((b, c)) = self.solve() else { return x.max(0.0) };
         let z = x.max(0.0).powf(self.contrast);
         z / (z.powf(self.shoulder) * b + c)
     }
@@ -211,7 +213,7 @@ impl Default for ToneParams {
     fn default() -> Self {
         Self {
             ev100: crate::lighting::DEFAULT_EV100,
-            curve: Curve::Lottes,
+            curve: Curve::None,
             lottes: Lottes::default(),
             sun_illuminance: crate::lighting::SUN_ILLUMINANCE,
             bloom: BLOOM_STRENGTH,
@@ -249,8 +251,8 @@ impl Tonemap {
         // exposure scales the stored scene by the image's EV against this
         // reference (1 when they agree).
         //
-        // Anchors that solve to no curve fall back to the clamp, as
-        // `Lottes::map` does, rather than to a scaled identity.
+        // Anchors that solve to no curve fall back to no curve, rather
+        // than to a scaled identity.
         let solved = params.lottes.solve();
         let (lottes, curve) = match (params.curve, solved) {
             (Curve::Lottes, Some(bc)) => (bc, 1.0),
@@ -377,10 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn bad_anchors_fall_back_to_the_clamp() {
+    fn bad_anchors_fall_back_to_no_curve() {
         let lottes = Lottes { mid: 20.0, ..Lottes::default() };
         assert_eq!(lottes.solve(), None);
         assert_eq!(lottes.map(0.5), 0.5);
-        assert_eq!(lottes.map(2.0), 1.0);
+        assert_eq!(lottes.map(2.0), 2.0);
     }
 }

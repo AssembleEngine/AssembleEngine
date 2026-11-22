@@ -1,8 +1,8 @@
 #version 460
 // post.tonemap (src/tonemap.rs): the HDR scene (linear light, stored at the
-// camera's reference exposure) to the output by the tone curve: 0 clamps to
-// 1 (the frames the 8-bit scene gave before the HDR target, and what tests
-// read linear values through), 1 is Lottes 2016. With auto-exposure the
+// camera's reference exposure) to the output by the tone curve: 0 is none
+// (the colour passes as is: an SDR target saturates at 1, and in HDR
+// post.encode clips at the display's peak), 1 is Lottes 2016. With auto-exposure the
 // stored scene is scaled by the metered, eased EV read from the 1x1 exposure
 // image before the bloom joins it (the bloom is already display-referred:
 // bloom.downsample applies the same scale). The curve maps the max channel
@@ -16,7 +16,7 @@
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Tonemap {
-    vec4 params;   // x: bloom strength, y: curve (0 clamp, 1 Lottes), z: 1 when the graph has a bloom,
+    vec4 params;   // x: bloom strength, y: curve (0 none, 1 Lottes), z: 1 when the graph has a bloom,
                    // w: 1 when it has the exposure image
     vec4 exposure; // x: the EV100 the scene was stored at
     vec4 curve;    // x: b, y: c, z: contrast a, w: shoulder d
@@ -77,7 +77,9 @@ void main() {
     if (t.params.z > 0.5) {
         c += texture(bloom, uv).rgb * t.params.x;
     }
-    c = t.params.y > 0.5 ? lottes(c) : min(c, vec3(1.0));
+    if (t.params.y > 0.5) {
+        c = lottes(c);
+    }
     // SDR's output is BT.709; a BT.2020 working space is mapped into it
     // (and out-of-gamut colour compressed) here, since SDR has no
     // post.encode. In HDR the display stays in the working space (the

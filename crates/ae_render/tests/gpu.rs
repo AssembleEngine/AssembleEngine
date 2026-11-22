@@ -15,6 +15,14 @@ use gpu_allocator::MemoryLocation;
 use ae_render::units::ATTRIBUTE_COUNT;
 use std::sync::Arc;
 
+/// The tone of the tests tuned under Lottes, the default curve before the
+/// pass-through: their thresholds (a specular below white, the waves'
+/// visible change, rounding against the emission order, decals' footprint)
+/// need a curve that keeps highlights under the output's limit.
+fn lottes_tone() -> ae_render::tonemap::ToneParams {
+    ae_render::tonemap::ToneParams { curve: ae_render::tonemap::Curve::Lottes, ..Default::default() }
+}
+
 fn gpu() -> Arc<GpuDevice> {
     let instance = Arc::new(GpuInstance::new(&[], Some(true)).expect("Vulkan instance"));
     assert!(instance.validation, "these tests need VK_LAYER_KHRONOS_validation");
@@ -546,14 +554,12 @@ fn terrain_renders_offscreen() {
     // The capture is sRGB-encoded, like the swapchain.
     let encode = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
     // The clear colour: the sky's radiance at the default exposure, through
-    // the default curve (the CPU mirror of the tonemap shader).
+    // the default curve (none: the sRGB target saturates at 1).
     let exposure = ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100);
-    let curve = ae_render::tonemap::Lottes::default();
     let sky_radiance = ae_render::lighting::sky_radiance(ae_render::colorspace::WorkingSpace::Bt709);
-    let sky: Vec<u8> = curve
-        .map_rgb([sky_radiance[0] * exposure, sky_radiance[1] * exposure, sky_radiance[2] * exposure])
+    let sky: Vec<u8> = sky_radiance
         .iter()
-        .map(|&c| (encode(c) * 255.0).round() as u8)
+        .map(|&c| (encode((c * exposure).min(1.0)) * 255.0).round() as u8)
         .collect();
     let is_sky = |p: &[u8]| p[..3].iter().zip(&sky).all(|(a, b)| a.abs_diff(*b) <= 2);
     let sky_pixels = pixels.chunks(4).filter(|p| is_sky(p)).count();
@@ -821,7 +827,7 @@ fn photometric_sun_exposure_and_inverse_square() {
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, curve: Curve::Clamp, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
+            .with_tone(ToneParams { ev100, curve: Curve::None, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -2427,7 +2433,7 @@ fn water_covers_the_low_ground_only() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: true }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(lottes_tone()).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if r.water {
             app = app.with_water();
         }
@@ -3492,7 +3498,7 @@ fn particles_light_by_illuminance() {
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
     let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, curve: Curve::Clamp, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
+    let tone = ToneParams { ev100: 14.0, curve: Curve::None, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {
@@ -3531,7 +3537,7 @@ fn render_particles(
     extent: vk::Extent2D,
     particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
 ) -> Vec<u8> {
-    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() })
+    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..lottes_tone() })
 }
 
 /// [`render_particles`] with the host's lights and a tone setting (for the
@@ -4019,7 +4025,7 @@ fn decals_wrap_over_cliffs() {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
         let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(lottes_tone()).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
             let life = match decals {
@@ -5615,7 +5621,7 @@ fn lights_specular_on_the_ground() {
 
     let render = |dir: Vec3| -> Vec<u8> {
         let l = Light::point(ground + dir * 60.0, Vec3::ONE, 2_000_000_000.0, 100.0, 3.0);
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() }).with_lights(vec![l]);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..lottes_tone() }).with_lights(vec![l]);
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -5968,7 +5974,7 @@ fn the_curve_places_the_sunlit_ground() {
         let total = (extent.width * extent.height) as f32;
         pixels.chunks(4).map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0).sum::<f32>() / total
     };
-    let scene = mean(&render(Curve::Clamp));
+    let scene = mean(&render(Curve::None));
     let shown = mean(&render(Curve::Lottes));
     eprintln!("sunlit ground: scene {scene:.4}, displayed {shown:.4} (was 0.596 with ACES)");
     assert!((0.35..=0.45).contains(&shown), "the sunlit ground displays at 0.35-0.45 linear: {shown:.4}");
@@ -6250,7 +6256,7 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { curve: Curve::Clamp, bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams { curve: Curve::None, bloom: 0.0, ..Default::default() })
             .with_display(OutputEncoding::Hdr10Pq, levels);
         {
             let view = app.view();
@@ -6451,7 +6457,7 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { curve: Curve::Clamp, bloom: 0.0, ..Default::default() });
+            .with_tone(ToneParams { curve: Curve::None, bloom: 0.0, ..Default::default() });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
