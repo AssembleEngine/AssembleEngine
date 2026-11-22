@@ -4159,6 +4159,28 @@ Design:
     by `"Orientation"`; the digest hashes components by id, and puppet's is unchanged
     (6ecb62f3277556b7 at 1, 2, 4 and 8 workers; churn c234b208cee2bb02 and aim
     467159c74018fe98 too).
+  - Step 6, A: the renderer draws `Orientation` — done (2026-11-22).
+    - Attributes `heading_x` and `heading_y` became `rot_x`, `rot_y`, `rot_z` and `rot_w`: the
+      unit's rotation from its frame (forward +x, up +y, right +z) to the world's, a plain
+      four-f32 quaternion (zero reads as the identity); `ATTRIBUTE_COUNT` 9 → 11, and
+      `ATTR_CLASS` and `ATTR_POSE` are 9 and 10. The stream grows by 80 KB a tick at 10 000
+      units (360 → 440 KB).
+    - Shaders: `unit.rot`, normalised in `loadUnit`; `place` and `orient` turn the model, the
+      dart, the model lights and the model cull's sphere by the full rotation (tilt
+      included). The model matrix is the ground point, then the rotation, then the fit, as
+      `Anim::bone_world` places a bone.
+    - Client: `Orientation` is read apart from the capture (`rt.chunks`, merged by entity),
+      as the `Anim` rows are. A unit with it is drawn by it; any other by its velocity's turn
+      or its last one (`Orientation::along`), as before. The observer path keeps the
+      velocity's turn (`Orientation` is not a viewed field).
+    - Tests: `streams_match_rows_by_entity` and a new `streams_draw_facing` (walking backwards
+      is drawn backwards; a tilted rotation reaches the stream bit-exact);
+      `units_pose_models` draws a tilted model unit's arm where `Rig::bone_frame` and the fit
+      put it. 58 GPU tests pass with zero validation messages and the golden `.dot` files are
+      unchanged.
+    - The instance-column copy into a frame slot, 10 000 rows: median 0.0161 ms for 9
+      attributes and 0.0192 ms for 11 (+0.0031 ms; RTX 3060 Ti, a `CpuToGpu` buffer, median
+      of 100).
 
 ### M15 — Fully bindless resources (priority: medium)
 
