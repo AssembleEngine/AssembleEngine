@@ -47,14 +47,13 @@ fn yaw(hx: f32, hy: f32) -> [f32; 4] {
 }
 
 /// A graph with one sampled image, for the bindless rebake test.
-fn one_sampled_graph(extent: u32, extra: bool) -> FrameGraph<()> {
+fn one_sampled_graph(extent: u32) -> FrameGraph<()> {
     let mut graph = FrameGraph::<()>::new();
     let tex = graph.image(
         "tex",
         ImageDesc::color_2d(vk::Format::R8G8B8A8_UNORM, extent, extent, vk::ImageUsageFlags::SAMPLED),
         ResourceClass::Persistent,
     );
-    let _ = extra;
     graph
         .pass("sample", PassKind::Compute, ())
         .sampled(tex, ShaderStage::Compute)
@@ -67,17 +66,17 @@ fn one_sampled_graph(extent: u32, extra: bool) -> FrameGraph<()> {
 fn graph_handles_survive_resize_and_rebake() {
     let gpu = gpu();
     let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
-    executor.set_graph(one_sampled_graph(4, false)).unwrap();
+    executor.set_graph(one_sampled_graph(4)).unwrap();
     assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
     // Same topology: no rebake, same index.
-    assert!(!executor.set_graph(one_sampled_graph(4, false)).unwrap());
+    assert!(!executor.set_graph(one_sampled_graph(4)).unwrap());
     assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
     // A resize rebakes and recreates the physical image; the name keeps
     // its index.
-    assert!(executor.set_graph(one_sampled_graph(8, false)).unwrap());
+    assert!(executor.set_graph(one_sampled_graph(8)).unwrap());
     assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
     // A second resource takes the next index in declaration order.
-    let mut graph = one_sampled_graph(8, false);
+    let mut graph = one_sampled_graph(8);
     let other = graph.image(
         "other",
         ImageDesc::color_2d(vk::Format::R8G8B8A8_UNORM, 8, 8, vk::ImageUsageFlags::SAMPLED),

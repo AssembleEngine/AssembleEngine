@@ -247,13 +247,24 @@ impl Slab {
         Ok((index, entry.generation))
     }
 
-    fn free(&mut self, index: u32) {
-        if let Some(entry) = self.entries.get_mut(index as usize)
-            && entry.live
-        {
-            entry.live = false;
-            self.live -= 1;
+    /// Stop resolving `index` (it is retiring). False if it was not live,
+    /// so a handle cannot be retired, and later freed, twice.
+    fn retire(&mut self, index: u32) -> bool {
+        match self.entries.get_mut(index as usize) {
+            Some(entry) if entry.live => {
+                entry.live = false;
+                self.live -= 1;
+                true
+            }
+            _ => false,
         }
+    }
+
+    /// Return a retired index to the free list once every slot has
+    /// flushed its fallback.
+    fn free(&mut self, index: u32) {
+        debug_assert!(!self.entries[index as usize].live, "freeing a live index");
+        debug_assert!(!self.free.contains(&index), "index freed twice");
         self.free.push_back(index);
     }
 
@@ -758,6 +769,11 @@ impl Bindless {
         }
     }
 
+    /// Whether a live sampled handle was registered as `kind`.
+    pub fn is_kind(&self, handle: ImageHandle, kind: SampledKind) -> bool {
+        self.sampled.kind(handle.index) == kind as u32
+    }
+
     /// Retire a sampled handle.
     pub fn retire_sampled(&mut self, handle: ImageHandle) {
         if self.sampled.resolve(handle.index, handle.generation) {
@@ -784,6 +800,15 @@ impl Bindless {
     }
 
     fn retire(&mut self, slab: usize, index: u32) {
+        let retiring = match slab {
+            0 => self.sampled.retire(index),
+            1 => self.samplers.retire(index),
+            2 => self.storage_images.retire(index),
+            _ => self.storage_buffers.retire(index),
+        };
+        if !retiring {
+            return;
+        }
         let fallback = match slab {
             0 => SampledKind::from_u32(self.sampled.kind(index))
                 .unwrap_or(SampledKind::Image2D)
@@ -965,6 +990,7 @@ mod tests {
         let (b, _) = slab.alloc(0).unwrap();
         let (c, _) = slab.alloc(0).unwrap();
         assert_eq!((a, b, c), (3, 4, 5));
+        assert!(slab.retire(4));
         slab.free(4);
         let (d, _) = slab.alloc(0).unwrap();
         assert_eq!(d, 4, "a freed index comes back before a new one");
@@ -975,7 +1001,13 @@ mod tests {
     #[test]
     fn a_retired_index_waits_for_every_slot() {
         let mut slab = Slab::new("sampled image", 3, 8, 0);
-        let (index, _) = slab.alloc(0).unwrap();
+        let (index, generation) = slab.alloc(0).unwrap();
+        assert!(slab.retire(index));
+        assert!(!slab.resolve(index, generation), "a retiring index no longer resolves");
+        assert!(
+            !slab.retire(index),
+            "a second retire is refused, so the index is freed once"
+        );
         let mut retirements = Retirements::new(2);
         assert!(!retirements.flush(0), "slot 1 has not applied the fallback");
         // The real registry does not free the index until this returns true.
@@ -991,6 +1023,7 @@ mod tests {
     fn a_stale_generation_does_not_resolve() {
         let mut slab = Slab::new("sampled image", 3, 8, SampledKind::Image2D as u32);
         let (index, first) = slab.alloc(SampledKind::Image2D as u32).unwrap();
+        assert!(slab.retire(index));
         slab.free(index);
         let (again, second) = slab.alloc(SampledKind::Image2DArray as u32).unwrap();
         assert_eq!(again, index);

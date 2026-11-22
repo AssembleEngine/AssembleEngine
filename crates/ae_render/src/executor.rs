@@ -376,10 +376,12 @@ impl<R> Executor<R> {
         {
             // Names are not part of the signature, so a renamed resource
             // still needs its handles re-keyed even though nothing rebaked.
-            // Direct descriptor writes need an idle device, which a rebake
-            // waits for anyway.
-            self.gpu.wait_idle();
-            self.sync_graph_handles(&graph, &baked)?;
+            // That writes descriptors directly and needs an idle device; the
+            // common case (every frame, the same names) touches nothing.
+            if !self.graph_names_match(&graph, &baked) {
+                self.gpu.wait_idle();
+                self.sync_graph_handles(&graph, &baked)?;
+            }
             self.graph = graph;
             return Ok(false);
         }
@@ -452,6 +454,19 @@ impl<R> Executor<R> {
         Ok(true)
     }
 
+    /// Whether `graph` names exactly the resources the registry holds
+    /// handles for (the same names `sync_graph_handles` would key).
+    fn graph_names_match(&self, graph: &FrameGraph<R>, baked: &BakedGraph) -> bool {
+        let names: BTreeSet<&str> = baked
+            .resources
+            .iter()
+            .enumerate()
+            .filter(|(_, resource)| resource.reachable && resource.physical.is_some())
+            .map(|(index, _)| graph.resource_name(ResourceId(index as u32)))
+            .collect();
+        names.len() == self.graph_handles.len() && names.iter().all(|name| self.graph_handles.contains_key(*name))
+    }
+
     /// Keep each graph resource's name and handles across bakes. The GPU is
     /// idle here, so the new physical views can be written into every slot
     /// directly.
@@ -492,6 +507,14 @@ impl<R> Executor<R> {
                         } else {
                             SampledKind::Image2D
                         };
+                        // A view type that changed (layers) needs an entry
+                        // of the new kind: retire the old one.
+                        if let Some(handle) = handles.sampled
+                            && !self.bindless.is_kind(handle, kind)
+                        {
+                            self.bindless.retire_sampled(handle);
+                            handles.sampled = None;
+                        }
                         match handles.sampled {
                             Some(handle) => {
                                 self.bindless
@@ -1077,13 +1100,15 @@ impl FrameRecording<'_> {
     }
 }
 
-/// The layout the graph's sampled access transitions an image to. A
-/// sampled depth image is read in the depth read-only layout; everything
-/// else is `SHADER_READ_ONLY_OPTIMAL`.
+/// The layout the graph's sampled access transitions an image to (the
+/// layout a descriptor must name). Only `Sampled` reads through a
+/// descriptor; `DepthRead` is an attachment and its layout
+/// (`DEPTH_STENCIL_READ_ONLY_OPTIMAL`) would be wrong for a depth image
+/// that is also sampled.
 fn sampled_layout(baked: &BakedGraph, id: ResourceId) -> vk::ImageLayout {
     for pass in &baked.passes {
         for access in &pass.accesses {
-            if access.resource == id && matches!(access.role, Role::Sampled(_) | Role::DepthRead) {
+            if access.resource == id && matches!(access.role, Role::Sampled(_)) {
                 return access.usage.layout;
             }
         }
