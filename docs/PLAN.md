@@ -5130,6 +5130,21 @@ set at index 2 next to their old sets. How handles reach a shader:
   Still not built from this step's design: the unit test that pins the descriptor layouts against
   `barriers.rs`, and the debug assertion that `set_graph` runs with no frame open.
 
+  Measured cost of A–B (2026-11-23, RTX 3060 Ti, `AE_BENCH_MACHINE=rtx3060ti`, machine idle,
+  release). `ae-client --bench all` (17 scenes), alternating `afe4e62` (before M15) and `decc608`,
+  two runs each. Every pass still binds its own sets, so this is the registry's overhead (the global
+  set, the flush in `begin_frame`, the per-frame name check), not bindless against binds; that is
+  step G.
+  - `bench-diff`: base against base, 0 changes. HEAD against base: 0 regressions in the second
+    pair. The first pair flagged `live-fox pass/water` (the known 4 µs or 177 µs per-process mode;
+    HEAD's second run was 4 µs) and `live-puppet cpu_anim_upload` +52% (one run only).
+  - GPU total per frame: −1.5% to +2% per scene, mostly +0.1% to +0.7%.
+  - `cpu_frame`: about +3% (3–9 µs on 70–200 µs) in 14 of 17 scenes, within tolerance but
+    consistent. The likely source is the per-frame name check (a `BTreeSet` of names and a string
+    lookup per resource in `execute`). `cpu_record`: −3% to +6%; `palette` +13% from one slow run.
+  - `near-fox pass/terrain`: 300 µs in both HEAD runs against 435–444 µs in both base runs, with
+    no terrain change. Not explained yet; possibly another per-process two-mode pass.
+
 **C. Sampled images and samplers.**
 
 - Terrain bindings 6–11, 14–16 and 18–20, and water's samples.
@@ -5337,6 +5352,8 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ## TODO (open, not a priority now)
 
+- M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
+  of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
   pre-commit hook is local (see `### M17 progress` for what it gates and its measured times), and
   several notes above wait on it (the `glslc`/SDL3 gating of `cargo test --workspace`, clippy on
