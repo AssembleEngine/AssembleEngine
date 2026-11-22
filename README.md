@@ -173,6 +173,8 @@ cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo run --release -p ae-client -- --probe-display                      # the display's HDR state and the surface's colour spaces, then exit
 cargo run --release -p ae-client -- --working-space bt2020               # light the scene in BT.2020 (SDR maps it back to BT.709; --display-gamut bt709|p3|bt2020 for HDR output)
+cargo run --release -p ae-client -- --hdr auto                           # HDR10 when the surface offers it, else scRGB, else SDR (U toggles HDR/SDR)
+cargo run --release -p ae-client -- --hdr hdr10 --paper-white 203 --peak 361   # force HDR10 with explicit levels (signal nits; KWin shows 203 at its 248)
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle
@@ -180,3 +182,14 @@ AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   
 
 Set `AE_BENCH_MACHINE` on a dedicated benchmark machine so wall times are only ever compared against
 results from the same machine; deterministic counters are compared everywhere.
+
+## Client controls
+
+WASD / arrows pan, the wheel zooms, right- or middle-drag orbits and tilts, Q/E orbit, R/F tilt, shift
+moves faster; `+`/`-` sim speed, Pause pauses the sim and the animation clocks, `[`/`]` terrain detail,
+T wireframe, L colour by LOD depth, G fog, C freeze the LOD, P print the camera, V v-sync, N render
+module flag 0, M tileset, B blend weights, O water, H shadows, Z bloom, X explosion, **U HDR/SDR**,
+Esc quits.
+
+`--capture` always writes the SDR readback (the offscreen path), so a capture shows neither the HDR
+encoding nor the display's levels.

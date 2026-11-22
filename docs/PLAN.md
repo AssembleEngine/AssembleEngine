@@ -3103,13 +3103,27 @@ Steps (commit and stop for compaction after each):
 - **Decided from the probe (2026-11-21): both encodings.** HDR10 (PQ) at
   `A2B10G10R10_UNORM_PACK32` first, scRGB at `R16G16B16A16_SFLOAT` as the alternative;
   no HLG.
-- **Open: the reference luminance the swapchain's image description carries.** What
-  matters is not KWin's output description but the one the Vulkan WSI attaches to the
-  swapchain surface: KWin maps the client's reference luminance onto its own (248). If
-  the NVIDIA WSI sends PQ without `set_luminances`, the protocol's default reference for
-  PQ is 203 nits, so paper white would be encoded at 203; encoding at 248 without saying
-  so would come out about 22% bright and push the peak past 441. scRGB (`ext_linear`)
-  defaults to a reference of 80. Stage 5 measures what is sent before choosing defaults.
+- **Measured (2026-11-22, stage 5): what the WSI itself sends.** Under `WAYLAND_DEBUG=1`
+  the NVIDIA Wayland WSI's `wp_image_description_creator_params_v1` sends, for HDR10,
+  `set_primaries_named(6)` (BT.2020) and `set_tf_named(11)` (`st2084_pq`) with **no
+  `set_luminances`**, so PQ's protocol default reference white, 203 nits, applies. For
+  scRGB it sends `set_primaries_named(1)` (sRGB), `set_tf_named(5)` (`ext_linear`) and
+  `set_luminances(0, 80, 203)`: 1.0 in the signal is 80 nits, and the reference white is
+  203 nits (the protocol's own default would be 80). KWin's output description (SDL's
+  `get_output`) says `luminances(0, 441, 248)`, `target_max_cll 441` and
+  `target_max_fall 402`: the display peaks at 441 and its SDR white is 248. KWin 6.8.3
+  maps a surface's reference white onto its output's (`ColorDescription::toOther` in
+  `src/core/colorspace.cpp` scales by `other.referenceLuminance() / referenceLuminance()`,
+  or affinely black-to-black and reference-to-reference for the perceptual intent the WSI
+  requests with `set_image_description(..., 0)`), and a PQ description without
+  `set_luminances` gets `defaultReferenceLuminanceFor(PQ) = 203`
+  (`src/wayland/colormanagement_v1.cpp`). So signal 203 shows at the desktop's 248, and
+  the signal's levels are relative to 203: paper white is 203 in both encodings and the
+  peak is 203 × SDL's headroom 1.778 = 361 nits of signal, which shows at the panel's 441.
+  Sending the panel's absolute 441 would land at 441 × 248/203 = 539, and KWin adds its
+  own perceptual tonemapper when the mapped peak exceeds the output's maximum
+  (`colorpipeline.cpp`), compressing the highlights a second time after the curve's
+  shoulder. Nothing is encoded at 248. (Review fix: the first stage-5 version sent 441.)
 - Stages:
   - **1. A parametric, hue-preserving tone curve** (replaces Narkowicz's fit, and with it
     the ACES TODO above). Lottes 2016: `x^a / ((x^a)^d · b + c)`, with `pow` for the
@@ -3149,7 +3163,7 @@ Steps (commit and stop for compaction after each):
     own `wp_image_description_creator_params_v1` requests (`set_tf_named`,
     `set_luminances`, `set_mastering_*`) and including what `vkSetHdrMetadataEXT` sends,
     to derive the encode reference from what is actually sent; a toggle through KDE's HDR
-    switch recreating the swapchain both ways; `--hdr off` identical to stage 3; zero
+    switch recreating the swapchain both ways; `--hdr off` identical to stage 4; zero
     validation messages.
   - **6. Render ABI and modules.** Bump the ABI; `declare` carries the encoding, levels,
     working space and output gamut; SDK `display_spec`/`DISPLAY_NAME`; both guest modules
@@ -3292,9 +3306,98 @@ Steps (commit and stop for compaction after each):
   (the same plus `--explode 12 --capture-frames 10`) changes as intended: 48 136 of
   921 600 pixels differ (5.22%), mean channel 0.249, max 63, and the brightest 200
   pixels' mean goes from (239.5, 233.8, 158.9) to (239.6, 228.2, 102.4), the fire's
-  deeper red. Not built: a light catalogue beyond
+  deeper red. Not built then: a light catalogue beyond
   effects (fixed lights are generated, not content), a gamut tag in glTF (`extras`), the
   HDR swapchain (stage 5), the module ABI (stage 6).
+- **Stage 5 is done** (2026-11-22). The client's swapchain carries an HDR encoding:
+  `--hdr off|auto|hdr10|scrgb` (auto by default) resolves against the surface's pairs
+  (`ae_render::swapchain::{HdrRequest, TargetFormat, resolve_target}`). Auto takes HDR10
+  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) when the surface offers it and SDL
+  reports the window HDR-capable, else scRGB (`R16G16B16A16_SFLOAT` +
+  `EXTENDED_SRGB_LINEAR_EXT`), else SDR. An explicit mode the surface does not offer is
+  an error naming what it does; nothing falls back silently. `VK_EXT_swapchain_colorspace`
+  is enabled on the instance (with a surface) and `VK_EXT_hdr_metadata` on the device, and
+  `vkSetHdrMetadataEXT` runs after every recreate. The swapchain is recreated on
+  `SDL_EVENT_WINDOW_HDR_STATE_CHANGED`, display/monitor events and the `U` toggle key;
+  the app is rebuilt and the graph redeclared on a change of the (format, colour space)
+  pair. The app takes its encoding from the swapchain's colour space and its levels from
+  `HdrSettings` (paper white 203 from the WSI's description, peak 203 × SDL's headroom
+  = 361 in the signal's nits, shown at the panel's 441);
+  `--paper-white`/`--peak` override, `--display-gamut` keeps its stage-3 meaning (P3 by
+  default for HDR10). `--capture` still writes the SDR readback and does not show the HDR
+  swapchain. A render module has no HDR support until stage 6, so `--render-module` with
+  HDR requested logs one line and falls back to SDR.
+  Measured under `WAYLAND_DEBUG=1`, the client's own `wp_image_description_creator_params_v1`
+  requests are:
+
+  ```
+  # --hdr hdr10
+  -> wp_color_manager_v1#64.get_surface(new id wp_color_management_surface_v1#86, wl_surface#5)
+  -> wp_color_manager_v1#64.create_parametric_creator(new id wp_image_description_creator_params_v1#87)
+  -> wp_image_description_creator_params_v1#87.set_primaries_named(6)        # BT.2020
+  -> wp_image_description_creator_params_v1#87.set_tf_named(11)              # st2084_pq
+  -> wp_image_description_creator_params_v1#87.set_max_cll(361)
+  -> wp_image_description_creator_params_v1#87.set_max_fall(361)
+  -> wp_image_description_creator_params_v1#87.set_mastering_display_primaries(680000, 320000, 265000, 690000, 150000, 60000, 312700, 329000)
+  -> wp_image_description_creator_params_v1#87.set_mastering_luminance(0, 361)
+  -> wp_image_description_creator_params_v1#87.create(new id wp_image_description_v1#88)
+  -> wp_color_management_surface_v1#86.set_image_description(wp_image_description_v1#88, 0)
+  # no set_luminances: PQ's protocol default reference white is 203 nits
+
+  # --hdr scrgb
+  -> wp_image_description_creator_params_v1#87.set_primaries_named(1)        # sRGB
+  -> wp_image_description_creator_params_v1#87.set_tf_named(5)               # ext_linear
+  -> wp_image_description_creator_params_v1#87.set_max_cll(361)
+  -> wp_image_description_creator_params_v1#87.set_max_fall(361)
+  -> wp_image_description_creator_params_v1#87.set_mastering_display_primaries(708000, 292000, 170000, 797000, 131000, 46000, 312700, 329000)
+  -> wp_image_description_creator_params_v1#87.set_mastering_luminance(0, 361)
+  -> wp_image_description_creator_params_v1#87.set_luminances(0, 80, 203)     # 1.0 = 80 nits, reference white 203
+  -> wp_image_description_creator_params_v1#87.create(new id wp_image_description_v1#88)
+  ```
+
+  The values `vkSetHdrMetadataEXT` sends (logged by the client) are the output gamut's
+  primaries with D65 white, `max_luminance = peak` (361), `min_luminance = 0`,
+  `max_content_light_level = 361` and `max_frame_average_light_level = 361` (a stated
+  conservative bound: no frame average can exceed the peak). The WSI forwards them into
+  the description (`set_max_cll`, `set_max_fall`, `set_mastering_*` above), so they are
+  in the signal's nits, relative to its 203 reference, like the levels. KWin's output
+  description is `luminances(0, 441, 248)`, `target_max_cll 441`. The excerpts above
+  were re-recorded after the review fix (3 s windowed runs, 0 validation messages); the
+  WSI sent a description in every run observed (HDR10 and scRGB).
+  `--hdr off` is byte-identical to stage 4 (07e928a): release captures at `--map land
+  --units 0 --camera 6000,6000,350,0.6,0.45`, with and without `--explode 12
+  --capture-frames 10`, compare equal with `cmp`. Under `AE_VK_VALIDATION=1`: a 10 s
+  windowed HDR10 run with `--exercise` (resize/minimize) and the same with scRGB each
+  report 9 swapchain recreates and 0 validation errors/warnings; a 24 s run through
+  KDE's HDR switch (off/on twice, `kscreen-doctor output.DP-3.hdr.disable|enable`)
+  recreates 5 times and reports 0/0 (these runs used the first version's absolute
+  peak: 441 in HDR mode, and 203 in SDR mode, floored at the paper white because KWin
+  advertises 200 there; with the fix the peak is 203 × headroom, 361 and 262, and no
+  floor is reached); a run
+  with the runtime toggle (the `U` path, `AE_HDR_TOGGLE_SECONDS=3` for the test hook)
+  recreates 5 times, rebakes 5 graphs and reports 0/0. SDL keeps reporting the window
+  HDR-capable while KWin's HDR switch is off (SDR white 155, peak 200), so `auto` stays
+  on HDR10 and the metadata follows the lower headroom; the compositor maps the
+  signal's 203 onto its 155.
+  55 GPU tests pass with validation, 73 lib tests (5 new, one of them the default
+  levels), module 1, golden 2, graph_file 2; `cargo test --workspace` is clean. Two bugs
+  the recreate exposed are fixed: the instance now enables `VK_EXT_swapchain_colorspace`
+  (and the device `VK_EXT_hdr_metadata`) only with a surface, and after an app rebuild the
+  render thread has the executor forget every external access state
+  (`Executor::forget_external_states`), so a new image under a reused identity (the
+  exposure image first showed it) does not inherit the old one's layout. Re-run after the
+  review fixes, under `AE_VK_VALIDATION=1`: 8 s `--exercise` with HDR10 and with scRGB
+  (7 recreates each) and 9 s of `AE_HDR_TOGGLE_SECONDS=2` (5 recreates, 5 rebakes,
+  metadata resent at 361 on each HDR entry), all 0 errors and 0 warnings; the `--hdr off`
+  captures still compare equal with 07e928a's. Not built: HDR
+  captures, the module ABI and HDR render modules (stage 6), benchmarks (stage 7).
+  With peak 361/203 the curve's HDR anchor is the headroom 1.778: `b` 0.500, `c` 1.000,
+  toe slope 1.00 (0.95 with the first version's 441), so scene 0.1 displays at 0.095
+  against SDR's 0.115, scene 1.0 at 0.667 against 0.579, paper white is reached at scene
+  2.0 and a fireball core (scene 4.2) at 1.355 of paper white, 275 signal nits (about 336
+  on the panel). Look checks for the display (not measured in a capture): HDR darks
+  against SDR, the far ground's toe (stage 1's TODO), and whether the P3 fire reads
+  redder in HDR than in SDR.
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -4126,8 +4229,9 @@ From M13 stage 1 (2026-11-21):
   the stage 1 captures. If it reads muddy on the display, try `contrast` (`a`) above 1, which
   deepens the toe without moving the anchors.
 - **Look check in stage 5: HDR darks against SDR.** With `a = 1` the HDR curve's toe is flatter
-  than SDR's (slope at zero 0.95 at 441/203 nits against 1.29), so HDR shows the darks about
-  20% darker and the key-to-paper-white range brighter than SDR. Compare on the display; if
+  than SDR's (slope at zero 1.00 at the reference panel's headroom 1.778 against 1.29), so HDR
+  shows the darks about 17% darker (scene 0.1: 0.095 against 0.115) and the key-to-paper-white
+  range brighter than SDR. Compare on the display; if
   the darks read crushed, solve `a` per output so the HDR curve also meets the SDR one at a
   dark anchor (scene 0.1 → 0.115), keeping the key and peak anchors.
 

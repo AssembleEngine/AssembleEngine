@@ -566,10 +566,11 @@ changes.
   places the key where SDR does; above it the curve is deliberately
   different, or the extra display range would go unused. Below it the
   HDR curve is not the SDR one either: with `a = 1` the solved toe is
-  flatter (slope at zero `1 / c`: 1.29 in SDR, 0.95 at 441/203 nits, 1.00 at
-  441/248), so the darks display about 20% darker than in SDR (scene 0.1:
-  0.115 SDR, 0.092 HDR; 0.25: 0.247 against 0.217) and the range from the key
-  to paper white brighter (scene 1.0: 0.579 against 0.691). An emitter between the two anchors (a
+  flatter (slope at zero `1 / c`: 1.29 in SDR, 1.00 at the reference panel's
+  headroom 1.778, which the client sends as 361/203 nits; 0.95 at 441/203),
+  so the darks display about 17% darker than in SDR (scene 0.1: 0.115 SDR,
+  0.095 HDR; 0.25: 0.247 against 0.222) and the range from the key to paper
+  white brighter (scene 1.0: 0.579 against 0.667). An emitter between the two anchors (a
   fireball is several scene units) displays above paper white on an HDR
   display. The scene's peak (16) is a property of the content — stage 1 chose
   it as the top of the scene's range — so it maps to the display's peak. The
@@ -591,9 +592,69 @@ changes.
   the conversion from the default BT.709 working space is a no-op and a
   negative (imaginary) value stays negative: scRGB's extended range is the
   point of the encoding.
-- **The defaults** are PQ's protocol reference 203 nits and a 1000-nit peak,
-  until the client reads SDL's HDR state and the swapchain's own reference
-  (M13 stage 5).
+- **The defaults** are PQ's protocol reference 203 nits and a 1000-nit peak
+  for a headless app. The client measures what the WSI's own image
+  description carries (M13 stage 5, next section) and uses 203 nits of
+  paper white and 203 × SDL's headroom as the peak (361 nits of signal,
+  which the compositor shows at the panel's 441).
+
+### The swapchain (M13 stage 5)
+
+- **The pair is chosen, not guessed.** `--hdr off|auto|hdr10|scrgb` (auto
+  by default) resolves against the surface's offered pairs: auto takes HDR10
+  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) when the surface offers
+  it and SDL reports the window HDR-capable, else scRGB
+  (`R16G16B16A16_SFLOAT` + `EXTENDED_SRGB_LINEAR_EXT`), else the SDR pair.
+  An explicit `hdr10` or `scrgb` the surface does not offer is an error
+  naming what it does. `U` toggles HDR and SDR at runtime; the swapchain is
+  recreated on that, on `SDL_EVENT_WINDOW_HDR_STATE_CHANGED` and on display
+  or monitor changes, and the app/graph are rebuilt when the (format, colour
+  space) pair changes.
+- **The measured references.** Under `WAYLAND_DEBUG=1` the NVIDIA Wayland
+  WSI sends `set_primaries_named(6)` (BT.2020) and `set_tf_named(11)`
+  (`st2084_pq`) with **no `set_luminances`** for HDR10, so PQ's protocol
+  default reference white, 203 nits, applies. For scRGB it sends
+  `set_primaries_named(1)` (sRGB), `set_tf_named(5)` (`ext_linear`) and
+  `set_luminances(0, 80, 203)`: 1.0 in the signal is 80 nits, and the
+  reference white is 203 nits. Paper white is therefore 203 in both.
+- **The levels are the signal's, relative to its reference.** KWin 6.8.3
+  maps a surface's reference white onto its output's
+  (`ColorDescription::toOther` scales by the ratio of the references), so
+  the signal's 203 shows at the desktop's 248. The peak is therefore the
+  headroom over the signal's paper white: 203 × 1.778 = 361 nits of signal,
+  shown at the panel's 441. Sending the panel's absolute 441 would map to
+  539, and KWin's perceptual tonemapper (added when the mapped peak exceeds
+  the output's maximum) would compress the highlights a second time.
+  Nothing is encoded at 248. `--paper-white` and `--peak` override both, in
+  the signal's nits.
+- **`vkSetHdrMetadataEXT` after every recreate** carries the output gamut's
+  primaries and D65 white, `max_luminance = peak`, `min_luminance = 0`,
+  `maxCLL = peak` and `maxFALL = peak` (361 on the reference panel; a
+  conservative bound: we do not measure a frame average, and no frame can
+  average above the peak). The WSI forwards them into the image description
+  (`set_max_cll`, `set_mastering_luminance`), so they are signal nits like
+  the levels. The values are logged (`[render] vkSetHdrMetadataEXT: ...`).
+- **The display path is unchanged.** The display intermediate stays in the
+  working space; `post.encode` writes the target in HDR10's 10-bit PQ or
+  scRGB's 16F, and SDR's `post.tonemap` writes the 8-bit sRGB target. The
+  offscreen capture path always uses the SDR readback, so `--capture` does
+  not show the HDR encoding.
+- **Modules fall back.** A render module has no HDR support until M13 stage
+  6; `--render-module` with HDR requested logs once and uses SDR rather than
+  failing `check_graph` every frame.
+- **Verification**: `ae_render::swapchain` (CPU) pins that the three target
+  pairs are the three encodings, auto's HDR10 -> scRGB -> SDR preference,
+  that an explicit mode the surface lacks is an error naming the offered
+  pairs, the metadata values (P3 primaries, peak/0/peak), and that the
+  default peak is the headroom over the signal's paper white (361 at
+  203 × 1.778, 262 in KDE's SDR mode). With
+  `AE_VK_VALIDATION=1`, 10 s windowed HDR10 and scRGB runs with `--exercise`
+  each recreate 9 times with zero messages, a run through KDE's HDR switch
+  recreates 5 times (recorded with the first version's absolute peak; the
+  peak is now 203 × headroom, 361 in KDE's HDR mode and 262 in its SDR
+  mode), and the `U` toggle recreates 5 times and rebakes 5 graphs with
+  zero messages. `--hdr off` release captures are byte-identical to stage
+  4's.
 - **Verification**: `post_encode_writes_st_2084_codes` (a constant display
   through the pass: 100, 203 and 1000 nits are ST.2084's codes 520, 594 and
   769 exactly, and a value past the peak stops at its code),
