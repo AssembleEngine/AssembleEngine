@@ -1,29 +1,29 @@
 {
   "suite": "gpu-close",
-  "commit": "06fa4c4",
+  "commit": "335e770",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "gpu_total",
       "kind": "time",
-      "value": 506559.99230366433,
+      "value": 508383.99082567776,
       "unit": "ns",
-      "spread": 0.031017026732111982
+      "spread": 0.34373035910840577
     },
     {
       "metric": "pass/exposure clear",
       "kind": "time",
-      "value": 1023.9999974146485,
+      "value": 1056.0000082477927,
       "unit": "ns",
-      "spread": 0.031250010658141064,
-      "tolerance": 2.0000000050495146
+      "spread": 0.03030304032501041,
+      "tolerance": 1.9393939242464782
     },
     {
       "metric": "pass/terrain lod",
       "kind": "time",
-      "value": 213055.99808692932,
+      "value": 213727.99575328827,
       "unit": "ns",
-      "spread": 0.007960374168429507
+      "spread": 0.11708338321233507
     },
     {
       "metric": "pass/lights",
@@ -36,9 +36,9 @@
     {
       "metric": "pass/terrain",
       "kind": "time",
-      "value": 233472.00453281403,
+      "value": 235167.995095253,
       "unit": "ns",
-      "spread": 0.00726421382226406
+      "spread": 0.007892227131445937
     },
     {
       "metric": "pass/water",
@@ -99,17 +99,17 @@
     {
       "metric": "pass/copy",
       "kind": "time",
-      "value": 161983.99662971497,
+      "value": 155903.99503707886,
       "unit": "ns",
-      "spread": 0.37870406332257706,
+      "spread": 0.4431444945491248,
       "tolerance": 0.5
     },
     {
       "metric": "pass/host read",
       "kind": "time",
-      "value": 6816.000211983919,
+      "value": 7135.999854654074,
       "unit": "ns",
-      "spread": 0.35680748479444463,
+      "spread": 0.23318387493757523,
       "tolerance": 0.5
     },
     {
@@ -122,17 +122,17 @@
     {
       "metric": "cpu_frame",
       "kind": "time",
-      "value": 98772.00796127316,
+      "value": 75222.98402404792,
       "unit": "ns",
-      "spread": 0.4248371664719645,
+      "spread": 0.3242367913939324,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_record",
       "kind": "time",
-      "value": 72561.00326776505,
+      "value": 52440.99721312523,
       "unit": "ns",
-      "spread": 0.4237813371081324,
+      "spread": 0.34610322083014283,
       "tolerance": 0.5
     },
     {

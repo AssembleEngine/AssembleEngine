@@ -1,22 +1,22 @@
 {
   "suite": "gpu-orbit",
-  "commit": "06fa4c4",
+  "commit": "335e770",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "gpu_total",
       "kind": "time",
-      "value": 818175.9903382044,
+      "value": 810496.0018245038,
       "unit": "ns",
-      "spread": 0.2762437662499007
+      "spread": 0.2637710067195704
     },
     {
       "metric": "pass/units reset",
       "kind": "time",
-      "value": 1023.9999974146485,
+      "value": 1056.0000082477927,
       "unit": "ns",
-      "spread": 0.06250002131628213,
-      "tolerance": 2.0000000050495146
+      "spread": 0.03030304032501041,
+      "tolerance": 1.9393939242464782
     },
     {
       "metric": "pass/exposure clear",
@@ -37,17 +37,17 @@
     {
       "metric": "pass/terrain lod",
       "kind": "time",
-      "value": 229535.9969139099,
+      "value": 231327.99565792084,
       "unit": "ns",
-      "spread": 0.09047819058809782
+      "spread": 0.7461613218468066
     },
     {
       "metric": "pass/units cull",
       "kind": "time",
-      "value": 4480.000119656324,
+      "value": 4544.000141322613,
       "unit": "ns",
-      "spread": 0.22142858850479802,
-      "tolerance": 0.4571428449330284
+      "spread": 0.2112675681065479,
+      "tolerance": 0.4507042113347939
     },
     {
       "metric": "pass/units count",
@@ -62,15 +62,15 @@
       "kind": "time",
       "value": 1760.0000137463212,
       "unit": "ns",
-      "spread": 0.05454547258501874,
+      "spread": 0.03636364839001249,
       "tolerance": 1.163636354547887
     },
     {
       "metric": "pass/shadows",
       "kind": "time",
-      "value": 37888.00165057182,
+      "value": 38176.000118255615,
       "unit": "ns",
-      "spread": 0.048986562388433276
+      "spread": 0.04861691181866298
     },
     {
       "metric": "pass/lights",
@@ -83,16 +83,16 @@
     {
       "metric": "pass/terrain",
       "kind": "time",
-      "value": 428032.0107936859,
+      "value": 431104.00438308716,
       "unit": "ns",
-      "spread": 0.08373206624449403
+      "spread": 0.08076008696583929
     },
     {
       "metric": "pass/units",
       "kind": "time",
       "value": 6144.000217318535,
       "unit": "ns",
-      "spread": 4.166666470872675,
+      "spread": 4.333333188066824,
       "tolerance": 0.3333333215430487
     },
     {
@@ -105,16 +105,16 @@
     {
       "metric": "pass/exposure meter",
       "kind": "time",
-      "value": 24576.00086927414,
+      "value": 23552.000522613525,
       "unit": "ns",
-      "spread": 0.45833332070146293
+      "spread": 0.5652173328491131
     },
     {
       "metric": "pass/exposure adapt",
       "kind": "time",
       "value": 9216.000325977802,
       "unit": "ns",
-      "spread": 0.0,
+      "spread": 0.11111114479609888,
       "tolerance": 0.22222221436203243
     },
     {
@@ -152,9 +152,9 @@
     {
       "metric": "pass/copy",
       "kind": "time",
-      "value": 153183.99667739868,
+      "value": 155583.99260044098,
       "unit": "ns",
-      "spread": 0.27762693477551176,
+      "spread": 0.5711641484848529,
       "tolerance": 0.5
     },
     {
@@ -162,7 +162,7 @@
       "kind": "time",
       "value": 7007.999811321497,
       "unit": "ns",
-      "spread": 0.2465754325789483,
+      "spread": 0.27853881490926813,
       "tolerance": 0.5
     },
     {
@@ -175,17 +175,17 @@
     {
       "metric": "cpu_frame",
       "kind": "time",
-      "value": 117911.99768829341,
+      "value": 100292.97213363642,
       "unit": "ns",
-      "spread": 0.2992999832838617,
+      "spread": 0.3853610143007835,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_record",
       "kind": "time",
-      "value": 83871.9978928566,
+      "value": 66350.99649429321,
       "unit": "ns",
-      "spread": 0.30655046513274414,
+      "spread": 0.41009181986821597,
       "tolerance": 0.5
     },
     {

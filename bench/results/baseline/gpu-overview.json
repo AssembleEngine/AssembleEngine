@@ -1,22 +1,22 @@
 {
   "suite": "gpu-overview",
-  "commit": "06fa4c4",
+  "commit": "335e770",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "gpu_total",
       "kind": "time",
-      "value": 653440.016991226,
+      "value": 650656.0131383594,
       "unit": "ns",
-      "spread": 0.25881486242789553
+      "spread": 0.2703578319912205
     },
     {
       "metric": "pass/units reset",
       "kind": "time",
-      "value": 768.0000271648169,
+      "value": 1056.0000082477927,
       "unit": "ns",
-      "spread": 0.041666679298537075,
-      "tolerance": 2.6666665723443894
+      "spread": 0.06060608065002082,
+      "tolerance": 1.9393939242464782
     },
     {
       "metric": "pass/exposure clear",
@@ -37,40 +37,40 @@
     {
       "metric": "pass/terrain lod",
       "kind": "time",
-      "value": 223424.0025281906,
+      "value": 222016.00670814514,
       "unit": "ns",
-      "spread": 0.009596143881732973
+      "spread": 0.7556932090907712
     },
     {
       "metric": "pass/units cull",
       "kind": "time",
       "value": 4639.999940991402,
       "unit": "ns",
-      "spread": 0.1724138034853142,
+      "spread": 0.17931040781090618,
       "tolerance": 0.4413793159580118
     },
     {
       "metric": "pass/units count",
       "kind": "time",
-      "value": 2047.999994829297,
+      "value": 2015.9999839961529,
       "unit": "ns",
-      "spread": 0.39062507638334426,
-      "tolerance": 1.0000000025247573
+      "spread": 0.42857140382327324,
+      "tolerance": 1.0158730239374387
     },
     {
       "metric": "pass/units count read",
       "kind": "time",
       "value": 1760.0000137463212,
       "unit": "ns",
-      "spread": 0.018181824195006246,
+      "spread": 0.03636364839001249,
       "tolerance": 1.163636354547887
     },
     {
       "metric": "pass/shadows",
       "kind": "time",
-      "value": 38240.00060558319,
+      "value": 38143.99987459183,
       "unit": "ns",
-      "spread": 0.023430945549583575
+      "spread": 0.023489916499352195
     },
     {
       "metric": "pass/lights",
@@ -83,16 +83,16 @@
     {
       "metric": "pass/terrain",
       "kind": "time",
-      "value": 303104.0132045746,
+      "value": 302080.0054073334,
       "unit": "ns",
-      "spread": 0.010135113543771716
+      "spread": 0.010169470121860202
     },
     {
       "metric": "pass/units",
       "kind": "time",
       "value": 7168.000098317862,
       "unit": "ns",
-      "spread": 0.14285712429602676,
+      "spread": 23.28571483326721,
       "tolerance": 0.2857142817953659
     },
     {
@@ -108,7 +108,7 @@
       "kind": "time",
       "value": 18432.000651955605,
       "unit": "ns",
-      "spread": 0.055555471343086145,
+      "spread": 0.11111104374113559,
       "tolerance": 0.11111110718101622
     },
     {
@@ -116,7 +116,7 @@
       "kind": "time",
       "value": 9216.000325977802,
       "unit": "ns",
-      "spread": 0.0,
+      "spread": 0.11111114479609888,
       "tolerance": 0.22222221436203243
     },
     {
@@ -154,17 +154,17 @@
     {
       "metric": "pass/copy",
       "kind": "time",
-      "value": 156031.996011734,
+      "value": 156064.0037059784,
       "unit": "ns",
-      "spread": 0.4029943282148154,
+      "spread": 0.7289316678121215,
       "tolerance": 0.5
     },
     {
       "metric": "pass/host read",
       "kind": "time",
-      "value": 7135.999854654074,
+      "value": 6912.000011652708,
       "unit": "ns",
-      "spread": 0.345291440608967,
+      "spread": 0.4861110390626626,
       "tolerance": 0.5
     },
     {
@@ -177,17 +177,17 @@
     {
       "metric": "cpu_frame",
       "kind": "time",
-      "value": 97451.97628402713,
+      "value": 100063.01644134519,
       "unit": "ns",
-      "spread": 0.4122032671455711,
+      "spread": 0.547364903033196,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_record",
       "kind": "time",
-      "value": 65091.997385025024,
+      "value": 66451.99656486511,
       "unit": "ns",
-      "spread": 0.4503011503462485,
+      "spread": 0.577439366765646,
       "tolerance": 0.5
     },
     {
