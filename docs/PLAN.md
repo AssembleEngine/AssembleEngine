@@ -4181,6 +4181,36 @@ Design:
     - The instance-column copy into a frame slot, 10 000 rows: median 0.0161 ms for 9
       attributes and 0.0192 ms for 11 (+0.0031 ms; RTX 3060 Ti, a `CpuToGpu` buffer, median
       of 100).
+  - Step 6, B: effects at joints — done (2026-11-22).
+    - Engine event `Effect` (`ae_abi::engine::EFFECT`, `…0014`); SDK `ae_sdk::fx` (feature
+      `fx`, which pulls `aim`): `entity`, `tick`, `pos` (nav x, the height above the unit's
+      ground point, nav y), `dir` (the bone's world forward), `effect` (the `name_id` of the
+      name), `count`, `scale`, `seed`, `bone`, `flags`.
+      `Anim::effect_at(entity, tick, bone, offset, &Body, &Orientation, effect, count, scale)`
+      places the effect at `bone_world` plus `offset` (in the unit-frame axes as the bone
+      carries them) and emits it; the emitting system declares `emits(Effect)`. The entity
+      and tick are parameters, unlike the design's sketch: an `Anim` carries neither, and
+      duel's `firer` is an ordinary system. The seed hashes entity, tick, effect and bone
+      (`fx::seed`), so two effects of one kind from different bones in one tick differ.
+      `Unit::effect_at(bone, offset, effect, count, scale)` fills entity, tick, `Body` and
+      `Orientation` in from a script's poll.
+    - Sink `ae_services::fx::FxPlugin`: host system `fx` with `reads_events(EFFECT)`, in key
+      order into an optional `Arc<FxFeed>`; with no feed the events are still consumed, so
+      its digest cursor matches. ae-headless registers it with no feed and the client with
+      one. `host(fx)` goes last in a schedule.
+    - Client: after each tick `Sim::stream` takes the feed. An effect the observer sees
+      (`Effects::sees`, at its nav `(x, y)`) becomes `ParticleFeed::emit(Burst { pos,
+      ground: true, effect, count, scale, seed })`, `effect` being its name's index in
+      `EFFECT_NAMES`; an unknown name is warned about once and skipped. `dir` is unused
+      (the effects are spherical for now). An effect emitted at run tick N starts when the
+      stream of tick N+1 is published (the sim's `run.tick()` is 0-based), so the burst
+      leads the drawn bone by up to one tick of the unit's motion.
+    - Tests: `ae_services/tests/fx.rs` on the new `fx_guest`: 200 Foxes, a `"flash"` at the
+      head and a `"smoke"` at the spine every tick, 24 000 effects; each `pos` equals the
+      bone's world position plus its offset from `Rig::bone_frame` and `place`, with `dir`
+      and the seed exact; the digests and the whole feed are equal at 8, 1, 2 and 4
+      workers. An ae-client unit test (`effects_become_bursts_only_where_seen`). No
+      existing game's digest changes (none schedules `host(fx)`).
 
 ### M15 — Fully bindless resources (priority: medium)
 
@@ -4425,6 +4455,15 @@ From the M14 hybrid animation work (2026-11-18); each needs a decision before it
   and with VRAM to spare; the bench now runs one process per scene instead. Conditions for
   going back to one process: find the state that carries over (allocations, descriptor pools,
   the model cache, threads left running) and show two whole one-process runs diffing clean.
+
+- **Interpolated unit rotation** (step 6, A): a unit is drawn with the tick's
+  `Orientation`, snapped; turning at 180°/s moves 6° a tick. Interpolation needs the previous
+  tick's quaternion, four more stream words, and the renderer's lerp.
+- **Bursts held to the drawn tick** (step 6, B): an effect of tick N starts when the stream of
+  tick N+1 is published, up to one tick before the drawn unit reaches the bone. A start tick
+  on `Burst`, held until the drawn tick reaches it, fixes it.
+- **The observer path's `Orientation`** (step 6, A): `Orientation` is not a viewed field, so an
+  observer's units are still turned by their velocity.
 
 From the M14 coroutine spike (2026-11-19):
 
