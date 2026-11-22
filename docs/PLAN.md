@@ -1075,8 +1075,10 @@ GPU bench (`ae-client --bench <scene>[,<scene>...]|all|list [--frames N] [--warm
   median GPU time per pass and in total, render-thread CPU time per frame (`cpu_frame`, fence waits
   excluded) and its recording part (`cpu_record`); counters `leaves` and `drawn` (summed over the
   frames: deterministic, so more is a regression); info `units_visible` (last frame, read after the
-  GPU finished), frames and size. The readback copy only offscreen rendering has is left out: it
-  follows the host bus (±25 % between runs).
+  GPU finished), frames and size. The readback copy only offscreen rendering has is left out of
+  `gpu_total`: it follows the host bus (±25 % between runs). Since M13 stage 7 it is reported on
+  its own (`pass/copy`, `pass/host read`, 50 % tolerance), and a `--bench-output hdr10|scrgb`
+  run writes `gpu-<scene>-hdr10.json` or `gpu-<scene>-scrgb.json`.
 - `ae_bench` gained a per-record `tolerance` that widens `--time-tolerance` for that metric:
   CPU times get 50 % (tens of microseconds; medians move by up to 30 % between runs, once 60 %),
   passes under ~20 µs get 2 µs absolute (the timer ticks in about 1 µs). `Executor::take_gpu_frames`

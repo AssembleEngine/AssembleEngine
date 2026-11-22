@@ -1,6 +1,7 @@
 //! `ae-client --bench <scene>|all|list`: GPU and render-CPU times of fixed
 //! scenes, offscreen at 1280x720, as `ae_bench` reports (one suite per
-//! scene, `gpu-<scene>`) for `ae-tool bench-diff`.
+//! scene, `gpu-<scene>`, or `gpu-<scene>-hdr10`/`-scrgb` for an HDR run)
+//! for `ae-tool bench-diff`.
 //!
 //! Each scene is a map, a look (tileset), units at a fixed sim tick and a
 //! fixed camera or camera path. After `--warmup` frames (the subdivision
