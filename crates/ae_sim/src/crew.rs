@@ -8,7 +8,7 @@
 
 use crate::command::{Command, CommandKey, Emitted};
 use crate::host::SpatialIndex;
-use crate::imports::{IdMap, WorkerCtx};
+use crate::imports::{IdMap, WorkerCtx, WorldPtr};
 use crate::work::WorkRange;
 use ae_abi::{EventSpan, MAX_EVENT_READS, MAX_TERMS, RunDesc};
 use ae_wasm::{GuestMemory, Instance};
@@ -33,6 +33,9 @@ pub struct BatchSystem {
     pub stagger: Option<(u32, u32)>,
     pub events: [EventSpan; MAX_EVENT_READS],
     pub event_count: u32,
+    /// Stable component ids the system may read with `ae_get`.
+    pub gets: [u64; ae_abi::MAX_GETS],
+    pub get_count: u32,
     pub ranges: Vec<WorkRange>,
 }
 
@@ -51,11 +54,15 @@ pub struct Batch {
     pub ids: Arc<IdMap>,
     pub memory: GuestMemory,
     pub spatial: Option<Arc<SpatialIndex>>,
+    /// The world the layer reads (`ae_get`); structural changes wait for the
+    /// layer's sync point, so it is valid for the whole batch.
+    pub world: WorldPtr,
     next: AtomicUsize,
     failed: AtomicBool,
 }
 
 impl Batch {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         systems: Vec<BatchSystem>,
         jobs: Vec<Job>,
@@ -64,6 +71,7 @@ impl Batch {
         ids: Arc<IdMap>,
         memory: GuestMemory,
         spatial: Option<Arc<SpatialIndex>>,
+        world: WorldPtr,
     ) -> Self {
         Self {
             systems,
@@ -73,6 +81,7 @@ impl Batch {
             ids,
             memory,
             spatial,
+            world,
             next: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
         }
@@ -110,12 +119,14 @@ impl Worker {
         let ctx = self.instance.store.data_mut();
         ctx.ids = Some(batch.ids.clone());
         ctx.spatial = batch.spatial.clone();
+        ctx.world = Some(batch.world);
         if let Err(e) = self.run_jobs(batch, &mut out) {
             batch.failed.store(true, Ordering::Relaxed);
             out.error = Some(e);
         }
         let ctx = self.instance.store.data_mut();
         ctx.spatial = None;
+        ctx.world = None;
         out.commands = ctx.commands.take();
         out.events = ctx.commands.take_events();
         out
@@ -152,6 +163,11 @@ impl Worker {
                 desc.columns = range.columns;
                 desc.term_ids = sys.term_ids;
                 desc.events = sys.events;
+                {
+                    let ctx = self.instance.store.data_mut();
+                    ctx.gets = sys.gets;
+                    ctx.get_count = sys.get_count;
+                }
                 unsafe {
                     if range.count > 0 {
                         // flecs keeps entity ids on the host heap; the guest gets a copy.

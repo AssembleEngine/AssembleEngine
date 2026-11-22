@@ -325,6 +325,21 @@ impl Unit {
         f(unsafe { &mut *self.at::<T>(true) })
     }
 
+    /// `T` of another entity, copied out (nothing borrowed across an
+    /// `await`). The resuming system declares `get(T)`.
+    pub fn get_of<T: Component>(&self, entity: Entity) -> Option<T> {
+        let mut out = core::mem::MaybeUninit::<T>::uninit();
+        let n = unsafe {
+            crate::host::ae_get(
+                entity.0,
+                T::ID,
+                out.as_mut_ptr() as usize as u32,
+                core::mem::size_of::<T>() as u32,
+            )
+        };
+        (n != 0).then(|| unsafe { out.assume_init() })
+    }
+
     /// Wait `ms` milliseconds (at least one tick): [`ms_ticks`].
     pub fn sleep(&self, ms: u32) -> Sleep {
         self.sleep_ticks(ms_ticks(ms))

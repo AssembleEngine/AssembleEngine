@@ -252,6 +252,7 @@ struct SystemArgs {
     terms: Vec<(Path, u32)>,
     emits: Vec<Path>,
     reads: Vec<Path>,
+    gets: Vec<Path>,
     after: Vec<Ident>,
     mode: u32,
     cadence: (u32, u32, u32),
@@ -269,9 +270,10 @@ fn list<T: syn::parse::Parse>(m: &syn::meta::ParseNestedMeta) -> syn::Result<Vec
 /// `ae_sys_name(desc: u32)` and records the declaration.
 ///
 /// Arguments, any order: `write(A, ..)`, `read(B, ..)` (query terms, in the
-/// order written), `emits(E, ..)`, `reads_events(E, ..)`, `after(system, ..)`,
-/// `serial`, and one cadence: `every(n)`, `every(n, phase)`,
-/// `staggered(n)` or `once`.
+/// order written), `emits(E, ..)`, `reads_events(E, ..)`, `get(T, ..)`
+/// (components read of other entities during the run, not query terms),
+/// `after(system, ..)`, `serial`, and one cadence: `every(n)`,
+/// `every(n, phase)`, `staggered(n)` or `once`.
 #[proc_macro_attribute]
 pub fn system(args: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -291,6 +293,8 @@ pub fn system(args: TokenStream, item: TokenStream) -> TokenStream {
             a.emits.extend(list::<Path>(&m)?);
         } else if is("reads_events") {
             a.reads.extend(list::<Path>(&m)?);
+        } else if is("get") {
+            a.gets.extend(list::<Path>(&m)?);
         } else if is("after") {
             a.after.extend(list::<Ident>(&m)?);
         } else if is("serial") {
@@ -334,8 +338,15 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
             format!("at most {} event streams read", abi::MAX_EVENT_READS),
         ));
     }
+    if a.gets.len() > abi::MAX_GETS {
+        return Err(Error::new_spanned(
+            name,
+            format!("at most {} components read with `get`", abi::MAX_GETS),
+        ));
+    }
     let mut r = Record::new(abi::KIND_SYSTEM);
     for v in [
+        abi::SYSTEM_RECORD_VERSION,
         a.mode,
         a.cadence.0,
         a.cadence.1,
@@ -343,6 +354,7 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
         a.terms.len() as u32,
         a.emits.len() as u32,
         a.reads.len() as u32,
+        a.gets.len() as u32,
         a.after.len() as u32,
         name_s.len() as u32,
         0,
@@ -361,6 +373,9 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
     for ty in &a.reads {
         r.patch_u64(quote! { <#ty as ::ae_sdk::Event>::ID });
     }
+    for ty in &a.gets {
+        r.patch_u64(quote! { <#ty as ::ae_sdk::Component>::ID });
+    }
     for dep in &a.after {
         r.string(&dep.to_string());
     }
@@ -371,7 +386,14 @@ fn system_impl(func: ItemFn, a: SystemArgs) -> syn::Result<Tokens> {
     // a type's own record lives in its defining crate's object, which the
     // linker drops when nothing references it (an SDK event a game only
     // emits). The schema parser accepts identical duplicates.
-    let types: Vec<&Path> = a.terms.iter().map(|(t, _)| t).chain(&a.emits).chain(&a.reads).collect();
+    let types: Vec<&Path> = a
+        .terms
+        .iter()
+        .map(|(t, _)| t)
+        .chain(&a.emits)
+        .chain(&a.reads)
+        .chain(&a.gets)
+        .collect();
     let uses = types.iter().enumerate().map(|(i, ty)| {
         let id = format_ident!("__AE_USES_{}_{}", name, i);
         quote! {

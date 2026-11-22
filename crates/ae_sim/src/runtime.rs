@@ -15,7 +15,7 @@ use crate::crew::{Batch, BatchSystem, Crew, Job, Worker, WorkerOut};
 use crate::digest::StateHash;
 use crate::events::EventStore;
 use crate::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, SpatialIndex};
-use crate::imports::{self, IdMap, WorkerCtx};
+use crate::imports::{self, IdMap, WorkerCtx, WorldPtr};
 use crate::schedule::{self, Cadence, Mode, Schedule, SystemDecl};
 use crate::schema::{ComponentDecl, Schema, Slot};
 use crate::work::{WorkRange, ranges};
@@ -242,6 +242,7 @@ impl Runtime {
                         terms,
                         emits: s.emits.clone(),
                         reads_events: s.reads_events.clone(),
+                        gets: s.gets.clone(),
                         after: s.after.clone(),
                         mode: s.mode,
                         cadence: s.cadence,
@@ -310,6 +311,7 @@ impl Runtime {
                         terms,
                         emits: decl.emits.clone(),
                         reads_events: decl.reads_events.clone(),
+                        gets: Vec::new(),
                         after: decl.after.clone(),
                         mode: Mode::Serial,
                         cadence: decl.cadence,
@@ -822,6 +824,12 @@ impl Runtime {
                 stagger: s.decl.cadence.stagger(tick),
                 events,
                 event_count: s.decl.reads_events.len() as u32,
+                gets: {
+                    let mut gets = [0; ae_abi::MAX_GETS];
+                    gets[..s.decl.gets.len()].copy_from_slice(&s.decl.gets);
+                    gets
+                },
+                get_count: s.decl.gets.len() as u32,
                 ranges,
             });
         }
@@ -836,6 +844,7 @@ impl Runtime {
             w.ids.clone(),
             self.memory,
             w.spatial.clone(),
+            WorldPtr(w.world),
         )))
     }
 

@@ -18,7 +18,7 @@
 //! | Kind | Body after the header |
 //! |---|---|
 //! | [`KIND_COMPONENT`] | `u64 id, u32 size, u32 align, u32 flags, u32 field_count, u32 name_len, u32 0`, name (pad 4), then per field: `u64 id, u32 offset, u32 size, u32 kind, u32 flags, u32 name_len, u32 0`, name (pad 4) |
-//! | [`KIND_SYSTEM`] | `u32 mode, u32 cadence, u32 cadence_n, u32 cadence_phase, u32 terms, u32 emits, u32 reads, u32 after, u32 name_len, u32 0`, name (pad 4), terms `{u64 id, u32 access, u32 0}`, emitted stream ids `u64`, read stream ids `u64`, `after` names as strings |
+//! | [`KIND_SYSTEM`] | `u32 version, u32 mode, u32 cadence, u32 cadence_n, u32 cadence_phase, u32 terms, u32 emits, u32 reads, u32 gets, u32 after, u32 name_len, u32 0`, name (pad 4), terms `{u64 id, u32 access, u32 0}`, emitted stream ids `u64`, read stream ids `u64`, get component ids `u64`, `after` names as strings |
 //! | [`KIND_ORDER`] | `u32 count, u32 0`, system names as strings |
 //! | [`KIND_DATA`] | `u32 name_len, u32 0`, name (pad 4), payload (the rest of the record): named data for the engine's services, e.g. `nav.classes` |
 //!
@@ -108,6 +108,11 @@ pub const CADENCE_ONCE: u32 = 3;
 
 pub const MAX_TERMS: usize = 16;
 pub const MAX_EVENT_READS: usize = 8;
+/// Components a system may read of other entities (`get(T, ..)`).
+pub const MAX_GETS: usize = 8;
+
+/// Version of a [`KIND_SYSTEM`] record: 2 added the `get` list.
+pub const SYSTEM_RECORD_VERSION: u32 = 2;
 
 /// Byte offsets inside a component record.
 pub mod component {
@@ -130,16 +135,18 @@ pub mod component {
 
 /// Byte offsets inside a system record.
 pub mod system {
-    pub const MODE: usize = 8;
-    pub const CADENCE: usize = 12;
-    pub const CADENCE_N: usize = 16;
-    pub const CADENCE_PHASE: usize = 20;
-    pub const TERMS: usize = 24;
-    pub const EMITS: usize = 28;
-    pub const READS: usize = 32;
-    pub const AFTER: usize = 36;
-    pub const NAME_LEN: usize = 40;
-    pub const NAME: usize = 48;
+    pub const VERSION: usize = 8;
+    pub const MODE: usize = 12;
+    pub const CADENCE: usize = 16;
+    pub const CADENCE_N: usize = 20;
+    pub const CADENCE_PHASE: usize = 24;
+    pub const TERMS: usize = 28;
+    pub const EMITS: usize = 32;
+    pub const READS: usize = 36;
+    pub const GETS: usize = 40;
+    pub const AFTER: usize = 44;
+    pub const NAME_LEN: usize = 48;
+    pub const NAME: usize = 56;
     pub const TERM_LEN: usize = 16;
 }
 
@@ -306,6 +313,11 @@ pub mod imports {
     /// the host rebuilt last; writes up to `cap` entity ids (`u64`) at `out`
     /// and returns the total count.
     pub const SPATIAL_RADIUS: &str = "ae_spatial_radius";
+    /// `ae_get(entity: u64, component: u64, out: u32, len: u32) -> u32`: copy
+    /// a component of another entity into the calling system's memory (1),
+    /// or 0 when the entity is not alive or lacks it. Traps when the
+    /// component is not in the system's `get` list or `len` is wrong.
+    pub const GET: &str = "ae_get";
 }
 
 /// Stable ids of the components engine services read and write (defined in

@@ -193,6 +193,23 @@ pub unsafe fn entity_alive(world: World, entity: EntityId) -> bool {
     entity.0 != 0 && unsafe { ecs_is_valid(world, entity.0) }
 }
 
+/// Read `component` of `entity` in place: a pointer into the column arena,
+/// or `None` when the entity is not alive or does not have it. The pointer
+/// stays valid until the next structural change; within a schedule layer,
+/// where structural changes wait for the sync point, it holds for the whole
+/// layer.
+///
+/// # Safety
+///
+/// `world` must be a live world and `component` registered in it.
+pub unsafe fn get_component(world: World, entity: EntityId, component: ComponentId) -> Option<*const u8> {
+    if !unsafe { entity_alive(world, entity) } {
+        return None;
+    }
+    let p = unsafe { ecs_get_id(world, entity.0, component.0) };
+    (!p.is_null()).then(|| p.cast::<u8>())
+}
+
 /// Create a cached query from AND terms.
 ///
 /// # Safety

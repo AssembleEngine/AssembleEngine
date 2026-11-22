@@ -94,6 +94,9 @@ pub struct SystemDecl {
     pub terms: Vec<ae_ecs::Term>,
     pub emits: Vec<u64>,
     pub reads_events: Vec<u64>,
+    /// Components read of other entities during the run (`get(T)`): reads
+    /// for layering, not query terms (they do not restrict the rows).
+    pub gets: Vec<u64>,
     /// Names of systems that must run before this one.
     pub after: Vec<String>,
     pub mode: Mode,
@@ -106,25 +109,35 @@ impl SystemDecl {
         let mut reads = BTreeSet::new();
         let mut writes = BTreeSet::new();
         let mut seen = BTreeSet::new();
-        let mut note = |r: Resource| -> Result<()> {
-            ensure!(seen.insert(r), "system `{}` lists {r:?} twice", self.name);
-            Ok(())
-        };
-        for term in &self.terms {
-            let r = Resource::Component(term.component);
-            note(r)?;
-            match term.access {
-                Access::Read => reads.insert(r),
-                Access::Write => writes.insert(r),
+        {
+            let mut note = |r: Resource| -> Result<()> {
+                ensure!(seen.insert(r), "system `{}` lists {r:?} twice", self.name);
+                Ok(())
             };
+            for term in &self.terms {
+                let r = Resource::Component(term.component);
+                note(r)?;
+                match term.access {
+                    Access::Read => reads.insert(r),
+                    Access::Write => writes.insert(r),
+                };
+            }
+            for &s in &self.emits {
+                note(Resource::Stream(s))?;
+                writes.insert(Resource::Stream(s));
+            }
+            for &s in &self.reads_events {
+                note(Resource::Stream(s))?;
+                reads.insert(Resource::Stream(s));
+            }
         }
-        for &s in &self.emits {
-            note(Resource::Stream(s))?;
-            writes.insert(Resource::Stream(s));
-        }
-        for &s in &self.reads_events {
-            note(Resource::Stream(s))?;
-            reads.insert(Resource::Stream(s));
+        for &id in &self.gets {
+            // A `get` of a component also read as a term is one read; of a
+            // written one is rejected when the module loads.
+            let r = Resource::Component(ae_ecs::ComponentId(id));
+            if seen.insert(r) {
+                reads.insert(r);
+            }
         }
         Ok((reads, writes))
     }

@@ -52,6 +52,8 @@ pub struct SystemRecord {
     pub terms: Vec<(u64, Access)>,
     pub emits: Vec<u64>,
     pub reads_events: Vec<u64>,
+    /// Components read of other entities during the run (`get(T)`).
+    pub gets: Vec<u64>,
     pub after: Vec<String>,
 }
 
@@ -220,8 +222,15 @@ fn component(rec: &[u8]) -> Result<ComponentDecl> {
 
 fn system(rec: &[u8]) -> Result<SystemRecord> {
     let mut r = Reader { rec, at: 8 };
+    let version = r.u32()?;
+    ensure!(
+        version == abi::SYSTEM_RECORD_VERSION,
+        "system record version {version} (this host reads {})",
+        abi::SYSTEM_RECORD_VERSION
+    );
     let (mode, cadence, n, phase) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
-    let (terms, emits, reads, after, name_len, _) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+    let (terms, emits, reads, gets, after, name_len, _) =
+        (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
     let name = r.name(name_len as usize)?;
     let mode = match mode {
         abi::MODE_PARALLEL => Mode::Parallel,
@@ -240,6 +249,7 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
         reads as usize <= abi::MAX_EVENT_READS,
         "system `{name}`: reads {reads} streams"
     );
+    ensure!(gets as usize <= abi::MAX_GETS, "system `{name}`: {gets} gets");
     let terms = (0..terms)
         .map(|_| -> Result<(u64, Access)> {
             let id = r.u64()?;
@@ -254,6 +264,7 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
         .collect::<Result<_>>()?;
     let emits = (0..emits).map(|_| r.u64()).collect::<Result<_>>()?;
     let reads_events = (0..reads).map(|_| r.u64()).collect::<Result<_>>()?;
+    let gets = (0..gets).map(|_| r.u64()).collect::<Result<_>>()?;
     let after = (0..after).map(|_| r.string()).collect::<Result<_>>()?;
     r.done()?;
     Ok(SystemRecord {
@@ -263,6 +274,7 @@ fn system(rec: &[u8]) -> Result<SystemRecord> {
         terms,
         emits,
         reads_events,
+        gets,
         after,
     })
 }
@@ -394,6 +406,26 @@ impl Schema {
                     s.name,
                     c.name
                 );
+            }
+            let mut written = BTreeSet::new();
+            for (id, access) in &s.terms {
+                if *access == Access::Write {
+                    written.insert(*id);
+                }
+            }
+            let mut seen = BTreeSet::new();
+            for id in &s.gets {
+                let c = schema
+                    .component(*id)
+                    .with_context(|| format!("system `{}` gets unknown component {id:#x}", s.name))?;
+                ensure!(!c.event, "system `{}` gets event type `{}`", s.name, c.name);
+                ensure!(
+                    !written.contains(id),
+                    "system `{}` gets `{}`, which it writes",
+                    s.name,
+                    c.name
+                );
+                ensure!(seen.insert(*id), "system `{}` gets `{}` twice", s.name, c.name);
             }
         }
         Ok(schema)

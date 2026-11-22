@@ -46,8 +46,20 @@ fn record(kind: u32, body: &[u8]) -> Vec<u8> {
 }
 
 fn system(name: &str, terms: &[(u64, u32)], emits: &[u64], reads: &[u64], cadence: (u32, u32, u32)) -> Vec<u8> {
+    system_gets(name, terms, emits, reads, &[], cadence)
+}
+
+fn system_gets(
+    name: &str,
+    terms: &[(u64, u32)],
+    emits: &[u64],
+    reads: &[u64],
+    gets: &[u64],
+    cadence: (u32, u32, u32),
+) -> Vec<u8> {
     let mut b = Vec::new();
     for v in [
+        abi::SYSTEM_RECORD_VERSION,
         abi::MODE_SERIAL,
         cadence.0,
         cadence.1,
@@ -55,6 +67,7 @@ fn system(name: &str, terms: &[(u64, u32)], emits: &[u64], reads: &[u64], cadenc
         terms.len() as u32,
         emits.len() as u32,
         reads.len() as u32,
+        gets.len() as u32,
         0,
         name.len() as u32,
         0,
@@ -68,7 +81,7 @@ fn system(name: &str, terms: &[(u64, u32)], emits: &[u64], reads: &[u64], cadenc
         b.extend_from_slice(&access.to_le_bytes());
         b.extend_from_slice(&0u32.to_le_bytes());
     }
-    for id in emits.iter().chain(reads) {
+    for id in emits.iter().chain(reads).chain(gets) {
         b.extend_from_slice(&id.to_le_bytes());
     }
     record(abi::KIND_SYSTEM, &b)
@@ -167,6 +180,13 @@ fn bad_schemas_are_rejected() {
     assert!(err(&[<Hit as Event>::SCHEMA, &uses_event, &order(&["s"])]).contains("queries event type"));
     let emits_component = system("s", &[], &[Body::ID], &[], (0, 0, 0));
     assert!(err(&[Body::SCHEMA, &emits_component, &order(&["s"])]).contains("as an event stream"));
+    // A `get` of a component the system writes, or of an event: rejected.
+    let gets_written = system_gets("s", &[(Body::ID, abi::ACCESS_WRITE)], &[], &[], &[Body::ID], (0, 0, 0));
+    assert!(err(&[Body::SCHEMA, &gets_written, &order(&["s"])]).contains("which it writes"));
+    let gets_event = system_gets("s", &[], &[], &[], &[Hit::ID], (0, 0, 0));
+    assert!(err(&[<Hit as Event>::SCHEMA, &gets_event, &order(&["s"])]).contains("gets event type"));
+    let gets_unknown = system_gets("s", &[], &[], &[], &[4242], (0, 0, 0));
+    assert!(err(&[Body::SCHEMA, &gets_unknown, &order(&["s"])]).contains("gets unknown component"));
     // Same id, different layout.
     let mut clash = Tagged::SCHEMA.to_vec();
     clash[abi::component::SIZE] ^= 4;

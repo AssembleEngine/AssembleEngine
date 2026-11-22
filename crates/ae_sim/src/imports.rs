@@ -8,6 +8,7 @@
 //! | `ae_add(entity: u64, component: u64, data: u32, len: u32)` | add or overwrite a component |
 //! | `ae_remove(entity: u64, component: u64)` | remove a component |
 //! | `ae_emit(stream: u64, data: u32, len: u32)` | emit an event |
+//! | `ae_get(entity: u64, component: u64, out: u32, len: u32) -> u32` | copy a component of another entity (1), or 0 when absent |
 //! | `ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32` | entities near a point, from the host's spatial index |
 //! | `ae_lookup(scope: u64, name: u64) -> u32` | a name host plugins published (`HostPlugin::names`), `u32::MAX` when missing |
 //! | `ae_query(op: u64, input: u32, input_len: u32, out: u32, out_len: u32) -> u32` | a pure function a host plugin answers (`HostPlugin::query`): bytes written, `u32::MAX` for an unknown op |
@@ -24,6 +25,7 @@
 
 use crate::command::{Command, CommandBuffer};
 use crate::host::{HostPlugin, SpatialIndex};
+use ae_ecs::flecs_backend as fb;
 use ae_ecs::{ComponentId, EntityId};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
@@ -72,6 +74,22 @@ impl IdMap {
     }
 }
 
+/// A world pointer carried into the workers: read only between the sync
+/// points, by workers of one batch (see `WorkerCtx::world`).
+#[derive(Clone, Copy, Debug)]
+pub struct WorldPtr(pub fb::World);
+
+// SAFETY: the pointer is valid for the batch's whole run, and every use is a
+// read (`ecs_get_id`) between sync points; no worker mutates the world.
+unsafe impl Send for WorldPtr {}
+unsafe impl Sync for WorldPtr {}
+
+impl WorldPtr {
+    fn get(self) -> fb::World {
+        self.0
+    }
+}
+
 /// Store data of one sim worker instance.
 pub struct WorkerCtx {
     pub memory: SharedMemory,
@@ -79,6 +97,12 @@ pub struct WorkerCtx {
     pub ids: Option<Arc<IdMap>>,
     /// The spatial index of the current batch, if a host system built one.
     pub spatial: Option<Arc<SpatialIndex>>,
+    /// The world of the current batch (read-only: structural changes wait
+    /// for the layer's sync point), for `ae_get`.
+    pub world: Option<WorldPtr>,
+    /// The running system's `get` list (stable component ids).
+    pub gets: [u64; ae_abi::MAX_GETS],
+    pub get_count: u32,
     hits: Vec<u32>,
 }
 
@@ -89,6 +113,9 @@ impl WorkerCtx {
             commands: CommandBuffer::default(),
             ids: None,
             spatial: None,
+            world: None,
+            gets: [0; ae_abi::MAX_GETS],
+            get_count: 0,
             hits: Vec::new(),
         }
     }
@@ -315,6 +342,41 @@ pub fn link(linker: &mut Linker<WorkerCtx>) -> Result<()> {
                 .as_ref()
                 .and_then(|m| m.names.get(&(scope, name)).copied())
                 .unwrap_or(u32::MAX)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "ae_get",
+        |caller: Caller<'_, WorkerCtx>, entity: u64, component: u64, out: u32, len: u32| -> wasmtime::Result<u32> {
+            let run = || -> Result<u32> {
+                let ctx = caller.data();
+                let id = ctx.component(component, Some(len as usize))?;
+                ensure!(
+                    ctx.gets[..ctx.get_count as usize].contains(&component),
+                    "system gets component {component:#x} without declaring it in `get`"
+                );
+                let world = ctx.world.map(WorldPtr::get).context("`ae_get` outside a system call")?;
+                let Some(src) = (unsafe { fb::get_component(world, EntityId(entity), id) }) else {
+                    return Ok(0);
+                };
+                let end = out as usize + len as usize;
+                ensure!(
+                    end <= ctx.memory.data_size(),
+                    "get output {out:#x}+{len} is out of bounds"
+                );
+                // The output buffer is the calling system's own memory; the
+                // source is its column (guest memory), which nothing writes
+                // structurally until the layer's sync point.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src,
+                        (ctx.memory.data().as_ptr() as *mut u8).add(out as usize),
+                        len as usize,
+                    )
+                };
+                Ok(1)
+            };
+            run().map_err(trap)
         },
     )?;
     linker.func_wrap(

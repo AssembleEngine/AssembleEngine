@@ -210,6 +210,22 @@ impl Run {
         }
         unsafe { core::slice::from_raw_parts(span.ptr as usize as *const E, span.count as usize) }
     }
+
+    /// `T` of another entity, read during this run and copied out: `None`
+    /// when it is not alive or does not have `T`. The system declares
+    /// `get(T)`; reading a component it writes is rejected at load.
+    pub fn get_of<T: Component>(&self, entity: Entity) -> Option<T> {
+        let mut out = core::mem::MaybeUninit::<T>::uninit();
+        let n = unsafe {
+            host::ae_get(
+                entity.0,
+                T::ID,
+                out.as_mut_ptr() as usize as u32,
+                core::mem::size_of::<T>() as u32,
+            )
+        };
+        (n != 0).then(|| unsafe { out.assume_init() })
+    }
 }
 
 #[cfg(target_family = "wasm")]
@@ -221,6 +237,7 @@ mod host {
         pub fn ae_add(entity: u64, component: u64, data: u32, len: u32);
         pub fn ae_remove(entity: u64, component: u64);
         pub fn ae_emit(stream: u64, data: u32, len: u32);
+        pub fn ae_get(entity: u64, component: u64, out: u32, len: u32) -> u32;
         pub fn ae_spatial_radius(x: f32, y: f32, r: f32, out: u32, cap: u32) -> u32;
         #[allow(dead_code)]
         pub fn ae_lookup(scope: u64, name: u64) -> u32;
@@ -248,6 +265,9 @@ mod host {
         native()
     }
     pub unsafe fn ae_emit(_: u64, _: u32, _: u32) {
+        native()
+    }
+    pub unsafe fn ae_get(_: u64, _: u64, _: u32, _: u32) -> u32 {
         native()
     }
     pub unsafe fn ae_spatial_radius(_: f32, _: f32, _: f32, _: u32, _: u32) -> u32 {
