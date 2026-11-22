@@ -179,6 +179,11 @@ impl Noise {
         let t = p - f;
         let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
         let grad = |h: u8, x: f32, y: f32| {
+            // 0.7071 stays 0.7071, not FRAC_1_SQRT_2: these corner gradients are
+            // baked into every generated heightmap, so a more exact constant would
+            // move the crossing map, the nav terrain and the frame captures, and
+            // with them the digests and goldens that are pinned to them.
+            #[allow(clippy::approx_constant)]
             const G: [(f32, f32); 8] = [
                 (1.0, 0.0),
                 (-1.0, 0.0),

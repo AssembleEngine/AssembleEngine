@@ -186,10 +186,10 @@ impl Default for DisplayLevels {
 /// mirror; the sim's f32 rules bind the sim, not render shaders or the
 /// host-side solve).
 pub fn pq(nits: f32) -> f32 {
-    const M1: f32 = 0.1593017578125;
+    const M1: f32 = 0.159_301_76;
     const M2: f32 = 78.84375;
     const C1: f32 = 0.8359375;
-    const C2: f32 = 18.8515625;
+    const C2: f32 = 18.851_563;
     const C3: f32 = 18.6875;
     let n = (nits / 10_000.0).max(0.0);
     let n1 = n.powf(M1);
@@ -204,10 +204,10 @@ pub fn pq_code(nits: f32) -> u16 {
 /// The ST.2084 EOTF (the inverse of [`pq`]), for decoding a readback: a PQ
 /// code in 0..1 to nits.
 pub fn pq_eotf(code: f32) -> f32 {
-    const M1: f32 = 0.1593017578125;
+    const M1: f32 = 0.159_301_76;
     const M2: f32 = 78.84375;
     const C1: f32 = 0.8359375;
-    const C2: f32 = 18.8515625;
+    const C2: f32 = 18.851_563;
     const C3: f32 = 18.6875;
     let n = code.max(0.0).powf(1.0 / M2);
     let num = (n - C1).max(0.0);

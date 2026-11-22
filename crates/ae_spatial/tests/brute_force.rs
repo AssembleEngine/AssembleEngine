@@ -153,6 +153,11 @@ fn nearest_matches_brute_force() {
     }
 }
 
+/// The angle ceiling stays 6.283, not `f32::consts::TAU`: it is the upper bound
+/// of this test's fixed random stream (seed 6), and no lint fix may move float
+/// bits. TAU is 6.2831853, which would change every generated segment; the
+/// grid-versus-brute-force comparison holds either way.
+#[allow(clippy::approx_constant)]
 #[test]
 fn sweep_matches_brute_force() {
     let w = world(4000, 5);
