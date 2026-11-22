@@ -1,13 +1,14 @@
-//! Death (feature `life`, M14 step 6, D): the [`Dying`] component, [`kill`],
-//! and the unseen question [`Anim::effect_at`](crate::anim::Anim) raises for
-//! the death script — whether a kill posts `KILLED` and adds `Dying`.
+//! Death (feature `life`, M14 step 6, D): the [`Dying`] component and
+//! [`kill`], which posts `KILLED` and adds `Dying`.
 //!
 //! Opt-in like `aim`: every component a module compiles takes an entity id
 //! in it. A dying unit stays an entity (its script can animate a fall), but
 //! it is excluded by a `without(Dying)` term: the spatial service does not
-//! find it and nav drops it like a despawn. The game despawns it when its
-//! death script ends (or keeps a corpse). The engine has no backstop: a
-//! game that never ends the death script keeps the unit dying forever.
+//! find it and nav drops it like a despawn. With
+//! [`resume_with_death`](crate::script::resume_with_death) the death script
+//! is cut by its cap and the unit despawned at its end (or kept as a
+//! corpse). The engine has no backstop: a game that handles `KILLED`
+//! itself and never ends its death keeps the unit dying forever.
 
 use crate::script::{Callins, callin};
 use crate::{Component, Entity, abi};

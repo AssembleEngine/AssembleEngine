@@ -70,7 +70,7 @@ pub const AIM_START: u64 = 90;
 pub const AIM_EVERY: u64 = 3;
 pub const KILL_AT: u64 = 180;
 /// The death script's cap, milliseconds.
-pub const CAP_MS: u32 = 5000;
+pub const CAP_MS: u32 = 8000;
 /// Clip seconds per metre at walking and running (times the radius).
 pub const WALK_PER_METRE: f32 = 0.6;
 pub const RUN_PER_METRE: f32 = 0.6;
@@ -392,17 +392,29 @@ fn firer(run: &Run) {
 /// A (dying units are excluded from the index).
 #[system(read(Pair, Body), write(Log), after(spatial))]
 fn check(run: &Run) {
-    let (pairs, bodies, logs) = (run.read::<Pair>(), run.read::<Body>(), run.write::<Log>());
-    let mut out = [Entity(0); 16];
+    let (pairs, bodies, logs, ids) = (
+        run.read::<Pair>(),
+        run.read::<Body>(),
+        run.write::<Log>(),
+        run.entities(),
+    );
+    // Neighbouring pairs (STEP apart) are in range too; the import returns
+    // every hit and writes at most the buffer's length.
+    let mut out = [Entity(0); 64];
     for i in run.rows() {
         let t = timeline(run.tick(), pairs[i].index);
         if t <= KILL_AT {
             continue;
         }
         let b = &bodies[i];
-        let n = spatial_radius(b.x, b.y, 40.0, &mut out);
+        let total = spatial_radius(b.x, b.y, 40.0, &mut out);
+        assert!(total <= out.len(), "{total} spatial hits, more than the buffer holds");
+        let hits = &out[..total];
         logs[i].checks += 1;
-        if out[..n].contains(&pairs[i].target) {
+        if hits.contains(&ids[i]) {
+            logs[i].found_a += 1;
+        }
+        if hits.contains(&pairs[i].target) {
             logs[i].found_b += 1;
         }
     }
@@ -538,7 +550,7 @@ async fn death(u: Unit) -> Fate {
     u.ended(0).await;
     u.sleep(1500).await;
     if u.param() & STUCK != 0 {
-        // The cap (the test's 5 s) cuts this.
+        // The cap (8 s, [`CAP_MS`]) cuts this.
         u.sleep(60_000).await;
     }
     Fate::Remove

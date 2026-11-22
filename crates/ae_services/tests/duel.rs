@@ -44,9 +44,11 @@ const PAIRS: u64 = 200;
 const TICKS: u64 = 760;
 /// Pairs of one variant run.
 const VARIANT_PAIRS: u64 = 8;
-const VARIANT_TICKS: u64 = 360;
-/// The SDK cap, ticks (5 s at 30 Hz).
-const CAP: u64 = 150;
+/// Long enough for the last staggered `STUCK` pair to reach its cap.
+const VARIANT_TICKS: u64 = 460;
+/// The duel game's cap, ticks (`CAP_MS`, 8 s at 30 Hz): a normal death (about
+/// 4.9 s: the fall, Survey once, 1.5 s still) ends well inside it.
+const CAP: u64 = 240;
 /// `standings`, `backwards`, `stuck`: the duel game's parameter bits.
 const STUCK: u64 = 1 << 16;
 const BACKWARDS: u64 = 1 << 17;

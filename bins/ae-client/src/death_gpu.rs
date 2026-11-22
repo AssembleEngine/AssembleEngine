@@ -6,10 +6,12 @@
 //!   within a tick of the unit's motion of it. The same with `BACKWARDS`:
 //!   the flash is behind the actor's velocity, where its `Orientation` puts
 //!   it.
-//! * Two frames between the death clip's end and the despawn are identical
-//!   in A's box (particles off).
-//! * After the despawn A's box shows no unit and no explosion (the script's
-//!   death does not set off the vanish explosion).
+//! * Two frames in the still second and a half between the death clip's
+//!   end and the despawn are identical in A's box (particles off).
+//! * At the despawn A leaves the picture (its box changes from the corpse's
+//!   frame), and no burst goes out: the script's death does not set off the
+//!   client's vanish explosion. B can stand in A's box (A runs towards it),
+//!   so the box is not compared with the bare terrain.
 //! * Validation reports nothing.
 //!
 //! Ignored by default: needs a Vulkan 1.3 GPU. Run with
@@ -21,26 +23,33 @@ use ae_render::terrain::app::{TerrainSource, lod_view};
 use ae_render::terrain::heightmap::build_pyramid;
 use ae_render::terrain::renderer::TerrainInfo;
 use ae_render::thread::{Headless, TargetInfo};
-use ae_render::units::InstanceStream;
 use glam::{Vec2, Vec3};
 use std::collections::BTreeMap;
 
 const TICKS: u64 = 400;
 const EXTENT: (u32, u32) = (1280, 720);
-/// Pixels: one tick of the unit's motion (0.1 m at a 60 m camera is about
-/// 1.5), the flash's size and the centroid's rounding.
+/// Pixels: one tick of the unit's motion (0.1 m at the 100 m camera is
+/// about 1), the flash's size and the centroid's rounding.
 const FLASH_TOLERANCE: f32 = 12.0;
+/// Frames kept before the current one, so the corpse's frames shortly
+/// before the despawn are at hand once it happens. The corpse lies still
+/// for 1.5 s (45 ticks) after its clip ends; [`STILL`] ticks before the
+/// despawn are inside that.
+const RECENT: usize = 12;
+const STILL: u64 = 10;
 
 struct Scene {
     /// Frame per tick (the map's frames in order).
     frames: BTreeMap<u64, Vec<u8>>,
-    /// The terrain alone.
-    baseline: Vec<u8>,
+    /// Bursts sent to the particle feed at the despawn's tick and the one
+    /// after (particles off: the feed is drained each tick, not drawn).
+    vanish_bursts: usize,
     /// The terrain heights (the effect's ground).
     source: Arc<TerrainSource>,
     /// The flash effects, by tick.
     flashes: BTreeMap<u64, Vec<ae_sdk::fx::Effect>>,
-    /// The tick the smoke was seen at (the fall's end), if any.
+    /// The tick the smoke was seen at (the fall's end, not the clip's), if
+    /// any.
     smoke: Option<u64>,
     /// A's position at the last tick it was alive (world x, nav y).
     last: [f32; 2],
@@ -90,7 +99,9 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     };
     let particle_feed = Arc::new(ParticleFeed::default());
     let mut effects = sim::Effects::default();
-    effects.particles = particles.then(|| particle_feed.clone());
+    // Particles off: the feed still takes the client's bursts (drained each
+    // tick, not drawn), so a vanish explosion is seen.
+    effects.particles = Some(particle_feed.clone());
     let effects = Arc::new(effects);
     let mut sim = sim::Sim::new(&s, None)?.with_effects(effects);
     let unit_feed = Arc::new(UnitFeed::default());
@@ -98,7 +109,7 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     let mut app =
         TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(super::units_setup(&s, unit_feed.clone())?);
     if particles {
-        let mut setup = ParticlesSetup::new(particle_feed, ae_render::particles::MAX_CAPACITY);
+        let mut setup = ParticlesSetup::new(particle_feed.clone(), ae_render::particles::MAX_CAPACITY);
         setup.downscale = 1;
         app = app.with_particles(setup);
     }
@@ -123,26 +134,14 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     app.create_offscreen(&gpu, extent)?;
     let mut headless = Headless::new(&gpu, &mut app, target, ExecutorConfig::default())?;
 
-    // The terrain alone: the baseline for the box after the despawn.
-    unit_feed.publish(Arc::new(InstanceStream {
-        tick: 0,
-        published: std::time::Instant::now(),
-        tick_seconds: 0.0,
-        sim_seconds: 0.0,
-        columns: Default::default(),
-        anim: Default::default(),
-    }));
-    headless.frames(&mut app, 1)?;
-    headless.wait()?;
-    let baseline = app.readback().context("no readback")?;
-
     let mut frames = BTreeMap::new();
-    let baseline_frame = baseline;
+    let mut vanish_bursts = 0;
     let mut flashes: BTreeMap<u64, Vec<ae_sdk::fx::Effect>> = BTreeMap::new();
     let mut smoke = None;
     let mut last = [400.0, 400.0];
     let mut gone = None;
     let mut seen = false;
+    let mut recent: std::collections::VecDeque<(u64, Vec<u8>)> = std::collections::VecDeque::new();
     for tick in 0..=TICKS {
         sim.tick()?;
         let stream = sim.stream(0.0)?;
@@ -159,6 +158,12 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
             gone = Some(tick);
         }
         unit_feed.publish(Arc::new(stream));
+        if !particles {
+            let bursts = particle_feed.take_all().len();
+            if gone.is_some() {
+                vanish_bursts += bursts;
+            }
+        }
         headless.frames(&mut app, 1)?;
         headless.wait()?;
         let pixels = app.readback().context("no readback")?;
@@ -174,10 +179,9 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
             smoke = Some(tick);
             frames.insert(tick, pixels.clone());
         }
-        if let Some(s) = smoke
-            && (tick == s + 10 || tick == s + 11)
-        {
-            frames.insert(tick, pixels.clone());
+        if gone == Some(tick) {
+            // The corpse's last frames, inside its still time.
+            frames.extend(recent.drain(..));
         }
         if let Some(g) = gone {
             // One frame after the despawn: the box with nothing in it.
@@ -187,10 +191,13 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
             if tick == g + 1 {
                 break;
             }
+        } else {
+            recent.push_back((tick, pixels));
+            if recent.len() > RECENT {
+                recent.pop_front();
+            }
         }
     }
-    // Frames after the smoke (the clip's end) and after the despawn: the
-    // last few rendered ones are enough.
     headless.finish()?;
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     eprintln!(
@@ -201,7 +208,7 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     let counters = &instance.counters;
     Ok(Scene {
         frames,
-        baseline: baseline_frame,
+        vanish_bursts,
         source,
         flashes,
         smoke,
@@ -301,40 +308,50 @@ fn the_duel_death_sequence_is_drawn_where_the_sim_puts_it() -> Result<()> {
     assert_eq!(scene.validation, (0, 0), "validation messages");
     let smoke = scene.smoke.context("no smoke effect")?;
     let w = scene.extent.0 as usize;
-    let last = project(&scene, Vec3::new(scene.last[0], 0.0, scene.last[1]));
-
-    let (box_x, box_y) = (last.0 as i32 - 40, last.1 as i32 - 40);
+    // A's box: 80 px square, centred on A's ground point (the terrain's
+    // height there, not 0).
+    let ground = scene.source.height_at(Vec2::new(scene.last[0], scene.last[1]));
+    let last = project(&scene, Vec3::new(scene.last[0], ground, scene.last[1]));
+    let (cx, cy) = (last.0 as i32, last.1 as i32);
+    let h = scene.extent.1 as usize;
     let box_pixels: Vec<usize> = (-40..40)
         .flat_map(|dy| (-40..40).map(move |dx| (dx, dy)))
         .filter_map(|(dx, dy)| {
-            let (x, y) = (box_x + dx, box_y + dy);
-            (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) * w < w * scene.extent.1 as usize)
-                .then(|| (y as usize * w + x as usize) * 4)
+            let (x, y) = (cx + dx, cy + dy);
+            (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h).then(|| (y as usize * w + x as usize) * 4)
         })
         .collect();
-    // Two frames while the death clip has ended and A is still there.
-    let a = &scene.frames[&(smoke + 10)];
-    let b = &scene.frames[&(smoke + 11)];
+    assert!(
+        box_pixels.len() * 2 > 80 * 80,
+        "A's box at {last:?} is mostly off screen"
+    );
+    let gone = scene.gone.context("A never vanished")?;
+    let (still_a, still_b) = (gone - STILL - 1, gone - STILL);
+    anyhow::ensure!(
+        smoke + 1 < still_a,
+        "A vanished at {gone}, too soon after its fall ended ({smoke}) for a still corpse"
+    );
+    // Two frames after the death clip has ended, while A lies still.
+    let a = &scene.frames[&still_a];
+    let b = &scene.frames[&still_b];
     assert!(
         box_pixels.iter().all(|&i| a[i..i + 4] == b[i..i + 4]),
         "the corpse's frames differ in its box"
     );
-    // After the despawn, A's box is the terrain (no unit, no explosion).
-    let gone = scene.gone.context("A never vanished")?;
+    // After the despawn A has left its box: the frame changed where the
+    // corpse was (the box centre is on it), and no burst went out.
     let after = &scene.frames[&(gone + 1).min(TICKS)];
-    let changed: Vec<usize> = box_pixels
-        .iter()
-        .copied()
-        .filter(|&i| after[i..i + 4] != scene.baseline[i..i + 4])
-        .collect();
+    let removed = box_pixels.iter().filter(|&&i| b[i..i + 4] != after[i..i + 4]).count();
     assert!(
-        changed.len() * 100 < box_pixels.len(),
-        "{} of {} pixels in A's box changed after the despawn (a unit or an explosion)",
-        changed.len(),
-        box_pixels.len()
+        removed >= 16,
+        "A's box barely changed at the despawn ({removed} pixels): the corpse is still drawn"
+    );
+    assert_eq!(
+        scene.vanish_bursts, 0,
+        "bursts at the despawn: the client set off a vanish explosion for a scripted death"
     );
     eprintln!(
-        "corpse still at ticks {smoke}+10/11; A vanished at {gone}; box {} px",
+        "corpse still at ticks {still_a}/{still_b}, fall ended {smoke}; A vanished at {gone}, {removed} of {} px changed",
         box_pixels.len()
     );
     Ok(())
