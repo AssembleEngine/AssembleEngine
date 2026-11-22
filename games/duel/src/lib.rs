@@ -1,9 +1,10 @@
 //! Duel: the M14 step 6 test game (E). Pairs of a scripted Fox (A) and a
 //! target Fox (B): A walks, stops and runs while its script takes the aim in
-//! steps (an upper-body Survey, the spine turned, then the head), fires
-//! three times with a muzzle flash at the head, and is killed at tick 180:
-//! its death script drops it on its side, emits smoke and ends, and A is
-//! despawned.
+//! steps (an upper-body Survey, the spine turned, then the head), and fires
+//! three times with a muzzle flash at the head. Each shot hits B (its head
+//! flinches); the third kills it: B's death script drops it on its side,
+//! emits smoke and ends, and B is despawned. A stops when its target goes
+//! down, and lives on.
 //!
 //! Game parameter: bits 0..16 the pair count (a 10-wide grid of
 //! [`STEP`] metres); bit 16 [`STUCK`]: the death script never ends, to test
@@ -15,19 +16,23 @@
 //!
 //! Systems, in schedule order:
 //! * `start` (tick 0): the pairs.
-//! * `steer`: A moves and posts `STARTED_MOVING` / `STOPPED_MOVING`;
-//!   `without(Dying)`, so a killed A stops.
-//! * `asker` (from [`AIM_START`], every [`AIM_EVERY`] ticks): asks weapon 0
-//!   to point from A's aim-from bone at B's chest (through `get(Body)`).
-//! * `fate`: at [`KILL_AT`], `life::kill`.
-//! * `scripts`: the aim, fire and death scripts (`resume_with_death`).
+//! * `steer`: A moves and posts `STARTED_MOVING` / `STOPPED_MOVING`; it
+//!   stops (and posts the stop) once its target is dying.
+//! * `asker` (from [`AIM_START`], every [`AIM_EVERY`] ticks, while the
+//!   target is not dying): asks weapon 0 to point from A's aim-from bone at
+//!   B's chest (through `get(Body)`).
+//! * `scripts`: A's aim and fire script (`resume_with_death`; A is never
+//!   killed, so its death never runs).
+//! * `targets`: B's script: idle, a flinch on each `HIT`, and the death.
 //! * `host(anim)`: the engine advances the channels.
 //! * `firer` (after the service): when aimed, fires 3 shots
-//!   [`SHOT_EVERY`] ticks apart, emitting a `"flash"` at the head and
-//!   posting `FIRED`.
+//!   [`SHOT_EVERY`] ticks apart, emitting a `"flash"` at the head, a [`Hit`]
+//!   on the target, and posting `FIRED`.
+//! * `damage`: each [`Hit`] takes one of B's [`HP`], posting `HIT`; the
+//!   last one kills it (`life::kill`).
 //! * `host(spatial)`: the index, without dying units.
-//! * `check` (from the tick after the kill): a spatial query at A's place
-//!   does not find A, and finds B.
+//! * `check` (from the tick after the kill, while the target is dying): a
+//!   spatial query at the target's place finds A, and not the dying B.
 //! * `host(fx)`: the effects sink, last.
 
 use ae_sdk::abi::name_id;
@@ -37,10 +42,13 @@ use ae_sdk::fx::Effect;
 use ae_sdk::life::{self, Dying, Fate};
 use ae_sdk::nav::Body;
 use ae_sdk::script::{self, Callins, Either, Script, ScriptAlloc, Unit, callin, race};
-use ae_sdk::{Component, Entity, Run, Spawn, schedule, spatial_radius, system};
+use ae_sdk::{Component, Entity, Run, Spawn, emit, schedule, spatial_radius, system};
 
 pub const SLOTS: u32 = 1 << 18;
-ae_sdk::script_slots!(SLOTS, with_death(unit, death));
+// Two composites (A's and B's), so the general form with their closures.
+ae_sdk::script_slots!(SLOTS, |u: Unit| script::with_death(u, unit, death, 0), |u: Unit| {
+    script::with_death(u, target, death, 0)
+},);
 
 #[global_allocator]
 static ALLOC: ScriptAlloc = ScriptAlloc;
@@ -68,7 +76,8 @@ pub const WALK_END: u64 = 45;
 pub const RUN_START: u64 = 75;
 pub const AIM_START: u64 = 90;
 pub const AIM_EVERY: u64 = 3;
-pub const KILL_AT: u64 = 180;
+/// B's hit points: one a shot, so the last of A's [`SHOTS`] kills it.
+pub const HP: u32 = SHOTS;
 /// The death script's cap, milliseconds.
 pub const CAP_MS: u32 = 8000;
 /// Clip seconds per metre at walking and running (times the radius).
@@ -104,6 +113,24 @@ pub struct B {
     pub reserved: u32,
 }
 
+/// B's health: [`HP`] at the start, one less a [`Hit`].
+#[repr(C)]
+#[derive(Clone, Copy, Component)]
+pub struct Health {
+    pub hp: u32,
+    /// Hits taken.
+    pub hits: u32,
+}
+
+/// A shot that hit `target`, from `shooter`.
+#[repr(C)]
+#[derive(Clone, Copy, Component)]
+#[component(event)]
+pub struct Hit {
+    pub target: Entity,
+    pub shooter: Entity,
+}
+
 /// The firer's state.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Component)]
@@ -122,6 +149,7 @@ pub struct Log {
     pub answered: u32,
     pub fired: u32,
     pub flashed: u32,
+    /// Shots that killed the target.
     pub kills: u32,
     /// Callins the script took: starts, stops, fires.
     pub handled_starts: u32,
@@ -132,8 +160,8 @@ pub struct Log {
     pub turned_head: u32,
     /// Ticks the firer found the weapon aimed (before the shot limit).
     pub aimed_seen: u32,
-    /// Spatial checks made (from the tick after the kill), and of those
-    /// that found A and B.
+    /// Spatial checks at the target's place while it is dying, and of those
+    /// that found A and the dying B.
     pub checks: u32,
     pub found_a: u32,
     pub found_b: u32,
@@ -201,7 +229,7 @@ fn start(run: &Run) {
             .with(&Gun::default())
             .with(&Log::NEW)
             .submit();
-        // B: at rest, facing A, no script.
+        // B: facing A, idling; its script flinches at hits and dies.
         Spawn::new()
             .with(&Body {
                 x: tx,
@@ -212,6 +240,9 @@ fn start(run: &Run) {
             })
             .with(&Orientation::along(-1.0, 0.0))
             .with(&Anim::new(model_id(MODEL)))
+            .with(&Script::default())
+            .with(&Callins::default())
+            .with(&Health { hp: HP, hits: 0 })
             .with(&B { index: i, reserved: 0 })
             .submit();
     }
@@ -237,7 +268,7 @@ fn pair(run: &Run) {
     }
 }
 
-#[system(read(Pair), write(Body, Callins, Log), without(Dying))]
+#[system(read(Pair), write(Body, Callins, Log), get(Dying), without(Dying))]
 fn steer(run: &Run) {
     let standing = run.param() & STANDING != 0;
     let backwards = run.param() & BACKWARDS != 0;
@@ -253,6 +284,15 @@ fn steer(run: &Run) {
         let b = &mut bodies[i];
         if standing {
             b.vx = 0.0;
+            continue;
+        }
+        // The target is down: stop for good.
+        if run.get_of::<Dying>(pairs[i].target).is_some() {
+            if b.vx != 0.0 {
+                b.vx = 0.0;
+                posts[i].post(callin::STOPPED_MOVING);
+                logs[i].stops += 1;
+            }
             continue;
         }
         match t {
@@ -277,11 +317,12 @@ fn steer(run: &Run) {
     }
 }
 
-/// Weapon 0's aim requests: from A's aim-from bone to B's chest.
+/// Weapon 0's aim requests: from A's aim-from bone to B's chest, while B
+/// is not dying.
 #[system(
     read(Pair, Body, Anim, Orientation),
     write(Weapons, Callins, Log),
-    get(Body),
+    get(Body, Dying),
     without(Dying)
 )]
 fn asker(run: &Run) {
@@ -298,7 +339,8 @@ fn asker(run: &Run) {
     let n = run.len();
     while i < n {
         let t = timeline(run.tick(), pairs[i].index);
-        if t >= AIM_START && (t - AIM_START) % AIM_EVERY == 0 {
+        let down = run.get_of::<Dying>(pairs[i].target).is_some();
+        if t >= AIM_START && (t - AIM_START) % AIM_EVERY == 0 && !down {
             if let Some(b) = run.get_of::<Body>(pairs[i].target) {
                 let from = anims[i]
                     .bone_world(weapons[i].aim_from[0], &bodies[i], &orientations[i])
@@ -312,24 +354,7 @@ fn asker(run: &Run) {
     }
 }
 
-/// At [`KILL_AT`], kill A: `KILLED` and `Dying`; `steer` then leaves it.
-#[system(read(Pair), write(Callins, Log), get(Dying), without(Dying))]
-fn fate(run: &Run) {
-    let (pairs, posts, logs, ids) = (
-        run.read::<Pair>(),
-        run.write::<Callins>(),
-        run.write::<Log>(),
-        run.entities(),
-    );
-    for i in run.rows() {
-        if timeline(run.tick(), pairs[i].index) == KILL_AT {
-            life::kill(ids[i], &mut posts[i], run.tick(), 0);
-            logs[i].kills += 1;
-        }
-    }
-}
-
-/// The aim, fire and death scripts.
+/// A's aim and fire script (never killed: its death does not run).
 #[system(
     read(Body, Pair, Orientation),
     write(Script, Callins, Anim, Weapons, Log),
@@ -339,11 +364,19 @@ fn scripts(run: &Run) {
     script::resume_with_death(run, unit, death, CAP_MS);
 }
 
-/// The three shots, once the script has answered, and their flashes.
+/// B's script: idle, flinch at hits, and the death.
+#[system(read(Body, B, Orientation), write(Script, Callins, Anim), emits(Effect))]
+fn targets(run: &Run) {
+    script::resume_with_death(run, target, death, CAP_MS);
+}
+
+/// The three shots, once the script has answered: their flashes, and a
+/// [`Hit`] on the target each.
 #[system(
     read(Pair, Body, Anim, Orientation, Weapons),
     write(Gun, Callins, Log),
-    emits(Effect),
+    get(Health),
+    emits(Effect, Hit),
     without(Dying)
 )]
 fn firer(run: &Run) {
@@ -380,6 +413,17 @@ fn firer(run: &Run) {
             2,
             1.0,
         );
+        let target = pairs[i].target;
+        if let Some(h) = run.get_of::<Health>(target) {
+            emit(&Hit {
+                target,
+                shooter: ids[i],
+            });
+            // `damage` takes one hit point a shot after this system.
+            if h.hp == 1 {
+                logs[i].kills += 1;
+            }
+        }
         posts[i].post(callin::FIRED);
         gun.shots += 1;
         gun.last = t;
@@ -388,25 +432,55 @@ fn firer(run: &Run) {
     }
 }
 
-/// From the tick after the kill: a spatial query at A's place finds B, not
-/// A (dying units are excluded from the index).
-#[system(read(Pair, Body), write(Log), after(spatial))]
+/// Hits on B: one hit point each, `HIT` posted; the last kills it.
+#[system(
+    serial,
+    read(B),
+    write(Health, Callins),
+    get(Dying),
+    reads_events(Hit),
+    without(Dying)
+)]
+fn damage(run: &Run) {
+    let (health, posts, ids) = (run.write::<Health>(), run.write::<Callins>(), run.entities());
+    let mut hits: Vec<u64> = run.events::<Hit>().iter().map(|h| h.target.0).collect();
+    hits.sort_unstable();
+    for i in run.rows() {
+        let e = ids[i].0;
+        let from = hits.partition_point(|&h| h < e);
+        let n = hits[from..].iter().take_while(|&&h| h == e).count() as u32;
+        if n == 0 {
+            continue;
+        }
+        let h = &mut health[i];
+        h.hits += n;
+        h.hp = h.hp.saturating_sub(n);
+        posts[i].post(callin::HIT);
+        if h.hp == 0 {
+            life::kill(ids[i], &mut posts[i], run.tick(), 0);
+        }
+    }
+}
+
+/// From the tick after the target's kill, while it is dying: a spatial
+/// query at its place finds A, not the target (dying units are excluded
+/// from the index).
+#[system(read(Pair), write(Log), get(Body, Dying), after(spatial))]
 fn check(run: &Run) {
-    let (pairs, bodies, logs, ids) = (
-        run.read::<Pair>(),
-        run.read::<Body>(),
-        run.write::<Log>(),
-        run.entities(),
-    );
+    let (pairs, logs, ids) = (run.read::<Pair>(), run.write::<Log>(), run.entities());
     // Neighbouring pairs (STEP apart) are in range too; the import returns
     // every hit and writes at most the buffer's length.
     let mut out = [Entity(0); 64];
     for i in run.rows() {
-        let t = timeline(run.tick(), pairs[i].index);
-        if t <= KILL_AT {
+        let target = pairs[i].target;
+        let (Some(d), Some(b)) = (run.get_of::<Dying>(target), run.get_of::<Body>(target)) else {
+            continue;
+        };
+        // `Dying` is added at `damage`'s sync point, and the index may be
+        // built in that layer: it leaves the index from the next tick.
+        if d.killed_at >= run.tick() {
             continue;
         }
-        let b = &bodies[i];
         let total = spatial_radius(b.x, b.y, 40.0, &mut out);
         assert!(total <= out.len(), "{total} spatial hits, more than the buffer holds");
         let hits = &out[..total];
@@ -533,9 +607,30 @@ async fn unit(u: Unit) {
     }
 }
 
-/// A's death: stop the upper body, play Survey once, fall on its side,
-/// smoke where the spine lies, then wait; `Fate::Remove` despawns it. With
-/// [`STUCK`], it never returns, and the SDK's cap ends it.
+/// B's life: Survey looping; each `HIT` flinches the head up and back.
+async fn target(u: Unit) {
+    let n = names();
+    u.update(|a: &mut Anim| {
+        a.play(0, n.survey);
+    });
+    loop {
+        u.callin(callin::HIT).await;
+        u.update(|a: &mut Anim| {
+            a.turn_by(n.head, Axis::RIGHT, deg(-15.0), deg(720.0)).ramp(deg(3600.0));
+        });
+        u.turned(n.head).await;
+        u.update(|a: &mut Anim| {
+            a.turn_by(n.head, Axis::RIGHT, deg(15.0), deg(240.0)).ramp(deg(1200.0));
+        });
+        u.turned(n.head).await;
+        u.update(|a: &mut Anim| a.release(n.head));
+    }
+}
+
+/// The death (B's; A is never killed): stop the upper body, play Survey
+/// once, fall on its side, smoke where the spine lies, then wait;
+/// `Fate::Remove` despawns it. With [`STUCK`], it never returns, and the
+/// SDK's cap ends it.
 async fn death(u: Unit) -> Fate {
     let n = names();
     u.update(|a: &mut Anim| a.stop(1, 200));
@@ -613,10 +708,11 @@ schedule!(
     start,
     steer,
     asker,
-    fate,
     scripts,
+    targets,
     host(anim),
     firer,
+    damage,
     host(spatial),
     pair,
     check,

@@ -1,5 +1,6 @@
 //! The death sequence drawn (M14 step 6, F): one duel pair on a land map,
-//! offscreen 1280×720, a fixed camera on A.
+//! offscreen 1280×720, a fixed camera on the pair. A shoots three times;
+//! the third shot kills B, which falls, lies still and is despawned.
 //!
 //! * Each flash (the sim's `Effect` at the head) is drawn where the effect
 //!   is, projected to pixels: the centroid of the flash's bright pixels is
@@ -7,11 +8,11 @@
 //!   the flash is behind the actor's velocity, where its `Orientation` puts
 //!   it.
 //! * Two frames in the still second and a half between the death clip's
-//!   end and the despawn are identical in A's box (particles off).
-//! * At the despawn A leaves the picture (its box changes from the corpse's
+//!   end and the despawn are identical in B's box (particles off; A, which
+//!   idles, stands outside it).
+//! * At the despawn B leaves the picture (its box changes from the corpse's
 //!   frame), and no burst goes out: the script's death does not set off the
-//!   client's vanish explosion. B can stand in A's box (A runs towards it),
-//!   so the box is not compared with the bare terrain.
+//!   client's vanish explosion.
 //! * Validation reports nothing.
 //!
 //! Ignored by default: needs a Vulkan 1.3 GPU. Run with
@@ -36,6 +37,10 @@ const FLASH_TOLERANCE: f32 = 12.0;
 /// for 1.5 s (45 ticks) after its clip ends; [`STILL`] ticks before the
 /// despawn are inside that.
 const RECENT: usize = 12;
+/// Half of B's box, pixels: the corpse (about 10–15 px at this camera) fits,
+/// and A, which stops about 50 px away, stays clear by [`CLEAR`].
+const HALF: i32 = 24;
+const CLEAR: f32 = 20.0;
 const STILL: u64 = 10;
 
 struct Scene {
@@ -51,9 +56,11 @@ struct Scene {
     /// The tick the smoke was seen at (the fall's end, not the clip's), if
     /// any.
     smoke: Option<u64>,
-    /// A's position at the last tick it was alive (world x, nav y).
+    /// B's position at the last tick it was drawn (world x, nav y), and A's
+    /// then.
     last: [f32; 2],
-    /// Tick A vanished at.
+    actor: [f32; 2],
+    /// Tick B vanished at.
     gone: Option<u64>,
     validation: (u64, u64),
     view_proj: glam::Mat4,
@@ -138,20 +145,25 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
     let mut vanish_bursts = 0;
     let mut flashes: BTreeMap<u64, Vec<ae_sdk::fx::Effect>> = BTreeMap::new();
     let mut smoke = None;
-    let mut last = [400.0, 400.0];
+    let mut last = [412.0, 394.0];
+    let mut actor = [400.0, 400.0];
     let mut gone = None;
     let mut seen = false;
     let mut recent: std::collections::VecDeque<(u64, Vec<u8>)> = std::collections::VecDeque::new();
     for tick in 0..=TICKS {
         sim.tick()?;
         let stream = sim.stream(0.0)?;
-        // A is the first row while both are drawn; its despawn is the
-        // stream's two rows becoming one.
+        // A then B (rows in entity order, A spawned first) while both are
+        // drawn; B's despawn is the stream's two rows becoming one.
         let bodies = stream.columns[0].len();
         if bodies == 2 {
-            last = [
+            actor = [
                 f32::from_bits(stream.columns[0][0]),
                 f32::from_bits(stream.columns[1][0]),
+            ];
+            last = [
+                f32::from_bits(stream.columns[0][1]),
+                f32::from_bits(stream.columns[1][1]),
             ];
             seen = true;
         } else if seen && bodies == 1 && gone.is_none() {
@@ -168,7 +180,6 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
         headless.wait()?;
         let pixels = app.readback().context("no readback")?;
         let fx = sim.last_effects().to_vec();
-        // A's position, while it is drawn.
         let flash = ae_sdk::abi::name_id(EFFECT_NAMES[0]);
         let smoke_id = ae_sdk::abi::name_id("smoke");
         if fx.iter().any(|e| e.effect == flash) {
@@ -213,6 +224,7 @@ fn scene(particles: bool, backwards: bool) -> Result<Scene> {
         flashes,
         smoke,
         last,
+        actor,
         gone,
         validation: (counters.errors(), counters.warnings()),
         view_proj: lod.view_proj,
@@ -308,50 +320,59 @@ fn the_duel_death_sequence_is_drawn_where_the_sim_puts_it() -> Result<()> {
     assert_eq!(scene.validation, (0, 0), "validation messages");
     let smoke = scene.smoke.context("no smoke effect")?;
     let w = scene.extent.0 as usize;
-    // A's box: 80 px square, centred on A's ground point (the terrain's
-    // height there, not 0).
+    // B's box: 2 × HALF px square, centred on B's ground point (the
+    // terrain's height there, not 0).
     let ground = scene.source.height_at(Vec2::new(scene.last[0], scene.last[1]));
     let last = project(&scene, Vec3::new(scene.last[0], ground, scene.last[1]));
     let (cx, cy) = (last.0 as i32, last.1 as i32);
     let h = scene.extent.1 as usize;
-    let box_pixels: Vec<usize> = (-40..40)
-        .flat_map(|dy| (-40..40).map(move |dx| (dx, dy)))
+    let box_pixels: Vec<usize> = (-HALF..HALF)
+        .flat_map(|dy| (-HALF..HALF).map(move |dx| (dx, dy)))
         .filter_map(|(dx, dy)| {
             let (x, y) = (cx + dx, cy + dy);
             (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h).then(|| (y as usize * w + x as usize) * 4)
         })
         .collect();
     assert!(
-        box_pixels.len() * 2 > 80 * 80,
-        "A's box at {last:?} is mostly off screen"
+        box_pixels.len() * 2 > (4 * HALF * HALF) as usize,
+        "B's box at {last:?} is mostly off screen"
     );
-    let gone = scene.gone.context("A never vanished")?;
+    // A idles (Survey) near B: it must stand clear of B's box, or the
+    // still-frame check sees A move.
+    let ground_a = scene.source.height_at(Vec2::new(scene.actor[0], scene.actor[1]));
+    let a_at = project(&scene, Vec3::new(scene.actor[0], ground_a, scene.actor[1]));
+    let apart = (a_at.0 - last.0).abs().max((a_at.1 - last.1).abs());
+    assert!(
+        apart > HALF as f32 + CLEAR,
+        "A at {a_at:?} is {apart:.0} px from B's box centre {last:?}: inside or at its edge"
+    );
+    let gone = scene.gone.context("B never vanished")?;
     let (still_a, still_b) = (gone - STILL - 1, gone - STILL);
     anyhow::ensure!(
         smoke + 1 < still_a,
-        "A vanished at {gone}, too soon after its fall ended ({smoke}) for a still corpse"
+        "B vanished at {gone}, too soon after its fall ended ({smoke}) for a still corpse"
     );
-    // Two frames after the death clip has ended, while A lies still.
+    // Two frames after the death clip has ended, while B lies still.
     let a = &scene.frames[&still_a];
     let b = &scene.frames[&still_b];
     assert!(
         box_pixels.iter().all(|&i| a[i..i + 4] == b[i..i + 4]),
         "the corpse's frames differ in its box"
     );
-    // After the despawn A has left its box: the frame changed where the
+    // After the despawn B has left its box: the frame changed where the
     // corpse was (the box centre is on it), and no burst went out.
     let after = &scene.frames[&(gone + 1).min(TICKS)];
     let removed = box_pixels.iter().filter(|&&i| b[i..i + 4] != after[i..i + 4]).count();
     assert!(
         removed >= 16,
-        "A's box barely changed at the despawn ({removed} pixels): the corpse is still drawn"
+        "B's box barely changed at the despawn ({removed} pixels): the corpse is still drawn"
     );
     assert_eq!(
         scene.vanish_bursts, 0,
         "bursts at the despawn: the client set off a vanish explosion for a scripted death"
     );
     eprintln!(
-        "corpse still at ticks {still_a}/{still_b}, fall ended {smoke}; A vanished at {gone}, {removed} of {} px changed",
+        "corpse still at ticks {still_a}/{still_b}, fall ended {smoke}; B vanished at {gone}, {removed} of {} px changed; A {apart:.0} px away",
         box_pixels.len()
     );
     Ok(())

@@ -1,22 +1,25 @@
 //! The duel game (M14 step 6, E/F): pairs of a scripted Fox (A) and a
 //! target Fox (B). A walks, stops and runs while its script takes the aim
-//! in steps, fires three flashes at its head, and is killed: the death
-//! script drops it, smokes, and it is despawned. `STUCK` tests the SDK's
-//! cap, `BACKWARDS` draws A against its velocity, `STANDING` aims from the
-//! rest pose.
+//! in steps and fires three flashes at its head. Each shot hits B; the
+//! third kills it: B's death script drops it, smokes, and it is despawned.
+//! A stops when B goes down and lives on. `STUCK` tests the SDK's cap,
+//! `BACKWARDS` draws A against its velocity, `STANDING` aims from the rest
+//! pose.
 //!
 //! Checked at 8, 1, 2 and 4 workers (the world and everything the systems
 //! did the same):
-//! * every callin handled: two starts and one stop a moving unit, none when
-//!   standing; every `FIRED` kicked the head;
+//! * every callin handled: two starts and two stops a moving unit (the walk's
+//!   end and B going down), none when standing; every `FIRED` kicked the
+//!   head;
 //! * each answered aim points along the line from the aim-from bone to B's
 //!   chest, measured independently in glam (standing: exact; running: the
 //!   measured bound);
 //! * three flashes an actor, each at the head's `bone_world` plus the
 //!   offset of its tick, with A facing where its `Orientation` says;
-//! * A is not in the spatial results from the tick after the kill, and B
-//!   is; A is despawned at its death's end, and with `STUCK` exactly at
-//!   `killed_at` + the cap;
+//! * the third shot kills B (A's log counts one kill); while B is dying a
+//!   spatial query at its place finds A and not B; B is despawned at its
+//!   death's end, and with `STUCK` exactly at `killed_at` + 1 + the cap
+//!   (the kill lands after B's script has run that tick);
 //! * the digests, logs, effects and aim errors are equal.
 //!
 //! One runtime at a time: the column arena is process-wide.
@@ -39,7 +42,8 @@ use std::sync::Arc;
 
 const HZ: u32 = 30;
 /// Pairs and ticks of the determinism run (the last pair starts 398 ticks
-/// late and dies 96 or so later).
+/// late; its B is killed about 130 ticks into its timeline and despawned
+/// about 150 later).
 const PAIRS: u64 = 200;
 const TICKS: u64 = 760;
 /// Pairs of one variant run.
@@ -137,8 +141,7 @@ struct Counters {
     polls: u32,
 }
 
-/// An actor's log when it was last seen, the tick it vanished at, and the
-/// tick it was killed at.
+/// An actor's log, and the tick its target was killed at and vanished at.
 #[derive(Clone, Debug, PartialEq)]
 struct Actor {
     log: Log,
@@ -168,7 +171,6 @@ fn run(rt: &mut Runtime, feed: &FxFeed, workers: usize, param: u64, ticks: u64) 
     let mut out = Outcome::default();
     let mut previous: BTreeSet<u64> = BTreeSet::new();
     let mut answered: BTreeMap<u64, u32> = BTreeMap::new();
-    let mut kills: BTreeMap<u64, u32> = BTreeMap::new();
     for _ in 0..ticks {
         rt.tick(&mut world, workers)?;
         let tick = world.tick;
@@ -177,6 +179,7 @@ fn run(rt: &mut Runtime, feed: &FxFeed, workers: usize, param: u64, ticks: u64) 
         let anims: BTreeMap<u64, Anim> = rows(rt, &world, "Anim")?;
         let orientations: BTreeMap<u64, Orientation> = rows(rt, &world, "Orientation")?;
         let logs: BTreeMap<u64, Log> = rows(rt, &world, "Log")?;
+        let dying: BTreeMap<u64, Dying> = rows(rt, &world, "Dying")?;
         // The effects of this tick: three flashes an actor, at the head,
         // and A facing its `Orientation` (the unit's frame's forward).
         for e in feed.take() {
@@ -225,30 +228,23 @@ fn run(rt: &mut Runtime, feed: &FxFeed, workers: usize, param: u64, ticks: u64) 
                 out.answered += (log.answered - before) as u64;
                 answered.insert(a, log.answered);
             }
-            let killed = kills.entry(a).or_insert(0);
-            if log.kills > *killed {
-                *killed = log.kills;
-                out.actors
-                    .entry(a)
-                    .or_insert(Actor {
-                        log: *log,
-                        gone: None,
-                        killed: None,
-                    })
-                    .killed = Some(tick);
+        }
+        // The targets: killed when their `Dying` appears, gone when their
+        // body does.
+        for (&a, p) in &pairs {
+            let actor = out.actors.entry(a).or_insert(Actor {
+                log: Log::default(),
+                gone: None,
+                killed: None,
+            });
+            if actor.killed.is_none() && dying.contains_key(&p.target) {
+                actor.killed = Some(tick);
+            }
+            if p.target != 0 && previous.contains(&p.target) && !bodies.contains_key(&p.target) {
+                actor.gone = Some(tick);
             }
         }
-        let alive: BTreeSet<u64> = pairs.keys().copied().collect();
-        for &a in previous.difference(&alive) {
-            out.actors
-                .entry(a)
-                .or_insert(Actor {
-                    log: Log::default(),
-                    gone: None,
-                    killed: None,
-                })
-                .gone = Some(tick);
-        }
+        let alive: BTreeSet<u64> = bodies.keys().copied().collect();
         for (&a, log) in &logs {
             out.actors
                 .entry(a)
@@ -310,7 +306,7 @@ fn check(o: &Outcome, workers: usize, param: u64, pairs: u64) -> Result<()> {
     ensure!(worst <= bound, "{workers} workers: aim error {worst}° > {bound}°");
     for (&a, actor) in &o.actors {
         let log = &actor.log;
-        let (want_starts, want_stops) = if standing { (0, 0) } else { (2, 1) };
+        let (want_starts, want_stops) = if standing { (0, 0) } else { (2, 2) };
         ensure!(
             (log.starts, log.stops, log.handled_starts, log.handled_stops)
                 == (want_starts, want_stops, want_starts, want_stops),
@@ -322,23 +318,25 @@ fn check(o: &Outcome, workers: usize, param: u64, pairs: u64) -> Result<()> {
         );
         ensure!(log.kills == 1, "{workers} workers: actor {a} kills {log:?}");
         ensure!(
-            log.checks > 0 && log.found_a == 0 && log.found_b == log.checks,
+            log.checks > 0 && log.found_a == log.checks && log.found_b == 0,
             "{workers} workers: actor {a} spatial {log:?}"
         );
         let (killed, gone) = (actor.killed.unwrap_or(0), actor.gone.unwrap_or(0));
         ensure!(
             killed > 0 && gone > killed,
-            "{workers} workers: actor {a} killed {killed}, gone {gone}"
+            "{workers} workers: actor {a}'s target killed {killed}, gone {gone}"
         );
         if stuck {
+            // `damage` kills after B's script has run that tick, so the
+            // death (and its cap) start the tick after.
             ensure!(
-                gone == killed + CAP,
-                "{workers} workers: actor {a} despawned at {gone}, killed {killed}, cap {CAP}"
+                gone == killed + 1 + CAP,
+                "{workers} workers: actor {a}'s target despawned at {gone}, killed {killed}, cap {CAP}"
             );
         } else {
             ensure!(
                 gone < killed + CAP,
-                "{workers} workers: actor {a} died in time: {gone} / {killed}"
+                "{workers} workers: actor {a}'s target died in time: {gone} / {killed}"
             );
         }
     }
