@@ -3389,8 +3389,9 @@ Steps (commit and stop for compaction after each):
   review fixes, under `AE_VK_VALIDATION=1`: 8 s `--exercise` with HDR10 and with scRGB
   (7 recreates each) and 9 s of `AE_HDR_TOGGLE_SECONDS=2` (5 recreates, 5 rebakes,
   metadata resent at 361 on each HDR entry), all 0 errors and 0 warnings; the `--hdr off`
-  captures still compare equal with 07e928a's. Not built: HDR
-  captures, the module ABI and HDR render modules (stage 6), benchmarks (stage 7).
+  captures still compare equal with 07e928a's. Not built then: HDR
+  captures, the module ABI and HDR render modules (stage 6, below), benchmarks
+  (stage 7).
   With peak 361/203 the curve's HDR anchor is the headroom 1.778: `b` 0.500, `c` 1.000,
   toe slope 1.00 (0.95 with the first version's 441), so scene 0.1 displays at 0.095
   against SDR's 0.115, scene 1.0 at 0.667 against 0.579, paper white is reached at scene
@@ -3398,6 +3399,70 @@ Steps (commit and stop for compaction after each):
   on the panel). Look checks for the display (not measured in a capture): HDR darks
   against SDR, the far ground's toe (stage 1's TODO), and whether the P3 fire reads
   redder in HDR than in SDR.
+- **Stage 6 is done** (2026-11-22). The render ABI's contract version is 2
+  (`ae_render_abi::module::MODULE_VERSION`; the graph descriptor's wire format stays 1:
+  no codes changed and nothing moved, and the program table stays 1). Before `declare`,
+  the host writes a [`DeclareInput`] (`ae_render_abi::module::DeclareInput`, 60 bytes)
+  into the module's memory at the address its `ae_render_declare_input` export returns:
+  the target's width, height, colour format and scene flags, and the output's display
+  spec — the encoding (`Sdr`/`Hdr10Pq`/`ScRgb`), the levels in signal nits
+  (`paper_white`, `peak`), the working space (BT.709 or BT.2020) and the output gamut
+  (BT.709, P3, BT.2020). A module built for the old contract is refused before anything
+  else is read: `render module ABI version 1; this host runs 2 (rebuild the module)`
+  (checked with the real v1 `render/post` built from bb69261, and pinned by a WAT test
+  with that exact text). The SDK exposes the spec as `DeclareEnv` (`encoding`,
+  `paper_white`, `peak`, `working_space`, `output_gamut`, `uses_display()`,
+  `headroom()`) and adds `display_spec()`, `DISPLAY_NAME` and `DISPLAY_FORMAT`; the
+  display rule is written into both the ABI and SDK docs.
+  Both guest modules and both JSON graphs now declare the HDR tail: `post.tonemap`
+  writes the display intermediate (`RGBA16F`, paper-white units, working space), the
+  module's colour passes run on it, and `post.encode` is the only pass that writes the
+  target; SDR keeps `post.tonemap` writing the target with no display and no encode.
+  `graph_file` gained `when: hdr|sdr` and the `display` format name, and a program's
+  uniform block can switch with a flag bit (`uniforms_flag`/`uniforms_off`, for a pass
+  that always runs but must be a no-op when off). `check_graph`'s rule (post.encode
+  exactly when the output is HDR) now applies to module graphs, with messages naming
+  the missing or extra pass and the encoding:
+  `the output is HDR10 (PQ) but the graph has no post.encode pass: the tonemap writes
+  the display, not the target`.
+  The post module's grade runs on the display, before the encode: contrast pivots at
+  0.18 of paper white, saturation mixes around Rec. 709's luma axis (luminance kept in the BT.709 working space),
+  and nothing is clamped at 1 — only `post.encode` maps the display, and above-peak
+  values stop at the peak there. Its vignette multiplies the display
+  (`1 - strength * smoothstep(radius, 1, d)`), which is range-safe: paper white and the
+  peak scale together. In SDR the grade writes the target and the vignette still blends
+  black over it (there is no display image to multiply); the SDR frame is unchanged.
+  The client's `--render-module` + HDR fallback and the toggle refusal are gone: a pair
+  change destroys and creates the app as before, and the running module stays loaded
+  (its format-dependent programs are rebuilt) and redeclares for the new display spec;
+  `declared_for` includes the encoding and the levels, so a levels change redeclares too.
+  Six HDR `.dot` goldens are new (native HDR10 and scRGB with the full scene, and
+  `default`/`post` for each); the ten SDR goldens are unchanged.
+  Measured: `--hdr off` release captures are byte-identical to bb69261 for the native
+  graph, `--render-module default`, `--render-module post` and both JSON graphs
+  (`--map land --units 0 --camera 6000,6000,350,0.6,0.45`, baseline built in a worktree
+  with its own `CARGO_TARGET_DIR`; all five compare equal with `cmp`). The default
+  module's HDR10 readback equals the native graph's exactly — worst channel 0 PQ codes,
+  0 of 64,000 pixels differ. The post grade, extracted from the built module and run
+  before a real `post.encode` (paper white 203, peak 1000 so the encode does not clip):
+  at display 1.5 the native encode decodes to 1.503 and the grade to
+  `[1.720, 1.660, 1.562]` (the maths says `[1.725, 1.658, 1.559]`); at 2.0, 1.996 to
+  `[2.303, 2.222, 2.093]` (`[2.307, 2.218, 2.085]`); a coloured `[1.8, 1.2, 0.9]`
+  goes to `[2.160, 1.304, 0.858]` and `[2.4, 1.6, 1.2]` to `[2.887, 1.750, 1.158]`
+  (in paper-white units; every channel within 0.008 of the maths, and the luminance is
+  the input's through contrast and the tint). With the client's 361-nit peak, display
+  values above 1.778 are above the display's peak and `post.encode` stops them there,
+  as for the native graph. Under `AE_VK_VALIDATION=1`, all 0 errors and 0 warnings:
+  `--render-module post --hdr hdr10 --exercise` for 10 s (480 frames, 9 recreates,
+  9 bakes), the same with scRGB (490 frames, 9 recreates, 9 bakes), the `U` toggle path
+  with the module for 13 s (5 recreates, 5 bakes — the module redeclares for each
+  encoding), a 30 s HDR10 run with two real hot reloads of the post module (two source
+  edits that changed its bytes: 4273 frames, 3 loads, 0 module errors), and the post
+  JSON graph in HDR10 for 5 s (675 frames). 58 GPU tests pass with validation (3 new:
+  the module's HDR10 frame against native, the HDR reload/vignette, the grade above
+  paper white), 73 lib tests, 3 ABI tests (1 new), module 3 (1 new), golden 1 (16
+  cases), graph_file 2; `cargo test --workspace` is clean. Not built: HDR captures
+  (stage 5's line stands), benchmarks (stage 7).
 - Not in M13: HDR screenshots and captures (they stay 8-bit sRGB); UI composition (M8,
   which should draw into `display` at paper white); HDR on X11; per-display ICC profiles;
   dynamic HDR metadata.
@@ -4313,6 +4378,13 @@ From the render side (2026-11-22):
     or the field is masked by the vision texture in the apply; whether a target is a screen
     quad (cheap, camera-facing) or a world sphere projected at collect time; whether the water's
     refraction (M16) reuses the same combine and field.
+
+From M13 stage 6 (2026-11-22):
+
+- **The post module's grade in a BT.2020 working space.** Its saturation mixes around Rec. 709's
+  luminance row (a shader constant), so it keeps luminance only in the default BT.709 working
+  space. Pass the working space's row in the grade's uniform (the module has
+  `DeclareEnv::working_space`), and measure a saturated patch's luminance before and after.
 
 Pie in the sky, some time:
 

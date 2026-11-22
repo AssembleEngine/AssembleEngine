@@ -47,7 +47,9 @@ end-of-tick capture of `Body`/`NavAgent` feeds an instance stream, and the GPU c
 (interpolated between ticks, ships on the water) while the render thread runs at ~2,500 fps without
 waiting for the sim. The frame graph can come from a render module (WASM): it wires engine library
 passes (terrain, units) and its own fullscreen shaders (reflected and checked against the declared
-passes), and is swapped while running when its sources change (`ae-client --render-module post`).
+passes), and is swapped while running when its sources change (`ae-client --render-module post`). The
+render ABI (contract version 2) carries the output's display spec, so a module declares the same HDR
+tail as the native graph (`--render-module post --hdr auto`).
 Terrain edits the sim makes reach the render heightfield (`ae-client --quake 60`): the nav service
 publishes landed ground changes, and the renderer patches its textures and error pyramid in place.
 Terrain is dressed by material tilesets (reusable surface layers, projected by orientation and
@@ -175,6 +177,7 @@ cargo run --release -p ae-client -- --probe-display                      # the d
 cargo run --release -p ae-client -- --working-space bt2020               # light the scene in BT.2020 (SDR maps it back to BT.709; --display-gamut bt709|p3|bt2020 for HDR output)
 cargo run --release -p ae-client -- --hdr auto                           # HDR10 when the surface offers it, else scRGB, else SDR (U toggles HDR/SDR)
 cargo run --release -p ae-client -- --hdr hdr10 --paper-white 203 --peak 361   # force HDR10 with explicit levels (signal nits; KWin shows 203 at its 248)
+cargo run --release -p ae-client -- --render-module post --hdr auto      # a module declares the HDR tail too (N: vignette)
 cargo test -p ae_render --test module                                    # render modules without a GPU
 cargo test --release -p ae_services --test capture                       # capturing every tick (and the ground feed) leaves the digest unchanged
 AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   # resize/minimize cycle

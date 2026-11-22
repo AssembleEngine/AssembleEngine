@@ -639,9 +639,10 @@ changes.
   scRGB's 16F, and SDR's `post.tonemap` writes the 8-bit sRGB target. The
   offscreen capture path always uses the SDR readback, so `--capture` does
   not show the HDR encoding.
-- **Modules fall back.** A render module has no HDR support until M13 stage
-  6; `--render-module` with HDR requested logs once and uses SDR rather than
-  failing `check_graph` every frame.
+- **Modules declare the same tail.** A render module receives the output's
+  display spec (M13 stage 6, below) and declares its graph for it, so
+  `--render-module` works in HDR like the native graph; `check_graph` refuses
+  a module graph with a missing or extra `post.encode`.
 - **Verification**: `ae_render::swapchain` (CPU) pins that the three target
   pairs are the three encodings, auto's HDR10 -> scRGB -> SDR preference,
   that an explicit mode the surface lacks is an error naming the offered
@@ -667,6 +668,56 @@ changes.
   203-nit paper white and 441-nit peak reaches 437.7 nits, no channel above
   439.8). The lib test `pq_codes_match_st_2084` pins the OETF and its
   inverse.
+
+### The render module ABI (M13 stage 6)
+
+- **Contract version 2.** The graph declaration's wire format stays 1 (no
+  codes changed, nothing moved) and the program table stays 1; the module
+  contract (`ae_render_abi::module::MODULE_VERSION`) goes to 2 because
+  `declare` now reads a `DeclareInput` the host writes into the module's
+  memory at its `ae_render_declare_input` export: the target (size, colour
+  format, scene flags) and the display spec (the encoding, `paper_white` and
+  `peak` in signal nits, the working space, the output gamut). A module
+  built for version 1 is refused at load, before any other export is read:
+  `render module ABI version 1; this host runs 2 (rebuild the module)`.
+- **The display rule, in the ABI and the SDK.** With `encoding` HDR the
+  module declares the display intermediate (`display_spec()`: RGBA16F
+  linear light in paper-white units, in the working space), `post.tonemap`
+  writes it, every colour-changing pass (the `post` module's grade and
+  vignette) runs on it, and `post.encode` is the only pass that writes the
+  target. In SDR there is no display image and no encode: `post.tonemap`
+  writes the target. The host applies `check_graph`'s rule to module graphs
+  and names the missing or extra pass and the encoding:
+  `the output is HDR10 (PQ) but the graph has no post.encode pass: the
+  tonemap writes the display, not the target`.
+- **The post module's grade** runs on the display before the encode:
+  contrast pivots at mid grey (0.18 of paper white), saturation mixes
+  around Rec. 709's luma axis (it keeps luminance in the default BT.709 working space; a TODO covers BT.2020), and nothing is clamped at 1
+  (only `post.encode` maps the display, and stops above-peak values at the
+  peak). Its HDR vignette multiplies the display
+  (`1 - strength · smoothstep(radius, 1, d)`): range-safe, because paper
+  white and the peak scale together. In SDR the vignette still blends black
+  over the target — there is no display to multiply — and the SDR frame is
+  byte-identical to stage 5's. A graph file expresses both: `when: hdr|sdr`
+  selects the tail, and `uniforms_flag`/`uniforms_off` switch a program's
+  uniform block with a flag bit (the HDR vignette runs always, at strength
+  0 when off).
+- **Recreating keeps the module.** On a swapchain pair change the app is
+  destroyed and created; the running module stays loaded (its
+  format-dependent programs are rebuilt) and redeclares for the new display
+  spec, and a levels change redeclares it too. The client's stage-5
+  fallback and its refusal of `U` with a module are gone.
+- **Verification**: the default module's HDR10 readback is the native
+  graph's exactly (worst channel 0 PQ codes; `the_default_module_renders_like_the_native_graph_in_hdr10`),
+  the grade above paper white decodes to its maths at display 1.5 and 2.0
+  (`the_post_grade_works_above_paper_white`), and a module reloads in HDR10
+  with validation silent (`render_modules_swap_graphs_in_hdr10`). An
+  old-ABI module is refused with the exact version text
+  (`broken_modules_are_rejected`), and the display rule is pinned by
+  `the_display_rule_is_enforced_on_module_graphs`. Six HDR `.dot` goldens
+  are new (native and both modules, HDR10 and scRGB); the SDR goldens are
+  unchanged. `--hdr off` release captures are byte-identical to stage 5's
+  for the native graph, both modules and both JSON graphs.
 
 ## Verification
 
