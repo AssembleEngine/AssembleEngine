@@ -215,6 +215,15 @@ Goal: catch regressions and find bottlenecks per subsystem, without launching th
 - Wall-time benches run on one pinned machine (nightly); counter benches run on every PR.
 - Each milestone's exit numbers (10k/50k digests and timings) become permanent scenario benches.
 
+**Consent before measuring**
+- No performance measurement or benchmark runs without the user's explicit consent, given for that
+  run. The user may have other work running on the machine, and wall times taken alongside it are
+  inconclusive.
+- Before measuring, ask the user to stop whatever else runs and to commit the machine to the
+  benchmark. If they do not, postpone every measurement to the last stage of the task.
+- Deterministic counters (fuel, expansions, command counts) and digests are not timings. Tests that
+  check them run without asking.
+
 **Tracy (optional, cargo feature `tracy`; zero cost when off)**
 - `ae_profile` crate: thin macros over `tracy-client`, compiled to nothing without the feature.
 - Zones: tick phases, each schedule layer, each system, each row-range job per worker, command merge, each

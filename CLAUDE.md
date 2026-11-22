@@ -63,6 +63,11 @@ cargo build --release -p ae-headless && ./target/release/ae-headless --game sand
   `RUSTFLAGS` is cleared for that build. `--game X` means `games/X` (crate `ae_game_X`), or a path
   ending in `.wasm`.
 - **Benchmarks:**
+  - **Every performance measurement or benchmark MUST have the user's explicit consent first.** The
+    user may be running something else in parallel, which makes timings inconclusive. Ask them to
+    stop other work and commit the machine to the benchmark. Without that, postpone all
+    measurements to the last stage of the task. This applies to subagents too: pass it along in
+    their prompts.
   - `ae-tool bench …` and `ae-client --bench …` write records under `bench/results/<label>/`.
   - Only `bench/results/baseline/` is committed.
   - `ae-client --bench` never compares runs. Judge regressions with
