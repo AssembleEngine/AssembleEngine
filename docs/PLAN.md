@@ -4312,6 +4312,11 @@ Design:
       has 3 hit points; `damage` (serial, `reads_events(Hit)`) takes one a
       hit, posts `HIT` (B's script flinches its head up 15° and back) and
       on the third calls `life::kill`. Pair 0's B is killed at tick 141.
+      Each hit also sets off a small impact at B's chest (`fire` at scale
+      0.1 and `sparks` at 0.15, from B's own `b_Spine02_03`). The effects
+      are scaled for a Fox (the catalogue's are a small vehicle's explosion
+      at scale 1: a flash 14 to 26 m across, smoke up to 30 m): the muzzle
+      flash 0.05 (about 1 m), the death smoke 0.15.
       `steer` stops A for good (posting `STOPPED_MOVING`) once its target is
       `Dying`, and `asker` stops asking; A lives on. A and B each have a
       script (`scripts`, `targets`), so `script_slots!` lists both
@@ -4362,7 +4367,8 @@ Design:
       Survey's end) are identical; at the despawn the box changes (24 of
       2304 px); no burst reaches the particle feed at the despawn (the
       vanish explosion; the test fails with 4 bursts when the client's
-      `Dying` skip is removed).
+      `Dying` skip is removed). With `AE_TEST_CAPTURE_DIR` set it saves the
+      frames it keeps as PPM (`duel-<scene>-<tick>.ppm`).
       Validation reports nothing.
     - `live-puppet` (new scene, `army-fox`/`live-fox` re-recorded in the
       same run, `bench/results/m14-step6`): `pass/units pose` 0.3148 ms
