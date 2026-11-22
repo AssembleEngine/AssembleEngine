@@ -4440,6 +4440,20 @@ From M13 stage 6 (2026-11-22):
 
 From M13 stage 7 (2026-11-22):
 
+- **The GPU bench is not a stable gate in the terrain-heavy scenes.** A full `ae-client --bench
+  all` at 25297ad (SDR, 1280×720, `rtx3060ti`) against the baseline recorded at 06fa4c4 (no SDR
+  code change between them) flags 12 time metrics: `pass/terrain` +11 to +92% in
+  `army-model-lights`, `lights-200`, `lights-1000`, `lights-low`, `live-fox`, `near-fox` (most
+  near 650 µs in that run), `battle`'s `gpu_total` +12.5% and its readback copy +60%, and
+  `pass/water`'s two modes in `army-fox`/`live-fox`. Three repeats of `lights-200,near-fox,battle`
+  on their own give `pass/terrain` 306/455/466 µs (baseline 349/339/462) and `battle`'s total
+  1.27–1.41 ms (baseline 1.24). The baseline's own `near-fox` terrain spread is ±96%, so a
+  single run's medians move within a run too, not only between runs. The idle GPU sits at P8
+  (210 MHz). Conditions for a fix: find what moves (clocks: pin them with `nvidia-smi -lgc`,
+  or warm each scene until its pass times settle; or the terrain's own LOD/cull work), then
+  show two full runs of one binary diffing clean, and re-record the baseline that way. Until
+  then a flagged `pass/terrain` or light-scene `gpu_total` is checked with repeated subset runs
+  before it is called a regression.
 - **Bound the top channel in gamut compression.** `colorspace::compress` scales a colour toward
   its luminance until the lowest channel reaches 0 (`t = y / (y - lo)`), so compressing wide
   colour into a narrower output gamut raises the top channel — the further the negative, the
