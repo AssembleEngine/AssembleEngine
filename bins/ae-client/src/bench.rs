@@ -24,7 +24,9 @@
 //! (M13: the HDR graph adds `post.encode` and a 10-bit or 16F target); the
 //! levels are fixed at the client's 203/361 signal nits, so runs are
 //! reproducible whatever the display. `--bench-size WxH` sets the extent
-//! (default 1280x720). The readback copy's passes (`copy`, `host read`) are
+//! (default 1280x720). A non-SDR run's records are named
+//! `gpu-<scene>-hdr10` or `gpu-<scene>-scrgb`, so `bench-diff` never pairs
+//! them with SDR's. The readback copy's passes (`copy`, `host read`) are
 //! reported as `pass/copy` and `pass/host read` with a 50% tolerance: their
 //! time follows the host bus, and they are still left out of `gpu_total`,
 //! so the total stays comparable with earlier records.
@@ -491,7 +493,15 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     drop(headless);
     RenderApp::destroy(&mut app, gpu);
 
-    let mut report = Report::new(&format!("gpu-{}", scene.name));
+    // An HDR run is its own record (`gpu-<scene>-hdr10`, `-scrgb`): HDR10
+    // has SDR's 4 B/px, so the workload info alone would not keep
+    // `bench-diff` from comparing it with an SDR record.
+    let suffix = match b.output {
+        OutputEncoding::Sdr => "",
+        OutputEncoding::Hdr10Pq => "-hdr10",
+        OutputEncoding::ScRgb => "-scrgb",
+    };
+    let mut report = Report::new(&format!("gpu-{}{suffix}", scene.name));
     if let Some(s) = sim_options(&o).filter(|_| scene.fox) {
         report.time_with_tolerance("model_setup", model_setup(gpu, &s)?, CPU_TOLERANCE);
     }
