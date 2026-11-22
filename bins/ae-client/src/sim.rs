@@ -358,6 +358,9 @@ pub struct Sim {
     fx: Option<Arc<FxFeed>>,
     /// Effect names already warned about (not in the effects catalogue).
     warned_fx: Vec<u64>,
+    /// The last `emit_fx`'s effects (tests only).
+    #[cfg(test)]
+    last_fx: Vec<Effect>,
     /// The units' channels after the last tick, by entity (with a poser).
     /// Milliseconds of the last stream's posing (reading the channels
     /// included).
@@ -517,6 +520,8 @@ impl Sim {
             last_dying: Vec::new(),
             fx: Some(fx),
             warned_fx: Vec::new(),
+            #[cfg(test)]
+            last_fx: Vec::new(),
             pose_ms: 0.0,
             read_ms: 0.0,
         })
@@ -795,6 +800,8 @@ impl Sim {
     fn emit_fx(&mut self) {
         let Some(feed) = &self.fx else { return };
         let effects = feed.take();
+        #[cfg(test)]
+        self.last_fx.clone_from(&effects);
         if effects.is_empty() {
             return;
         }
@@ -803,6 +810,12 @@ impl Sim {
         if let Some(particles) = &fx.particles {
             particles.emit_all(&bursts);
         }
+    }
+
+    /// The effects the last `stream` took from the `fx` feed (tests only).
+    #[cfg(test)]
+    pub fn last_effects(&self) -> &[Effect] {
+        &self.last_fx
     }
 
     /// The next stream writes the whole animation table (its reader missed

@@ -1594,6 +1594,9 @@ fn validation_text(on: bool, errors: u64, warnings: u64) -> String {
     }
 }
 
+#[cfg(test)]
+mod death_gpu;
+
 fn main() -> ExitCode {
     match parse().and_then(run) {
         Ok(code) => code,

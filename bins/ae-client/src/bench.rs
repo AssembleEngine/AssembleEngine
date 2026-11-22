@@ -238,7 +238,7 @@ const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 /// a 12 m grid (radius 3) from (2304, 17296), the army camera's view.
 const FOX_PARAM: u64 = 10_000 | 12 << 32 | 144 << 40 | 1081 << 52;
 
-const SCENES: [Scene; 16] = [
+const SCENES: [Scene; 17] = [
     Scene {
         name: "overview",
         about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate",
@@ -400,6 +400,22 @@ const SCENES: [Scene; 16] = [
         model_lights: false,
     },
     Scene {
+        name: "live-puppet",
+        about: "as live-fox, the 10k Foxes of the puppet game (a script per unit: clips, callins, head turns), on its 4 m grid",
+        map: MapKind::Water,
+        map_cells: 2560,
+        units: 10_000,
+        tileset: Some("temperate"),
+        camera: [200.0, 200.0, 1400.0, 0.4, 0.85],
+        path: Path::Fixed,
+        explosions: 0,
+        spread: 0.0,
+        fox: true,
+        live: true,
+        lights: 0,
+        model_lights: false,
+    },
+    Scene {
         name: "near-fox",
         about: "as army-fox, closer (fewer units, larger on screen)",
         map: MapKind::Water,
@@ -501,8 +517,15 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
     let mut o = Options::default();
     if let Some(model) = fox.filter(|_| scene.fox) {
         o.models = vec![model];
-        o.game = "scripted".into();
-        o.param = Some(FOX_PARAM);
+        // The puppet game's 10k, each with a script; the rest the scripted
+        // game's grid parameter.
+        if scene.name == "live-puppet" {
+            o.game = "puppet".into();
+            o.param = Some(10_000);
+        } else {
+            o.game = "scripted".into();
+            o.param = Some(FOX_PARAM);
+        }
     }
     o.particles_full = b.particles_full;
     o.particle_blend = b.particle_blend;

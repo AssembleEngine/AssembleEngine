@@ -1,0 +1,20 @@
+# The death-script edge cases' test module for
+# crates/ae_services/tests/duel.rs, built by the test itself for
+# wasm32-wasip1-threads. Not part of the main workspace.
+[package]
+name = "ae_services_death_guest"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../../../sdk/ae-sdk", features = ["nav", "anim", "aim", "life"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[workspace]
