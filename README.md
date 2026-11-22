@@ -129,7 +129,7 @@ running, three shots that hit and kill the target, its death). Details: [docs/PL
 | `render/default`, `render/post` | Render modules: the engine's scene graph from WASM; the same with a colour grade and a vignette (built for `wasm32-unknown-unknown`; not workspace members) | new |
 | `crates/ae_profile` | Tracy zones, plots and frame marks; nothing without the `tracy` feature | new |
 | `crates/ae_bench` | Benchmark records, regression diff, standalone subsystem suites | new |
-| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary), `catalog-fmt`, `pack [--module GAME]`, `unpack-list`, `map-export`, `hooks install` | new |
+| `bins/ae-tool` | `bench`, `bench-diff`, `navbench` (runs `ae_nav`'s binary), `catalog-fmt`, `pack [--module GAME]`, `unpack-list`, `map-export`, `capture-diff`, `hooks install` | new |
 | `spikes/parallel_guest` | M0 risk spikes (three binaries) | new |
 | `vendor/` | flecs and its build crate | ecs_sim `vendor/` |
 
@@ -179,6 +179,8 @@ first.
 
 ```sh
 cargo test --workspace                     # everything; builds test guests on the fly
+AE_TEST_CAPTURE_DIR=/tmp/a cargo test -p ae_render --test gpu -- --ignored --test-threads=1
+./target/release/ae-tool capture-diff /tmp/a /tmp/b   # compare two capture runs byte for byte
 
 # Benchmarks (no window, GPU or network needed)
 cargo build --release -p ae-tool

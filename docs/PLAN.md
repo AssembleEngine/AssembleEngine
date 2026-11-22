@@ -4830,7 +4830,373 @@ Verification:
 Not decided: one set or one per resource class; combined versus separate samplers; whether to
 require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately or keep
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
-handles.
+handles. The design below proposes an answer to each.
+
+#### M15 — design (2026-11-22; steps A–B built, B without library-owned externals)
+
+This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
+them in order and commit each step with its own `docs:` commit. Where this section differs from
+the outline, this section wins. It settles every point under "Not decided". The overrides:
+
+- No update-after-bind.
+- The global set is not variable-count.
+- Samplers are a separate array.
+- The proof of identical frames compares captures, not two live paths.
+- Uniform blocks move into the storage-buffer array as `std140` buffer blocks.
+- The two "measured" items move to the last step, G.
+
+Rules that bind the implementer, and any subagent it starts (pass them on in its prompt):
+
+- **Every performance measurement or benchmark needs the user's explicit consent first.** The
+  user may be running something else at the same time, and that makes timings inconclusive. Ask
+  them to stop other work and give the machine to the benchmark. Without that consent, leave all
+  measurements to step G. This covers "cost measured", `bench-diff`, `ae-client --bench` and GPU
+  timestamps that are read as timings.
+- Never read `~/ecs_sim/src/engine/engine.rs` whole, and grep `docs/PLAN.md` instead of reading
+  it whole (CLAUDE.md).
+- GPU tests run with `cargo test -p ae_render --test gpu -- --ignored --test-threads=1`. The
+  validation layer must report zero messages.
+
+##### Where the descriptors are today (the map for steps C–E)
+
+Every `update_descriptor_sets` call in `crates/ae_render/src`, as of `afe4e62`:
+
+| Site | When | What it writes |
+|---|---|---|
+| `terrain/renderer.rs:910` (`new`) | creation, per slot | bindings 0–21: UBOs 0, 12; SSBOs 1–5, 13, 17, 21; images 6–11, 14–16, 18–20 |
+| `units.rs:868` (`new`) | creation, per slot | the units' set |
+| `units.rs:1113` (`models`) | model set load | models set 1: SSBOs 0–6, 8–14; `textures[1024]` at 7 (partially bound) |
+| `lights.rs:480` (`new`) | creation | lights set, shared as set 1 by terrain, water, units, particles |
+| `exposure.rs:302` (`new`) | creation | histogram, exposure image |
+| `exposure.rs:443` (record) | **every frame** | scene, depth, glow images; vision buffer |
+| `fullscreen.rs:388` (`new`) | creation | the program's UBO |
+| `fullscreen.rs:469` (`record`) | **every frame** | one combined sampler per sampled intent |
+| `particles.rs:1030`, `:1041`, `:1108` (`new`) | creation | particle sets |
+| `particles.rs:1594` (`ensure_half`), `:1723`, `:1748` (`ensure_packets`) | resize | own half-size and packet images |
+| `particles.rs:2141`, `:2332`, `:2679` (`record_draw`) | **every frame** | depth, scene and packet images |
+| `demo.rs:457` (`set_for`) | demo graph | test-only demo passes |
+| `upload.rs:718` (mip generator) | upload time | per-mip storage views (not a frame pass) |
+
+Samplers: terrain (nearest clamp, linear clamp, trilinear repeat), `shadow.rs:133-134`
+(comparison, and the same without comparison), `models.rs:372` (one per distinct glTF sampler,
+deduplicated by `Sampler`), `particles.rs:850,862`, `exposure.rs:254`, `terrain/app.rs:955`.
+
+The shaders use sets 0 and 1 only. They sample `sampler2D`, `sampler2DArray` (tileset, decals),
+`usampler2D` (terrain material ids) and `sampler2DShadow` (the unit shadow map). Push-constant
+blocks are small. The terrain's is 16 bytes.
+
+The device (`device.rs:330-410`) enables only `descriptorBindingPartiallyBound`, gated on
+`gpu_driven`. The development machine (RTX 3060 Ti, Vulkan 1.4.357, `vulkaninfo`) supports every
+descriptor-indexing feature, update-after-bind for every class, `descriptorBuffer` and
+`bufferDeviceAddress`. Its ordinary per-stage and per-set descriptor limits are 1,048,576 per class.
+These are the limits that apply, because the design uses no update-after-bind pool. Its
+`maxPushConstantsSize` is 256.
+
+Other vendors' limits without update-after-bind can be far smaller. Step A therefore checks each
+capacity against `maxPerStageDescriptor*` and `maxDescriptorSet*`, and refuses a device whose
+limits are below them with an error that names the class. The core `shader*ArrayDynamicIndexing`
+features are not enabled today, although the models index `textures[m.tex.x]`.
+
+##### Decisions for the user
+
+Each one was my default. All eight are confirmed for implementation (2026-11-22); the one
+correction the spec check produced is recorded under step A (the storage-image dynamic-indexing
+features are not Vulkan 1.3 requirements, and step A requires them anyway). Each is marked where it
+is used.
+
+1. **No fallback path.** The fixed-slot path is only a migration aid, and step E deletes it. A
+   device without the required subset is skipped at device selection, the same way as one without
+   dynamic rendering:
+   - `runtimeDescriptorArray`,
+   - `descriptorBindingPartiallyBound`,
+   - `shaderSampledImageArrayNonUniformIndexing`,
+   - `shaderStorageBufferArrayNonUniformIndexing`,
+   - `shaderStorageImageArrayNonUniformIndexing`,
+   - the core `shaderSampledImageArrayDynamicIndexing`, `shaderStorageBufferArrayDynamicIndexing`
+     and `shaderStorageImageArrayDynamicIndexing`. These cover the push-constant and uniform
+     indices. The NonUniform flags do not cover them, and the validation layer may not report
+     their absence.
+
+   Not verified: which of these Vulkan 1.3 makes mandatory. A fetch of the spec's "Feature
+   Requirements" section failed. Step A reads it from the spec sources (`features.adoc`,
+   `features-requirements`) and records the answer here. If the subset is not mandatory, the user
+   decides whether to keep a fixed-slot fallback for such devices.
+2. **One global set per frame slot, with fixed capacities and no update-after-bind (A).** Only
+   the highest-numbered binding of a set may be `VARIABLE_DESCRIPTOR_COUNT` (VUID
+   `VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004`). That rules out "one set
+   with a variable-count array per class". Every binding is therefore `PARTIALLY_BOUND` with a
+   fixed capacity, and there is one set per class binding.
+
+   There is one copy of the set per frame in flight. A slot's copy is written only in
+   `Executor::begin_frame`, after that slot's fence has signalled. The set is then idle, so the
+   writes are legal without `UPDATE_AFTER_BIND`.
+
+   The consequence: a handle registered after `begin_frame(k)`, such as a model loaded mid-frame,
+   is not usable in frame k. `Bindless::index(h)` returns the fallback until the current slot has
+   flushed it.
+
+   If a target vendor's limits without update-after-bind are below the capacities, the
+   alternative is an `UPDATE_AFTER_BIND_POOL` layout with per-binding update-after-bind flags. It
+   keeps the same write discipline and only raises the limits.
+3. **Sampled images and samplers are separate arrays (C).** Images go in `texture*[]` and
+   samplers in `sampler[]`, and the shader combines them, for example
+   `sampler2DShadow(ae_images[h], ae_samplers[s])`.
+   - Combined samplers would multiply handles: the models alone have 1024 textures times their
+     glTF samplers.
+   - The sampler array is not immutable, because the glTF sampler states are open-ended. The
+     registry deduplicates samplers by create info, as `models.rs` does today.
+4. **One sampled-image binding with aliased declarations (C).** `texture2D`, `texture2DArray` and
+   `utexture2D` are all declared at binding 0, and the handle type records the view type.
+   - The CPU handles are typed (`Sampled2D`, `Sampled2DArray`, `SampledU2D`), so a handle cannot
+     reach a declaration of the wrong dimension.
+   - If `glslc -Werror` or the validation layer rejects the aliasing, the fallback is one binding
+     per view type. That costs no design change.
+5. **Uniform blocks become `layout(std140) buffer` blocks in the storage-buffer array (D).**
+   There is no uniform-buffer binding.
+   - The `std140` qualifier keeps today's byte offsets, so the CPU structs do not change.
+   - The buffers keep `UNIFORM_BUFFER` usage only if a pass that has not migrated yet still binds
+     them. They gain `STORAGE_BUFFER` usage.
+   - This keeps the global set at four classes and stays clear of the small
+     `maxPerStageDescriptorUniformBuffers` that some drivers report.
+6. **Identical frames are proven by comparing captures (B).** No second live path is kept. Step B
+   adds `ae-tool capture-diff <dir-a> <dir-b>`, which compares the PPMs of two
+   `AE_TEST_CAPTURE_DIR` runs byte for byte. Each step from C on captures at its base commit and
+   after its change, and the step passes only if every capture is identical.
+
+   The outline's in-process comparison would mean keeping two recorders per library pass. Today's
+   GPU tests hash readbacks (`fnv` in `tests/gpu.rs`) but pin no frames, so captures are the
+   reference.
+7. **Modules never see handle values (F).** The host writes each program's sampled-intent handles
+   into a per-program handle table, and the program reads `handles[i]` for intent `i`.
+   - The program declares its uniform block as a std140 entry of the storage-buffer array,
+     indexed by a host push constant.
+   - The shader's form is read by reflection, so the program table's wire format is unchanged.
+8. **`VK_EXT_descriptor_buffer` is not required (G).** It is evaluated only if the measured CPU
+   frame still shows descriptor work. With the per-frame writes gone (rule 2 and steps C–D), I
+   expect it not to.
+
+##### The shape
+
+**Global set (step A, `crates/ae_render/src/bindless.rs`).**
+
+- One `vk::DescriptorSetLayout`, numbered by `AE_BINDLESS_SET` in a new
+  `shaders/bindless.glsl`. It is set 2 while old layouts still use sets 0 and 1, and becomes set 0
+  in step E.
+- Bindings and capacities (counted and reported like the light cuts):
+
+| Binding | Class | Capacity |
+|---|---|---|
+| 0 | `SAMPLED_IMAGE` | 4096 |
+| 1 | `SAMPLER` | 64 |
+| 2 | `STORAGE_IMAGE` | 256 |
+| 3 | `STORAGE_BUFFER` | 1024 (storage buffers and the uniform blocks) |
+
+- All stages, all bindings `PARTIALLY_BOUND`.
+- Index 0 of each binding is the fallback:
+  - binding 0: a 1×1 white RGBA8 image, with a 2D-array and a uint twin at indices 1 and 2;
+  - binding 1: linear clamp;
+  - binding 2: a 1×1 RGBA32F image;
+  - binding 3: a zeroed 256-byte buffer.
+- The pool holds `frames_in_flight` sets.
+- `bindless.glsl` declares the aliased arrays (decision 4), with
+  `#extension GL_EXT_nonuniform_qualifier : require`. It also has `AE_BUFFER(name, type)` (std430) and
+  `AE_UNIFORM(name, block)` (std140) macros. Both declare a block array at binding 3.
+  - Storage images read with a format: declare one aliased array per format at binding 2.
+  - Write-only storage images: use the format-less declaration. `shaderStorageImageWriteWithoutFormat`
+    is already enabled.
+  - Put `nonuniformEXT` at every index that is not dynamically uniform, for example a per-instance
+    texture. Per-draw and per-push indices need none.
+
+**Registry.**
+
+- `Bindless { sets: Vec<vk::DescriptorSet>, slabs: [Slab; 5], pending: Vec<Vec<Write>>, … }`,
+  owned by the executor and reached by library code through `&mut Bindless` at creation and load.
+- `register_*` returns a typed handle, `ImageHandle { index: u32, generation: u32 }` and its
+  siblings.
+  - Only `index` ever reaches the GPU.
+  - The generation is checked on the CPU wherever a handle is turned into an index
+    (`Bindless::index(h)`). A stale handle yields the fallback index and logs once.
+- Indices are issued in creation order from a FIFO free list, never by address or hash order, so
+  bench scenes and captures stay seeded.
+- `retire(h)` queues a fallback write for every slot. The index returns to the free list only
+  after every slot has flushed it.
+- `begin_frame(slot)` flushes `pending[slot]` and counts the writes in `ExecutorStats`
+  (`bindless_writes`, `bindless_live[5]`).
+- Writes come only from the render thread. `Recorder::record` and `SharedRecorder::record` read
+  handles and never write.
+- A resource that differs per slot, such as `vision_bufs[slot]` or a per-slot UBO, takes one index
+  whose content differs per slot set (`register_slotted`).
+
+**Graph resources (step B).**
+
+- `ImageBinding` gains `sampled: Option<u32>` and `storage: Option<u32>`, and `BufferBinding`
+  gains `storage: Option<u32>`. They are filled in the bindings loop in `Executor::execute`
+  (`executor.rs:505-545`).
+- The executor keeps `name → index` across bakes:
+  - a resource that keeps its name keeps its index;
+  - a new name takes the next index in declaration order;
+  - a vanished name is retired.
+- `set_graph` already calls `wait_idle`, so after a bake it writes the new physical views into
+  every slot's set directly. This is safe only because the render thread calls `set_graph` before
+  `begin_frame` and before any recording (`thread.rs:417-423` and `:570-573`). Keep that order:
+  if `set_graph` ever moves after recording starts, it would invalidate a command buffer that has
+  already bound the set. A debug assertion in `set_graph` checks that no frame is open. Aliased resources (`physical.members`) get separate indices that point
+  at one view.
+- A resource gets a sampled index only if its usage has `SAMPLED`, and a storage index only if it
+  has `STORAGE`.
+- The descriptor's image layout is the one the role transitions to:
+  - `SHADER_READ_ONLY_OPTIMAL` for `Sampled`,
+  - `GENERAL` for storage,
+  - the read-only depth layout for a sampled depth image.
+
+  A frame-graph unit test pins this against `barriers.rs`.
+- Externals:
+  - The library-owned ones (`shadows.map`, `shadows.color`, `exposure`, the library buffers) are
+    registered by their owner. The `externals` closure returns their handles in the binding.
+  - Swapchain images and `readback.target` are never sampled and get none.
+- The `.dot` goldens gain each resource's indices and nothing else
+  (`AE_UPDATE_GOLDEN=1 cargo test -p ae_render --test golden`).
+
+**Pipeline layout.** One shared layout from step E on: the global set plus one 128-byte push range
+for all stages. 128 bytes is the guaranteed minimum. Until then, migrated passes put the global
+set at index 2 next to their old sets. How handles reach a shader:
+
+- Handles that change per draw or per frame go in push constants. These are the particles' depth,
+  scene and packet images and exposure's inputs, which today are the per-frame writes.
+- Fixed handles go in the pass's existing uniform or table data, such as the terrain's frame UBO
+  or the models' material records.
+- Model material records (`m.tex[k]`, `units_models.frag.glsl:28,37`) hold global sampled indices
+  and a sampler index in place of `models::MAX_TEXTURES` slots.
+
+##### Steps
+
+**A. Device features and the registry.** No shader changes.
+
+- Require the subset in decision 1 in `device.rs` candidate selection, including the core dynamic
+  indexing flags. Check the capacities against the limits that apply without update-after-bind.
+  Give a clear error, and enable the features.
+- Add `bindless.rs` (layout, pool, per-slot sets, slabs, fallbacks, flush in `begin_frame`,
+  stats).
+- CPU unit tests:
+  - creation-order indices;
+  - a retired index is reused only after every slot has flushed;
+  - a stale generation resolves to the fallback;
+  - the capacity error names the class.
+- GPU test: the executor creates the set, a frame runs, validation is clean.
+  (`bindless_set_runs_a_frame`, with `graph_handles_survive_resize_and_rebake` covering B.)
+- Record here what the 1.3 spec makes mandatory.
+
+  **Recorded (2026-11-22).** Vulkan 1.3's required features (spec "Feature Requirements")
+  include `descriptorIndexing`, `runtimeDescriptorArray`, `descriptorBindingPartiallyBound`,
+  `shaderSampledImageArrayDynamicIndexing`, `shaderStorageBufferArrayDynamicIndexing`,
+  `shaderSampledImageArrayNonUniformIndexing` and
+  `shaderStorageBufferArrayNonUniformIndexing`. They do **not** include
+  `shaderStorageImageArrayDynamicIndexing` or `shaderStorageImageArrayNonUniformIndexing`; both
+  become mandatory only in Vulkan 1.4. Step A requires them anyway (decision 1's list), so a 1.3
+  device lacking either is refused at selection. If that exclusion ever matters, the alternative
+  is to keep the storage-image array's indices dynamically uniform and drop those two flags.
+
+  Built: `crates/ae_render/src/bindless.rs` (layout, pool, per-slot sets, four slabs, fallbacks,
+  generation checks, flush in `Executor::begin_frame`, limits check) and the feature/limit gate in
+  `device.rs`. `ExecutorStats` gained `bindless_writes` and `bindless_live`.
+
+**B. Graph handles and the capture diff.**
+
+- Add the binding fields, name-keyed indices across bakes, the externals, and the goldens.
+- Add `ae-tool capture-diff`.
+- Test: a resize and a topology hot reload keep every surviving name's index. The arrays do not
+  move and the bake count goes up.
+- Take a full capture set at this commit (every GPU test with `AE_TEST_CAPTURE_DIR`). It is the
+  reference for step C.
+
+  Built: `ImageBinding`/`BufferBinding` carry the indices, `Executor` keeps `name → handles`
+  across bakes and rewrites the new physical views directly after `set_graph`'s `wait_idle`, the
+  `.dot` goldens carry the indices, and `ae-tool capture-diff` compares two capture directories.
+  `graph_handles_survive_resize_and_rebake` checks that a resize and a topology rebake keep a
+  surviving name's index. Library-owned externals still return bindings with no handles: they
+  register when step C moves their descriptors. C–G are not built.
+
+**C. Sampled images and samplers.**
+
+- Terrain bindings 6–11, 14–16 and 18–20, and water's samples.
+- The post chain: tonemap, bloom, encode, composite.
+- Exposure's inputs, which removes the per-frame write at `exposure.rs:443`.
+- The particles' sampled images, which removes `particles.rs:2141/2332/2679`. Their own images
+  register in `ensure_half`/`ensure_packets`.
+- The units' shadow-map receivers.
+- The models' 1024-array, which moves into binding 0, so `models::MAX_TEXTURES` goes.
+- All samplers move into the sampler array.
+- Acceptance: `capture-diff` identical, validation and sync validation clean.
+
+**D. Buffers, storage images, uniform blocks.**
+
+- Terrain SSBOs 1–5, 13, 17 and 21, and UBOs 0 and 12 (as std140 buffer blocks).
+- The units' sets.
+- The lights set, which ends the shared set 1.
+- The particle pools, keys and indirects.
+- The exposure histogram and image.
+- The fullscreen UBOs, engine side.
+- Storage images through binding 2.
+- Acceptance: `capture-diff` identical. No `update_descriptor_sets` call is left in any `record*`
+  function; a grep in the step's checks shows it.
+
+**E. Retire the per-pass layouts.**
+
+- Delete the per-pass set layouts, pools and sets, and the `gpu_driven`-gated partially-bound
+  flag.
+- Every pipeline uses the shared layout. Renumber `AE_BINDLESS_SET` to 0.
+- `demo.rs` moves too. `upload.rs`'s mip generator stays as it is: it runs once at upload, is not
+  a frame pass, and needs per-mip views. The doc comment says so.
+- `pipeline::set_layout` goes if nothing uses it.
+- Acceptance: `capture-diff` identical.
+
+**F. Module contract.**
+
+- `MODULE_VERSION` goes from 2 to 3. `PROGRAM_VERSION` (1) and the graph files' `"version": 1`
+  stay, because the wire format is unchanged (decision 7).
+- `fullscreen::reflect` learns:
+  - `OpTypeRuntimeArray`;
+  - separate `OpTypeImage` and `OpTypeSampler`;
+  - push-constant blocks and their size;
+  - the global set's bindings.
+- `check` accepts exactly one of two forms and rejects a mix:
+  - the old one (set 0: binding 0 the UBO, bindings 1.. the samplers);
+  - the bindless one: only the global set, binding 0 as `texture2D`, binding 1, binding 3 for its
+    std140 block and its handle table, and a push block of at most 16 bytes
+    (`uniforms, sampler, handles, pad`).
+- A version-2 module must use the old form. A version-3 module may use either, for this version
+  only. The next bump drops the old form, and a TODO says so.
+- The host writes each program's handle table once per bake. Indices are identical across slots.
+- Move `render/post`'s three shaders and `render/default` to the bindless form, as well as
+  `render/default.graph.json` and `render/post.graph.json` (their shaders change; the JSON does
+  not). Update the docs in `ae-render-sdk` and in the `ae_render_abi::module` header ("Program
+  table").
+- Tests:
+  - a version-2 module with the old form still loads and renders;
+  - a version-3 module mixing the two forms fails at load and names the binding;
+  - a program with 64 sampled intents renders, which no old layout allowed;
+  - a retired handle draws the fallback and logs once;
+  - a GPU-assisted validation run (new `AE_VK_GPU_AV=1`, test-only, apart from the sync-validation
+    run) of a program that deliberately indexes past the count reports the error, and the normal
+    scenes report none.
+
+**G. Measurements and the descriptor-buffer question.** This step needs the user's consent first.
+
+- `bench-diff` against `bench/results/baseline/` (`AE_BENCH_MACHINE` set): GPU time within each
+  scene's tolerance.
+- CPU frame: descriptor writes per frame before (from the step B commit) and after, from
+  `ExecutorStats`.
+- The cost of shader indexing: per-pass GPU time on terrain, models and particles.
+- `VK_EXT_descriptor_buffer` is prototyped only if descriptor work still shows on the CPU frame.
+- Record the numbers with their conditions.
+
+##### Not part of M15
+
+- Buffer device addresses for buffers.
+- Bindless vertex or index buffers. Nothing uses vertex input.
+- Texture streaming.
+- The editor's and the frame-graph visualiser's names for handles. The visualiser shows indices
+  from the `.dot` goldens. Naming waits for the editor.
 
 ### M16 — RedAlert-graphics survey and port (water first, priority: medium)
 
