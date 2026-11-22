@@ -64,21 +64,9 @@ pub fn hdr_state(window: &SdlWindow) -> HdrState {
             return HdrState::default();
         }
         HdrState {
-            enabled: sdl::SDL_GetBooleanProperty(
-                props,
-                sdl::SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
-                false,
-            ),
-            sdr_white_level: sdl::SDL_GetFloatProperty(
-                props,
-                sdl::SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
-                0.0,
-            ),
-            headroom: sdl::SDL_GetFloatProperty(
-                props,
-                sdl::SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT,
-                1.0,
-            ),
+            enabled: sdl::SDL_GetBooleanProperty(props, sdl::SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false),
+            sdr_white_level: sdl::SDL_GetFloatProperty(props, sdl::SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 0.0),
+            headroom: sdl::SDL_GetFloatProperty(props, sdl::SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0),
         }
     }
 }
@@ -119,8 +107,7 @@ fn describe_display(window: &SdlWindow) -> String {
             CStr::from_ptr(name).to_string_lossy()
         };
         let props = sdl::SDL_GetDisplayProperties(display);
-        let hdr =
-            sdl::SDL_GetBooleanProperty(props, sdl::SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+        let hdr = sdl::SDL_GetBooleanProperty(props, sdl::SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
         format!(
             "{name:?} (display {}): HDR {}",
             display.0,
@@ -154,9 +141,9 @@ pub fn probe(window: &mut SdlWindow) -> Result<()> {
     // loader has it (it only widens the list of pairs; nothing is created).
     let entry = unsafe { ash::Entry::load() }?;
     let available = unsafe { entry.enumerate_instance_extension_properties(None) }?;
-    let colorspace = available.iter().any(|ext| {
-        ext.extension_name_as_c_str().ok() == Some(ash::ext::swapchain_colorspace::NAME)
-    });
+    let colorspace = available
+        .iter()
+        .any(|ext| ext.extension_name_as_c_str().ok() == Some(ash::ext::swapchain_colorspace::NAME));
     drop(entry);
     let mut extensions = window.instance_extensions()?;
     if colorspace {
@@ -179,11 +166,7 @@ pub fn probe(window: &mut SdlWindow) -> Result<()> {
             .device_name_as_c_str()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let families = unsafe {
-            instance
-                .instance
-                .get_physical_device_queue_family_properties(physical)
-        };
+        let families = unsafe { instance.instance.get_physical_device_queue_family_properties(physical) };
         let presents = (0..families.len() as u32).any(|family| {
             unsafe {
                 instance
@@ -197,11 +180,7 @@ pub fn probe(window: &mut SdlWindow) -> Result<()> {
             continue;
         }
         let version = properties.api_version;
-        let device_extensions = unsafe {
-            instance
-                .instance
-                .enumerate_device_extension_properties(physical)
-        }?;
+        let device_extensions = unsafe { instance.instance.enumerate_device_extension_properties(physical) }?;
         let hdr_metadata = device_extensions
             .iter()
             .any(|ext| ext.extension_name_as_c_str().ok() == Some(ash::ext::hdr_metadata::NAME));
@@ -243,14 +222,8 @@ pub fn probe(window: &mut SdlWindow) -> Result<()> {
                 names.join(", ")
             }
         };
-        println!(
-            "[hdr] HDR10 (PQ): {}",
-            offered(vk::ColorSpaceKHR::HDR10_ST2084_EXT)
-        );
-        println!(
-            "[hdr] scRGB: {}",
-            offered(vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT)
-        );
+        println!("[hdr] HDR10 (PQ): {}", offered(vk::ColorSpaceKHR::HDR10_ST2084_EXT));
+        println!("[hdr] scRGB: {}", offered(vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT));
     }
     instance.destroy_surface(surface);
 

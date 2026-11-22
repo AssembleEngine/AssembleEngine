@@ -77,11 +77,21 @@ pub struct Hits {
 }
 
 impl Hits {
-    pub fn query_count(&self) -> usize { self.offsets.len().saturating_sub(1) }
-    pub fn of(&self, q: usize) -> &[u32] { &self.items[self.offsets[q] as usize..self.offsets[q + 1] as usize] }
-    pub fn values_of(&self, q: usize) -> &[f32] { &self.values[self.offsets[q] as usize..self.offsets[q + 1] as usize] }
-    pub fn len(&self) -> usize { self.items.len() }
-    pub fn is_empty(&self) -> bool { self.items.is_empty() }
+    pub fn query_count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+    pub fn of(&self, q: usize) -> &[u32] {
+        &self.items[self.offsets[q] as usize..self.offsets[q + 1] as usize]
+    }
+    pub fn values_of(&self, q: usize) -> &[f32] {
+        &self.values[self.offsets[q] as usize..self.offsets[q + 1] as usize]
+    }
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
     fn clear(&mut self) {
         self.offsets.clear();
         self.items.clear();
@@ -109,13 +119,24 @@ pub struct Grid {
 impl Grid {
     /// An empty grid covering `bounds` with square cells of `cell` units.
     pub fn new(bounds: Bounds, cell: f32) -> Self {
-        assert!(cell > 0.0 && bounds.max_x > bounds.min_x && bounds.max_y > bounds.min_y, "bad grid shape");
+        assert!(
+            cell > 0.0 && bounds.max_x > bounds.min_x && bounds.max_y > bounds.min_y,
+            "bad grid shape"
+        );
         let cols = ((bounds.max_x - bounds.min_x) / cell).ceil().max(1.0) as i32;
         let rows = ((bounds.max_y - bounds.min_y) / cell).ceil().max(1.0) as i32;
         Self {
-            bounds, cell, inv_cell: 1.0 / cell, cols, rows,
-            start: vec![0; (cols * rows) as usize + 1], order: Vec::new(),
-            x: Vec::new(), y: Vec::new(), radius: Vec::new(), max_radius: 0.0,
+            bounds,
+            cell,
+            inv_cell: 1.0 / cell,
+            cols,
+            rows,
+            start: vec![0; (cols * rows) as usize + 1],
+            order: Vec::new(),
+            x: Vec::new(),
+            y: Vec::new(),
+            radius: Vec::new(),
+            max_radius: 0.0,
         }
     }
 
@@ -130,7 +151,11 @@ impl Grid {
         self.y.clear();
         self.y.extend_from_slice(y);
         self.radius.clear();
-        if radius.is_empty() { self.radius.resize(n, 0.0) } else { self.radius.extend_from_slice(radius) }
+        if radius.is_empty() {
+            self.radius.resize(n, 0.0)
+        } else {
+            self.radius.extend_from_slice(radius)
+        }
         self.max_radius = self.radius.iter().fold(0.0f32, |m, &r| m.max(r));
         // Counting sort by cell; items stay in index order within a cell.
         let cells = (self.cols * self.rows) as usize;
@@ -154,16 +179,28 @@ impl Grid {
         }
     }
 
-    pub fn len(&self) -> usize { self.x.len() }
-    pub fn is_empty(&self) -> bool { self.x.is_empty() }
-    pub fn cell_size(&self) -> f32 { self.cell }
+    pub fn len(&self) -> usize {
+        self.x.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.x.is_empty()
+    }
+    pub fn cell_size(&self) -> f32 {
+        self.cell
+    }
 
     #[inline]
-    fn col(&self, x: f32) -> i32 { (((x - self.bounds.min_x) * self.inv_cell).floor() as i32).clamp(0, self.cols - 1) }
+    fn col(&self, x: f32) -> i32 {
+        (((x - self.bounds.min_x) * self.inv_cell).floor() as i32).clamp(0, self.cols - 1)
+    }
     #[inline]
-    fn row(&self, y: f32) -> i32 { (((y - self.bounds.min_y) * self.inv_cell).floor() as i32).clamp(0, self.rows - 1) }
+    fn row(&self, y: f32) -> i32 {
+        (((y - self.bounds.min_y) * self.inv_cell).floor() as i32).clamp(0, self.rows - 1)
+    }
     #[inline]
-    fn cell_index(&self, x: f32, y: f32) -> usize { (self.row(y) * self.cols + self.col(x)) as usize }
+    fn cell_index(&self, x: f32, y: f32) -> usize {
+        (self.row(y) * self.cols + self.col(x)) as usize
+    }
 
     #[inline]
     fn cell_items(&self, col: i32, row: i32) -> &[u32] {
@@ -186,7 +223,9 @@ impl Grid {
 
     /// Items with centre within each circle; hits ascending by item index.
     pub fn radius(&self, queries: &[Circle], out: &mut Hits) {
-        self.batch(queries.len(), out, false, |q, items, _| self.radius_one(queries[q], items));
+        self.batch(queries.len(), out, false, |q, items, _| {
+            self.radius_one(queries[q], items)
+        });
     }
 
     /// One radius query on the calling thread (no thread pool): replaces
@@ -198,7 +237,9 @@ impl Grid {
         items.clear();
         self.for_cells(x - r, y - r, x + r, y + r, |i| {
             let (dx, dy) = (self.x[i as usize] - x, self.y[i as usize] - y);
-            if dx * dx + dy * dy <= r2 { items.push(i); }
+            if dx * dx + dy * dy <= r2 {
+                items.push(i);
+            }
         });
         items.sort_unstable();
     }
@@ -209,7 +250,9 @@ impl Grid {
             let b = queries[q];
             self.for_cells(b.min_x, b.min_y, b.max_x, b.max_y, |i| {
                 let (x, y) = (self.x[i as usize], self.y[i as usize]);
-                if x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y { items.push(i); }
+                if x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y {
+                    items.push(i);
+                }
             });
             items.sort_unstable();
         });
@@ -220,7 +263,9 @@ impl Grid {
     pub fn nearest(&self, queries: &[Nearest], out: &mut Hits) {
         self.batch(queries.len(), out, true, |q, items, values| {
             let Nearest { x, y, max_r, k } = queries[q];
-            if k == 0 { return; }
+            if k == 0 {
+                return;
+            }
             // Grow the searched square ring by ring until the k-th best is
             // closer than any unsearched cell, or `max_r` is covered.
             let mut best: Vec<(f32, u32)> = Vec::new();
@@ -231,14 +276,22 @@ impl Grid {
             let reach = (max_r * self.inv_cell).ceil().min(self.cols.max(self.rows) as f32) as i32 + 1;
             for ring in 0..=reach {
                 for row in (cy - ring)..=(cy + ring) {
-                    if row < 0 || row >= self.rows { continue; }
+                    if row < 0 || row >= self.rows {
+                        continue;
+                    }
                     for col in (cx - ring)..=(cx + ring) {
-                        if col < 0 || col >= self.cols { continue; }
-                        if (row - cy).abs() != ring && (col - cx).abs() != ring { continue; }
+                        if col < 0 || col >= self.cols {
+                            continue;
+                        }
+                        if (row - cy).abs() != ring && (col - cx).abs() != ring {
+                            continue;
+                        }
                         for &i in self.cell_items(col, row) {
                             let (dx, dy) = (self.x[i as usize] - x, self.y[i as usize] - y);
                             let d2 = dx * dx + dy * dy;
-                            if d2 <= max_r2 { best.push((d2, i)); }
+                            if d2 <= max_r2 {
+                                best.push((d2, i));
+                            }
                         }
                     }
                 }
@@ -248,7 +301,9 @@ impl Grid {
                     // Everything outside the searched rings is at least
                     // `ring` cells (minus the query's offset in its cell) away.
                     let safe = ring as f32 * self.cell;
-                    if best[k as usize - 1].0 <= safe * safe { break; }
+                    if best[k as usize - 1].0 <= safe * safe {
+                        break;
+                    }
                 }
             }
             best.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -276,7 +331,11 @@ impl Grid {
                 // Edge rows also hold items beyond the bounds: open slabs.
                 let base = self.bounds.min_y + row as f32 * self.cell;
                 let slab_lo = if row == 0 { f32::NEG_INFINITY } else { base - reach };
-                let slab_hi = if row == self.rows - 1 { f32::INFINITY } else { base + self.cell + reach };
+                let slab_hi = if row == self.rows - 1 {
+                    f32::INFINITY
+                } else {
+                    base + self.cell + reach
+                };
                 let (mut x_lo, mut x_hi) = (s.x0.min(s.x1), s.x0.max(s.x1));
                 if dy != 0.0 {
                     let ta = ((slab_lo - s.y0) / dy).clamp(0.0, 1.0);
@@ -287,7 +346,15 @@ impl Grid {
                 }
                 for col in self.col(x_lo - reach)..=self.col(x_hi + reach) {
                     for &i in self.cell_items(col, row) {
-                        if let Some(t) = entry_time(&s, dx, dy, len2, self.x[i as usize], self.y[i as usize], s.pad + self.radius[i as usize]) {
+                        if let Some(t) = entry_time(
+                            &s,
+                            dx,
+                            dy,
+                            len2,
+                            self.x[i as usize],
+                            self.y[i as usize],
+                            s.pad + self.radius[i as usize],
+                        ) {
                             hits.push((t, i));
                         }
                     }
@@ -304,7 +371,13 @@ impl Grid {
     /// Run `n` queries in fixed chunks on the current rayon pool. Each query
     /// gets empty scratch buffers for its hits (and values), which are then
     /// appended to the chunk's.
-    fn batch(&self, n: usize, out: &mut Hits, with_values: bool, run: impl Fn(usize, &mut Vec<u32>, &mut Vec<f32>) + Sync) {
+    fn batch(
+        &self,
+        n: usize,
+        out: &mut Hits,
+        with_values: bool,
+        run: impl Fn(usize, &mut Vec<u32>, &mut Vec<f32>) + Sync,
+    ) {
         out.clear();
         let parts: Vec<(Vec<u32>, Vec<u32>, Vec<f32>)> = (0..n.div_ceil(CHUNK))
             .into_par_iter()
@@ -332,7 +405,9 @@ impl Grid {
                 out.offsets.push(total);
             }
             out.items.extend_from_slice(&items);
-            if with_values { out.values.extend_from_slice(&values); }
+            if with_values {
+                out.values.extend_from_slice(&values);
+            }
         }
     }
 }
@@ -343,12 +418,20 @@ impl Grid {
 fn entry_time(s: &Segment, dx: f32, dy: f32, len2: f32, px: f32, py: f32, r: f32) -> Option<f32> {
     let (fx, fy) = (s.x0 - px, s.y0 - py);
     let c = fx * fx + fy * fy - r * r;
-    if c <= 0.0 { return Some(0.0); }
-    if len2 == 0.0 { return None; }
+    if c <= 0.0 {
+        return Some(0.0);
+    }
+    if len2 == 0.0 {
+        return None;
+    }
     let b = fx * dx + fy * dy;
-    if b >= 0.0 { return None; }
+    if b >= 0.0 {
+        return None;
+    }
     let disc = b * b - len2 * c;
-    if disc < 0.0 { return None; }
+    if disc < 0.0 {
+        return None;
+    }
     let t = (-b - disc.sqrt()) / len2;
     (t <= 1.0).then_some(t)
 }
@@ -366,7 +449,15 @@ mod tests {
 
     #[test]
     fn counting_sort_keeps_index_order_per_cell() {
-        let mut g = Grid::new(Bounds { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 }, 5.0);
+        let mut g = Grid::new(
+            Bounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            5.0,
+        );
         g.rebuild(&[1.0, 6.0, 2.0, -50.0, 7.0], &[1.0, 1.0, 2.0, 3.0, 9.0], &[]);
         assert_eq!(g.cell_items(0, 0), &[0, 2, 3]);
         assert_eq!(g.cell_items(1, 0), &[1]);
@@ -375,17 +466,33 @@ mod tests {
 
     #[test]
     fn entry_time_of_a_ray_through_a_disc() {
-        let s = Segment { x0: 0.0, y0: 0.0, x1: 10.0, y1: 0.0, pad: 0.0 };
+        let s = Segment {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 0.0,
+            pad: 0.0,
+        };
         assert_eq!(entry_time(&s, 10.0, 0.0, 100.0, 5.0, 0.0, 1.0), Some(0.4));
         assert_eq!(entry_time(&s, 10.0, 0.0, 100.0, 5.0, 2.0, 1.0), None);
-        assert_eq!(entry_time(&s, 10.0, 0.0, 100.0, 0.5, 0.0, 1.0), Some(0.0), "starts inside");
+        assert_eq!(
+            entry_time(&s, 10.0, 0.0, 100.0, 0.5, 0.0, 1.0),
+            Some(0.0),
+            "starts inside"
+        );
         assert_eq!(entry_time(&s, 10.0, 0.0, 100.0, 12.0, 0.0, 1.0), None, "beyond the end");
         let mut seed = 9u64;
         for _ in 0..1000 {
-            let (px, py, r) = (rng(&mut seed) * 12.0 - 1.0, rng(&mut seed) * 4.0 - 2.0, rng(&mut seed) * 2.0);
+            let (px, py, r) = (
+                rng(&mut seed) * 12.0 - 1.0,
+                rng(&mut seed) * 4.0 - 2.0,
+                rng(&mut seed) * 2.0,
+            );
             let hit = entry_time(&s, 10.0, 0.0, 100.0, px, py, r);
             let d2 = (px.clamp(0.0, 10.0) - px).powi(2) + py * py;
-            if (d2 - r * r).abs() < 1e-3 { continue; } // tangent: either answer is fine
+            if (d2 - r * r).abs() < 1e-3 {
+                continue;
+            } // tangent: either answer is fine
             assert_eq!(hit.is_some(), d2 < r * r, "px {px} py {py} r {r}");
         }
     }

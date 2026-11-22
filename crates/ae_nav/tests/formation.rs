@@ -2,7 +2,7 @@
 //! away from the point the formation faces, instead of alternating on both
 //! sides (pathsim's layout, kept without a facing).
 
-use ae_nav::scenario::{Scenario, land_crossing_plan};
+use ae_nav::scenario::{land_crossing_plan, Scenario};
 
 const UNITS: u32 = 300;
 const MAP_CELLS: i32 = 384;
@@ -19,9 +19,21 @@ fn formation_sides(facing: bool) -> (usize, usize) {
     let y = 2300.0;
     let line = vec![WorldPos::new(300.0, y), WorldPos::new(700.0, y)];
     let toward = WorldPos::new(500.0, 2000.0);
-    let unit_ids: Vec<u32> = (1..=plan.units.len() as u64).map(|e| s.nav.local_id(e).unwrap()).collect();
-    let payload = CommandPayload { id: 1, unit_ids, kind: CommandKind::CurveFormation { guide_points: line }, requested_point: WorldPos::new(700.0, y), corridor_tolerance_world: 48.0 };
-    if facing { s.nav.queue_formation_facing(payload, toward) } else { s.nav.queue_command_at(payload) }
+    let unit_ids: Vec<u32> = (1..=plan.units.len() as u64)
+        .map(|e| s.nav.local_id(e).unwrap())
+        .collect();
+    let payload = CommandPayload {
+        id: 1,
+        unit_ids,
+        kind: CommandKind::CurveFormation { guide_points: line },
+        requested_point: WorldPos::new(700.0, y),
+        corridor_tolerance_world: 48.0,
+    };
+    if facing {
+        s.nav.queue_formation_facing(payload, toward)
+    } else {
+        s.nav.queue_command_at(payload)
+    }
     s.step();
     s.nav.publish_snapshot();
     let cmd = &s.nav.snapshot().unwrap().commands[0];

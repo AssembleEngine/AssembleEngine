@@ -216,7 +216,10 @@ impl Runtime {
     /// (the first plugin providing a name wins).
     pub fn with_hosts(wasm: &[u8], cfg: RuntimeConfig, plugins: Vec<Arc<dyn HostPlugin>>) -> Result<Self> {
         let schema = Schema::from_module(wasm)?;
-        ensure!(cfg.max_workers >= 1 && cfg.range_rows >= 1 && cfg.tick_hz >= 1, "bad runtime config");
+        ensure!(
+            cfg.max_workers >= 1 && cfg.range_rows >= 1 && cfg.tick_hz >= 1,
+            "bad runtime config"
+        );
         let offered: Vec<Vec<HostDecl>> = plugins.iter().map(|p| p.systems()).collect();
         // The schedule only needs resource identity, so it is computed on
         // stable ids, once.
@@ -226,7 +229,14 @@ impl Runtime {
             match slot {
                 Slot::Module(i) => {
                     let s = &schema.systems[*i];
-                    let terms: Vec<Term> = s.terms.iter().map(|&(id, access)| Term { component: ComponentId(id), access }).collect();
+                    let terms: Vec<Term> = s
+                        .terms
+                        .iter()
+                        .map(|&(id, access)| Term {
+                            component: ComponentId(id),
+                            access,
+                        })
+                        .collect();
                     let decl = SystemDecl {
                         name: s.name.clone(),
                         terms,
@@ -236,28 +246,65 @@ impl Runtime {
                         mode: s.mode,
                         cadence: s.cadence,
                     };
-                    systems.push(SystemRt { name: s.name.as_str().into(), decl, term_ids: s.terms.iter().map(|t| t.0).collect(), write_mask: write_mask(&s.terms), kind: Kind::Module(*i) });
+                    systems.push(SystemRt {
+                        name: s.name.as_str().into(),
+                        decl,
+                        term_ids: s.terms.iter().map(|t| t.0).collect(),
+                        write_mask: write_mask(&s.terms),
+                        kind: Kind::Module(*i),
+                    });
                 }
                 Slot::Host(name) => {
                     let (plugin, decl) = offered
                         .iter()
                         .enumerate()
                         .find_map(|(p, decls)| decls.iter().find(|d| d.name == *name).map(|d| (p, d.clone())))
-                        .with_context(|| format!("the module schedules host system `{name}`, which no host plugin provides"))?;
-                    plugins[plugin].check(name, &schema).with_context(|| format!("host system `{name}`"))?;
+                        .with_context(|| {
+                            format!("the module schedules host system `{name}`, which no host plugin provides")
+                        })?;
+                    plugins[plugin]
+                        .check(name, &schema)
+                        .with_context(|| format!("host system `{name}`"))?;
                     decl.cadence.validate()?;
                     // The row filter is the SDK's (`run.rows()`); a host system sees whole tables.
-                    ensure!(!matches!(decl.cadence, Cadence::Staggered { .. }), "host system `{name}`: staggered cadence is for module systems");
-                    ensure!(decl.query.len() <= MAX_TERMS && decl.reads_events.len() <= MAX_EVENT_READS, "host system `{name}`: too many terms or streams");
+                    ensure!(
+                        !matches!(decl.cadence, Cadence::Staggered { .. }),
+                        "host system `{name}`: staggered cadence is for module systems"
+                    );
+                    ensure!(
+                        decl.query.len() <= MAX_TERMS && decl.reads_events.len() <= MAX_EVENT_READS,
+                        "host system `{name}`: too many terms or streams"
+                    );
                     for &(id, _) in &decl.query {
-                        ensure!(schema.component(id).is_some_and(|c| !c.event), "host system `{name}` queries component {id:#x}, which the module does not declare");
+                        ensure!(
+                            schema.component(id).is_some_and(|c| !c.event),
+                            "host system `{name}` queries component {id:#x}, which the module does not declare"
+                        );
                     }
                     for &id in decl.emits.iter().chain(&decl.reads_events) {
-                        ensure!(schema.component(id).is_some_and(|c| c.event), "host system `{name}` uses event stream {id:#x}, which the module does not declare");
+                        ensure!(
+                            schema.component(id).is_some_and(|c| c.event),
+                            "host system `{name}` uses event stream {id:#x}, which the module does not declare"
+                        );
                     }
-                    let mut terms: Vec<Term> = decl.query.iter().map(|&(id, access)| Term { component: ComponentId(id), access }).collect();
+                    let mut terms: Vec<Term> = decl
+                        .query
+                        .iter()
+                        .map(|&(id, access)| Term {
+                            component: ComponentId(id),
+                            access,
+                        })
+                        .collect();
                     // Created components order like writes (no query term).
-                    terms.extend(decl.creates.iter().filter(|id| !decl.query.iter().any(|q| q.0 == **id)).map(|&id| Term { component: ComponentId(id), access: Access::Write }));
+                    terms.extend(
+                        decl.creates
+                            .iter()
+                            .filter(|id| !decl.query.iter().any(|q| q.0 == **id))
+                            .map(|&id| Term {
+                                component: ComponentId(id),
+                                access: Access::Write,
+                            }),
+                    );
                     let sd = SystemDecl {
                         name: name.clone(),
                         terms,
@@ -267,7 +314,13 @@ impl Runtime {
                         mode: Mode::Serial,
                         cadence: decl.cadence,
                     };
-                    systems.push(SystemRt { name: name.as_str().into(), decl: sd, term_ids: decl.query.iter().map(|t| t.0).collect(), write_mask: write_mask(&decl.query), kind: Kind::Host(hosts.len()) });
+                    systems.push(SystemRt {
+                        name: name.as_str().into(),
+                        decl: sd,
+                        term_ids: decl.query.iter().map(|t| t.0).collect(),
+                        write_mask: write_mask(&decl.query),
+                        kind: Kind::Host(hosts.len()),
+                    });
                     hosts.push(HostSlot { plugin, decl });
                 }
             }
@@ -285,7 +338,10 @@ impl Runtime {
             Some(d) => {
                 ensure!(d.len() >= 8, "`{}` record is {} bytes", ae_abi::script::DATA, d.len());
                 let (slot_bytes, slots) = (ae_abi::get_u32(d, 0), ae_abi::get_u32(d, 4));
-                ensure!(slot_bytes > 0 && slot_bytes.is_multiple_of(ae_abi::script::SLOT_ALIGN) && slots > 0, "bad script slot arena: {slots} slots of {slot_bytes} bytes");
+                ensure!(
+                    slot_bytes > 0 && slot_bytes.is_multiple_of(ae_abi::script::SLOT_ALIGN) && slots > 0,
+                    "bad script slot arena: {slots} slots of {slot_bytes} bytes"
+                );
                 Some((slot_bytes, slots))
             }
             None => None,
@@ -307,7 +363,11 @@ impl Runtime {
             if let Some((slot_bytes, slots)) = script_decl {
                 let len = slot_bytes as u64 * slots as u64;
                 let offset = claim_pages(memory, len.div_ceil(PAGE_BYTES))?;
-                scripts = Some(ScriptArena { offset, slot_bytes, slots });
+                scripts = Some(ScriptArena {
+                    offset,
+                    slot_bytes,
+                    slots,
+                });
             }
             Ok(())
         })?;
@@ -321,12 +381,48 @@ impl Runtime {
         }
         let mut workers = Vec::new();
         for (mut instance, (desc, ids_buf)) in std::mem::take(&mut set.instances).into_iter().zip(scratch) {
-            let funcs = schema.systems.iter().map(|s| instance.func::<u32, ()>(&s.export())).collect::<Result<_>>()?;
-            workers.push(Worker { instance, funcs, desc, ids_buf, ids_cap, metered: cfg.metering == Metering::Fuel });
+            let funcs = schema
+                .systems
+                .iter()
+                .map(|s| instance.func::<u32, ()>(&s.export()))
+                .collect::<Result<_>>()?;
+            workers.push(Worker {
+                instance,
+                funcs,
+                desc,
+                ids_buf,
+                ids_cap,
+                metered: cfg.metering == Metering::Fuel,
+            });
         }
         let crew = Crew::new(workers)?;
-        let layer_labels = schedule.layers.iter().enumerate().map(|(k, l)| format!("layer {k}: {}", l.iter().map(|&i| &*systems[i].name).collect::<Vec<_>>().join(" "))).collect();
-        Ok(Self { schema, schedule, systems, hosts, plugins, cfg, memory: guest, shared, crew, events_at, scripts, events_len: (cfg.event_pages * PAGE_BYTES) as usize, layer_labels, arena_base })
+        let layer_labels = schedule
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(k, l)| {
+                format!(
+                    "layer {k}: {}",
+                    l.iter().map(|&i| &*systems[i].name).collect::<Vec<_>>().join(" ")
+                )
+            })
+            .collect();
+        Ok(Self {
+            schema,
+            schedule,
+            systems,
+            hosts,
+            plugins,
+            cfg,
+            memory: guest,
+            shared,
+            crew,
+            events_at,
+            scripts,
+            events_len: (cfg.event_pages * PAGE_BYTES) as usize,
+            layer_labels,
+            arena_base,
+        })
     }
 
     /// Current size of the shared guest memory, in bytes (column arena,
@@ -396,12 +492,17 @@ impl Runtime {
             emits[self.schedule.position[i] as usize] = s.decl.emits.clone();
         }
         ids.emits = emits;
-        ids.names.insert((ae_abi::sim::SCOPE, ae_abi::sim::TICK_HZ), self.cfg.tick_hz);
+        ids.names
+            .insert((ae_abi::sim::SCOPE, ae_abi::sim::TICK_HZ), self.cfg.tick_hz);
         if let Some(a) = &self.scripts {
             // Every world starts with empty slots.
             unsafe { std::ptr::write_bytes(self.memory.ptr(a.offset), 0, a.len()) };
             use ae_abi::script::{BASE, SCOPE, SLOT_BYTES, SLOTS};
-            ids.names.extend([((SCOPE, BASE), a.offset), ((SCOPE, SLOT_BYTES), a.slot_bytes), ((SCOPE, SLOTS), a.slots)]);
+            ids.names.extend([
+                ((SCOPE, BASE), a.offset),
+                ((SCOPE, SLOT_BYTES), a.slot_bytes),
+                ((SCOPE, SLOTS), a.slots),
+            ]);
         }
         for plugin in &self.plugins {
             for (scope, name, value) in plugin.names() {
@@ -421,7 +522,13 @@ impl Runtime {
                 queries.push(None);
                 continue;
             }
-            let terms: Vec<Term> = query.iter().map(|t| Term { component: ecs(t.component.0), access: t.access }).collect();
+            let terms: Vec<Term> = query
+                .iter()
+                .map(|t| Term {
+                    component: ecs(t.component.0),
+                    access: t.access,
+                })
+                .collect();
             queries.push(Some((unsafe { fb::create_query(world, &terms)? }, terms)));
         }
         let mut hash_queries = Vec::new();
@@ -429,7 +536,10 @@ impl Runtime {
             if let Some(id) = ecs_ids[i]
                 && c.fields.iter().any(|f| f.hashed())
             {
-                let terms = [Term { component: id, access: Access::Read }];
+                let terms = [Term {
+                    component: id,
+                    access: Access::Read,
+                }];
                 hash_queries.push((i, unsafe { fb::create_query(world, &terms)? }, terms));
             }
         }
@@ -442,7 +552,11 @@ impl Runtime {
                 events.add_reader(stream, i)?;
             }
         }
-        let init = HostInit { param, workers, tick_hz: self.cfg.tick_hz };
+        let init = HostInit {
+            param,
+            workers,
+            tick_hz: self.cfg.tick_hz,
+        };
         let mut hosts: Vec<Option<Box<dyn HostSystem>>> = (0..self.hosts.len()).map(|_| None).collect();
         for (p, plugin) in self.plugins.iter().enumerate() {
             let mine: Vec<usize> = (0..self.hosts.len()).filter(|&h| self.hosts[h].plugin == p).collect();
@@ -451,13 +565,33 @@ impl Runtime {
             }
             let names: Vec<&str> = mine.iter().map(|&h| self.hosts[h].decl.name.as_str()).collect();
             let made = plugin.instantiate(&init, &self.schema, &names)?;
-            ensure!(made.len() == mine.len(), "host plugin made {} systems for {} names", made.len(), mine.len());
+            ensure!(
+                made.len() == mine.len(),
+                "host plugin made {} systems for {} names",
+                made.len(),
+                mine.len()
+            );
             for (h, system) in mine.into_iter().zip(made) {
                 hosts[h] = Some(system);
             }
         }
-        let hosts = hosts.into_iter().map(|h| h.expect("every host slot has a plugin")).collect();
-        Ok(World { world, ids: Arc::new(ids), ecs_ids, queries, hash_queries, hosts, spatial: None, applier: Applier::default(), events, tick: 0, param })
+        let hosts = hosts
+            .into_iter()
+            .map(|h| h.expect("every host slot has a plugin"))
+            .collect();
+        Ok(World {
+            world,
+            ids: Arc::new(ids),
+            ecs_ids,
+            queries,
+            hash_queries,
+            hosts,
+            spatial: None,
+            applier: Applier::default(),
+            events,
+            tick: 0,
+            param,
+        })
     }
 
     /// Run one tick on `workers` workers.
@@ -479,13 +613,28 @@ impl Runtime {
         ae_profile::zone!("sim_tick");
         let tick = w.tick;
         ensure!(bundle.tick == tick, "a bundle for tick {} at tick {tick}", bundle.tick);
-        let mut stats = TickStats { fuel: vec![0; self.systems.len()], host_system_ns: vec![0; self.systems.len()], ..Default::default() };
+        let mut stats = TickStats {
+            fuel: vec![0; self.systems.len()],
+            host_system_ns: vec![0; self.systems.len()],
+            ..Default::default()
+        };
         if !bundle.commands.is_empty() {
             let mut accepted = Vec::with_capacity(bundle.commands.len());
             for (seq, c) in bundle.commands.iter().enumerate() {
-                let ok = self.schema.component(c.stream).is_some_and(|d| d.event && d.command && d.size as usize == c.bytes.len());
+                let ok = self
+                    .schema
+                    .component(c.stream)
+                    .is_some_and(|d| d.event && d.command && d.size as usize == c.bytes.len());
                 if ok {
-                    accepted.push((crate::command::CommandKey { system: u32::MAX, range: c.player, seq: seq as u32 }, c.stream, c.bytes.clone()));
+                    accepted.push((
+                        crate::command::CommandKey {
+                            system: u32::MAX,
+                            range: c.player,
+                            seq: seq as u32,
+                        },
+                        c.stream,
+                        c.bytes.clone(),
+                    ));
                 } else {
                     stats.commands_dropped += 1;
                 }
@@ -508,7 +657,13 @@ impl Runtime {
                 self.prepare(w, layer, tick)?
             };
             stats.prepare_ns += started.elapsed().as_nanos() as u64;
-            let hosts: Vec<usize> = self.schedule.layers[layer].iter().copied().filter(|&i| matches!(self.systems[i].kind, Kind::Host(_)) && self.systems[i].decl.cadence.runs_on(tick)).collect();
+            let hosts: Vec<usize> = self.schedule.layers[layer]
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    matches!(self.systems[i].kind, Kind::Host(_)) && self.systems[i].decl.cadence.runs_on(tick)
+                })
+                .collect();
             if batch.is_none() && hosts.is_empty() {
                 continue;
             }
@@ -519,7 +674,14 @@ impl Runtime {
             // module system of the layer writes.
             let jobs: Vec<HostJob> = hosts.iter().map(|&i| self.host_job(w, i)).collect::<Result<_>>()?;
             let (crew_outs, host_outs) = {
-                let World { hosts: states, events: store, ids, spatial, param, .. } = &mut *w;
+                let World {
+                    hosts: states,
+                    events: store,
+                    ids,
+                    spatial,
+                    param,
+                    ..
+                } = &mut *w;
                 let (memory, param) = (self.memory, *param);
                 let run = move || run_hosts(jobs, memory, tick, param, states, store, ids, spatial);
                 match batch {
@@ -546,7 +708,13 @@ impl Runtime {
             };
             if let Some((index_of, outs)) = crew_outs {
                 for out in outs {
-                    let WorkerOut { commands: c, events: e, fuel, calls, error } = out;
+                    let WorkerOut {
+                        commands: c,
+                        events: e,
+                        fuel,
+                        calls,
+                        error,
+                    } = out;
                     if let Some(error) = error {
                         return Err(error.context(format!("tick {tick}, layer {layer}")));
                     }
@@ -570,7 +738,10 @@ impl Runtime {
             let started = Instant::now();
             let commands: Vec<(CommandKey, Command)> = merge(commands)?;
             events.sort_unstable_by_key(|(key, stream, _)| (*key, *stream));
-            ensure!(events.windows(2).all(|p| p[0].0 != p[1].0), "duplicate event key: a work range ran twice");
+            ensure!(
+                events.windows(2).all(|p| p[0].0 != p[1].0),
+                "duplicate event key: a work range ran twice"
+            );
             stats.commands += commands.len() as u64;
             stats.events += events.len() as u64;
             let applied = unsafe { w.applier.apply(w.world, &commands)? };
@@ -600,12 +771,21 @@ impl Runtime {
             }
             let ranges: Vec<WorkRange> = match &w.queries[i] {
                 Some((q, terms)) => unsafe { ranges(w.world, *q, terms, self.cfg.range_rows, self.memory)? },
-                None => vec![WorkRange { index: 0, entities: std::ptr::null(), count: 0, columns: [0; MAX_TERMS] }],
+                None => vec![WorkRange {
+                    index: 0,
+                    entities: std::ptr::null(),
+                    count: 0,
+                    columns: [0; MAX_TERMS],
+                }],
             };
             let mut events = [EventSpan::default(); MAX_EVENT_READS];
             for (k, &stream) in s.decl.reads_events.iter().enumerate() {
                 let (bytes, count) = w.events.unseen(stream, i);
-                ensure!(staged + bytes.len() <= self.events_len, "events of one layer exceed the {}-byte staging area", self.events_len);
+                ensure!(
+                    staged + bytes.len() <= self.events_len,
+                    "events of one layer exceed the {}-byte staging area",
+                    self.events_len
+                );
                 let at = self.events_at + staged as u32;
                 unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.memory.ptr(at), bytes.len()) };
                 staged = (staged + bytes.len()).next_multiple_of(16);
@@ -616,10 +796,18 @@ impl Runtime {
             let index = systems.len();
             if s.decl.mode == Mode::Serial || rows < self.cfg.parallel_min_rows {
                 if !ranges.is_empty() {
-                    jobs.push(Job { system: index, first: 0, end: ranges.len() });
+                    jobs.push(Job {
+                        system: index,
+                        first: 0,
+                        end: ranges.len(),
+                    });
                 }
             } else {
-                jobs.extend((0..ranges.len()).map(|r| Job { system: index, first: r, end: r + 1 }));
+                jobs.extend((0..ranges.len()).map(|r| Job {
+                    system: index,
+                    first: r,
+                    end: r + 1,
+                }));
             }
             let mut term_ids = [0u64; MAX_TERMS];
             term_ids[..s.term_ids.len()].copy_from_slice(&s.term_ids);
@@ -640,7 +828,15 @@ impl Runtime {
         if systems.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Batch::new(systems, jobs, tick, w.param, w.ids.clone(), self.memory, w.spatial.clone())))
+        Ok(Some(Batch::new(
+            systems,
+            jobs,
+            tick,
+            w.param,
+            w.ids.clone(),
+            self.memory,
+            w.spatial.clone(),
+        )))
     }
 
     /// Host system `i`'s (runtime order) inputs for this run.
@@ -650,12 +846,24 @@ impl Runtime {
         let decl = &self.hosts[h].decl;
         let (ranges, sizes) = match &w.queries[i] {
             Some((q, terms)) => {
-                let sizes = terms.iter().map(|t| unsafe { fb::component_size(w.world, t.component) }).collect::<Result<Vec<_>>>()?;
+                let sizes = terms
+                    .iter()
+                    .map(|t| unsafe { fb::component_size(w.world, t.component) })
+                    .collect::<Result<Vec<_>>>()?;
                 (unsafe { ranges(w.world, *q, terms, usize::MAX, self.memory)? }, sizes)
             }
             None => (Vec::new(), Vec::new()),
         };
-        Ok(HostJob { index: i, slot: h, name: s.name.clone(), position: self.schedule.position[i], ranges, sizes, reads: decl.reads_events.clone(), emits: decl.emits.clone() })
+        Ok(HostJob {
+            index: i,
+            slot: h,
+            name: s.name.clone(),
+            position: self.schedule.position[i],
+            ranges,
+            sizes,
+            reads: decl.reads_events.clone(),
+            emits: decl.emits.clone(),
+        })
     }
 
     /// Order-independent digest of every hashed field of every live row,
@@ -699,14 +907,25 @@ impl Runtime {
                 parts.push((format!("(host {})", s.name), part.finish(), i as u64));
             }
         }
-        Ok(Digest { total: total.finish(), parts })
+        Ok(Digest {
+            total: total.finish(),
+            parts,
+        })
     }
 
     /// Live rows of a component, by name.
     pub fn count(&self, w: &World, component: &str) -> Result<usize> {
-        let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
+        let i = self
+            .schema
+            .components
+            .iter()
+            .position(|c| c.name == component)
+            .with_context(|| format!("no component `{component}`"))?;
         let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
-        let terms = [Term { component: id, access: Access::Read }];
+        let terms = [Term {
+            component: id,
+            access: Access::Read,
+        }];
         let mut n = 0;
         unsafe {
             let q = fb::create_query_uncached(w.world, &terms)?;
@@ -749,7 +968,12 @@ impl Runtime {
         self.each_chunk(w, component, |ids, data| {
             // SAFETY: the tables' memory outlives the query, until the
             // world is next changed (which needs `&mut World`).
-            out.push(unsafe { (std::slice::from_raw_parts(ids.as_ptr(), ids.len()), std::slice::from_raw_parts(data.as_ptr(), data.len())) });
+            out.push(unsafe {
+                (
+                    std::slice::from_raw_parts(ids.as_ptr(), ids.len()),
+                    std::slice::from_raw_parts(data.as_ptr(), data.len()),
+                )
+            });
         })?;
         Ok(out)
     }
@@ -757,10 +981,18 @@ impl Runtime {
     /// Every chunk of entities with `component` (between ticks): their ids
     /// and the column's bytes, a row of the component's size per entity.
     pub fn each_chunk(&self, w: &World, component: &str, mut f: impl FnMut(&[u64], &[u8])) -> Result<()> {
-        let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
+        let i = self
+            .schema
+            .components
+            .iter()
+            .position(|c| c.name == component)
+            .with_context(|| format!("no component `{component}`"))?;
         let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
         let size = self.schema.components[i].size as usize;
-        let terms = [Term { component: id, access: Access::Read }];
+        let terms = [Term {
+            component: id,
+            access: Access::Read,
+        }];
         unsafe {
             let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
@@ -779,20 +1011,35 @@ impl Runtime {
     /// world no longer follows from its commands. Whether the entity had
     /// the component.
     pub fn poke(&self, w: &mut World, entity: u64, component: &str, field: &str, bits: u32) -> Result<bool> {
-        let i = self.schema.components.iter().position(|c| c.name == component).with_context(|| format!("no component `{component}`"))?;
+        let i = self
+            .schema
+            .components
+            .iter()
+            .position(|c| c.name == component)
+            .with_context(|| format!("no component `{component}`"))?;
         let c = &self.schema.components[i];
-        let f = c.fields.iter().find(|f| f.name == field).with_context(|| format!("`{component}` has no field `{field}`"))?;
+        let f = c
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .with_context(|| format!("`{component}` has no field `{field}`"))?;
         ensure!(f.size == 4, "`{component}.{field}` is {} bytes; poke writes 4", f.size);
         let id = w.ecs_ids[i].with_context(|| format!("`{component}` is an event stream"))?;
         let (size, offset) = (c.size as usize, f.offset as usize);
-        let terms = [Term { component: id, access: Access::Write }];
+        let terms = [Term {
+            component: id,
+            access: Access::Write,
+        }];
         let mut found = false;
         unsafe {
             let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
                 let ids = std::slice::from_raw_parts(chunk.entities, chunk.count);
                 if let Some(r) = ids.iter().position(|&e| e == entity) {
-                    chunk.fields[0].add(r * size + offset).cast::<u32>().write_unaligned(bits);
+                    chunk.fields[0]
+                        .add(r * size + offset)
+                        .cast::<u32>()
+                        .write_unaligned(bits);
                     found = true;
                 }
                 Ok(())
@@ -808,8 +1055,12 @@ impl Runtime {
     pub fn capture(&self, w: &World, spec: &CaptureSpec, out: &mut Capture) -> Result<()> {
         let mut terms = Vec::with_capacity(spec.components.len());
         for &ci in &spec.components {
-            let id = w.ecs_ids[ci].with_context(|| format!("`{}` is an event stream", self.schema.components[ci].name))?;
-            terms.push(Term { component: id, access: Access::Read });
+            let id =
+                w.ecs_ids[ci].with_context(|| format!("`{}` is an event stream", self.schema.components[ci].name))?;
+            terms.push(Term {
+                component: id,
+                access: Access::Read,
+            });
         }
         out.tick = w.tick;
         out.entities.clear();
@@ -820,11 +1071,13 @@ impl Runtime {
         unsafe {
             let q = fb::create_query_uncached(w.world, &terms)?;
             let r = fb::for_each_chunk(w.world, q, &terms, |chunk| {
-                out.entities.extend_from_slice(std::slice::from_raw_parts(chunk.entities, chunk.count));
+                out.entities
+                    .extend_from_slice(std::slice::from_raw_parts(chunk.entities, chunk.count));
                 for (column, &(term, offset)) in out.columns.iter_mut().zip(&spec.fields) {
                     let base = chunk.fields[term].cast_const();
                     let stride = spec.sizes[term];
-                    column.extend((0..chunk.count).map(|r| base.add(r * stride + offset).cast::<u32>().read_unaligned()));
+                    column
+                        .extend((0..chunk.count).map(|r| base.add(r * stride + offset).cast::<u32>().read_unaligned()));
                 }
                 Ok(())
             });
@@ -896,7 +1149,9 @@ fn run_hosts(
             ids,
             spatial,
         };
-        states[job.slot].run(&mut ctx).with_context(|| format!("host system `{}`", job.name))?;
+        states[job.slot]
+            .run(&mut ctx)
+            .with_context(|| format!("host system `{}`", job.name))?;
         let e = buffer.take_events();
         out.push((job.index, (buffer.take(), e), started.elapsed().as_nanos() as u64));
     }
@@ -904,7 +1159,11 @@ fn run_hosts(
 }
 
 fn write_mask(terms: &[(u64, Access)]) -> u32 {
-    terms.iter().enumerate().filter(|(_, (_, a))| *a == Access::Write).fold(0u32, |m, (i, _)| m | 1 << i)
+    terms
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, a))| *a == Access::Write)
+        .fold(0u32, |m, (i, _)| m | 1 << i)
 }
 
 fn add_stats(t: &mut ApplyStats, s: &ApplyStats) {

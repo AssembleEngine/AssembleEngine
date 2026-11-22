@@ -95,7 +95,19 @@ pub struct Log {
 }
 
 impl Log {
-    pub const NEW: Log = Log { starts: 0, stops: 0, looks: 0, cut: 0, backs: 0, backs_cut: 0, slept: 0, turn_min: u32::MAX, aims: 0, checked: 0, aim_err: 0.0 };
+    pub const NEW: Log = Log {
+        starts: 0,
+        stops: 0,
+        looks: 0,
+        cut: 0,
+        backs: 0,
+        backs_cut: 0,
+        slept: 0,
+        turn_min: u32::MAX,
+        aims: 0,
+        checked: 0,
+        aim_err: 0.0,
+    };
 }
 
 #[repr(C)]
@@ -132,7 +144,13 @@ fn spawn(i: u32, aim: bool) {
         Facing::along(dir, 0.0)
     };
     Spawn::new()
-        .with(&Body { x, y, vx: 0.0, vy: 0.0, radius: STEP / 4.0 })
+        .with(&Body {
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            radius: STEP / 4.0,
+        })
         .with(&Walker { dir, reserved: 0 })
         .with(&facing)
         .with(&Weapons::default())
@@ -159,7 +177,13 @@ fn steer(run: &Run) {
     if run.param() & AIM != 0 {
         return;
     }
-    let (bodies, walkers, facings, posts, ids) = (run.write::<Body>(), run.write::<Walker>(), run.write::<Facing>(), run.write::<Callins>(), run.entities());
+    let (bodies, walkers, facings, posts, ids) = (
+        run.write::<Body>(),
+        run.write::<Walker>(),
+        run.write::<Facing>(),
+        run.write::<Callins>(),
+        run.entities(),
+    );
     for i in run.rows() {
         let (b, w) = (&mut bodies[i], &mut walkers[i]);
         let walking = cycle(run.tick(), ids[i]) < WALK_TICKS;
@@ -186,7 +210,11 @@ struct Names {
 
 fn names() -> Names {
     let model = model_id(MODEL);
-    let (Some(survey), Some(walk), Some(head)) = (anim::clip(model, "Survey"), anim::clip(model, "Walk"), anim::bone(model, "b_Head_05")) else {
+    let (Some(survey), Some(walk), Some(head)) = (
+        anim::clip(model, "Survey"),
+        anim::clip(model, "Walk"),
+        anim::bone(model, "b_Head_05"),
+    ) else {
         panic!("the {MODEL} model lacks a clip or bone the script uses");
     };
     Names { survey, walk, head }
@@ -220,7 +248,11 @@ async fn look_around(u: Unit, head: u16) {
 pub fn target(tick: u64, units: u32) -> [f32; 3] {
     let (cx, cy) = (50.0 * STEP, (units / 100) as f32 * STEP * 0.5);
     let a = tick as f32 * TARGET_RATE;
-    [cx + TARGET_RADIUS * libm::cosf(a), TARGET_HEIGHT, cy + TARGET_RADIUS * libm::sinf(a)]
+    [
+        cx + TARGET_RADIUS * libm::cosf(a),
+        TARGET_HEIGHT,
+        cy + TARGET_RADIUS * libm::sinf(a),
+    ]
 }
 
 #[system(read(Body, Anim, Facing), write(Weapons, Callins))]
@@ -228,7 +260,13 @@ fn aimer(run: &Run) {
     if run.param() & AIM == 0 || run.tick() % AIM_EVERY != 0 {
         return;
     }
-    let (bodies, anims, facings, weapons, posts) = (run.read::<Body>(), run.read::<Anim>(), run.read::<Facing>(), run.write::<Weapons>(), run.write::<Callins>());
+    let (bodies, anims, facings, weapons, posts) = (
+        run.read::<Body>(),
+        run.read::<Anim>(),
+        run.read::<Facing>(),
+        run.write::<Weapons>(),
+        run.write::<Callins>(),
+    );
     let t = target(run.tick(), run.param() as u32);
     for i in run.rows() {
         // From the bone the script named (the root before its first poll).
@@ -288,7 +326,12 @@ async fn unit(u: Unit) {
                 // The head back to the front (and at least a short while,
                 // so it is not given back the tick it arrives), then back
                 // to the clips; stopping first leaves it turned.
-                match race(join(turn_head(u, n.head, 0.0), u.sleep(300)), u.callin(callin::STOPPED_MOVING)).await {
+                match race(
+                    join(turn_head(u, n.head, 0.0), u.sleep(300)),
+                    u.callin(callin::STOPPED_MOVING),
+                )
+                .await
+                {
                     Either::Left(_) => u.update(|a: &mut Anim| {
                         a.release(n.head);
                         u.update(|l: &mut Log| l.backs += 1);
@@ -323,7 +366,13 @@ fn check(run: &Run) {
     if run.param() & AIM == 0 {
         return;
     }
-    let (bodies, anims, facings, weapons, logs) = (run.read::<Body>(), run.read::<Anim>(), run.read::<Facing>(), run.read::<Weapons>(), run.write::<Log>());
+    let (bodies, anims, facings, weapons, logs) = (
+        run.read::<Body>(),
+        run.read::<Anim>(),
+        run.read::<Facing>(),
+        run.read::<Weapons>(),
+        run.write::<Log>(),
+    );
     let head = names().head;
     for i in run.rows() {
         let (w, l) = (&weapons[i], &mut logs[i]);
@@ -334,7 +383,11 @@ fn check(run: &Run) {
         let d = w.dir(0);
         // The angle between them by atan2 (acos is coarse near 0).
         let cos = f[0] * d[0] + f[1] * d[1] + f[2] * d[2];
-        let c = [f[1] * d[2] - f[2] * d[1], f[2] * d[0] - f[0] * d[2], f[0] * d[1] - f[1] * d[0]];
+        let c = [
+            f[1] * d[2] - f[2] * d[1],
+            f[2] * d[0] - f[0] * d[2],
+            f[0] * d[1] - f[1] * d[0],
+        ];
         let sin = libm::sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
         l.aim_err = l.aim_err.max(libm::atan2f(sin, cos).to_degrees());
         l.aims += 1;

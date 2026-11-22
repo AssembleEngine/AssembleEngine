@@ -60,11 +60,18 @@ pub fn changed_rects(old: &Terrain, new: &Terrain, cells: (i32, i32, i32, i32)) 
 
 /// The texture regions for `update`, against the terrain the textures
 /// show (`shown`, then replaced by the update's).
-pub fn edit(editor: &mut TerrainEditor, shown: &mut SharedTerrain, update: &GroundUpdate, relief: f32) -> Option<(TerrainUpdate, usize)> {
+pub fn edit(
+    editor: &mut TerrainEditor,
+    shown: &mut SharedTerrain,
+    update: &GroundUpdate,
+    relief: f32,
+) -> Option<(TerrainUpdate, usize)> {
     let t = &update.terrain;
     let rects = changed_rects(shown, t, update.cells);
     let cx = t.geom.cells_x as usize;
-    let result = editor.edit(update.version, &rects, cell_ground(t, relief), |x, y| t.material[y * cx + x]);
+    let result = editor.edit(update.version, &rects, cell_ground(t, relief), |x, y| {
+        t.material[y * cx + x]
+    });
     *shown = t.clone();
     result.map(|u| (u, rects.len()))
 }
@@ -76,7 +83,13 @@ pub struct GroundThread {
 
 impl GroundThread {
     /// `shown`: the terrain `source` was built from.
-    pub fn start(feed: Arc<GroundFeed>, source: Arc<TerrainSource>, mut shown: SharedTerrain, relief: f32, edits: Arc<Mutex<TerrainEdits>>) -> Self {
+    pub fn start(
+        feed: Arc<GroundFeed>,
+        source: Arc<TerrainSource>,
+        mut shown: SharedTerrain,
+        relief: f32,
+        edits: Arc<Mutex<TerrainEdits>>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
         let handle = std::thread::Builder::new()
@@ -97,7 +110,10 @@ impl GroundThread {
                 }
             })
             .expect("spawn the terrain edit thread");
-        Self { stop, handle: Some(handle) }
+        Self {
+            stop,
+            handle: Some(handle),
+        }
     }
 }
 

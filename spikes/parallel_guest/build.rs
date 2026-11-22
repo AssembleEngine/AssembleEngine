@@ -23,15 +23,31 @@ fn build_guest(out: &std::path::Path, dir: &str, name: &str) -> PathBuf {
     let target_dir = out.join(format!("{dir}-target"));
     let mut cargo = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cargo
-        .args(["build", "--release", "--target", "wasm32-wasip1-threads", "--manifest-path", &format!("{dir}/Cargo.toml")])
+        .args([
+            "build",
+            "--release",
+            "--target",
+            "wasm32-wasip1-threads",
+            "--manifest-path",
+            &format!("{dir}/Cargo.toml"),
+        ])
         .arg("--target-dir")
         .arg(&target_dir);
     // The outer build's flags are for the host target.
-    for var in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
+    for var in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
         cargo.env_remove(var);
     }
     let status = cargo.status().expect("run cargo for a guest module");
-    assert!(status.success(), "guest build failed (is the wasm32-wasip1-threads target installed?)");
+    assert!(
+        status.success(),
+        "guest build failed (is the wasm32-wasip1-threads target installed?)"
+    );
     let wasm = target_dir.join(format!("wasm32-wasip1-threads/release/{name}.wasm"));
     assert!(wasm.exists(), "guest module missing at {}", wasm.display());
     wasm

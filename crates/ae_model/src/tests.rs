@@ -2,19 +2,68 @@ use super::*;
 use crate::pose::{PlayMode, Pose, animated_radius, bake, globals, palette, rest_palette};
 
 fn bone(name: &str, parent: Option<u32>, t: [f32; 3]) -> Bone {
-    Bone { name: name.into(), parent, rest: trs(t, [0.0, 0.0, 0.0, 1.0], [1.0; 3]).to_cols_array(), translation: t, rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }
+    Bone {
+        name: name.into(),
+        parent,
+        rest: trs(t, [0.0, 0.0, 0.0, 1.0], [1.0; 3]).to_cols_array(),
+        translation: t,
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0; 3],
+    }
 }
 
 fn sample_model() -> Model {
-    let tex = ktx::write(&ktx::Image { format: ktx::Format::RGBA8_SRGB, width: 2, height: 1, levels: vec![vec![255, 0, 0, 255, 0, 255, 0, 128], vec![128, 128, 0, 192]] }, true).unwrap();
-    let v = |x: f32, joint: u16| Vertex { position: [x, 0.0, 0.0], normal: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0], color: [65535; 4], joints: [joint, 0, 0, 0], weights: [65535, 0, 0, 0], ..Default::default() };
+    let tex = ktx::write(
+        &ktx::Image {
+            format: ktx::Format::RGBA8_SRGB,
+            width: 2,
+            height: 1,
+            levels: vec![vec![255, 0, 0, 255, 0, 255, 0, 128], vec![128, 128, 0, 192]],
+        },
+        true,
+    )
+    .unwrap();
+    let v = |x: f32, joint: u16| Vertex {
+        position: [x, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        tangent: [1.0, 0.0, 0.0, 1.0],
+        color: [65535; 4],
+        joints: [joint, 0, 0, 0],
+        weights: [65535, 0, 0, 0],
+        ..Default::default()
+    };
     Model {
         bones: vec![bone("root", None, [0.0; 3]), bone("arm", Some(0), [1.0, 0.0, 0.0])],
-        joints: vec![Joint { bone: 0, inverse_bind: Mat4::IDENTITY.to_cols_array() }, Joint { bone: 1, inverse_bind: Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0)).to_cols_array() }],
-        primitives: vec![Primitive { material: 0, layout: Layout::Rigid, first_vertex: 0, vertex_count: 3, first_index: 0, index_count: 3 }],
+        joints: vec![
+            Joint {
+                bone: 0,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+            },
+            Joint {
+                bone: 1,
+                inverse_bind: Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0)).to_cols_array(),
+            },
+        ],
+        primitives: vec![Primitive {
+            material: 0,
+            layout: Layout::Rigid,
+            first_vertex: 0,
+            vertex_count: 3,
+            first_index: 0,
+            index_count: 3,
+        }],
         materials: vec![Material {
             name: "m".into(),
-            base_color_texture: Some(TextureRef { texture: 0, uv: 0, sampler: Sampler::default(), transform: Some(UvTransform { offset: [0.5, 0.0], rotation: 0.3, scale: [2.0, 2.0] }) }),
+            base_color_texture: Some(TextureRef {
+                texture: 0,
+                uv: 0,
+                sampler: Sampler::default(),
+                transform: Some(UvTransform {
+                    offset: [0.5, 0.0],
+                    rotation: 0.3,
+                    scale: [2.0, 2.0],
+                }),
+            }),
             alpha: AlphaMode::Mask { cutoff: 0.5 },
             ..Default::default()
         }],
@@ -26,10 +75,19 @@ fn sample_model() -> Model {
         clips: vec![Clip {
             name: "swing".into(),
             duration: 2.0,
-            channels: vec![Channel { bone: 1, path: Path::Translation, interpolation: Interpolation::Linear, times: Range { offset: 0, len: 2 }, values: Range { offset: 2, len: 6 } }],
+            channels: vec![Channel {
+                bone: 1,
+                path: Path::Translation,
+                interpolation: Interpolation::Linear,
+                times: Range { offset: 0, len: 2 },
+                values: Range { offset: 2, len: 6 },
+            }],
         }],
         clip_data: vec![0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 4.0, 0.0],
-        bounds: Bounds { min: [0.0; 3], max: [2.0, 0.0, 0.0] },
+        bounds: Bounds {
+            min: [0.0; 3],
+            max: [2.0, 0.0, 0.0],
+        },
     }
 }
 
@@ -51,7 +109,12 @@ fn refuses_other_versions_and_bad_references() {
     let m = sample_model();
     let mut bytes = m.to_bytes();
     bytes[8] = 99;
-    assert!(Model::from_bytes(&bytes).unwrap_err().to_string().contains("version 99"));
+    assert!(
+        Model::from_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("version 99")
+    );
     let mut bad = sample_model();
     bad.vertices[1].joints[0] = 7;
     assert!(bad.validate().is_err());
@@ -65,20 +128,38 @@ fn ktx_round_trip_and_the_reference_reader() {
     for format in [ktx::Format::RGBA8_UNORM, ktx::Format::RGBA8_SRGB, ktx::Format::BC7_SRGB] {
         for zstd in [false, true] {
             let (w, h) = (5u32, 3u32);
-            let levels: Vec<Vec<u8>> =
-                (0..3).map(|l| (0..format.level_bytes((w >> l).max(1), (h >> l).max(1)).unwrap()).map(|i| (i * 7 + l * 13) as u8).collect()).collect();
-            let image = ktx::Image { format, width: w, height: h, levels };
+            let levels: Vec<Vec<u8>> = (0..3)
+                .map(|l| {
+                    (0..format.level_bytes((w >> l).max(1), (h >> l).max(1)).unwrap())
+                        .map(|i| (i * 7 + l * 13) as u8)
+                        .collect()
+                })
+                .collect();
+            let image = ktx::Image {
+                format,
+                width: w,
+                height: h,
+                levels,
+            };
             let bytes = ktx::write(&image, zstd).unwrap();
             let back = ktx::read(&bytes).unwrap();
             assert_eq!(back, image, "{format:?} zstd {zstd}");
             let r = ktx2::Reader::new(&bytes[..]).unwrap();
             let dfd = r.basic_dfd().expect("a basic DFD");
-            assert_eq!(dfd.transfer_function == Some(ktx2::TransferFunction::SRGB), format.is_srgb());
+            assert_eq!(
+                dfd.transfer_function == Some(ktx2::TransferFunction::SRGB),
+                format.is_srgb()
+            );
             assert_eq!(r.header().format.map(|f| f.value()), Some(format.0));
         }
     }
     // A level of the wrong size is refused.
-    let bad = ktx::Image { format: ktx::Format::RGBA8_UNORM, width: 2, height: 2, levels: vec![vec![0; 15]] };
+    let bad = ktx::Image {
+        format: ktx::Format::RGBA8_UNORM,
+        width: 2,
+        height: 2,
+        levels: vec![vec![0; 15]],
+    };
     assert!(ktx::write(&bad, false).is_err());
 }
 
@@ -94,7 +175,11 @@ fn pose_and_clip() {
     // Half way from (1, 0, 0) to (1, 4, 0).
     assert!(pose.translation[1].abs_diff_eq(Vec3::new(1.0, 2.0, 0.0), 1e-6));
     let pal = palette(&m, &globals(&m, &pose.locals(&m)));
-    assert!(pal[1].transform_point3(Vec3::new(1.0, 0.0, 0.0)).abs_diff_eq(Vec3::new(1.0, 2.0, 0.0), 1e-6));
+    assert!(
+        pal[1]
+            .transform_point3(Vec3::new(1.0, 0.0, 0.0))
+            .abs_diff_eq(Vec3::new(1.0, 2.0, 0.0), 1e-6)
+    );
     // Held outside the keys.
     pose.sample(&m, 0, 9.0);
     assert!(pose.translation[1].abs_diff_eq(Vec3::new(1.0, 4.0, 0.0), 1e-6));
@@ -106,7 +191,13 @@ fn step_slerp_and_cubic() {
     // Rotation, linear: a quarter turn about +Y over 1 s; half way is an eighth.
     let q = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
     m.clip_data = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0, q.x, q.y, q.z, q.w];
-    m.clips[0].channels[0] = Channel { bone: 1, path: Path::Rotation, interpolation: Interpolation::Linear, times: Range { offset: 0, len: 2 }, values: Range { offset: 2, len: 8 } };
+    m.clips[0].channels[0] = Channel {
+        bone: 1,
+        path: Path::Rotation,
+        interpolation: Interpolation::Linear,
+        times: Range { offset: 0, len: 2 },
+        values: Range { offset: 2, len: 8 },
+    };
     m.validate().unwrap();
     let mut pose = Pose::rest(&m);
     pose.sample(&m, 0, 0.5);
@@ -115,8 +206,16 @@ fn step_slerp_and_cubic() {
     pose.sample(&m, 0, 0.99);
     assert!(pose.rotation[1].abs_diff_eq(Quat::IDENTITY, 1e-6));
     // Cubic spline, translation, zero tangents: smoothstep between the keys.
-    m.clip_data = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    m.clips[0].channels[0] = Channel { bone: 1, path: Path::Translation, interpolation: Interpolation::CubicSpline, times: Range { offset: 0, len: 2 }, values: Range { offset: 2, len: 18 } };
+    m.clip_data = vec![
+        0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ];
+    m.clips[0].channels[0] = Channel {
+        bone: 1,
+        path: Path::Translation,
+        interpolation: Interpolation::CubicSpline,
+        times: Range { offset: 0, len: 2 },
+        values: Range { offset: 2, len: 18 },
+    };
     m.validate().unwrap();
     pose.sample(&m, 0, 0.25);
     let s: f32 = 0.25;
@@ -146,9 +245,15 @@ fn baked_clips_match_the_sampler_and_loop() {
         assert!(back[1].abs_diff_eq(got[1], 1e-4), "t {t} on the way back");
         let forth = baked.locals(&m, 4.0 * baked.duration + t, PlayMode::PingPong);
         assert!(forth[1].abs_diff_eq(got[1], 1e-4), "t {t} forwards again");
-        assert!(baked.locals(&m, t, PlayMode::Once)[1].abs_diff_eq(got[1], 1e-4), "t {t} once");
+        assert!(
+            baked.locals(&m, t, PlayMode::Once)[1].abs_diff_eq(got[1], 1e-4),
+            "t {t} once"
+        );
         let held = baked.locals(&m, baked.duration + 5.0 + t, PlayMode::Once);
-        assert!(held[1].abs_diff_eq(baked.locals(&m, baked.duration, PlayMode::Once)[1], 1e-6), "t {t}: once holds the last frame");
+        assert!(
+            held[1].abs_diff_eq(baked.locals(&m, baked.duration, PlayMode::Once)[1], 1e-6),
+            "t {t}: once holds the last frame"
+        );
     }
     // A duration that is not a whole number of frames: the rate rounds up
     // so the last frame falls on it.
@@ -166,7 +271,13 @@ fn baked_clips_match_the_sampler_and_loop() {
     let q = -Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
     m.clip_data = vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0, q.x, q.y, q.z, q.w];
     m.clips[0].duration = 1.0;
-    m.clips[0].channels[0] = Channel { bone: 1, path: Path::Rotation, interpolation: Interpolation::Linear, times: Range { offset: 0, len: 2 }, values: Range { offset: 2, len: 8 } };
+    m.clips[0].channels[0] = Channel {
+        bone: 1,
+        path: Path::Rotation,
+        interpolation: Interpolation::Linear,
+        times: Range { offset: 0, len: 2 },
+        values: Range { offset: 2, len: 8 },
+    };
     m.validate().unwrap();
     let baked = bake(&m, 0);
     assert!(baked.keys.windows(2).all(|k| k[0].r.dot(k[1].r) >= 0.0));
@@ -207,14 +318,21 @@ fn turned_reach_bounds_any_turn() {
     let mut scaled = sample_model();
     scaled.bones[0].scale = [2.0; 3];
     scaled.bones[0].rest = Mat4::from_scale(Vec3::splat(2.0)).to_cols_array();
-    assert!((turned_reach(&scaled) - 2.0 * want).abs() < 1e-3, "{}", turned_reach(&scaled));
+    assert!(
+        (turned_reach(&scaled) - 2.0 * want).abs() < 1e-3,
+        "{}",
+        turned_reach(&scaled)
+    );
     // Any turn of the bones stays within it: the arm turned straight out.
     let mut pose = Pose::rest(&m);
     pose.sample(&m, 0, 2.0);
     pose.rotation[1] = Quat::from_rotation_z(4f32.atan2(1.0));
     let far = palette(&m, &globals(&m, &pose.locals(&m)));
     let tip = far[1].transform_point3(Vec3::new(2.0, 0.0, 0.0));
-    assert!((tip.length() - (17f32.sqrt() + 1.0)).abs() < 1e-4 && tip.length() <= turned_reach(&m), "{tip}");
+    assert!(
+        (tip.length() - (17f32.sqrt() + 1.0)).abs() < 1e-4 && tip.length() <= turned_reach(&m),
+        "{tip}"
+    );
     // Nothing moves without joints.
     let mut rigid = still;
     rigid.joints.clear();
@@ -226,26 +344,43 @@ fn rig_bounds_of_a_pose() {
     use crate::anim::{Channels, Layer, Manual, Rig, manual_flags, manual_kind};
     let m = sample_model();
     let rig = Rig::new(&m);
-    let close = |b: Bounds, min: [f32; 3], max: [f32; 3]| (0..3).all(|i| (b.min[i] - min[i]).abs() < 1e-5 && (b.max[i] - max[i]).abs() < 1e-5);
+    let close = |b: Bounds, min: [f32; 3], max: [f32; 3]| {
+        (0..3).all(|i| (b.min[i] - min[i]).abs() < 1e-5 && (b.max[i] - max[i]).abs() < 1e-5)
+    };
     // At rest: the model's rest bounds.
     let rest = rig.bounds(&Channels::default());
     assert!(close(rest, m.bounds.min, m.bounds.max), "{rest:?}");
     // Halfway through the clip the arm is at (1, 2, 0), its tip 1 further.
     let mut ch = Channels::default();
-    ch.layers[0] = Layer { clip: 1, weight: 1.0, target: 1.0, phase: 1.0, ..Default::default() };
+    ch.layers[0] = Layer {
+        clip: 1,
+        weight: 1.0,
+        target: 1.0,
+        phase: 1.0,
+        ..Default::default()
+    };
     let b = rig.bounds(&ch);
     assert!(close(b, [0.0; 3], [2.0, 2.0, 0.0]), "{b:?}");
     // The arm turned a quarter about z (manual, over the clip): its tip at
     // (1, 1, 0).
     let s = std::f32::consts::FRAC_1_SQRT_2;
-    ch.manual[0] = Manual { bone: 1, kind: manual_kind::TURN, value: [0.0, 0.0, s, s], target: [0.0, 0.0, s, s], ..Default::default() };
+    ch.manual[0] = Manual {
+        bone: 1,
+        kind: manual_kind::TURN,
+        value: [0.0, 0.0, s, s],
+        target: [0.0, 0.0, s, s],
+        ..Default::default()
+    };
     let b = rig.bounds(&ch);
     assert!(close(b, [0.0; 3], [1.0, 1.0, 0.0]), "{b:?}");
     // A command not taken yet is not shown: the clip has the arm.
     ch.manual[0].flags = manual_flags::PENDING | manual_flags::FRESH;
     assert!(close(rig.bounds(&ch), [0.0; 3], [2.0, 2.0, 0.0]));
     // Nothing to bound without vertices.
-    assert_eq!(Rig::new(&Model::default()).bounds(&Channels::default()), Bounds::default());
+    assert_eq!(
+        Rig::new(&Model::default()).bounds(&Channels::default()),
+        Bounds::default()
+    );
 }
 
 #[test]
@@ -260,15 +395,25 @@ fn gltf_axes() {
 #[test]
 fn uv_transform_matrix() {
     // KHR_texture_transform's own example order: T * R * S.
-    let t = UvTransform { offset: [0.5, 0.25], rotation: 0.4, scale: [2.0, 3.0] };
+    let t = UvTransform {
+        offset: [0.5, 0.25],
+        rotation: 0.4,
+        scale: [2.0, 3.0],
+    };
     let m = t.matrix();
     let uv = [0.3f32, 0.7];
-    let got = [m[0][0] * uv[0] + m[1][0] * uv[1] + m[2][0], m[0][1] * uv[0] + m[1][1] * uv[1] + m[2][1]];
+    let got = [
+        m[0][0] * uv[0] + m[1][0] * uv[1] + m[2][0],
+        m[0][1] * uv[0] + m[1][1] * uv[1] + m[2][1],
+    ];
     let (s, c) = 0.4f32.sin_cos();
     let (x, y) = (uv[0] * 2.0, uv[1] * 3.0);
     // The extension's rotation matrix: [c s; -s c].
     let want = [c * x + s * y + 0.5, -s * x + c * y + 0.25];
-    assert!((got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6, "{got:?} {want:?}");
+    assert!(
+        (got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6,
+        "{got:?} {want:?}"
+    );
 }
 
 #[test]
@@ -277,25 +422,71 @@ fn merge_by_material_and_layout() {
     let mut skinned = m.vertices[0];
     skinned.joints = [0, 1, 0, 0];
     skinned.weights = [30000, 35535, 0, 0];
-    let piece = |x: f32, joint: u16| Vertex { position: [x, 1.0, 0.0], joints: [joint, 0, 0, 0], weights: [65535, 0, 0, 0], ..m.vertices[0] };
+    let piece = |x: f32, joint: u16| Vertex {
+        position: [x, 1.0, 0.0],
+        joints: [joint, 0, 0, 0],
+        weights: [65535, 0, 0, 0],
+        ..m.vertices[0]
+    };
     // Primitive 0 (rigid, joint 0..1), a second rigid piece on joint 1 with
     // the same material, and a skinned triangle with it too.
-    m.vertices.extend([piece(0.0, 1), piece(1.0, 1), piece(2.0, 1), skinned, skinned, skinned]);
+    m.vertices
+        .extend([piece(0.0, 1), piece(1.0, 1), piece(2.0, 1), skinned, skinned, skinned]);
     m.indices.extend([2, 1, 0, 0, 1, 2]);
-    m.primitives.push(Primitive { material: 0, layout: Layout::Skinned, first_vertex: 3, vertex_count: 3, first_index: 3, index_count: 3 });
-    m.primitives.push(Primitive { material: 0, layout: Layout::Skinned, first_vertex: 6, vertex_count: 3, first_index: 6, index_count: 3 });
+    m.primitives.push(Primitive {
+        material: 0,
+        layout: Layout::Skinned,
+        first_vertex: 3,
+        vertex_count: 3,
+        first_index: 3,
+        index_count: 3,
+    });
+    m.primitives.push(Primitive {
+        material: 0,
+        layout: Layout::Skinned,
+        first_vertex: 6,
+        vertex_count: 3,
+        first_index: 6,
+        index_count: 3,
+    });
     m.validate().unwrap();
-    let before: Vec<[f32; 3]> = m.primitives.iter().flat_map(|p| m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|&i| m.vertices[(p.first_vertex + i) as usize].position)).collect();
+    let before: Vec<[f32; 3]> = m
+        .primitives
+        .iter()
+        .flat_map(|p| {
+            m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize]
+                .iter()
+                .map(|&i| m.vertices[(p.first_vertex + i) as usize].position)
+        })
+        .collect();
     m.merge_primitives();
     m.validate().unwrap();
-    assert_eq!(m.primitives.iter().map(|p| (p.layout, p.vertex_count, p.index_count)).collect::<Vec<_>>(), [(Layout::Rigid, 6, 6), (Layout::Skinned, 3, 3)]);
+    assert_eq!(
+        m.primitives
+            .iter()
+            .map(|p| (p.layout, p.vertex_count, p.index_count))
+            .collect::<Vec<_>>(),
+        [(Layout::Rigid, 6, 6), (Layout::Skinned, 3, 3)]
+    );
     // The same triangles, in the same order.
-    let after: Vec<[f32; 3]> = m.primitives.iter().flat_map(|p| m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|&i| m.vertices[(p.first_vertex + i) as usize].position)).collect();
+    let after: Vec<[f32; 3]> = m
+        .primitives
+        .iter()
+        .flat_map(|p| {
+            m.indices[p.first_index as usize..(p.first_index + p.index_count) as usize]
+                .iter()
+                .map(|&i| m.vertices[(p.first_vertex + i) as usize].position)
+        })
+        .collect();
     assert_eq!(before, after);
     let rigid = m.gpu_words(&m.primitives[0]);
     assert_eq!(rigid.len(), 6 * RIGID_WORDS);
     assert_eq!(rigid[RIGID_WORDS * 3 + 16], 1, "the piece's joint");
-    assert_eq!(f32::from_bits(rigid[RIGID_WORDS * 4]), 1.0, "position x of the second piece's second vertex");
+    assert_eq!(
+        f32::from_bits(rigid[RIGID_WORDS * 4]),
+        1.0,
+        "position x of the second piece's second vertex"
+    );
     let skin = m.gpu_words(&m.primitives[1]);
     assert_eq!(skin.len(), 3 * SKINNED_WORDS);
     assert_eq!(&skin[16..20], &[1 << 16, 0, 30000 | 35535 << 16, 0]);
@@ -314,8 +505,18 @@ mod anim_tests {
     /// about +Y over 1 s; clip 2 lifts `tip` by 1 over 1 s.
     fn model() -> Model {
         let mut m = sample_model();
-        m.bones = vec![bone("root", None, [0.0; 3]), bone("left", Some(0), [0.0, 0.0, 1.0]), bone("right", Some(0), [0.0, 0.0, -1.0]), bone("tip", Some(1), [1.0, 0.0, 0.0])];
-        m.joints = (0..4).map(|b| Joint { bone: b, inverse_bind: Mat4::IDENTITY.to_cols_array() }).collect();
+        m.bones = vec![
+            bone("root", None, [0.0; 3]),
+            bone("left", Some(0), [0.0, 0.0, 1.0]),
+            bone("right", Some(0), [0.0, 0.0, -1.0]),
+            bone("tip", Some(1), [1.0, 0.0, 0.0]),
+        ];
+        m.joints = (0..4)
+            .map(|b| Joint {
+                bone: b,
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+            })
+            .collect();
         let q = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         #[rustfmt::skip]
         let data = vec![
@@ -327,11 +528,32 @@ mod anim_tests {
             1.0, 0.0, 0.0, 1.0, 1.0, 0.0, // 24: tip's lift
         ];
         let r = |offset, len| Range { offset, len };
-        let ch = |bone, path, times, values| Channel { bone, path, interpolation: Interpolation::Linear, times, values };
+        let ch = |bone, path, times, values| Channel {
+            bone,
+            path,
+            interpolation: Interpolation::Linear,
+            times,
+            values,
+        };
         m.clips = vec![
-            Clip { name: "rise".into(), duration: 2.0, channels: vec![ch(1, Path::Translation, r(0, 2), r(2, 6)), ch(2, Path::Translation, r(0, 2), r(8, 6))] },
-            Clip { name: "turn".into(), duration: 1.0, channels: vec![ch(1, Path::Rotation, r(14, 2), r(16, 8))] },
-            Clip { name: "lift".into(), duration: 1.0, channels: vec![ch(3, Path::Translation, r(14, 2), r(24, 6))] },
+            Clip {
+                name: "rise".into(),
+                duration: 2.0,
+                channels: vec![
+                    ch(1, Path::Translation, r(0, 2), r(2, 6)),
+                    ch(2, Path::Translation, r(0, 2), r(8, 6)),
+                ],
+            },
+            Clip {
+                name: "turn".into(),
+                duration: 1.0,
+                channels: vec![ch(1, Path::Rotation, r(14, 2), r(16, 8))],
+            },
+            Clip {
+                name: "lift".into(),
+                duration: 1.0,
+                channels: vec![ch(3, Path::Translation, r(14, 2), r(24, 6))],
+            },
         ];
         m.clip_data = data;
         m.validate().unwrap();
@@ -351,13 +573,23 @@ mod anim_tests {
     fn assert_close(got: &[Affine], want: &[Mat4], eps: f32, what: &str) {
         for (k, (g, w)) in got.iter().zip(want).enumerate() {
             let w = affine_of_cols(&w.to_cols_array());
-            assert!(g.iter().zip(&w).all(|(a, b)| (a - b).abs() <= eps), "{what}: joint {k}: {g:?} vs {w:?}");
+            assert!(
+                g.iter().zip(&w).all(|(a, b)| (a - b).abs() <= eps),
+                "{what}: joint {k}: {g:?} vs {w:?}"
+            );
         }
     }
 
     fn layer(clip: u16, phase: f32) -> Layer {
         // `clip` is the model's index; layers number clips from 1.
-        Layer { clip: clip + 1, weight: 1.0, target: 1.0, speed: 1.0, phase, ..Default::default() }
+        Layer {
+            clip: clip + 1,
+            weight: 1.0,
+            target: 1.0,
+            speed: 1.0,
+            phase,
+            ..Default::default()
+        }
     }
 
     /// The rest pose, and a clip at full weight, as the glam path draws them.
@@ -388,25 +620,44 @@ mod anim_tests {
         assert_eq!(rig.mask("left"), Some(only_left));
         assert_eq!(rig.subtree(left), vec![0.0, 1.0, 0.0, 1.0]);
         let mut ch = Channels::default();
-        ch.layers[0] = Layer { mask: only_left, ..layer(0, 1.0) };
+        ch.layers[0] = Layer {
+            mask: only_left,
+            ..layer(0, 1.0)
+        };
         let p = palette_of(&rig, &ch);
         assert_eq!(p[1][7], 1.0, "left risen half way");
         assert_eq!(p[2], palette_of(&rig, &Channels::default())[2], "right untouched");
         assert_eq!(p[3][7], 1.0, "the tip rides on left");
-        ch.layers[0] = Layer { weight: 0.5, ..layer(0, 2.0 - 1e-6) };
-        assert!((palette_of(&rig, &ch)[2][7] - 1.0).abs() < 1e-4, "half weight: half of the full rise");
+        ch.layers[0] = Layer {
+            weight: 0.5,
+            ..layer(0, 2.0 - 1e-6)
+        };
+        assert!(
+            (palette_of(&rig, &ch)[2][7] - 1.0).abs() < 1e-4,
+            "half weight: half of the full rise"
+        );
         let mut w = vec![0.0; 4];
         w[2] = 0.25;
         let quarter = rig.add_mask("quarter right", w);
-        ch.layers[0] = Layer { mask: quarter, ..layer(0, 2.0 - 1e-6) };
+        ch.layers[0] = Layer {
+            mask: quarter,
+            ..layer(0, 2.0 - 1e-6)
+        };
         let p = palette_of(&rig, &ch);
         assert!((p[2][7] - 0.5).abs() < 1e-4 && p[1][7] == 0.0);
         // A second blend layer over the first.
         ch.layers[0] = layer(0, 1.0);
-        ch.layers[1] = Layer { mask: only_left, ..layer(1, 1.0 - 1e-6) };
+        ch.layers[1] = Layer {
+            mask: only_left,
+            ..layer(1, 1.0 - 1e-6)
+        };
         let p = palette_of(&rig, &ch);
         assert_eq!(p[2][7], 1.0, "right still rises");
-        assert!(p[3][11].abs() < 1e-4 && (p[3][3]).abs() < 1e-4, "left turned a quarter: the tip at {:?}", p[3]);
+        assert!(
+            p[3][11].abs() < 1e-4 && (p[3][3]).abs() < 1e-4,
+            "left turned a quarter: the tip at {:?}",
+            p[3]
+        );
     }
 
     /// An additive layer adds its clip's change from its first frame: at
@@ -418,8 +669,19 @@ mod anim_tests {
         let mut ch = Channels::default();
         ch.layers[0] = layer(0, 1.0);
         let base = palette_of(&rig, &ch);
-        ch.layers[1] = Layer { kind: kind::ADDITIVE, ..layer(0, 0.0) };
-        assert_close(&palette_of(&rig, &ch), &base.iter().map(|a| Mat4::from_cols_array(&cols_of(a))).collect::<Vec<_>>(), 1e-6, "additive at its reference");
+        ch.layers[1] = Layer {
+            kind: kind::ADDITIVE,
+            ..layer(0, 0.0)
+        };
+        assert_close(
+            &palette_of(&rig, &ch),
+            &base
+                .iter()
+                .map(|a| Mat4::from_cols_array(&cols_of(a)))
+                .collect::<Vec<_>>(),
+            1e-6,
+            "additive at its reference",
+        );
         ch.layers[1].phase = 1.0;
         assert_eq!(palette_of(&rig, &ch)[1][7], 2.0, "half way plus half way");
         ch.layers[1].weight = 0.5;
@@ -427,7 +689,9 @@ mod anim_tests {
     }
 
     fn cols_of(a: &Affine) -> [f32; 16] {
-        [a[0], a[4], a[8], 0.0, a[1], a[5], a[9], 0.0, a[2], a[6], a[10], 0.0, a[3], a[7], a[11], 1.0]
+        [
+            a[0], a[4], a[8], 0.0, a[1], a[5], a[9], 0.0, a[2], a[6], a[10], 0.0, a[3], a[7], a[11], 1.0,
+        ]
     }
 
     /// The ticker: fades, phases, play modes, ground speed.
@@ -436,7 +700,12 @@ mod anim_tests {
         let rig = Rig::new(&model());
         let dt = 1.0 / 30.0;
         let mut ch = Channels::default();
-        ch.layers[0] = Layer { weight: 0.0, target: 1.0, fade: 5.0, ..layer(1, 0.0) };
+        ch.layers[0] = Layer {
+            weight: 0.0,
+            target: 1.0,
+            fade: 5.0,
+            ..layer(1, 0.0)
+        };
         let mut ticks = 0;
         while ch.layers[0].weight < 1.0 {
             rig.advance(&mut ch, dt, 0.0);
@@ -447,7 +716,11 @@ mod anim_tests {
         for _ in 0..30 {
             rig.advance(&mut ch, dt, 0.0);
         }
-        assert!(ch.layers[0].phase >= 0.0 && ch.layers[0].phase < 1.0, "looped: {}", ch.layers[0].phase);
+        assert!(
+            ch.layers[0].phase >= 0.0 && ch.layers[0].phase < 1.0,
+            "looped: {}",
+            ch.layers[0].phase
+        );
         assert!((ch.layers[0].phase - 0.2).abs() < 1e-4);
         // Fading out clears the layer.
         ch.layers[0].target = 0.0;
@@ -456,7 +729,10 @@ mod anim_tests {
         }
         assert!(ch.layers[0].is_empty());
         // Once: ends and holds.
-        ch.layers[0] = Layer { mode: PlayMode::Once as u8, ..layer(1, 0.9) };
+        ch.layers[0] = Layer {
+            mode: PlayMode::Once as u8,
+            ..layer(1, 0.9)
+        };
         rig.advance(&mut ch, dt, 0.0);
         assert!(!ch.layers[0].ended());
         for _ in 0..3 {
@@ -464,10 +740,17 @@ mod anim_tests {
         }
         assert!(ch.layers[0].ended() && ch.layers[0].phase == 1.0);
         // Ping-pong keeps two lengths; ground speed scales the clip.
-        ch.layers[0] = Layer { mode: PlayMode::PingPong as u8, ..layer(1, 1.9) };
+        ch.layers[0] = Layer {
+            mode: PlayMode::PingPong as u8,
+            ..layer(1, 1.9)
+        };
         rig.advance(&mut ch, 0.2, 0.0);
         assert!((ch.layers[0].phase - 0.1).abs() < 1e-5);
-        ch.layers[0] = Layer { flags: layer_flags::GROUND_SPEED, speed: 0.1, ..layer(0, 0.0) };
+        ch.layers[0] = Layer {
+            flags: layer_flags::GROUND_SPEED,
+            speed: 0.1,
+            ..layer(0, 0.0)
+        };
         rig.advance(&mut ch, 0.5, 6.0);
         assert!((ch.layers[0].phase - 0.3).abs() < 1e-6, "6 m/s for 0.5 s at 0.1 s/m");
     }
@@ -475,7 +758,14 @@ mod anim_tests {
     /// A command as the SDK leaves it: pending, and fresh unless it replaces
     /// an entry.
     fn command(bone: u16, kind: u8, target: [f32; 4], speed: f32) -> Manual {
-        Manual { bone, kind, flags: manual_flags::PENDING | manual_flags::FRESH, target, speed, ..Default::default() }
+        Manual {
+            bone,
+            kind,
+            flags: manual_flags::PENDING | manual_flags::FRESH,
+            target,
+            speed,
+            ..Default::default()
+        }
     }
 
     fn reissue(m: &mut Manual, target: [f32; 4]) {
@@ -502,9 +792,17 @@ mod anim_tests {
         let up = |angle| [0.0, 1.0, 0.0, angle];
         let mut ch = Channels::default();
         ch.manual[0] = command(1, manual_kind::TURN, up(pi / 2.0), pi);
-        assert_eq!(ticks_until_done(&rig, &mut ch, 0), 15, "a quarter turn at half a turn a second");
+        assert_eq!(
+            ticks_until_done(&rig, &mut ch, 0),
+            15,
+            "a quarter turn at half a turn a second"
+        );
         let p = palette_of(&rig, &ch);
-        assert!(p[3][11].abs() < 1e-5 && p[3][3].abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
+        assert!(
+            p[3][11].abs() < 1e-5 && p[3][3].abs() < 1e-5,
+            "tip turned onto -Z of left: {:?}",
+            p[3]
+        );
         // Back to rest, then to 270°: the long way, through +90°.
         reissue(&mut ch.manual[0], up(0.0));
         ticks_until_done(&rig, &mut ch, 0);
@@ -513,14 +811,26 @@ mod anim_tests {
             rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         }
         let p = palette_of(&rig, &ch);
-        assert!(p[3][11].abs() < 1e-4 && p[3][3].abs() < 1e-4, "through +90°: {:?}", p[3]);
+        assert!(
+            p[3][11].abs() < 1e-4 && p[3][3].abs() < 1e-4,
+            "through +90°: {:?}",
+            p[3]
+        );
         assert_eq!(ticks_until_done(&rig, &mut ch, 0), 30);
         let p = palette_of(&rig, &ch);
-        assert!((p[3][11] - 2.0).abs() < 1e-4 && p[3][3].abs() < 1e-4, "at 270° (-90°): {:?}", p[3]);
+        assert!(
+            (p[3][11] - 2.0).abs() < 1e-4 && p[3][3].abs() < 1e-4,
+            "at 270° (-90°): {:?}",
+            p[3]
+        );
         // Ramps: from rest with 2π/s² up and down, a quarter turn takes
         // 2·sqrt(θ/a) = 1 s, peaking at π/s (give or take a tick).
         let mut ch = Channels::default();
-        ch.manual[0] = Manual { accel: 2.0 * pi, decel: 2.0 * pi, ..command(1, manual_kind::TURN, up(pi / 2.0), 10.0) };
+        ch.manual[0] = Manual {
+            accel: 2.0 * pi,
+            decel: 2.0 * pi,
+            ..command(1, manual_kind::TURN, up(pi / 2.0), 10.0)
+        };
         let mut peak = 0.0f32;
         let mut ticks = 0;
         while !ch.manual[0].done() {
@@ -532,7 +842,10 @@ mod anim_tests {
         assert!(peak > 0.9 * pi && peak < 1.01 * pi, "top speed reached {peak}");
         // Given again mid-way, a turn goes on as if it had not been.
         let mut a = Channels::default();
-        a.manual[0] = Manual { accel: 2.0 * pi, ..command(1, manual_kind::TURN, up(pi / 2.0), pi) };
+        a.manual[0] = Manual {
+            accel: 2.0 * pi,
+            ..command(1, manual_kind::TURN, up(pi / 2.0), pi)
+        };
         for _ in 0..5 {
             rig.advance(&mut a, 1.0 / 30.0, 0.0);
         }
@@ -554,11 +867,22 @@ mod anim_tests {
         ch.manual[0] = command(1, manual_kind::TURN, up(pi / 2.0), 0.0);
         rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         let p = palette_of(&rig, &ch);
-        assert!(p[3][3].abs() < 1e-5 && p[3][7].abs() < 1e-5 && p[3][11].abs() < 1e-5, "tip turned onto -Z of left: {:?}", p[3]);
-        ch.manual[0] = Manual { flags: manual_flags::PENDING | manual_flags::FRESH | manual_flags::BONE_AXIS, ..command(1, manual_kind::TURN, [0.0, 0.0, 1.0, pi / 2.0], 0.0) };
+        assert!(
+            p[3][3].abs() < 1e-5 && p[3][7].abs() < 1e-5 && p[3][11].abs() < 1e-5,
+            "tip turned onto -Z of left: {:?}",
+            p[3]
+        );
+        ch.manual[0] = Manual {
+            flags: manual_flags::PENDING | manual_flags::FRESH | manual_flags::BONE_AXIS,
+            ..command(1, manual_kind::TURN, [0.0, 0.0, 1.0, pi / 2.0], 0.0)
+        };
         rig.advance(&mut ch, 1.0 / 30.0, 0.0);
         let p = palette_of(&rig, &ch);
-        assert!((p[3][11] - 2.0).abs() < 1e-5, "about the bone's Z (the model's -Y): onto +Z: {:?}", p[3]);
+        assert!(
+            (p[3][11] - 2.0).abs() < 1e-5,
+            "about the bone's Z (the model's -Y): onto +Z: {:?}",
+            p[3]
+        );
     }
 
     /// Aiming: a direction as a bone sees it, with its parents where they
@@ -570,14 +894,20 @@ mod anim_tests {
         let pi = std::f32::consts::PI;
         let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
         let mut ch = Channels::default();
-        assert!(close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]), "parents at rest");
+        assert!(
+            close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]),
+            "parents at rest"
+        );
         // `left` told to turn a quarter about up: the tip sees the model's +X
         // where its own +Z was at rest.
         ch.manual[0] = command(1, manual_kind::TURN, [0.0, 1.0, 0.0, pi / 2.0], 1.0);
         let d = rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]);
         assert!(close(d, [0.0, 0.0, 1.0]), "{d:?}");
         rig.advance(&mut ch, 1.0 / 30.0, 0.0);
-        assert!(close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), d), "where it is going, not where it is");
+        assert!(
+            close(rig.dir_in(&ch, 3, [1.0, 0.0, 0.0]), d),
+            "where it is going, not where it is"
+        );
         // A clip turning `left` a quarter: the same, now.
         let mut ch = Channels::default();
         ch.layers[0] = layer(1, 1.0 - 1e-6);
@@ -593,10 +923,19 @@ mod anim_tests {
         long.manual[0].speed = 1.0;
         let mut short = long;
         short.manual[0].flags |= manual_flags::SHORT;
-        let (lt, st) = (ticks_until_done(&rig, &mut long, 0), ticks_until_done(&rig, &mut short, 0));
+        let (lt, st) = (
+            ticks_until_done(&rig, &mut long, 0),
+            ticks_until_done(&rig, &mut short, 0),
+        );
         assert_eq!((lt, st), (179, 11), "340° and 20° at 1 rad/s (178.02 and 10.5 ticks)");
         let (pl, ps) = (palette_of(&rig, &long), palette_of(&rig, &short));
-        assert!(pl.iter().flatten().zip(ps.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-4), "the same place");
+        assert!(
+            pl.iter()
+                .flatten()
+                .zip(ps.iter().flatten())
+                .all(|(a, b)| (a - b).abs() < 1e-4),
+            "the same place"
+        );
     }
 
     /// A bone with a manual entry takes no clip (its children still do); a
@@ -609,8 +948,14 @@ mod anim_tests {
         let dt = 1.0 / 30.0;
         let mut ch = Channels::default();
         // Clip "turn" has `left` a quarter round; "lift" raises `tip` (held).
-        ch.layers[0] = Layer { speed: 0.0, ..layer(1, 1.0 - 1e-6) };
-        ch.layers[1] = Layer { speed: 0.0, ..layer(2, 1.0 - 1e-6) };
+        ch.layers[0] = Layer {
+            speed: 0.0,
+            ..layer(1, 1.0 - 1e-6)
+        };
+        ch.layers[1] = Layer {
+            speed: 0.0,
+            ..layer(2, 1.0 - 1e-6)
+        };
         let quarter = palette_of(&rig, &ch);
         ch.manual[0] = command(1, manual_kind::TURN, [0.0, 0.0, 1.0, 0.0], 1.0);
         assert_eq!(palette_of(&rig, &ch), quarter, "a fresh entry shows nothing yet");
@@ -618,11 +963,25 @@ mod anim_tests {
         let mut started = ch;
         shown.advance(&mut started, 0.0, 0.0);
         let p = palette_of(&rig, &started);
-        assert!(p.iter().flatten().zip(quarter.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-5), "started where the clip had it");
+        assert!(
+            p.iter()
+                .flatten()
+                .zip(quarter.iter().flatten())
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "started where the clip had it"
+        );
         ticks_until_done(&rig, &mut started, 0);
         let p = palette_of(&rig, &started);
-        assert!((p[3][3] - 1.0).abs() < 1e-4 && (p[3][11] - 1.0).abs() < 1e-4, "left back at rest, the clip's turn gone: {:?}", p[3]);
-        assert!((p[3][7] - 1.0).abs() < 1e-4, "the tip still lifted by its clip: {:?}", p[3]);
+        assert!(
+            (p[3][3] - 1.0).abs() < 1e-4 && (p[3][11] - 1.0).abs() < 1e-4,
+            "left back at rest, the clip's turn gone: {:?}",
+            p[3]
+        );
+        assert!(
+            (p[3][7] - 1.0).abs() < 1e-4,
+            "the tip still lifted by its clip: {:?}",
+            p[3]
+        );
         // Playing a clip on `left` takes it back.
         started.layers[0].flags |= layer_flags::NEW;
         rig.advance(&mut started, 0.0, 0.0);
@@ -634,12 +993,20 @@ mod anim_tests {
         rig.advance(&mut started, 0.0, 0.0);
         assert!(!started.manual[0].is_empty());
         started.layers[1].flags |= layer_flags::NEW;
-        started.layers[2] = Layer { kind: kind::ADDITIVE, flags: layer_flags::NEW, ..layer(1, 0.0) };
+        started.layers[2] = Layer {
+            kind: kind::ADDITIVE,
+            flags: layer_flags::NEW,
+            ..layer(1, 0.0)
+        };
         rig.advance(&mut started, 0.0, 0.0);
         assert!(!started.manual[0].is_empty());
         // A spin speeds up and down by its ramps, staying on the rest side.
         let mut ch = Channels::default();
-        ch.manual[3] = Manual { accel: 8.0 * pi, decel: 8.0 * pi, ..command(2, manual_kind::SPIN, [0.0, 1.0, 0.0, 0.0], 4.0 * pi) };
+        ch.manual[3] = Manual {
+            accel: 8.0 * pi,
+            decel: 8.0 * pi,
+            ..command(2, manual_kind::SPIN, [0.0, 1.0, 0.0, 0.0], 4.0 * pi)
+        };
         assert_eq!(ticks_until_done(&rig, &mut ch, 3), 15);
         assert_eq!(ch.manual[3].rate, 4.0 * pi);
         for _ in 0..40 {
@@ -654,7 +1021,11 @@ mod anim_tests {
         rig.advance(&mut ch, dt, 0.0);
         let p = palette_of(&rig, &ch);
         assert_eq!((p[1][7], p[1][0], p[1][11]), (2.0, 2.0, 1.0));
-        assert!((p[3][3] - 2.0).abs() < 1e-5, "the tip rides on the scaled bone: {:?}", p[3]);
+        assert!(
+            (p[3][3] - 2.0).abs() < 1e-5,
+            "the tip rides on the scaled bone: {:?}",
+            p[3]
+        );
     }
 
     /// The same channels give the same bits.
@@ -663,9 +1034,20 @@ mod anim_tests {
         let rig = Rig::new(&model());
         let mut ch = Channels::default();
         ch.layers[0] = layer(0, 0.3);
-        ch.layers[1] = Layer { kind: kind::ADDITIVE, weight: 0.3, ..layer(1, 0.6) };
-        ch.manual[0] = Manual { accel: 3.0, decel: 2.0, ..command(3, manual_kind::TURN, [0.3, 0.0, 1.0, 1.0], 2.0) };
-        ch.manual[1] = Manual { accel: 3.0, ..command(2, manual_kind::SPIN, [1.0, 1.0, 0.0, 0.0], 5.0) };
+        ch.layers[1] = Layer {
+            kind: kind::ADDITIVE,
+            weight: 0.3,
+            ..layer(1, 0.6)
+        };
+        ch.manual[0] = Manual {
+            accel: 3.0,
+            decel: 2.0,
+            ..command(3, manual_kind::TURN, [0.3, 0.0, 1.0, 1.0], 2.0)
+        };
+        ch.manual[1] = Manual {
+            accel: 3.0,
+            ..command(2, manual_kind::SPIN, [1.0, 1.0, 0.0, 0.0], 5.0)
+        };
         let mut a = ch;
         let mut b = ch;
         for _ in 0..100 {
@@ -674,6 +1056,11 @@ mod anim_tests {
         }
         assert_eq!(a, b);
         let (pa, pb) = (palette_of(&rig, &a), palette_of(&rig, &b));
-        assert!(pa.iter().flatten().zip(pb.iter().flatten()).all(|(x, y)| x.to_bits() == y.to_bits()));
+        assert!(
+            pa.iter()
+                .flatten()
+                .zip(pb.iter().flatten())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
     }
 }

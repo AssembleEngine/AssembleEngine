@@ -181,13 +181,33 @@ impl World {
             let velocity = fb::register_component(world, "Velocity", 8, 4)?;
             let health = fb::register_component(world, "Health", 4, 4)?;
             let stunned = fb::register_component(world, "Stunned", 4, 4)?;
-            let terms = [Term { component: position, access: Access::Write }, Term { component: velocity, access: Access::Read }];
+            let terms = [
+                Term {
+                    component: position,
+                    access: Access::Write,
+                },
+                Term {
+                    component: velocity,
+                    access: Access::Read,
+                },
+            ];
             let query = fb::create_query(world, &terms)?;
             let plain = fb::find_table(world, &[position, velocity])?;
             let with_health = fb::find_table(world, &[position, velocity, health])?;
             let mut this = Self {
-                world, position, velocity, health, stunned, query, terms,
-                alive: Vec::with_capacity(ENTITIES), rng: Rng(0xF1EC5), serial: 0, plain, with_health, ops: [(0, 0.0); 4],
+                world,
+                position,
+                velocity,
+                health,
+                stunned,
+                query,
+                terms,
+                alive: Vec::with_capacity(ENTITIES),
+                rng: Rng(0xF1EC5),
+                serial: 0,
+                plain,
+                with_health,
+                ops: [(0, 0.0); 4],
             };
             for _ in 0..ENTITIES {
                 this.spawn()?;
@@ -203,7 +223,12 @@ impl World {
             let e = fb::spawn_in_table(self.world, if n % 3 == 0 { self.with_health } else { self.plain });
             // The entity already has these components: the sets write in place.
             fb::set_component(self.world, e, self.position, bytes(&[seed(n, 1), seed(n, 2)]))?;
-            fb::set_component(self.world, e, self.velocity, bytes(&[seed(n, 3) * 0.05, seed(n, 4) * 0.05]))?;
+            fb::set_component(
+                self.world,
+                e,
+                self.velocity,
+                bytes(&[seed(n, 3) * 0.05, seed(n, 4) * 0.05]),
+            )?;
             if n % 3 == 0 {
                 fb::set_component(self.world, e, self.health, bytes(&n))?;
             }
@@ -262,12 +287,19 @@ impl World {
         unsafe {
             fb::for_each_chunk(self.world, self.query, &self.terms, |chunk| {
                 let (pos, vel) = (chunk.fields[0] as usize, chunk.fields[1] as usize);
-                ensure!((lo..hi).contains(&pos) && (lo..hi).contains(&vel), "a column is outside the arena");
+                ensure!(
+                    (lo..hi).contains(&pos) && (lo..hi).contains(&vel),
+                    "a column is outside the arena"
+                );
                 let mut first = 0;
                 while first < chunk.count {
                     let count = RANGE_ROWS.min(chunk.count - first);
                     let byte = first * 8;
-                    out.push(Work { pos: (pos + byte - memory_base) as u32, vel: (vel + byte - memory_base) as u32, count: count as u32 });
+                    out.push(Work {
+                        pos: (pos + byte - memory_base) as u32,
+                        vel: (vel + byte - memory_base) as u32,
+                        count: count as u32,
+                    });
                     first += count;
                 }
                 Ok(())
@@ -328,12 +360,17 @@ struct Timings {
 fn run_native(memory: &SharedMemory) -> Result<(u64, Timings)> {
     let base = memory_base(memory) as usize;
     let mut world = World::new()?;
-    let mut t = Timings { system: 0.0, churn: 0.0 };
+    let mut t = Timings {
+        system: 0.0,
+        churn: 0.0,
+    };
     for _ in 0..TICKS {
         let started = Instant::now();
         for w in world.work(base)? {
-            let pos = unsafe { std::slice::from_raw_parts_mut((base + w.pos as usize) as *mut [f32; 2], w.count as usize) };
-            let vel = unsafe { std::slice::from_raw_parts((base + w.vel as usize) as *const [f32; 2], w.count as usize) };
+            let pos =
+                unsafe { std::slice::from_raw_parts_mut((base + w.pos as usize) as *mut [f32; 2], w.count as usize) };
+            let vel =
+                unsafe { std::slice::from_raw_parts((base + w.vel as usize) as *const [f32; 2], w.count as usize) };
             integrate_native(pos, vel, DT);
         }
         t.system += started.elapsed().as_secs_f64();
@@ -342,9 +379,16 @@ fn run_native(memory: &SharedMemory) -> Result<(u64, Timings)> {
         t.churn += started.elapsed().as_secs_f64();
     }
     let total: u64 = world.ops.iter().map(|(n, _)| n).sum();
-    println!("structural phase: {} table changes per tick on average", total / TICKS as u64);
+    println!(
+        "structural phase: {} table changes per tick on average",
+        total / TICKS as u64
+    );
     for (name, (count, secs)) in OP_NAMES.iter().zip(world.ops) {
-        println!("  {name:<15} {:>6} per tick  {:>6.0} ns each", count / TICKS as u64, secs * 1e9 / count.max(1) as f64);
+        println!(
+            "  {name:<15} {:>6} per tick  {:>6.0} ns each",
+            count / TICKS as u64,
+            secs * 1e9 / count.max(1) as f64
+        );
     }
     Ok((world.digest()?.0, t))
 }
@@ -355,7 +399,10 @@ fn run_guests(memory: &SharedMemory, guests: &mut [Guest]) -> Result<(u64, Timin
     let work: RwLock<Arc<Vec<Work>>> = RwLock::new(Arc::new(Vec::new()));
     let next = AtomicUsize::new(0);
     let (start, done) = (Barrier::new(guests.len() + 1), Barrier::new(guests.len() + 1));
-    let mut t = Timings { system: 0.0, churn: 0.0 };
+    let mut t = Timings {
+        system: 0.0,
+        churn: 0.0,
+    };
     std::thread::scope(|scope| -> Result<()> {
         let handles: Vec<_> = guests
             .iter_mut()
@@ -411,54 +458,82 @@ fn main() -> Result<()> {
     // The arena is claimed once the first instance is up, before the other
     // instances allocate their shadow stacks, so the guest allocator has to
     // grow past it.
-    let (memory, mut guests) = spawn_guests_with(&engine, &module, max_workers, Metering::None, true, |memory, _first| {
-        let first_page = memory.grow(ARENA_PAGES)?;
-        let base = memory_base(memory) as usize + first_page as usize * PAGE;
-        *ARENA.lock().unwrap() = Some(Arena {
-            base,
-            len: ARENA_PAGES as usize * PAGE,
-            top: 0,
-            free: std::array::from_fn(|_| Vec::new()),
-            live_bytes: 0,
-            peak_bytes: 0,
-            calls: 0,
-        });
-        Ok(())
-    })?;
+    let (memory, mut guests) =
+        spawn_guests_with(&engine, &module, max_workers, Metering::None, true, |memory, _first| {
+            let first_page = memory.grow(ARENA_PAGES)?;
+            let base = memory_base(memory) as usize + first_page as usize * PAGE;
+            *ARENA.lock().unwrap() = Some(Arena {
+                base,
+                len: ARENA_PAGES as usize * PAGE,
+                top: 0,
+                free: std::array::from_fn(|_| Vec::new()),
+                live_bytes: 0,
+                peak_bytes: 0,
+                calls: 0,
+            });
+            Ok(())
+        })?;
     let (lo, hi) = arena_range();
     let base = memory_base(&memory) as usize;
-    println!("shared memory {} MiB; column arena at guest offsets [{:#x}, {:#x})", memory.data_size() >> 20, lo - base, hi - base);
+    println!(
+        "shared memory {} MiB; column arena at guest offsets [{:#x}, {:#x})",
+        memory.data_size() >> 20,
+        lo - base,
+        hi - base
+    );
 
     // Guest allocations made after the arena was claimed must lie outside it.
     for (index, guest) in guests.iter_mut().enumerate() {
         let stack = guest.stack_address.call(&mut guest.store, ())? as usize + base;
-        ensure!(!(lo..hi).contains(&stack), "instance {index} has its shadow stack inside the arena");
+        ensure!(
+            !(lo..hi).contains(&stack),
+            "instance {index} has its shadow stack inside the arena"
+        );
     }
     let probe = guests[0].alloc(1 << 20)? as usize + base;
-    ensure!(!(lo..hi).contains(&probe), "guest malloc returned memory inside the arena");
+    ensure!(
+        !(lo..hi).contains(&probe),
+        "guest malloc returned memory inside the arena"
+    );
     println!("guest stacks and a 1 MiB guest malloc after the claim all lie outside the arena");
 
     unsafe { fb::install_column_allocator(column_malloc, column_realloc, column_free) };
 
-    println!("{ENTITIES} entities, 3 archetypes plus Stunned toggling; {TICKS} ticks of integrate over {RANGE_ROWS}-row ranges, {CHURN} structural commands per tick");
+    println!(
+        "{ENTITIES} entities, 3 archetypes plus Stunned toggling; {TICKS} ticks of integrate over {RANGE_ROWS}-row ranges, {CHURN} structural commands per tick"
+    );
     let (reference, t) = run_native(&memory)?;
     {
         let world = World::new()?;
         let (_, rows, tables) = world.digest()?;
-        println!("freshly spawned world: {tables} tables matched by the query, {rows} rows (churn adds the Stunned variants)");
+        println!(
+            "freshly spawned world: {tables} tables matched by the query, {rows} rows (churn adds the Stunned variants)"
+        );
     }
     {
         let arena = ARENA.lock().unwrap();
         let arena = arena.as_ref().unwrap();
-        println!("arena: {} allocator calls so far, peak live {} MiB, high-water {} MiB", arena.calls, arena.peak_bytes >> 20, arena.top >> 20);
+        println!(
+            "arena: {} allocator calls so far, peak live {} MiB, high-water {} MiB",
+            arena.calls,
+            arena.peak_bytes >> 20,
+            arena.top >> 20
+        );
     }
     let per = |s: f64| s * 1e3 / TICKS as f64;
-    println!("native Rust:      system {:>6.2} ms/tick  churn {:>5.2} ms/tick  digest {reference:016x}", per(t.system), per(t.churn));
+    println!(
+        "native Rust:      system {:>6.2} ms/tick  churn {:>5.2} ms/tick  digest {reference:016x}",
+        per(t.system),
+        per(t.churn)
+    );
 
     let mut single = 0.0;
     for workers in [1usize, 2, 4, 8, 16].into_iter().filter(|w| *w <= max_workers) {
         let (digest, t) = run_guests(&memory, &mut guests[..workers])?;
-        ensure!(digest == reference, "{workers} workers: digest {digest:016x} differs from native {reference:016x}");
+        ensure!(
+            digest == reference,
+            "{workers} workers: digest {digest:016x} differs from native {reference:016x}"
+        );
         if workers == 1 {
             single = t.system;
         }

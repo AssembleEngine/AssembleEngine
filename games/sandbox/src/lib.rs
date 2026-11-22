@@ -94,11 +94,26 @@ fn mix(mut z: u64) -> u64 {
 
 fn spawn_unit(seed: u32) {
     let mut s = seed | 1;
-    let p = Position { x: unit(&mut s) * MAP, y: unit(&mut s) * MAP };
+    let p = Position {
+        x: unit(&mut s) * MAP,
+        y: unit(&mut s) * MAP,
+    };
     let goal = [unit(&mut s) * MAP, unit(&mut s) * MAP];
-    let brain = Brain { goal, rng: s, speed: 40.0 + unit(&mut s) * 60.0 };
-    let health = Health { hp: 60.0 + unit(&mut s) * 140.0, armour: unit(&mut s) * 0.5 };
-    Spawn::new().with(&p).with(&Velocity { x: 0.0, y: 0.0 }).with(&brain).with(&health).submit();
+    let brain = Brain {
+        goal,
+        rng: s,
+        speed: 40.0 + unit(&mut s) * 60.0,
+    };
+    let health = Health {
+        hp: 60.0 + unit(&mut s) * 140.0,
+        armour: unit(&mut s) * 0.5,
+    };
+    Spawn::new()
+        .with(&p)
+        .with(&Velocity { x: 0.0, y: 0.0 })
+        .with(&brain)
+        .with(&health)
+        .submit();
 }
 
 fn wear_percent(run: &Run) -> f32 {
@@ -114,7 +129,12 @@ fn setup(run: &Run) {
     for i in 0..run.param() as u32 {
         spawn_unit(i.wrapping_mul(0x9E37_79B9) ^ 0x5EED);
     }
-    Spawn::new().with(&Census { deaths: 0, where_sum: 0 }).submit();
+    Spawn::new()
+        .with(&Census {
+            deaths: 0,
+            where_sum: 0,
+        })
+        .submit();
 }
 
 /// Steering, a quarter of the units per tick.
@@ -141,7 +161,10 @@ fn think(run: &Run) {
         }
         let n = (dx * dx + dy * dy).sqrt().max(1.0e-3);
         let jitter = unit(&mut b.rng) * 0.2 + 0.9;
-        vel[i] = Velocity { x: dx / n * b.speed * jitter, y: dy / n * b.speed * jitter };
+        vel[i] = Velocity {
+            x: dx / n * b.speed * jitter,
+            y: dy / n * b.speed * jitter,
+        };
     }
 }
 
@@ -164,7 +187,11 @@ fn wear(run: &Run) {
         let hit = (roll % 1000) as f32 * scale * (1.0 - hp[i].armour);
         hp[i].hp -= hit;
         if hp[i].hp <= 0.0 {
-            emit(&Death { entity: ids[i], x: pos[i].x, y: pos[i].y });
+            emit(&Death {
+                entity: ids[i],
+                x: pos[i].x,
+                y: pos[i].y,
+            });
             ae_sdk::despawn(ids[i]);
             spawn_unit((roll >> 32) as u32);
         }
@@ -177,7 +204,9 @@ fn census(run: &Run) {
     for c in run.write::<Census>() {
         c.deaths += deaths.len() as u64;
         for d in deaths {
-            c.where_sum = c.where_sum.wrapping_add(mix(d.entity.0 ^ (d.x.to_bits() as u64) << 32 ^ d.y.to_bits() as u64));
+            c.where_sum = c
+                .where_sum
+                .wrapping_add(mix(d.entity.0 ^ (d.x.to_bits() as u64) << 32 ^ d.y.to_bits() as u64));
         }
     }
 }

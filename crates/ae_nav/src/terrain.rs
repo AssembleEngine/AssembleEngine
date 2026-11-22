@@ -20,7 +20,11 @@ pub struct TerrainConfig {
 
 impl TerrainConfig {
     pub fn new(seed: u64, cells: i32, cell_size: f32, sector_cells: i32) -> Self {
-        Self { seed, geom: WorldGeometry::new(cells, cells, cell_size, sector_cells), water: WaterMode::Obstacle }
+        Self {
+            seed,
+            geom: WorldGeometry::new(cells, cells, cell_size, sector_cells),
+            water: WaterMode::Obstacle,
+        }
     }
 }
 
@@ -58,25 +62,55 @@ pub struct Medium {
 
 impl Medium {
     /// Anything that is not an obstacle: pathsim's units.
-    pub const ANY: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: false };
+    pub const ANY: Medium = Medium {
+        min_depth: 0,
+        max_depth: i16::MAX,
+        hover: false,
+    };
     /// Ground units that ford water up to `max_depth`.
-    pub const fn land(max_depth: i16) -> Medium { Medium { min_depth: 0, max_depth, hover: false } }
+    pub const fn land(max_depth: i16) -> Medium {
+        Medium {
+            min_depth: 0,
+            max_depth,
+            hover: false,
+        }
+    }
     /// Ships: water at least `min_depth` deep.
-    pub const fn ship(min_depth: i16) -> Medium { Medium { min_depth, max_depth: i16::MAX, hover: false } }
+    pub const fn ship(min_depth: i16) -> Medium {
+        Medium {
+            min_depth,
+            max_depth: i16::MAX,
+            hover: false,
+        }
+    }
     /// Hovercraft: land and water of any depth.
-    pub const HOVER: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: true };
+    pub const HOVER: Medium = Medium {
+        min_depth: 0,
+        max_depth: i16::MAX,
+        hover: true,
+    };
     /// Amphibious: drives along the bottom at any depth.
-    pub const AMPHIBIOUS: Medium = Medium { min_depth: 0, max_depth: i16::MAX, hover: false };
+    pub const AMPHIBIOUS: Medium = Medium {
+        min_depth: 0,
+        max_depth: i16::MAX,
+        hover: false,
+    };
 
     #[inline]
-    pub fn allows(&self, depth: i16) -> bool { self.hover || (depth >= self.min_depth && depth <= self.max_depth) }
+    pub fn allows(&self, depth: i16) -> bool {
+        self.hover || (depth >= self.min_depth && depth <= self.max_depth)
+    }
     /// Moves on the water surface, so slopes and climbs are measured there.
     #[inline]
-    pub fn on_surface(&self) -> bool { self.hover || self.min_depth > 0 }
+    pub fn on_surface(&self) -> bool {
+        self.hover || self.min_depth > 0
+    }
 }
 
 impl Default for Medium {
-    fn default() -> Self { Medium::ANY }
+    fn default() -> Self {
+        Medium::ANY
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,10 +149,16 @@ pub struct Terrain {
 /// `move_cost` of a cell under overlays: blocked stays 255, open cells cost
 /// the base plus the overlay, at most 254.
 pub fn effective_cost(base: u8, overlay: u8) -> u8 {
-    if base == 255 { 255 } else { (base as u16 + overlay as u16).min(254) as u8 }
+    if base == 255 {
+        255
+    } else {
+        (base as u16 + overlay as u16).min(254) as u8
+    }
 }
 
-fn no_water() -> i16 { NO_WATER }
+fn no_water() -> i16 {
+    NO_WATER
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Material {
@@ -152,12 +192,26 @@ pub struct TerrainPatch {
 }
 
 impl TerrainPatch {
-    pub fn new() -> Self { Self { version: 0, cells: Vec::new(), overlay: Vec::new() } }
-    pub fn is_empty(&self) -> bool { self.cells.is_empty() && self.overlay.is_empty() }
+    pub fn new() -> Self {
+        Self {
+            version: 0,
+            cells: Vec::new(),
+            overlay: Vec::new(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty() && self.overlay.is_empty()
+    }
     /// Whether the patch changes the ground (blocked, height or material),
     /// not only traversal costs.
-    pub fn changes_ground(&self) -> bool { self.cells.iter().any(|e| e.blocked.is_some() || e.height.is_some() || e.material.is_some()) }
-    pub fn push(&mut self, e: CellEdit) { self.cells.push(e); }
+    pub fn changes_ground(&self) -> bool {
+        self.cells
+            .iter()
+            .any(|e| e.blocked.is_some() || e.height.is_some() || e.material.is_some())
+    }
+    pub fn push(&mut self, e: CellEdit) {
+        self.cells.push(e);
+    }
     /// Sort and collapse duplicate cells. Later values win, deterministically.
     pub fn finish(&mut self) {
         self.cells.sort_by_key(|e| (e.y, e.x));
@@ -165,10 +219,18 @@ impl TerrainPatch {
         for e in self.cells.drain(..) {
             if let Some(prev) = out.last_mut() {
                 if prev.x == e.x && prev.y == e.y {
-                    if e.blocked.is_some() { prev.blocked = e.blocked; }
-                    if e.height.is_some() { prev.height = e.height; }
-                    if e.cost.is_some() { prev.cost = e.cost; }
-                    if e.material.is_some() { prev.material = e.material; }
+                    if e.blocked.is_some() {
+                        prev.blocked = e.blocked;
+                    }
+                    if e.height.is_some() {
+                        prev.height = e.height;
+                    }
+                    if e.cost.is_some() {
+                        prev.cost = e.cost;
+                    }
+                    if e.material.is_some() {
+                        prev.material = e.material;
+                    }
                     continue;
                 }
             }
@@ -177,12 +239,23 @@ impl TerrainPatch {
         self.cells = out;
     }
     pub fn dirty_cells(&self) -> Option<(i32, i32, i32, i32)> {
-        if self.is_empty() { return None; }
-        let mut x0 = i32::MAX; let mut y0 = i32::MAX;
-        let mut x1 = i32::MIN; let mut y1 = i32::MIN;
-        for (x, y) in self.cells.iter().map(|c| (c.x, c.y)).chain(self.overlay.iter().map(|o| (o.0, o.1))) {
-            x0 = x0.min(x); y0 = y0.min(y);
-            x1 = x1.max(x); y1 = y1.max(y);
+        if self.is_empty() {
+            return None;
+        }
+        let mut x0 = i32::MAX;
+        let mut y0 = i32::MAX;
+        let mut x1 = i32::MIN;
+        let mut y1 = i32::MIN;
+        for (x, y) in self
+            .cells
+            .iter()
+            .map(|c| (c.x, c.y))
+            .chain(self.overlay.iter().map(|o| (o.0, o.1)))
+        {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
         }
         Some((x0, y0, x1, y1))
     }
@@ -201,13 +274,22 @@ impl Terrain {
         let g = &cfg.geom;
         let n = (g.cells_x * g.cells_y) as usize;
         let mut t = Self {
-            geom: g.clone(), seed: cfg.seed, version: TERRAIN_VERSION_INITIAL,
-            blocked: vec![0; n], height: vec![0; n], move_cost: vec![10; n],
+            geom: g.clone(),
+            seed: cfg.seed,
+            version: TERRAIN_VERSION_INITIAL,
+            blocked: vec![0; n],
+            height: vec![0; n],
+            move_cost: vec![10; n],
             material: vec![Material::Grass as u8; n],
-            water_level: NO_WATER, water_depth: Vec::new(), overlay: Vec::new(), base_cost: Vec::new(),
+            water_level: NO_WATER,
+            water_depth: Vec::new(),
+            overlay: Vec::new(),
+            base_cost: Vec::new(),
         };
         let surface = cfg.water == WaterMode::Surface;
-        if surface { t.water_level = SURFACE_WATER_LEVEL; }
+        if surface {
+            t.water_level = SURFACE_WATER_LEVEL;
+        }
         let mut rng = Rng::new(cfg.seed);
         let water_seed = rng.next_u64();
         let forest_seed = rng.next_u64();
@@ -215,7 +297,8 @@ impl Terrain {
         for y in 0..g.cells_y {
             for x in 0..g.cells_x {
                 let i = (y * g.cells_x + x) as usize;
-                let wx = x as f32; let wy = y as f32;
+                let wx = x as f32;
+                let wy = y as f32;
                 let macro_n = fbm(cfg.seed, wx / 720.0, wy / 720.0, 3, 2.0, 0.52);
                 let ridge = 1.0 - (fbm(rock_seed, wx / 260.0, wy / 260.0, 3, 2.1, 0.5) * 2.0 - 1.0).abs();
                 let detail = fbm(forest_seed, wx / 58.0, wy / 58.0, 2, 2.0, 0.5);
@@ -252,7 +335,9 @@ impl Terrain {
         let sx = |v: i32| v * cx / 2560;
         let sy = |v: i32| v * cy / 2560;
         let sr = |v: i32| (v * cx.min(cy) / 2560).max(2);
-        let spans = |v: &[(i32, i32)], f: &dyn Fn(i32) -> i32| v.iter().map(|&(a, b)| (f(a), f(b).max(f(a) + 3))).collect::<Vec<_>>();
+        let spans = |v: &[(i32, i32)], f: &dyn Fn(i32) -> i32| {
+            v.iter().map(|&(a, b)| (f(a), f(b).max(f(a) + 3))).collect::<Vec<_>>()
+        };
         // A few irregular lake basins, independent of the global noise field.
         let lake = if surface { stamp_lake } else { stamp_ellipse };
         lake(&mut t, sx(1330), sy(1620), sr(92), sr(56), sr(27), water_seed);
@@ -262,7 +347,16 @@ impl Terrain {
             // A river from the north edge to the south edge separating the
             // spawn plaza (west) from the destinations (east), with two
             // fords; the road crosses it on a causeway (`stamp_road`).
-            stamp_river(&mut t, (sx(600), 0), (sx(1700), cy - 1), sr(22), sr(60), &[sy(700), sy(2000)], sr(7), water_seed ^ 0x51);
+            stamp_river(
+                &mut t,
+                (sx(600), 0),
+                (sx(1700), cy - 1),
+                sr(22),
+                sr(60),
+                &[sy(700), sy(2000)],
+                sr(7),
+                water_seed ^ 0x51,
+            );
         }
         stamp_ellipse(&mut t, sx(1550), sy(430), sr(55), sr(38), sr(18), rock_seed ^ 4);
         stamp_ellipse(&mut t, sx(1930), sy(650), sr(40), sr(26), sr(14), rock_seed ^ 7);
@@ -270,8 +364,22 @@ impl Terrain {
         // Broken fortification walls make deliberate chokepoints and force
         // routes to make meaningful decisions. Gaps are generated at fixed
         // positions so every scenario is reproducible.
-        stamp_vwall(&mut t, sx(820), sy(160), sy(2360), 7, &spans(&[(590, 638), (1420, 1450), (1986, 2014)], &sy));
-        stamp_hwall(&mut t, sy(1280), sx(1010), sx(2240), 6, &spans(&[(1180, 1220), (1690, 1722)], &sx));
+        stamp_vwall(
+            &mut t,
+            sx(820),
+            sy(160),
+            sy(2360),
+            7,
+            &spans(&[(590, 638), (1420, 1450), (1986, 2014)], &sy),
+        );
+        stamp_hwall(
+            &mut t,
+            sy(1280),
+            sx(1010),
+            sx(2240),
+            6,
+            &spans(&[(1180, 1220), (1690, 1722)], &sx),
+        );
         stamp_vwall(&mut t, sx(1770), sy(720), sy(2100), 5, &spans(&[(1200, 1260)], &sy));
         stamp_hwall(&mut t, sy(2190), sx(300), sx(900), 5, &spans(&[(620, 650)], &sx));
         // Fully enclosed rock chambers: their floors are disconnected regions.
@@ -284,7 +392,9 @@ impl Terrain {
             stamp_ellipse(&mut t, px, py, r, r * 2 / 3, sr(13), rock_seed ^ (px as u64));
             for dy in -(r * 2 / 3) - sr(13)..=(r * 2 / 3) + sr(13) {
                 for dx in 0..=2 {
-                    let Some(i) = idx(g, px + 2 + dx, py + dy) else { continue };
+                    let Some(i) = idx(g, px + 2 + dx, py + dy) else {
+                        continue;
+                    };
                     t.blocked[i] = 0;
                     t.material[i] = Material::Sand as u8;
                     t.move_cost[i] = 12;
@@ -298,11 +408,23 @@ impl Terrain {
         clear_plaza(&mut t, &natural_height, sx(2290), sy(300), sr(64));
         // Carve a broad road: cheaper terrain but never special-cased in
         // navigation beyond the ordinary weighted grid.
-        let road: Vec<(i32, i32)> = [(250, 2300), (700, 2100), (1020, 1900), (1400, 1560), (1740, 1100), (2050, 650), (2290, 300)]
-            .iter().map(|&(x, y)| (sx(x), sy(y))).collect();
+        let road: Vec<(i32, i32)> = [
+            (250, 2300),
+            (700, 2100),
+            (1020, 1900),
+            (1400, 1560),
+            (1740, 1100),
+            (2050, 650),
+            (2290, 300),
+        ]
+        .iter()
+        .map(|&(x, y)| (sx(x), sy(y)))
+        .collect();
         stamp_road(&mut t, &natural_height, &road, 5);
         // Generation worked on ground heights; now put water on top.
-        if surface { t.flood(SURFACE_WATER_LEVEL); }
+        if surface {
+            t.flood(SURFACE_WATER_LEVEL);
+        }
         t
     }
 
@@ -312,37 +434,65 @@ impl Terrain {
     pub fn flood(&mut self, level: i16) {
         assert!(self.water_depth.is_empty(), "map already has water");
         self.water_level = level;
-        self.water_depth = self.height.iter().map(|&g| (level as i32 - g as i32).max(0) as i16).collect();
-        for h in &mut self.height { *h = (*h).max(level); }
+        self.water_depth = self
+            .height
+            .iter()
+            .map(|&g| (level as i32 - g as i32).max(0) as i16)
+            .collect();
+        for h in &mut self.height {
+            *h = (*h).max(level);
+        }
     }
 
-    pub fn len(&self) -> usize { self.blocked.len() }
+    pub fn len(&self) -> usize {
+        self.blocked.len()
+    }
     pub fn is_blocked(&self, c: CellPos) -> bool {
         self.geom.in_bounds(c) && self.blocked[self.geom.cell_index(c)] != 0
     }
-    pub fn in_bounds_blocked_or_out(&self, c: CellPos) -> bool { !self.geom.in_bounds(c) || self.is_blocked(c) }
-    pub fn height_at(&self, c: CellPos) -> i16 { self.height[self.geom.cell_index(c)] }
-    pub fn cost_at(&self, c: CellPos) -> u8 { self.move_cost[self.geom.cell_index(c)] }
-    pub fn material_at(&self, c: CellPos) -> u8 { self.material[self.geom.cell_index(c)] }
+    pub fn in_bounds_blocked_or_out(&self, c: CellPos) -> bool {
+        !self.geom.in_bounds(c) || self.is_blocked(c)
+    }
+    pub fn height_at(&self, c: CellPos) -> i16 {
+        self.height[self.geom.cell_index(c)]
+    }
+    pub fn cost_at(&self, c: CellPos) -> u8 {
+        self.move_cost[self.geom.cell_index(c)]
+    }
+    pub fn material_at(&self, c: CellPos) -> u8 {
+        self.material[self.geom.cell_index(c)]
+    }
 
     #[inline]
-    pub fn has_water(&self) -> bool { !self.water_depth.is_empty() }
+    pub fn has_water(&self) -> bool {
+        !self.water_depth.is_empty()
+    }
 
     /// Water depth (decimetres) over cell index `i`; 0 when dry.
     #[inline]
     pub fn depth(&self, i: usize) -> i16 {
-        if self.water_depth.is_empty() { 0 } else { self.water_depth[i] }
+        if self.water_depth.is_empty() {
+            0
+        } else {
+            self.water_depth[i]
+        }
     }
 
     /// Ground height at cell index `i`, under any water.
     #[inline]
-    pub fn ground_height(&self, i: usize) -> i16 { self.height[i] - self.depth(i) }
+    pub fn ground_height(&self, i: usize) -> i16 {
+        self.height[i] - self.depth(i)
+    }
 
     /// Height of what a unit in `medium` stands on at cell index `i`: the
     /// water surface for surface movers, the ground (river bed) otherwise.
     #[inline]
     pub fn standing_height(&self, i: usize, medium: &Medium) -> i16 {
-        if medium.on_surface() { self.height[i] } else { self.ground_height(i) }
+        if medium.on_surface() {
+            self.height[i]
+        } else {
+            self.ground_height(i)
+        }
     }
 
     /// Whether a unit in `medium` may occupy cell index `i` (ignoring slope
@@ -351,8 +501,12 @@ impl Terrain {
     pub fn open_for(&self, i: usize, medium: &Medium) -> bool {
         self.blocked[i] == 0 && medium.allows(self.depth(i))
     }
-    pub fn world_of_cell(&self, c: CellPos) -> WorldPos { self.geom.cell_center(c) }
-    pub fn cell_of_world(&self, p: WorldPos) -> CellPos { self.geom.world_to_cell(p) }
+    pub fn world_of_cell(&self, c: CellPos) -> WorldPos {
+        self.geom.cell_center(c)
+    }
+    pub fn cell_of_world(&self, p: WorldPos) -> CellPos {
+        self.geom.world_to_cell(p)
+    }
 
     /// Apply an edit against this immutable base, producing the next version.
     pub fn with_patch(&self, patch: TerrainPatch) -> (Self, TerrainPatch) {
@@ -367,9 +521,13 @@ impl Terrain {
         self.version += 1;
         patch.version = self.version;
         for e in &patch.cells {
-            if e.x < 0 || e.y < 0 || e.x >= self.geom.cells_x || e.y >= self.geom.cells_y { continue; }
+            if e.x < 0 || e.y < 0 || e.x >= self.geom.cells_x || e.y >= self.geom.cells_y {
+                continue;
+            }
             let i = (e.y * self.geom.cells_x + e.x) as usize;
-            if let Some(b) = e.blocked { self.blocked[i] = b as u8; }
+            if let Some(b) = e.blocked {
+                self.blocked[i] = b as u8;
+            }
             if let Some(h) = e.height {
                 // An edit sets the ground; the water surface stays where it is.
                 let ground = h.clamp(0, 2400);
@@ -382,25 +540,39 @@ impl Terrain {
             }
             // Cost edits set the base cost under any overlays.
             let layered = !self.overlay.is_empty();
-            let cost = if layered { &mut self.base_cost[i] } else { &mut self.move_cost[i] };
-            if let Some(c) = e.cost { *cost = c; }
-            if let Some(m) = e.material { self.material[i] = m; }
+            let cost = if layered {
+                &mut self.base_cost[i]
+            } else {
+                &mut self.move_cost[i]
+            };
+            if let Some(c) = e.cost {
+                *cost = c;
+            }
+            if let Some(m) = e.material {
+                self.material[i] = m;
+            }
             if e.blocked == Some(true) {
                 self.material[i] = Material::Rock as u8;
                 *cost = 255;
             }
             if e.blocked == Some(false) && *cost == 255 {
                 *cost = 10;
-                if self.material[i] == Material::Rock as u8 { self.material[i] = Material::Grass as u8; }
+                if self.material[i] == Material::Rock as u8 {
+                    self.material[i] = Material::Grass as u8;
+                }
             }
-            if layered { self.move_cost[i] = effective_cost(self.base_cost[i], self.overlay[i]); }
+            if layered {
+                self.move_cost[i] = effective_cost(self.base_cost[i], self.overlay[i]);
+            }
         }
         if !patch.overlay.is_empty() && self.overlay.is_empty() {
             self.base_cost = self.move_cost.clone();
             self.overlay = vec![0; self.move_cost.len()];
         }
         for &(x, y, o) in &patch.overlay {
-            if x < 0 || y < 0 || x >= self.geom.cells_x || y >= self.geom.cells_y { continue; }
+            if x < 0 || y < 0 || x >= self.geom.cells_x || y >= self.geom.cells_y {
+                continue;
+            }
             let i = (y * self.geom.cells_x + x) as usize;
             self.overlay[i] = o;
             self.move_cost[i] = effective_cost(self.base_cost[i], o);
@@ -416,10 +588,14 @@ impl Terrain {
         Self::digest_of_bands_with_water(self.version, self.water_level, &bands)
     }
 
-    pub fn digest_bands(&self) -> usize { (self.geom.cells_y.max(0) as usize).div_ceil(DIGEST_BAND_ROWS) }
+    pub fn digest_bands(&self) -> usize {
+        (self.geom.cells_y.max(0) as usize).div_ceil(DIGEST_BAND_ROWS)
+    }
 
     /// The band holding row `y`.
-    pub fn digest_band_of(&self, y: i32) -> usize { (y.clamp(0, self.geom.cells_y - 1) as usize) / DIGEST_BAND_ROWS }
+    pub fn digest_band_of(&self, y: i32) -> usize {
+        (y.clamp(0, self.geom.cells_y - 1) as usize) / DIGEST_BAND_ROWS
+    }
 
     pub fn band_digest(&self, band: usize) -> u64 {
         let w = self.geom.cells_x.max(0) as usize;
@@ -429,9 +605,15 @@ impl Terrain {
         let wet = !self.water_depth.is_empty();
         let layered = !self.overlay.is_empty();
         for i in lo..hi {
-            h.u64(((self.blocked[i] as u64) << 40) | ((self.move_cost[i] as u64) << 16) | (self.height[i] as u16 as u64));
-            if wet { h.u32(self.water_depth[i] as u16 as u32); }
-            if layered { h.u32((self.overlay[i] as u32) << 8 | self.base_cost[i] as u32); }
+            h.u64(
+                ((self.blocked[i] as u64) << 40) | ((self.move_cost[i] as u64) << 16) | (self.height[i] as u16 as u64),
+            );
+            if wet {
+                h.u32(self.water_depth[i] as u16 as u32);
+            }
+            if layered {
+                h.u32((self.overlay[i] as u32) << 8 | self.base_cost[i] as u32);
+            }
         }
         h.finish()
     }
@@ -445,20 +627,30 @@ impl Terrain {
     pub fn digest_of_bands_with_water(version: u32, water_level: i16, bands: &[u64]) -> u64 {
         let mut h = crate::rng::StateHasher::new();
         h.u32(version);
-        if water_level != NO_WATER { h.u32(0x57A7_E400 | water_level as u16 as u32); }
-        for &b in bands { h.u64(b); }
+        if water_level != NO_WATER {
+            h.u32(0x57A7_E400 | water_level as u16 as u32);
+        }
+        for &b in bands {
+            h.u64(b);
+        }
         h.finish()
     }
 
     pub fn nearest_open_cell(&self, c: CellPos, max_radius: i32, accept: impl Fn(CellPos) -> bool) -> Option<CellPos> {
         let c = self.geom.clamp_cell(c);
-        if accept(c) { return Some(c); }
+        if accept(c) {
+            return Some(c);
+        }
         for r in 1..=max_radius {
             for dy in -r..=r {
                 for dx in -r..=r {
-                    if dx.abs() != r && dy.abs() != r { continue; }
+                    if dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
                     let p = CellPos::new(c.x + dx, c.y + dy);
-                    if self.geom.in_bounds(p) && accept(p) { return Some(p); }
+                    if self.geom.in_bounds(p) && accept(p) {
+                        return Some(p);
+                    }
                 }
             }
         }
@@ -466,7 +658,9 @@ impl Terrain {
     }
 }
 
-fn idx(g: &WorldGeometry, x: i32, y: i32) -> Option<usize> { g.cell_index_xy(x, y) }
+fn idx(g: &WorldGeometry, x: i32, y: i32) -> Option<usize> {
+    g.cell_index_xy(x, y)
+}
 
 /// Rows per terrain digest band.
 pub const DIGEST_BAND_ROWS: usize = 16;
@@ -474,7 +668,9 @@ pub const DIGEST_BAND_ROWS: usize = 16;
 fn paint_block(t: &mut Terrain, x: i32, y: i32, blocked: bool) {
     if let Some(i) = idx(&t.geom, x, y) {
         // Walls and rocks stop at open water: they never dam a river.
-        if blocked && t.water_level != NO_WATER && t.blocked[i] == 0 && t.material[i] == Material::Water as u8 { return; }
+        if blocked && t.water_level != NO_WATER && t.blocked[i] == 0 && t.material[i] == Material::Water as u8 {
+            return;
+        }
         t.blocked[i] = blocked as u8;
         if blocked {
             t.material[i] = Material::Rock as u8;
@@ -492,7 +688,9 @@ fn paint_block(t: &mut Terrain, x: i32, y: i32, blocked: bool) {
 fn stamp_ellipse(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32, seed: u64) {
     for y in cy - ry - rough..=cy + ry + rough {
         for x in cx - rx - rough..=cx + rx + rough {
-            if idx(&t.geom, x, y).is_none() { continue; }
+            if idx(&t.geom, x, y).is_none() {
+                continue;
+            }
             let nx = (x - cx) as f32 / rx as f32;
             let ny = (y - cy) as f32 / ry as f32;
             let d = nx * nx + ny * ny;
@@ -514,7 +712,9 @@ fn stamp_ellipse(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32
 const BANK_RAMP: f32 = 50.0;
 
 /// Widest bank needed to climb from the water to the highest ground.
-fn bank_cells(t: &Terrain) -> i32 { ((2400.0 - t.water_level as f32) / BANK_RAMP).ceil() as i32 + 1 }
+fn bank_cells(t: &Terrain) -> i32 {
+    ((2400.0 - t.water_level as f32) / BANK_RAMP).ceil() as i32 + 1
+}
 
 /// A lake basin under the water surface: the ellipse of `stamp_ellipse`,
 /// carved down to between 4 and 16 m deep (deepest in the middle) instead of
@@ -542,11 +742,16 @@ fn stamp_lake(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32, s
             } else {
                 // Distance beyond the shore, in cells along the short axis.
                 let beyond = (d.sqrt() - edge.sqrt()) * r_min;
-                if beyond > bank as f32 { continue; }
+                if beyond > bank as f32 {
+                    continue;
+                }
                 let bank_height = (level + 6.0 + beyond * BANK_RAMP).round() as i16;
                 if bank_height < t.height[i] {
                     t.height[i] = bank_height;
-                    if t.blocked[i] == 0 { t.material[i] = Material::Sand as u8; t.move_cost[i] = 12; }
+                    if t.blocked[i] == 0 {
+                        t.material[i] = Material::Sand as u8;
+                        t.move_cost[i] = 12;
+                    }
                 }
             }
         }
@@ -560,7 +765,16 @@ fn stamp_lake(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, rough: i32, s
 /// each `fords` row are only 1.2 m deep (land units of `water_profiles` wade
 /// across).
 #[allow(clippy::too_many_arguments)]
-fn stamp_river(t: &mut Terrain, from: (i32, i32), to: (i32, i32), half_width: i32, wobble: i32, fords: &[i32], ford_half: i32, seed: u64) {
+fn stamp_river(
+    t: &mut Terrain,
+    from: (i32, i32),
+    to: (i32, i32),
+    half_width: i32,
+    wobble: i32,
+    fords: &[i32],
+    ford_half: i32,
+    seed: u64,
+) {
     let level = t.water_level as f32;
     let bank = bank_cells(t);
     let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
@@ -585,7 +799,10 @@ fn stamp_river(t: &mut Terrain, from: (i32, i32), to: (i32, i32), half_width: i3
                 let bank_height = (level + 6.0 + (dist - half_width as f32) * BANK_RAMP).round() as i16;
                 if bank_height < t.height[i] {
                     t.height[i] = bank_height;
-                    if t.blocked[i] == 0 { t.material[i] = Material::Sand as u8; t.move_cost[i] = 12; }
+                    if t.blocked[i] == 0 {
+                        t.material[i] = Material::Sand as u8;
+                        t.move_cost[i] = 12;
+                    }
                 }
             }
         }
@@ -609,7 +826,9 @@ fn stamp_ring(t: &mut Terrain, cx: i32, cy: i32, rx: i32, ry: i32, thickness: i3
 
 fn stamp_vwall(t: &mut Terrain, x0: i32, y0: i32, y1: i32, thickness: i32, gaps: &[(i32, i32)]) {
     for y in y0..=y1 {
-        if gaps.iter().any(|&(a, b)| y >= a && y <= b) { continue; }
+        if gaps.iter().any(|&(a, b)| y >= a && y <= b) {
+            continue;
+        }
         let wobble = ((y / 43) % 3) - 1;
         for x in x0 + wobble - thickness / 2..=x0 + wobble + thickness / 2 {
             paint_block(t, x, y, true);
@@ -619,7 +838,9 @@ fn stamp_vwall(t: &mut Terrain, x0: i32, y0: i32, y1: i32, thickness: i32, gaps:
 
 fn stamp_hwall(t: &mut Terrain, y0: i32, x0: i32, x1: i32, thickness: i32, gaps: &[(i32, i32)]) {
     for x in x0..=x1 {
-        if gaps.iter().any(|&(a, b)| x >= a && x <= b) { continue; }
+        if gaps.iter().any(|&(a, b)| x >= a && x <= b) {
+            continue;
+        }
         let wobble = ((x / 37) % 3) - 1;
         for y in y0 + wobble - thickness / 2..=y0 + wobble + thickness / 2 {
             paint_block(t, x, y, true);
@@ -658,7 +879,9 @@ fn stamp_road(t: &mut Terrain, natural_height: &[i16], points: &[(i32, i32)], ha
             for dy in -half_width..=half_width {
                 for dx in -half_width..=half_width {
                     if let Some(i) = idx(&t.geom, x + dx, y + dy) {
-                        if dx * dx + dy * dy > (half_width + 1) * (half_width + 1) { continue; }
+                        if dx * dx + dy * dy > (half_width + 1) * (half_width + 1) {
+                            continue;
+                        }
                         t.blocked[i] = 0;
                         t.move_cost[i] = 8;
                         t.material[i] = Material::Road as u8;
@@ -691,15 +914,26 @@ impl TestTerrain {
     pub fn wall(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
         for y in y0..=y1 {
             for x in x0..=x1 {
-                if let Some(i) = self.geom.cell_index_xy(x, y) { self.blocked[i] = 1; }
+                if let Some(i) = self.geom.cell_index_xy(x, y) {
+                    self.blocked[i] = 1;
+                }
             }
         }
     }
     pub fn into_terrain(self, seed: u64) -> Terrain {
         let material = self.cost.iter().map(|_| Material::Grass as u8).collect();
         Terrain {
-            geom: self.geom, seed, version: 1, blocked: self.blocked,
-            height: self.height, move_cost: self.cost, material, water_level: NO_WATER, water_depth: Vec::new(), overlay: Vec::new(), base_cost: Vec::new(),
+            geom: self.geom,
+            seed,
+            version: 1,
+            blocked: self.blocked,
+            height: self.height,
+            move_cost: self.cost,
+            material,
+            water_level: NO_WATER,
+            water_depth: Vec::new(),
+            overlay: Vec::new(),
+            base_cost: Vec::new(),
         }
     }
 }

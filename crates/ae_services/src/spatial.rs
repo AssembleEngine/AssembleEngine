@@ -31,7 +31,15 @@ pub struct SpatialPlugin {
 impl SpatialPlugin {
     /// A square map from the origin.
     pub fn square(extent: f32, cell: f32) -> Self {
-        Self { bounds: Bounds { min_x: 0.0, min_y: 0.0, max_x: extent, max_y: extent }, cell }
+        Self {
+            bounds: Bounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: extent,
+                max_y: extent,
+            },
+            cell,
+        }
     }
 }
 
@@ -53,7 +61,12 @@ impl HostPlugin for SpatialPlugin {
                 if n != "spatial" {
                     bail!("no host system `{n}` in the spatial plugin");
                 }
-                Ok(Box::new(Spatial { plugin: *self, x: Vec::new(), y: Vec::new(), r: Vec::new() }))
+                Ok(Box::new(Spatial {
+                    plugin: *self,
+                    x: Vec::new(),
+                    y: Vec::new(),
+                    r: Vec::new(),
+                }))
             })
             .collect()
     }
@@ -71,7 +84,10 @@ impl HostSystem for Spatial {
         // Reuse the last index's allocations when no batch still holds it.
         let mut index = match ctx.take_spatial().map(Arc::try_unwrap) {
             Some(Ok(index)) => index,
-            _ => SpatialIndex { grid: Grid::new(self.plugin.bounds, self.plugin.cell), entities: Vec::new() },
+            _ => SpatialIndex {
+                grid: Grid::new(self.plugin.bounds, self.plugin.cell),
+                entities: Vec::new(),
+            },
         };
         index.entities.clear();
         self.x.clear();

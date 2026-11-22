@@ -45,7 +45,10 @@ struct Arena {
 static ARENA: Mutex<Option<Arena>> = Mutex::new(None);
 
 fn class_of(size: usize) -> u32 {
-    (size.max(1) + HEADER).next_power_of_two().trailing_zeros().max(MIN_CLASS)
+    (size.max(1) + HEADER)
+        .next_power_of_two()
+        .trailing_zeros()
+        .max(MIN_CLASS)
 }
 
 impl Arena {
@@ -76,7 +79,10 @@ impl Arena {
 
     fn class_of_block(&self, ptr: *mut c_void) -> u32 {
         let address = ptr as usize;
-        assert!(address >= self.base + HEADER && address < self.base + self.len, "pointer {address:#x} is not from the column arena");
+        assert!(
+            address >= self.base + HEADER && address < self.base + self.len,
+            "pointer {address:#x} is not from the column arena"
+        );
         unsafe { ((address - HEADER) as *const u32).read() }
     }
 
@@ -153,7 +159,13 @@ pub unsafe fn install(base: *mut u8, len: usize) -> Result<(), String> {
         }
         None => {}
     }
-    *guard = Some(Arena { base: base as usize, len, top: 0, free: std::array::from_fn(|_| Vec::new()), stats: ArenaStats::default() });
+    *guard = Some(Arena {
+        base: base as usize,
+        len,
+        top: 0,
+        free: std::array::from_fn(|_| Vec::new()),
+        stats: ArenaStats::default(),
+    });
     drop(guard);
     unsafe { crate::flecs_backend::install_column_allocator(column_malloc, column_realloc, column_free) };
     Ok(())
@@ -171,7 +183,11 @@ pub fn release(base: *mut u8) {
 
 /// The installed range, if any.
 pub fn range() -> Option<(usize, usize)> {
-    ARENA.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|a| (a.base, a.base + a.len))
+    ARENA
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|a| (a.base, a.base + a.len))
 }
 
 pub fn contains(ptr: *const u8) -> bool {
@@ -179,7 +195,12 @@ pub fn contains(ptr: *const u8) -> bool {
 }
 
 pub fn stats() -> ArenaStats {
-    ARENA.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|a| a.stats).unwrap_or_default()
+    ARENA
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|a| a.stats)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -189,7 +210,16 @@ mod tests {
     fn arena(len: usize) -> (Vec<u64>, Arena) {
         let mut backing = vec![0u64; len / 8];
         let base = backing.as_mut_ptr() as usize;
-        (backing, Arena { base, len, top: 0, free: std::array::from_fn(|_| Vec::new()), stats: ArenaStats::default() })
+        (
+            backing,
+            Arena {
+                base,
+                len,
+                top: 0,
+                free: std::array::from_fn(|_| Vec::new()),
+                stats: ArenaStats::default(),
+            },
+        )
     }
 
     #[test]

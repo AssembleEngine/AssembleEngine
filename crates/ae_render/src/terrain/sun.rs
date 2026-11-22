@@ -39,7 +39,11 @@ struct March {
 
 fn march(cell: f32, sun: Vec3) -> Option<March> {
     let flat = (sun.x * sun.x + sun.z * sun.z).sqrt();
-    (flat > 1e-6 && sun.y > 0.0).then(|| March { dx: sun.x / flat, dy: sun.z / flat, rise: cell * sun.y / flat })
+    (flat > 1e-6 && sun.y > 0.0).then(|| March {
+        dx: sun.x / flat,
+        dy: sun.z / flat,
+        rise: cell * sun.y / flat,
+    })
 }
 
 /// The heightmap in world units, read without a copy.
@@ -57,7 +61,10 @@ impl Ground<'_> {
 
     /// Lowest and highest world height.
     fn range(&self) -> (f32, f32) {
-        let (lo, hi) = self.data.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        let (lo, hi) = self
+            .data
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
         let (a, b) = (lo * self.scale + self.offset, hi * self.scale + self.offset);
         (a.min(b), a.max(b))
     }
@@ -77,10 +84,21 @@ impl Ground<'_> {
 /// with the sun in direction `sun`. A sun overhead or below the horizon
 /// casts nothing (the ground heights).
 pub fn shadow_heights(heightmap: &Heightmap, cell: f32, scale: f32, offset: f32, sun: Vec3) -> Vec<f32> {
-    let ground = Ground { data: &heightmap.data, scale, offset };
+    let ground = Ground {
+        data: &heightmap.data,
+        scale,
+        offset,
+    };
     let mut s: Vec<f32> = (0..heightmap.data.len()).map(|i| ground.at(i)).collect();
     if let Some(m) = march(cell, sun) {
-        fill(&mut s, ground, heightmap.width, heightmap.height, m, (0, 0, heightmap.width - 1, heightmap.height - 1));
+        fill(
+            &mut s,
+            ground,
+            heightmap.width,
+            heightmap.height,
+            m,
+            (0, 0, heightmap.width - 1, heightmap.height - 1),
+        );
     }
     s
 }
@@ -89,9 +107,21 @@ pub fn shadow_heights(heightmap: &Heightmap, cell: f32, scale: f32, offset: f32,
 /// `shadow` (from [`shadow_heights`] with the same `cell`, `scale`,
 /// `offset` and `sun`) where it can differ, the rectangles and the ground
 /// their shadows (old or new) can reach. Returns the rectangles rewritten.
-pub fn update(shadow: &mut [f32], heightmap: &Heightmap, cell: f32, scale: f32, offset: f32, sun: Vec3, changed: &[Rect]) -> Vec<Rect> {
+pub fn update(
+    shadow: &mut [f32],
+    heightmap: &Heightmap,
+    cell: f32,
+    scale: f32,
+    offset: f32,
+    sun: Vec3,
+    changed: &[Rect],
+) -> Vec<Rect> {
     let (w, h) = (heightmap.width, heightmap.height);
-    let ground = Ground { data: &heightmap.data, scale, offset };
+    let ground = Ground {
+        data: &heightmap.data,
+        scale,
+        offset,
+    };
     let Some(m) = march(cell, sun) else {
         for &rect in changed {
             ground.reset(shadow, w, rect);
@@ -152,8 +182,17 @@ fn fill(shadow: &mut [f32], ground: Ground<'_>, w: usize, h: usize, m: March, re
             *v = best;
         }
     };
-    let rows: Vec<(usize, &mut [f32])> = shadow.chunks_mut(w).enumerate().skip(y0).take(y1 - y0 + 1).map(|(y, r)| (y, &mut r[x0..=x1])).collect();
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(rows.len().div_ceil(16)).max(1);
+    let rows: Vec<(usize, &mut [f32])> = shadow
+        .chunks_mut(w)
+        .enumerate()
+        .skip(y0)
+        .take(y1 - y0 + 1)
+        .map(|(y, r)| (y, &mut r[x0..=x1]))
+        .collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(rows.len().div_ceil(16))
+        .max(1);
     let per = rows.len().div_ceil(threads);
     let mut rows = rows;
     std::thread::scope(|scope| {
@@ -175,7 +214,11 @@ mod tests {
     use super::*;
 
     fn map(w: usize, h: usize, f: impl Fn(usize, usize) -> f32) -> Heightmap {
-        Heightmap { width: w, height: h, data: (0..w * h).map(|i| f(i % w, i / w)).collect() }
+        Heightmap {
+            width: w,
+            height: h,
+            data: (0..w * h).map(|i| f(i % w, i / w)).collect(),
+        }
     }
 
     /// Flat ground is lit everywhere (shadow height = ground height, exactly).
@@ -192,8 +235,19 @@ mod tests {
     fn a_tower_shades_away_from_the_sun() {
         let (n, cell, tall) = (65usize, 4.0, 40.0);
         let c = 32;
-        let hm = map(n, n, |x, y| if (c - 1..=c + 1).contains(&x) && (c - 1..=c + 1).contains(&y) { 1.0 } else { 0.0 });
-        for sun in [direction(), Vec3::new(0.3, 0.6, -0.7).normalize(), Vec3::new(0.9, 0.5, 0.1).normalize(), Vec3::new(-0.1, 0.4, 0.95).normalize()] {
+        let hm = map(n, n, |x, y| {
+            if (c - 1..=c + 1).contains(&x) && (c - 1..=c + 1).contains(&y) {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        for sun in [
+            direction(),
+            Vec3::new(0.3, 0.6, -0.7).normalize(),
+            Vec3::new(0.9, 0.5, 0.1).normalize(),
+            Vec3::new(-0.1, 0.4, 0.95).normalize(),
+        ] {
             let s = shadow_heights(&hm, cell, tall, 0.0, sun);
             let flat = (sun.x * sun.x + sun.z * sun.z).sqrt();
             let (dx, dz, rise) = (sun.x / flat, sun.z / flat, sun.y / flat);
@@ -207,7 +261,11 @@ mod tests {
             // the shadow height falling as it goes.
             for t in [8.0, length * 0.5, length * 0.8] {
                 let expect = tall - t * rise;
-                assert!((at(t) - expect).abs() < tall * 0.1, "{sun:?} t {t}: {} vs {expect}", at(t));
+                assert!(
+                    (at(t) - expect).abs() < tall * 0.1,
+                    "{sun:?} t {t}: {} vs {expect}",
+                    at(t)
+                );
             }
             assert!(at(length + 3.0 * cell) == 0.0, "{sun:?}: lit past the shadow's end");
             // Toward the sun: lit.
@@ -223,10 +281,17 @@ mod tests {
     #[test]
     fn updates_equal_a_full_recompute() {
         let (n, cell) = (97usize, 4.0);
-        let mut hm = map(n, n, |x, y| ((x * 7 + y * 13) % 11) as f32 * 0.02 + (x as f32 * 0.05).sin() * 0.1);
+        let mut hm = map(n, n, |x, y| {
+            ((x * 7 + y * 13) % 11) as f32 * 0.02 + (x as f32 * 0.05).sin() * 0.1
+        });
         let sun = direction();
         let mut s = shadow_heights(&hm, cell, 80.0, 3.0, sun);
-        for (rect, v) in [((40, 40, 44, 46), 0.9), ((40, 40, 44, 46), 0.0), ((0, 90, 6, 96), 1.0), ((90, 0, 96, 3), 0.7)] {
+        for (rect, v) in [
+            ((40, 40, 44, 46), 0.9),
+            ((40, 40, 44, 46), 0.0),
+            ((0, 90, 6, 96), 1.0),
+            ((90, 0, 96, 3), 0.7),
+        ] {
             let (x0, y0, x1, y1) = rect;
             for y in y0..=y1 {
                 for x in x0..=x1 {

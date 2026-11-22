@@ -27,20 +27,35 @@ fn native_demo(width: u32, height: u32, output: Output) -> FrameGraph {
     let work_usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
     let scene = graph.image(
         "scene",
-        ImageDesc::color_2d(SCENE_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | work_usage),
+        ImageDesc::color_2d(
+            SCENE_FORMAT,
+            width,
+            height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | work_usage,
+        ),
         ResourceClass::Transient,
     );
     let work = |graph: &mut FrameGraph, name: &str| {
-        graph.image(name, ImageDesc::color_2d(SCENE_FORMAT, width, height, work_usage), ResourceClass::Transient)
+        graph.image(
+            name,
+            ImageDesc::color_2d(SCENE_FORMAT, width, height, work_usage),
+            ResourceClass::Transient,
+        )
     };
     let params_staging = graph.buffer(
         "params staging",
-        BufferDesc { size: PARAMS_BYTES, usage: vk::BufferUsageFlags::TRANSFER_SRC },
+        BufferDesc {
+            size: PARAMS_BYTES,
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+        },
         ResourceClass::External,
     );
     let params = graph.buffer(
         "params",
-        BufferDesc { size: PARAMS_BYTES, usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST },
+        BufferDesc {
+            size: PARAMS_BYTES,
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        },
         ResourceClass::Transient,
     );
     let a1 = work(&mut graph, "a1");
@@ -59,19 +74,34 @@ fn native_demo(width: u32, height: u32, output: Output) -> FrameGraph {
         Output::Readback => {
             let target = graph.image(
                 "target",
-                ImageDesc::color_2d(SCENE_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC),
+                ImageDesc::color_2d(
+                    SCENE_FORMAT,
+                    width,
+                    height,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                ),
                 ResourceClass::External,
             );
             let readback = graph.buffer(
                 "readback",
-                BufferDesc { size: width as u64 * height as u64 * 4, usage: vk::BufferUsageFlags::TRANSFER_DST },
+                BufferDesc {
+                    size: width as u64 * height as u64 * 4,
+                    usage: vk::BufferUsageFlags::TRANSFER_DST,
+                },
                 ResourceClass::External,
             );
             (target, Some(readback))
         }
     };
-    graph.pass("upload params", PassKind::Transfer, ()).access(params_staging, Role::TransferSrc).discard(params, Role::TransferDst).id();
-    graph.pass("triangle", PassKind::Graphics, ()).color(scene, LoadOp::Clear).id();
+    graph
+        .pass("upload params", PassKind::Transfer, ())
+        .access(params_staging, Role::TransferSrc)
+        .discard(params, Role::TransferDst)
+        .id();
+    graph
+        .pass("triangle", PassKind::Graphics, ())
+        .color(scene, LoadOp::Clear)
+        .id();
     let filter = |graph: &mut FrameGraph, name: &str, src, dst| {
         graph
             .pass(name, PassKind::Compute, ())
@@ -92,8 +122,16 @@ fn native_demo(width: u32, height: u32, output: Output) -> FrameGraph {
         .id();
     match readback {
         Some(buffer) => {
-            graph.pass("readback", PassKind::Transfer, ()).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
-            graph.pass("host read", PassKind::Transfer, ()).access(buffer, Role::HostRead).root().id();
+            graph
+                .pass("readback", PassKind::Transfer, ())
+                .access(target, Role::TransferSrc)
+                .discard(buffer, Role::TransferDst)
+                .id();
+            graph
+                .pass("host read", PassKind::Transfer, ())
+                .access(buffer, Role::HostRead)
+                .root()
+                .id();
         }
         None => {
             graph.pass("present", PassKind::Present, ()).present(target).root().id();
@@ -117,10 +155,20 @@ fn guest_demo(width: u32, height: u32, output: Output) -> Vec<u8> {
 
     let mut g = GraphBuilder::new();
     let work_usage = IMG_STORAGE | IMG_SAMPLED;
-    let scene = g.image("scene", ImageSpec::color_2d(RGBA8, width, height, IMG_COLOR | work_usage), Class::Transient);
+    let scene = g.image(
+        "scene",
+        ImageSpec::color_2d(RGBA8, width, height, IMG_COLOR | work_usage),
+        Class::Transient,
+    );
     let params_staging = g.buffer("params staging", PARAMS_BYTES, BUF_TRANSFER_SRC, Class::External);
     let params = g.buffer("params", PARAMS_BYTES, BUF_UNIFORM | BUF_TRANSFER_DST, Class::Transient);
-    let mut work = |name| g.image(name, ImageSpec::color_2d(RGBA8, width, height, work_usage), Class::Transient);
+    let mut work = |name| {
+        g.image(
+            name,
+            ImageSpec::color_2d(RGBA8, width, height, work_usage),
+            Class::Transient,
+        )
+    };
     let (a1, a2, b1, b2) = (work("a1"), work("a2"), work("b1"), work("b2"));
     let (target, readback) = match output {
         Output::Present(format) => {
@@ -128,13 +176,35 @@ fn guest_demo(width: u32, height: u32, output: Output) -> Vec<u8> {
             (g.image("backbuffer", spec, Class::Backbuffer), None)
         }
         Output::Readback => {
-            let target = g.image("target", ImageSpec::color_2d(RGBA8, width, height, IMG_COLOR | IMG_TRANSFER_SRC), Class::External);
-            (target, Some(g.buffer("readback", width as u64 * height as u64 * 4, BUF_TRANSFER_DST, Class::External)))
+            let target = g.image(
+                "target",
+                ImageSpec::color_2d(RGBA8, width, height, IMG_COLOR | IMG_TRANSFER_SRC),
+                Class::External,
+            );
+            (
+                target,
+                Some(g.buffer(
+                    "readback",
+                    width as u64 * height as u64 * 4,
+                    BUF_TRANSFER_DST,
+                    Class::External,
+                )),
+            )
         }
     };
-    g.pass("upload params", PassKind::Transfer, 1).access(params_staging, Role::TransferSrc).discard(params, Role::TransferDst).id();
-    g.pass("triangle", PassKind::Graphics, 2).color(scene, LoadOp::Clear).id();
-    for (name, src, dst) in [("blur_h", scene, a1), ("blur_v", a1, a2), ("invert", scene, b1), ("tint", b1, b2)] {
+    g.pass("upload params", PassKind::Transfer, 1)
+        .access(params_staging, Role::TransferSrc)
+        .discard(params, Role::TransferDst)
+        .id();
+    g.pass("triangle", PassKind::Graphics, 2)
+        .color(scene, LoadOp::Clear)
+        .id();
+    for (name, src, dst) in [
+        ("blur_h", scene, a1),
+        ("blur_v", a1, a2),
+        ("invert", scene, b1),
+        ("tint", b1, b2),
+    ] {
         g.pass(name, PassKind::Compute, 3)
             .access(src, Role::StorageImageRead(ShaderStage::Compute))
             .discard(dst, Role::StorageImageWrite(ShaderStage::Compute))
@@ -148,8 +218,14 @@ fn guest_demo(width: u32, height: u32, output: Output) -> Vec<u8> {
         .id();
     match readback {
         Some(buffer) => {
-            g.pass("readback", PassKind::Transfer, 5).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
-            g.pass("host read", PassKind::Transfer, 6).access(buffer, Role::HostRead).root().id();
+            g.pass("readback", PassKind::Transfer, 5)
+                .access(target, Role::TransferSrc)
+                .discard(buffer, Role::TransferDst)
+                .id();
+            g.pass("host read", PassKind::Transfer, 6)
+                .access(buffer, Role::HostRead)
+                .root()
+                .id();
         }
         None => {
             g.pass("present", PassKind::Present, 7).present(target).root().id();
@@ -167,7 +243,10 @@ fn guest_declaration_matches_native_graph() {
         let bytes = guest_demo(1280, 720, output);
         let decoded = decode(&bytes).expect("decode");
         assert_eq!(decoded.signature(), native.signature(), "topology signatures differ");
-        let (a, b) = (bake(&native, BakeOptions::default()).unwrap(), bake(&decoded, BakeOptions::default()).unwrap());
+        let (a, b) = (
+            bake(&native, BakeOptions::default()).unwrap(),
+            bake(&decoded, BakeOptions::default()).unwrap(),
+        );
         assert_eq!(a, b, "bakes differ");
         assert_eq!(to_dot(&native, &a), to_dot(&decoded, &b), "dot exports differ");
         // Payloads arrive per pass, in declaration order.
@@ -183,7 +262,11 @@ fn a_topology_change_changes_the_signature() {
     let readback = decode(&guest_demo(1280, 720, OUTPUTS[1])).unwrap().signature();
     assert_ne!(present, resized);
     assert_ne!(present, readback);
-    assert_eq!(present, decode(&guest_demo(1280, 720, OUTPUTS[0])).unwrap().signature(), "same declaration, same signature");
+    assert_eq!(
+        present,
+        decode(&guest_demo(1280, 720, OUTPUTS[0])).unwrap().signature(),
+        "same declaration, same signature"
+    );
 }
 
 #[test]
@@ -192,14 +275,19 @@ fn encode_decode_round_trip() {
         let native = native_demo(640, 360, output);
         let decoded = decode(&encode(&native, |_| 0)).unwrap();
         assert_eq!(decoded.signature(), native.signature());
-        assert_eq!(bake(&decoded, BakeOptions::default()).unwrap(), bake(&native, BakeOptions::default()).unwrap());
+        assert_eq!(
+            bake(&decoded, BakeOptions::default()).unwrap(),
+            bake(&native, BakeOptions::default()).unwrap()
+        );
     }
 }
 
 #[test]
 fn malformed_declarations_are_rejected() {
     let good = guest_demo(64, 64, OUTPUTS[0]);
-    let word = |bytes: &mut Vec<u8>, index: usize, value: u32| bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    let word = |bytes: &mut Vec<u8>, index: usize, value: u32| {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes())
+    };
     let resource_word = |r: usize, k: usize| abi::HEADER_WORDS + r * abi::RESOURCE_WORDS + k;
     let resources = 8; // scene, params staging, params, a1, a2, b1, b2, backbuffer
     let pass_word = |p: usize, k: usize| abi::HEADER_WORDS + resources * abi::RESOURCE_WORDS + p * abi::PASS_WORDS + k;
@@ -215,18 +303,58 @@ fn malformed_declarations_are_rejected() {
     check(&|b| b.truncate(20), &|e| matches!(e, DescriptorError::Truncated { .. }));
     check(&|b| b.push(0), &|e| matches!(e, DescriptorError::TrailingBytes(1)));
     check(&|b| word(b, 0, 0xDEAD), &|e| matches!(e, DescriptorError::BadMagic(_)));
-    check(&|b| word(b, 1, 99), &|e| matches!(e, DescriptorError::UnsupportedVersion(99)));
-    check(&|b| word(b, 4, u32::MAX), &|e| matches!(e, DescriptorError::TooMany { .. }));
-    check(&|b| word(b, resource_word(0, 1), 9), &|e| matches!(e, DescriptorError::BadEnum { what: "resource class", .. }));
-    check(&|b| word(b, resource_word(0, 6), 0), &|e| matches!(e, DescriptorError::BadImage { .. }));
-    check(&|b| word(b, resource_word(0, 4), 10_000), &|e| matches!(e, DescriptorError::BadName { .. }));
-    check(&|b| word(b, pass_word(0, 0), 7), &|e| matches!(e, DescriptorError::BadEnum { what: "pass kind", .. }));
-    check(&|b| word(b, pass_word(0, 1), 4), &|e| matches!(e, DescriptorError::BadEnum { what: "pass flags", .. }));
-    check(&|b| word(b, pass_word(1, 5), 0), &|e| matches!(e, DescriptorError::BadIntentRange { .. }));
-    check(&|b| word(b, intent_word(0, 0), 500), &|e| matches!(e, DescriptorError::BadResource { .. }));
-    check(&|b| word(b, intent_word(0, 1), 77), &|e| matches!(e, DescriptorError::BadEnum { what: "intent role", .. }));
+    check(&|b| word(b, 1, 99), &|e| {
+        matches!(e, DescriptorError::UnsupportedVersion(99))
+    });
+    check(&|b| word(b, 4, u32::MAX), &|e| {
+        matches!(e, DescriptorError::TooMany { .. })
+    });
+    check(&|b| word(b, resource_word(0, 1), 9), &|e| {
+        matches!(
+            e,
+            DescriptorError::BadEnum {
+                what: "resource class",
+                ..
+            }
+        )
+    });
+    check(&|b| word(b, resource_word(0, 6), 0), &|e| {
+        matches!(e, DescriptorError::BadImage { .. })
+    });
+    check(&|b| word(b, resource_word(0, 4), 10_000), &|e| {
+        matches!(e, DescriptorError::BadName { .. })
+    });
+    check(&|b| word(b, pass_word(0, 0), 7), &|e| {
+        matches!(e, DescriptorError::BadEnum { what: "pass kind", .. })
+    });
+    check(&|b| word(b, pass_word(0, 1), 4), &|e| {
+        matches!(e, DescriptorError::BadEnum { what: "pass flags", .. })
+    });
+    check(&|b| word(b, pass_word(1, 5), 0), &|e| {
+        matches!(e, DescriptorError::BadIntentRange { .. })
+    });
+    check(&|b| word(b, intent_word(0, 0), 500), &|e| {
+        matches!(e, DescriptorError::BadResource { .. })
+    });
+    check(&|b| word(b, intent_word(0, 1), 77), &|e| {
+        matches!(
+            e,
+            DescriptorError::BadEnum {
+                what: "intent role",
+                ..
+            }
+        )
+    });
     // TransferSrc takes no argument.
-    check(&|b| word(b, intent_word(0, 2), 1), &|e| matches!(e, DescriptorError::BadEnum { what: "intent argument", .. }));
+    check(&|b| word(b, intent_word(0, 2), 1), &|e| {
+        matches!(
+            e,
+            DescriptorError::BadEnum {
+                what: "intent argument",
+                ..
+            }
+        )
+    });
 }
 
 /// Random corruption must never panic, neither in decode nor in bake.
@@ -279,25 +407,84 @@ fn depth_and_continued_attachments_round_trip() {
     const IMG_COLOR: u32 = 0x10;
     const IMG_DEPTH: u32 = 0x20;
     let mut g = GraphBuilder::new();
-    let depth = g.image("depth", ImageSpec::depth_2d(D32, 320, 200, IMG_DEPTH | IMG_SAMPLED), Class::Transient);
-    let color = g.image("color", ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR | IMG_SAMPLED), Class::Transient);
-    let back = g.image("backbuffer", ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR), Class::Backbuffer);
-    g.pass("terrain", abi::PassKind::Graphics, 1).color(color, abi::LoadOp::Clear).depth(depth, abi::LoadOp::Clear).id();
-    g.pass("units", abi::PassKind::Graphics, 2).color(color, abi::LoadOp::Load).depth(depth, abi::LoadOp::Load).id();
-    g.pass("decals", abi::PassKind::Graphics, 3).color(color, abi::LoadOp::Load).depth_read(depth).id();
-    g.pass("post", abi::PassKind::Graphics, 4).sampled(color, abi::ShaderStage::Fragment).sampled(depth, abi::ShaderStage::Fragment).color(back, abi::LoadOp::DontCare).id();
+    let depth = g.image(
+        "depth",
+        ImageSpec::depth_2d(D32, 320, 200, IMG_DEPTH | IMG_SAMPLED),
+        Class::Transient,
+    );
+    let color = g.image(
+        "color",
+        ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR | IMG_SAMPLED),
+        Class::Transient,
+    );
+    let back = g.image(
+        "backbuffer",
+        ImageSpec::color_2d(RGBA8, 320, 200, IMG_COLOR),
+        Class::Backbuffer,
+    );
+    g.pass("terrain", abi::PassKind::Graphics, 1)
+        .color(color, abi::LoadOp::Clear)
+        .depth(depth, abi::LoadOp::Clear)
+        .id();
+    g.pass("units", abi::PassKind::Graphics, 2)
+        .color(color, abi::LoadOp::Load)
+        .depth(depth, abi::LoadOp::Load)
+        .id();
+    g.pass("decals", abi::PassKind::Graphics, 3)
+        .color(color, abi::LoadOp::Load)
+        .depth_read(depth)
+        .id();
+    g.pass("post", abi::PassKind::Graphics, 4)
+        .sampled(color, abi::ShaderStage::Fragment)
+        .sampled(depth, abi::ShaderStage::Fragment)
+        .color(back, abi::LoadOp::DontCare)
+        .id();
     g.pass("present", abi::PassKind::Present, 5).present(back).root().id();
     let decoded = decode(&g.finish()).expect("decode");
 
     let mut native = FrameGraph::new();
     let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
-    let ndepth = native.image("depth", ImageDesc::depth_2d(vk::Format::D32_SFLOAT, 320, 200, usage), ResourceClass::Transient);
-    let ncolor = native.image("color", ImageDesc::color_2d(SCENE_FORMAT, 320, 200, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
-    let nback = native.image("backbuffer", ImageDesc::color_2d(SCENE_FORMAT, 320, 200, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer);
-    native.pass("terrain", PassKind::Graphics, ()).color(ncolor, LoadOp::Clear).depth(ndepth, LoadOp::Clear).id();
-    native.pass("units", PassKind::Graphics, ()).color(ncolor, LoadOp::Load).depth(ndepth, LoadOp::Load).id();
-    native.pass("decals", PassKind::Graphics, ()).color(ncolor, LoadOp::Load).depth_read(ndepth).id();
-    native.pass("post", PassKind::Graphics, ()).sampled(ncolor, ShaderStage::Fragment).sampled(ndepth, ShaderStage::Fragment).color(nback, LoadOp::DontCare).id();
+    let ndepth = native.image(
+        "depth",
+        ImageDesc::depth_2d(vk::Format::D32_SFLOAT, 320, 200, usage),
+        ResourceClass::Transient,
+    );
+    let ncolor = native.image(
+        "color",
+        ImageDesc::color_2d(
+            SCENE_FORMAT,
+            320,
+            200,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        ),
+        ResourceClass::Transient,
+    );
+    let nback = native.image(
+        "backbuffer",
+        ImageDesc::color_2d(SCENE_FORMAT, 320, 200, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+        ResourceClass::Backbuffer,
+    );
+    native
+        .pass("terrain", PassKind::Graphics, ())
+        .color(ncolor, LoadOp::Clear)
+        .depth(ndepth, LoadOp::Clear)
+        .id();
+    native
+        .pass("units", PassKind::Graphics, ())
+        .color(ncolor, LoadOp::Load)
+        .depth(ndepth, LoadOp::Load)
+        .id();
+    native
+        .pass("decals", PassKind::Graphics, ())
+        .color(ncolor, LoadOp::Load)
+        .depth_read(ndepth)
+        .id();
+    native
+        .pass("post", PassKind::Graphics, ())
+        .sampled(ncolor, ShaderStage::Fragment)
+        .sampled(ndepth, ShaderStage::Fragment)
+        .color(nback, LoadOp::DontCare)
+        .id();
     native.pass("present", PassKind::Present, ()).present(nback).root().id();
 
     assert_eq!(decoded.signature(), native.signature());

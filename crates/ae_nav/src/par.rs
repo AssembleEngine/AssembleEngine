@@ -31,22 +31,28 @@ impl Par {
     /// A pool of `threads` threads; 0 or 1 runs everything on the caller.
     pub fn new(threads: usize) -> Self {
         let threads = threads.max(1);
-        let pool = (threads > 1).then(|| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|i| format!("sim-par-{i}"))
-                .start_handler(|i| thread_load::register(&format!("sim-par-{i}")))
-                .build()
-                .expect("build simulation thread pool")
-        }).map(Arc::new);
+        let pool = (threads > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name(|i| format!("sim-par-{i}"))
+                    .start_handler(|i| thread_load::register(&format!("sim-par-{i}")))
+                    .build()
+                    .expect("build simulation thread pool")
+            })
+            .map(Arc::new);
         Self { pool, threads }
     }
 
-    pub fn threads(&self) -> usize { self.threads }
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
 
     /// Pieces to split `n` items into.
     fn pieces(&self, n: usize) -> usize {
-        if self.pool.is_none() || n < MIN_PARALLEL_ITEMS { return 1; }
+        if self.pool.is_none() || n < MIN_PARALLEL_ITEMS {
+            return 1;
+        }
         (self.threads * PIECES_PER_THREAD).min(n / MIN_PIECE_ITEMS).max(1)
     }
 
@@ -66,7 +72,18 @@ impl Par {
     /// Run `a` and `b`, in parallel when there is a pool.
     pub fn join<A: Send, B: Send>(&self, a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
         match &self.pool {
-            Some(pool) => run(pool, || rayon::join(|| { let _b = thread_load::busy(); a() }, || { let _b = thread_load::busy(); b() })),
+            Some(pool) => run(pool, || {
+                rayon::join(
+                    || {
+                        let _b = thread_load::busy();
+                        a()
+                    },
+                    || {
+                        let _b = thread_load::busy();
+                        b()
+                    },
+                )
+            }),
             None => (a(), b()),
         }
     }
@@ -75,7 +92,10 @@ impl Par {
     /// does not depend on the algorithm or the thread count.
     pub fn sort_unstable<T: Ord + Send>(&self, items: &mut [T]) {
         match &self.pool {
-            Some(pool) if items.len() >= MIN_PARALLEL_ITEMS => run(pool, || { let _b = thread_load::busy(); items.par_sort_unstable() }),
+            Some(pool) if items.len() >= MIN_PARALLEL_ITEMS => run(pool, || {
+                let _b = thread_load::busy();
+                items.par_sort_unstable()
+            }),
             _ => items.sort_unstable(),
         }
     }
@@ -84,7 +104,9 @@ impl Par {
     pub fn map<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
         match &self.pool {
             // One busy span per rayon job, not per item.
-            Some(pool) if items.len() > 1 => run(pool, || items.par_iter().map_init(thread_load::busy, |_, x| f(x)).collect()),
+            Some(pool) if items.len() > 1 => run(pool, || {
+                items.par_iter().map_init(thread_load::busy, |_, x| f(x)).collect()
+            }),
             _ => items.iter().map(f).collect(),
         }
     }
@@ -96,7 +118,15 @@ impl Par {
         match &self.pool {
             Some(pool) if k > 1 => {
                 let chunk = n.div_ceil(k);
-                run(pool, || (0..k).into_par_iter().map(|c| { let _b = thread_load::busy(); f((c * chunk).min(n), ((c + 1) * chunk).min(n)) }).collect())
+                run(pool, || {
+                    (0..k)
+                        .into_par_iter()
+                        .map(|c| {
+                            let _b = thread_load::busy();
+                            f((c * chunk).min(n), ((c + 1) * chunk).min(n))
+                        })
+                        .collect()
+                })
             }
             _ => vec![f(0, n)],
         }
@@ -109,12 +139,25 @@ impl Par {
 
     /// `f(start, chunk)` over contiguous mutable chunks of `items`, where
     /// `start` is the index of the chunk's first item; results in chunk order.
-    pub fn chunks_mut_at<T: Send, R: Send>(&self, items: &mut [T], f: impl Fn(usize, &mut [T]) -> R + Sync + Send) -> Vec<R> {
+    pub fn chunks_mut_at<T: Send, R: Send>(
+        &self,
+        items: &mut [T],
+        f: impl Fn(usize, &mut [T]) -> R + Sync + Send,
+    ) -> Vec<R> {
         let k = self.pieces(items.len());
         match &self.pool {
             Some(pool) if k > 1 => {
                 let chunk = items.len().div_ceil(k);
-                run(pool, || items.par_chunks_mut(chunk).enumerate().map(|(c, s)| { let _b = thread_load::busy(); f(c * chunk, s) }).collect())
+                run(pool, || {
+                    items
+                        .par_chunks_mut(chunk)
+                        .enumerate()
+                        .map(|(c, s)| {
+                            let _b = thread_load::busy();
+                            f(c * chunk, s)
+                        })
+                        .collect()
+                })
             }
             _ => vec![f(0, items)],
         }
@@ -124,7 +167,11 @@ impl Par {
 /// `pool.install(f)`. A caller outside the pool blocks until `f` is done, so
 /// it counts as idle meanwhile; a pool thread runs `f` inline.
 fn run<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
-    if rayon::current_thread_index().is_some() { pool.install(f) } else { thread_load::idle(|| pool.install(f)) }
+    if rayon::current_thread_index().is_some() {
+        pool.install(f)
+    } else {
+        thread_load::idle(|| pool.install(f))
+    }
 }
 
 #[cfg(test)]
@@ -136,10 +183,19 @@ mod tests {
         let expected: Vec<usize> = (0..5000).collect();
         for t in [1, 2, 3, 8] {
             let par = Par::new(t);
-            let got: Vec<usize> = par.ranges(5000, |lo, hi| (lo..hi).collect::<Vec<_>>()).into_iter().flatten().collect();
+            let got: Vec<usize> = par
+                .ranges(5000, |lo, hi| (lo..hi).collect::<Vec<_>>())
+                .into_iter()
+                .flatten()
+                .collect();
             assert_eq!(got, expected);
             let mut items = vec![1u32; 5000];
-            let sums = par.chunks_mut(&mut items, |c| { for x in c.iter_mut() { *x += 1; } c.len() });
+            let sums = par.chunks_mut(&mut items, |c| {
+                for x in c.iter_mut() {
+                    *x += 1;
+                }
+                c.len()
+            });
             assert_eq!(sums.iter().sum::<usize>(), 5000);
             assert!(items.iter().all(|&x| x == 2));
         }

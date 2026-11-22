@@ -155,7 +155,10 @@ impl DisplayLevels {
     /// The levels that make an HDR frame carry the SDR one's values: paper
     /// white at the SDR white (80 nits, scRGB's own reference) and no
     /// headroom.
-    pub const FLAT: Self = Self { paper_white: 80.0, peak: 80.0 };
+    pub const FLAT: Self = Self {
+        paper_white: 80.0,
+        peak: 80.0,
+    };
 
     /// How far the peak is above paper white: the tone curve's peak anchor
     /// displays at this, in paper-white units.
@@ -172,7 +175,10 @@ impl DisplayLevels {
 
 impl Default for DisplayLevels {
     fn default() -> Self {
-        Self { paper_white: 203.0, peak: 1000.0 }
+        Self {
+            paper_white: 203.0,
+            peak: 1000.0,
+        }
     }
 }
 
@@ -222,7 +228,13 @@ pub fn bt709_to_bt2020(c: [f32; 3]) -> [f32; 3] {
 /// in BT.709-relative light, as the GPU pass does. The CPU mirror the tests
 /// decode against.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_rgb(encoding: OutputEncoding, levels: DisplayLevels, working: WorkingSpace, gamut: Gamut, c: [f32; 3]) -> [f32; 3] {
+pub fn encode_rgb(
+    encoding: OutputEncoding,
+    levels: DisplayLevels,
+    working: WorkingSpace,
+    gamut: Gamut,
+    c: [f32; 3],
+) -> [f32; 3] {
     let peak = levels.headroom();
     let v = c.map(|x| x.min(peak));
     let mut out = colorspace::convert(working.gamut(), gamut, v);
@@ -250,7 +262,17 @@ impl Encode {
     /// image is `format`.
     pub fn new(gpu: &GpuDevice, encoding: OutputEncoding, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         anyhow::ensure!(encoding.uses_display(), "an SDR output has no post.encode pass");
-        Ok(Self { program: FullscreenProgram::new(gpu, "post.encode", spirv!("encode.frag"), UNIFORM_BYTES, 1, &[format], frames_in_flight)? })
+        Ok(Self {
+            program: FullscreenProgram::new(
+                gpu,
+                "post.encode",
+                spirv!("encode.frag"),
+                UNIFORM_BYTES,
+                1,
+                &[format],
+                frames_in_flight,
+            )?,
+        })
     }
 
     /// Frame slot `slot`'s uniform: the levels, the encoding, the working
@@ -258,9 +280,21 @@ impl Encode {
     /// whether the output gamut is narrower than the working space (so the
     /// pass compresses). None of this varies within a run in practice, but
     /// it is frame state like the levels (a module may redeclare).
-    pub fn write(&mut self, slot: usize, encoding: OutputEncoding, levels: DisplayLevels, working: WorkingSpace, gamut: Gamut) {
+    pub fn write(
+        &mut self,
+        slot: usize,
+        encoding: OutputEncoding,
+        levels: DisplayLevels,
+        working: WorkingSpace,
+        gamut: Gamut,
+    ) {
         let compress = !gamut.contains(working);
-        let words: [f32; 4] = [levels.paper_white, levels.peak, if encoding == OutputEncoding::ScRgb { 1.0 } else { 0.0 }, if compress { 1.0 } else { 0.0 }];
+        let words: [f32; 4] = [
+            levels.paper_white,
+            levels.peak,
+            if encoding == OutputEncoding::ScRgb { 1.0 } else { 0.0 },
+            if compress { 1.0 } else { 0.0 },
+        ];
         let to_output = colorspace::matrix(working.gamut(), gamut);
         let to_container = colorspace::matrix(gamut, encoding.container_gamut());
         let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -316,24 +350,48 @@ mod tests {
     fn sc_rgb_is_relative_to_80_nits() {
         // 80-nit paper white: display 1.0 is scRGB 1.0 (the default gamut
         // carries it through BT.2020 and back, so within float rounding).
-        let flat = encode_rgb(OutputEncoding::ScRgb, DisplayLevels::FLAT, WorkingSpace::Bt709, Gamut::Bt2020, [1.0, 0.5, 0.0]);
+        let flat = encode_rgb(
+            OutputEncoding::ScRgb,
+            DisplayLevels::FLAT,
+            WorkingSpace::Bt709,
+            Gamut::Bt2020,
+            [1.0, 0.5, 0.0],
+        );
         for (got, want) in flat.iter().zip([1.0, 0.5, 0.0]) {
             assert!((got - want).abs() < 1e-6, "{flat:?}");
         }
         // 203 nits: the same light is 2.5375 scRGB.
-        let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+        let levels = DisplayLevels {
+            paper_white: 203.0,
+            peak: 1000.0,
+        };
         assert!((levels.sc_rgb_scale() - 2.5375).abs() < 1e-6);
-        let v = encode_rgb(OutputEncoding::ScRgb, levels, WorkingSpace::Bt709, Gamut::Bt2020, [0.4, 0.2, 0.0]);
+        let v = encode_rgb(
+            OutputEncoding::ScRgb,
+            levels,
+            WorkingSpace::Bt709,
+            Gamut::Bt2020,
+            [0.4, 0.2, 0.0],
+        );
         assert!((v[0] - 1.015).abs() < 1e-5, "{v:?}");
         // Negatives pass (out of gamut, not black): the default scRGB gamut
         // is wider than the working space, so nothing is compressed.
-        let neg = encode_rgb(OutputEncoding::ScRgb, levels, WorkingSpace::Bt709, Gamut::Bt2020, [-0.1, 0.0, 0.0])[0];
+        let neg = encode_rgb(
+            OutputEncoding::ScRgb,
+            levels,
+            WorkingSpace::Bt709,
+            Gamut::Bt2020,
+            [-0.1, 0.0, 0.0],
+        )[0];
         assert!((neg - -0.1 * levels.sc_rgb_scale()).abs() < 1e-5, "{neg}");
     }
 
     #[test]
     fn nothing_encodes_above_the_peak() {
-        let levels = DisplayLevels { paper_white: 203.0, peak: 441.0 };
+        let levels = DisplayLevels {
+            paper_white: 203.0,
+            peak: 441.0,
+        };
         // Display 8.0 is above the display's 2.172: it clamps at the peak.
         let top = pq(441.0);
         for c in [levels.headroom(), levels.headroom() * 4.0, 16.0] {
@@ -341,7 +399,13 @@ mod tests {
             assert!((v[0] - top).abs() < 1e-6, "{c}: {v:?} vs {top}");
         }
         // Paper white is PQ's 203 nits.
-        let white = encode_rgb(OutputEncoding::Hdr10Pq, levels, WorkingSpace::Bt709, Gamut::P3, [1.0; 3]);
+        let white = encode_rgb(
+            OutputEncoding::Hdr10Pq,
+            levels,
+            WorkingSpace::Bt709,
+            Gamut::P3,
+            [1.0; 3],
+        );
         assert!((white[0] - pq(203.0)).abs() < 1e-6, "{white:?}");
     }
 

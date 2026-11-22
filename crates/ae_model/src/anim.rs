@@ -122,7 +122,19 @@ pub struct Layer {
 
 impl Default for Layer {
     fn default() -> Self {
-        Self { clip: 0, mask: 0, mode: 0, kind: kind::BLEND, flags: 0, reserved: 0, weight: 0.0, target: 0.0, fade: 0.0, speed: 0.0, phase: 0.0 }
+        Self {
+            clip: 0,
+            mask: 0,
+            mode: 0,
+            kind: kind::BLEND,
+            flags: 0,
+            reserved: 0,
+            weight: 0.0,
+            target: 0.0,
+            fade: 0.0,
+            speed: 0.0,
+            phase: 0.0,
+        }
     }
 }
 
@@ -300,12 +312,24 @@ struct SkinVertex {
 
 impl Rig {
     pub fn new(model: &Model) -> Rig {
-        let rest: Vec<Trs> = model.bones.iter().map(|b| Trs { t: b.translation, r: b.rotation, s: b.scale }).collect();
+        let rest: Vec<Trs> = model
+            .bones
+            .iter()
+            .map(|b| Trs {
+                t: b.translation,
+                r: b.rotation,
+                s: b.scale,
+            })
+            .collect();
         let mut rig = Rig {
             names: model.bones.iter().map(|b| b.name.clone()).collect(),
             parents: model.bones.iter().map(|b| b.parent.unwrap_or(u32::MAX)).collect(),
             rest_affine: model.bones.iter().map(|b| affine_of_cols(&b.rest)).collect(),
-            joints: model.joints.iter().map(|j| (j.bone, affine_of_cols(&j.inverse_bind))).collect(),
+            joints: model
+                .joints
+                .iter()
+                .map(|j| (j.bone, affine_of_cols(&j.inverse_bind)))
+                .collect(),
             clips: Vec::new(),
             clip_names: model.clips.iter().map(|c| c.name.clone()).collect(),
             masks: Vec::new(),
@@ -379,7 +403,13 @@ impl Rig {
     /// Clip `clip` (numbered from 1) as baked: what [`Rig::pose`] samples,
     /// for the GPU to sample the same keys.
     pub fn clip_table(&self, clip: u16) -> Option<ClipTable<'_>> {
-        self.baked(clip).map(|c| ClipTable { tracks: &c.tracks, frames: c.frames, rate: c.rate, duration: c.duration, keys: &c.keys })
+        self.baked(clip).map(|c| ClipTable {
+            tracks: &c.tracks,
+            frames: c.frames,
+            rate: c.rate,
+            duration: c.duration,
+            keys: &c.keys,
+        })
     }
 
     fn baked(&self, clip: u16) -> Option<&Baked> {
@@ -407,7 +437,10 @@ impl Rig {
     /// [`Layer::mask`].
     pub fn add_mask(&mut self, name: &str, weights: Vec<f32>) -> u16 {
         assert_eq!(weights.len(), self.bones(), "a mask has a weight per bone");
-        self.masks.push(Mask { name: name.into(), weights });
+        self.masks.push(Mask {
+            name: name.into(),
+            weights,
+        });
         self.masks.len() as u16
     }
 
@@ -423,7 +456,10 @@ impl Rig {
     }
 
     pub fn rest_pose(&self) -> Pose {
-        Pose { local: self.rest.clone(), posed: vec![false; self.bones()] }
+        Pose {
+            local: self.rest.clone(),
+            posed: vec![false; self.bones()],
+        }
     }
 
     /// One tick of `dt` seconds: layers' weights fade (a layer faded out is
@@ -443,7 +479,11 @@ impl Rig {
                 *l = Layer::default();
                 continue;
             }
-            let rate = if l.flags & layer_flags::GROUND_SPEED != 0 { l.speed * ground_speed } else { l.speed };
+            let rate = if l.flags & layer_flags::GROUND_SPEED != 0 {
+                l.speed * ground_speed
+            } else {
+                l.speed
+            };
             let d = self.duration(l.clip);
             l.phase += rate * dt;
             match PlayMode::from_bits(l.mode as u32) {
@@ -465,7 +505,10 @@ impl Rig {
                     let a = if up { m.accel } else { m.decel };
                     m.rate = toward(m.rate, m.speed, a * dt, a <= 0.0);
                     if m.rate != 0.0 {
-                        m.value = qnorm(qmul(m.value, axis_angle([m.target[0], m.target[1], m.target[2]], m.rate * dt)));
+                        m.value = qnorm(qmul(
+                            m.value,
+                            axis_angle([m.target[0], m.target[1], m.target[2]], m.rate * dt),
+                        ));
                         // On the rest pose's side, so a turn after it goes
                         // the way its angle says.
                         if self.rest.get(m.bone as usize).is_some_and(|r| dot4(m.value, r.r) < 0.0) {
@@ -488,11 +531,14 @@ impl Rig {
                 continue;
             }
             ch.layers[i].flags &= !layer_flags::NEW;
-            let Some(c) = self.baked(l.clip).filter(|_| l.kind != kind::ADDITIVE) else { continue };
+            let Some(c) = self.baked(l.clip).filter(|_| l.kind != kind::ADDITIVE) else {
+                continue;
+            };
             let mask = self.mask_weights(l.mask);
             for m in ch.manual.iter_mut() {
                 let b = m.bone as usize;
-                let covered = c.tracks.binary_search(&(b as u32)).is_ok() && mask.map_or(1.0, |w| w.get(b).copied().unwrap_or(0.0)) > 0.0;
+                let covered = c.tracks.binary_search(&(b as u32)).is_ok()
+                    && mask.map_or(1.0, |w| w.get(b).copied().unwrap_or(0.0)) > 0.0;
                 if !m.is_empty() && m.flags & manual_flags::PENDING == 0 && covered {
                     *m = Manual::default();
                 }
@@ -503,7 +549,11 @@ impl Rig {
     /// Pending manual entries into their bones' terms; fresh ones start from
     /// where their bone is shown.
     fn start_manual(&self, ch: &mut Channels) {
-        if !ch.manual.iter().any(|m| !m.is_empty() && m.flags & manual_flags::PENDING != 0) {
+        if !ch
+            .manual
+            .iter()
+            .any(|m| !m.is_empty() && m.flags & manual_flags::PENDING != 0)
+        {
             return;
         }
         let before = *ch;
@@ -532,12 +582,29 @@ impl Rig {
             m.rate = 0.0;
         }
         let v = [m.target[0], m.target[1], m.target[2]];
-        let axis = || norm3(if m.flags & manual_flags::BONE_AXIS != 0 { v } else { self.in_rest_frame(b, v, false) });
+        let axis = || {
+            norm3(if m.flags & manual_flags::BONE_AXIS != 0 {
+                v
+            } else {
+                self.in_rest_frame(b, v, false)
+            })
+        };
         m.target = match m.kind {
             manual_kind::TURN => {
                 let q = axis_angle(axis(), m.target[3]);
-                let t = qnorm(qmul(if m.flags & manual_flags::RELATIVE != 0 { m.value } else { rest.r }, q));
-                if m.flags & manual_flags::SHORT != 0 && dot4(m.value, t) < 0.0 { neg4(t) } else { t }
+                let t = qnorm(qmul(
+                    if m.flags & manual_flags::RELATIVE != 0 {
+                        m.value
+                    } else {
+                        rest.r
+                    },
+                    q,
+                ));
+                if m.flags & manual_flags::SHORT != 0 && dot4(m.value, t) < 0.0 {
+                    neg4(t)
+                } else {
+                    t
+                }
             }
             manual_kind::SPIN => {
                 let a = axis();
@@ -589,11 +656,19 @@ impl Rig {
         for m in ch.manual.iter().filter(|m| !m.is_empty() && m.bone as usize == b) {
             manual |= m.shows();
             if matches!(m.kind, manual_kind::TURN | manual_kind::SPIN) {
-                let m = if m.flags & manual_flags::PENDING != 0 { self.resolve(ch, *m).unwrap_or(*m) } else { *m };
+                let m = if m.flags & manual_flags::PENDING != 0 {
+                    self.resolve(ch, *m).unwrap_or(*m)
+                } else {
+                    *m
+                };
                 return if m.kind == manual_kind::TURN { m.target } else { m.value };
             }
         }
-        if manual { self.rest[b].r } else { self.clip_local(ch, b).r }
+        if manual {
+            self.rest[b].r
+        } else {
+            self.clip_local(ch, b).r
+        }
     }
 
     /// Bone `b`'s local transform from the layers alone.
@@ -604,7 +679,9 @@ impl Rig {
                 continue;
             }
             let Some(c) = self.baked(l.clip) else { continue };
-            let Ok(i) = c.tracks.binary_search(&(b as u32)) else { continue };
+            let Ok(i) = c.tracks.binary_search(&(b as u32)) else {
+                continue;
+            };
             let w = (l.weight * self.mask_weights(l.mask).map_or(1.0, |m| m[b])).min(1.0);
             if w > 0.0 {
                 let (fa, fb, s) = c.frames_at(l.phase, PlayMode::from_bits(l.mode as u32));
@@ -634,7 +711,11 @@ impl Rig {
             }
         }
         // Manual bones: their rest pose, with their entries' values.
-        let shown = || ch.manual.iter().filter(|m| m.shows() && (m.bone as usize) < self.bones());
+        let shown = || {
+            ch.manual
+                .iter()
+                .filter(|m| m.shows() && (m.bone as usize) < self.bones())
+        };
         for m in shown() {
             out.local[m.bone as usize] = self.rest[m.bone as usize];
         }
@@ -666,7 +747,9 @@ impl Rig {
         for v in &self.skin {
             let mut m = [0.0f32; 12];
             for k in 0..4 {
-                let Some(j) = palette.get(v.joints[k] as usize).filter(|_| v.weights[k] != 0) else { continue };
+                let Some(j) = palette.get(v.joints[k] as usize).filter(|_| v.weights[k] != 0) else {
+                    continue;
+                };
                 let w = v.weights[k] as f32 / 65535.0;
                 for (x, y) in m.iter_mut().zip(j) {
                     *x += y * w;
@@ -678,7 +761,11 @@ impl Rig {
                 max[i] = max[i].max(q[i]);
             }
         }
-        if self.skin.is_empty() { Bounds::default() } else { Bounds { min, max } }
+        if self.skin.is_empty() {
+            Bounds::default()
+        } else {
+            Bounds { min, max }
+        }
     }
 
     /// The model's footprint radius ([`crate::footprint`]): a unit of
@@ -719,7 +806,11 @@ impl Rig {
     /// Model-space bone matrices (parents come first).
     pub fn globals(&self, pose: &Pose, out: &mut [Affine]) {
         for b in 0..self.bones() {
-            let local = if pose.posed[b] { affine_of_trs(&pose.local[b]) } else { self.rest_affine[b] };
+            let local = if pose.posed[b] {
+                affine_of_trs(&pose.local[b])
+            } else {
+                self.rest_affine[b]
+            };
             out[b] = match self.parents[b] {
                 u32::MAX => local,
                 p => mul(&out[p as usize], &local),
@@ -743,7 +834,11 @@ fn skin_vertices(model: &Model) -> Vec<SkinVertex> {
     model
         .vertices
         .iter()
-        .map(|v| SkinVertex { p: v.position.map(f32::to_bits), joints: v.joints, weights: v.weights })
+        .map(|v| SkinVertex {
+            p: v.position.map(f32::to_bits),
+            joints: v.joints,
+            weights: v.weights,
+        })
         .filter(|v| seen.insert(*v))
         .collect()
 }
@@ -751,7 +846,13 @@ fn skin_vertices(model: &Model) -> Vec<SkinVertex> {
 /// `x` moved toward `to` by at most `step` (or all the way, `at_once`).
 fn toward(x: f32, to: f32, step: f32, at_once: bool) -> f32 {
     let d = to - x;
-    if at_once || d.abs() <= step { to } else if d > 0.0 { x + step } else { x - step }
+    if at_once || d.abs() <= step {
+        to
+    } else if d > 0.0 {
+        x + step
+    } else {
+        x - step
+    }
 }
 
 /// `x` into `[0, period)` (0 for no period).
@@ -773,7 +874,11 @@ fn wrap(x: f32, period: f32) -> f32 {
 /// acceleration to the top speed, and down to what the deceleration can
 /// still stop from.
 fn profile(m: &Manual, remaining: f32, dt: f32) -> f32 {
-    let mut r = if m.accel > 0.0 { (m.rate + m.accel * dt).min(m.speed) } else { m.speed };
+    let mut r = if m.accel > 0.0 {
+        (m.rate + m.accel * dt).min(m.speed)
+    } else {
+        m.speed
+    };
     if m.decel > 0.0 {
         r = r.min(libm::sqrtf(2.0 * m.decel * remaining));
     }
@@ -801,8 +906,17 @@ fn step_turn(m: &mut Manual, dt: f32) {
         return;
     }
     let s = step / remaining;
-    let (wa, wb) = if sn < 1e-4 { (1.0 - s, s) } else { (libm::sinf((1.0 - s) * arc) / sn, libm::sinf(s * arc) / sn) };
-    m.value = qnorm([a[0] * wa + b[0] * wb, a[1] * wa + b[1] * wb, a[2] * wa + b[2] * wb, a[3] * wa + b[3] * wb]);
+    let (wa, wb) = if sn < 1e-4 {
+        (1.0 - s, s)
+    } else {
+        (libm::sinf((1.0 - s) * arc) / sn, libm::sinf(s * arc) / sn)
+    };
+    m.value = qnorm([
+        a[0] * wa + b[0] * wb,
+        a[1] * wa + b[1] * wb,
+        a[2] * wa + b[2] * wb,
+        a[3] * wa + b[3] * wb,
+    ]);
     m.rate = r;
 }
 
@@ -854,7 +968,11 @@ fn neg4(a: [f32; 4]) -> [f32; 4] {
 
 fn norm3(v: [f32; 3]) -> [f32; 3] {
     let len = libm::sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if len > 0.0 { [v[0] / len, v[1] / len, v[2] / len] } else { [0.0, 1.0, 0.0] }
+    if len > 0.0 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
+    }
 }
 
 /// `v` rotated by `q`.
@@ -884,13 +1002,26 @@ fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 pub fn qnorm(q: [f32; 4]) -> [f32; 4] {
     let len = libm::sqrtf(dot4(q, q));
-    if len > 0.0 { [q[0] / len, q[1] / len, q[2] / len, q[3] / len] } else { [0.0, 0.0, 0.0, 1.0] }
+    if len > 0.0 {
+        [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 /// From `a` to `b` by `s`, the short way, normalised.
 fn nlerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
-    let b = if dot4(a, b) < 0.0 { [-b[0], -b[1], -b[2], -b[3]] } else { b };
-    qnorm([a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s, a[3] + (b[3] - a[3]) * s])
+    let b = if dot4(a, b) < 0.0 {
+        [-b[0], -b[1], -b[2], -b[3]]
+    } else {
+        b
+    };
+    qnorm([
+        a[0] + (b[0] - a[0]) * s,
+        a[1] + (b[1] - a[1]) * s,
+        a[2] + (b[2] - a[2]) * s,
+        a[3] + (b[3] - a[3]) * s,
+    ])
 }
 
 fn slerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
@@ -907,7 +1038,12 @@ fn slerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
     let th = libm::acosf(d);
     let sn = libm::sinf(th);
     let (wa, wb) = (libm::sinf((1.0 - s) * th) / sn, libm::sinf(s * th) / sn);
-    qnorm([a[0] * wa + b[0] * wb, a[1] * wa + b[1] * wb, a[2] * wa + b[2] * wb, a[3] * wa + b[3] * wb])
+    qnorm([
+        a[0] * wa + b[0] * wb,
+        a[1] * wa + b[1] * wb,
+        a[2] * wa + b[2] * wb,
+        a[3] * wa + b[3] * wb,
+    ])
 }
 
 fn axis_angle(axis: [f32; 3], angle: f32) -> [f32; 4] {
@@ -916,8 +1052,18 @@ fn axis_angle(axis: [f32; 3], angle: f32) -> [f32; 4] {
 }
 
 fn lerp_trs(a: Trs, b: Trs, s: f32) -> Trs {
-    let l = |x: [f32; 3], y: [f32; 3]| [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s, x[2] + (y[2] - x[2]) * s];
-    Trs { t: l(a.t, b.t), r: nlerp(a.r, b.r, s), s: l(a.s, b.s) }
+    let l = |x: [f32; 3], y: [f32; 3]| {
+        [
+            x[0] + (y[0] - x[0]) * s,
+            x[1] + (y[1] - x[1]) * s,
+            x[2] + (y[2] - x[2]) * s,
+        ]
+    };
+    Trs {
+        t: l(a.t, b.t),
+        r: nlerp(a.r, b.r, s),
+        s: l(a.s, b.s),
+    }
 }
 
 pub fn affine_of_trs(p: &Trs) -> Affine {
@@ -941,7 +1087,9 @@ pub fn affine_of_trs(p: &Trs) -> Affine {
 
 /// A column-major 4x4 (its affine part) by rows.
 pub fn affine_of_cols(m: &[f32; 16]) -> Affine {
-    [m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14]]
+    [
+        m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14],
+    ]
 }
 
 pub fn mul(a: &Affine, b: &Affine) -> Affine {
@@ -985,7 +1133,13 @@ fn bake(model: &Model, rest: &[Trs], clip: usize) -> Baked {
         keys.extend(tracks.iter().map(|&b| rest[b as usize]));
         for ch in &c.channels {
             let i = tracks.binary_search(&ch.bone).unwrap();
-            let v = sample(model.clip_floats(ch.times), model.clip_floats(ch.values), ch.path, ch.interpolation, t);
+            let v = sample(
+                model.clip_floats(ch.times),
+                model.clip_floats(ch.values),
+                ch.path,
+                ch.interpolation,
+                t,
+            );
             let k = &mut keys[base + i];
             match ch.path {
                 Path::Translation => k.t = [v[0], v[1], v[2]],
@@ -1003,7 +1157,13 @@ fn bake(model: &Model, rest: &[Trs], clip: usize) -> Baked {
             }
         }
     }
-    Baked { tracks, frames, rate, duration: c.duration, keys }
+    Baked {
+        tracks,
+        frames,
+        rate,
+        duration: c.duration,
+        keys,
+    }
 }
 
 /// One channel at time `t` (held at its first and last keys outside them).
@@ -1035,11 +1195,21 @@ fn sample(times: &[f32], values: &[f32], path: Path, interp: Interpolation, t: f
         Interpolation::Linear if rotation => slerp(qnorm(value(k)), qnorm(value(k + 1)), s),
         Interpolation::Linear => {
             let (a, b) = (value(k), value(k + 1));
-            [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s, a[3] + (b[3] - a[3]) * s]
+            [
+                a[0] + (b[0] - a[0]) * s,
+                a[1] + (b[1] - a[1]) * s,
+                a[2] + (b[2] - a[2]) * s,
+                a[3] + (b[3] - a[3]) * s,
+            ]
         }
         Interpolation::CubicSpline => {
             let (s2, s3) = (s * s, s * s * s);
-            let (h00, h10, h01, h11) = (2.0 * s3 - 3.0 * s2 + 1.0, dt * (s3 - 2.0 * s2 + s), -2.0 * s3 + 3.0 * s2, dt * (s3 - s2));
+            let (h00, h10, h01, h11) = (
+                2.0 * s3 - 3.0 * s2 + 1.0,
+                dt * (s3 - 2.0 * s2 + s),
+                -2.0 * s3 + 3.0 * s2,
+                dt * (s3 - s2),
+            );
             let (v0, m0, v1, m1) = (value(k), tangent(k, true), value(k + 1), tangent(k + 1, false));
             let v = [0, 1, 2, 3].map(|j| v0[j] * h00 + m0[j] * h10 + v1[j] * h01 + m1[j] * h11);
             if rotation { qnorm(v) } else { v }

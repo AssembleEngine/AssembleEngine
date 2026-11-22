@@ -42,11 +42,15 @@ pub struct Archive {
 }
 
 fn u16_at(b: &[u8], at: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(b.get(at..at + 2).context("truncated zip")?.try_into().unwrap()))
+    Ok(u16::from_le_bytes(
+        b.get(at..at + 2).context("truncated zip")?.try_into().unwrap(),
+    ))
 }
 
 fn u32_at(b: &[u8], at: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(b.get(at..at + 4).context("truncated zip")?.try_into().unwrap()))
+    Ok(u32::from_le_bytes(
+        b.get(at..at + 4).context("truncated zip")?.try_into().unwrap(),
+    ))
 }
 
 impl Archive {
@@ -55,11 +59,20 @@ impl Archive {
         // The end record: 22 bytes plus a comment of up to 64 KiB.
         ensure!(b.len() >= 22, "not a zip archive (too short)");
         let lowest = b.len().saturating_sub(22 + 0xFFFF);
-        let end = (lowest..=b.len() - 22).rev().find(|&i| u32_at(b, i).is_ok_and(|s| s == END)).context("not a zip archive (no end record)")?;
-        ensure!(u16_at(b, end + 4)? == 0 && u16_at(b, end + 6)? == 0, "multi-disk zip archives are not supported");
+        let end = (lowest..=b.len() - 22)
+            .rev()
+            .find(|&i| u32_at(b, i).is_ok_and(|s| s == END))
+            .context("not a zip archive (no end record)")?;
+        ensure!(
+            u16_at(b, end + 4)? == 0 && u16_at(b, end + 6)? == 0,
+            "multi-disk zip archives are not supported"
+        );
         let count = u16_at(b, end + 10)? as usize;
         let (cd_size, cd_at) = (u32_at(b, end + 12)? as usize, u32_at(b, end + 16)? as usize);
-        ensure!(count != 0xFFFF && cd_at != 0xFFFF_FFFF, "zip64 archives are not supported");
+        ensure!(
+            count != 0xFFFF && cd_at != 0xFFFF_FFFF,
+            "zip64 archives are not supported"
+        );
         ensure!(cd_at + cd_size <= end, "zip central directory out of range");
         let mut entries = BTreeMap::new();
         let mut at = cd_at;
@@ -70,26 +83,51 @@ impl Archive {
             let crc = u32_at(b, at + 16)?;
             let compressed = u32_at(b, at + 20)? as usize;
             let size = u32_at(b, at + 24)? as usize;
-            let (n, x, c) = (u16_at(b, at + 28)? as usize, u16_at(b, at + 30)? as usize, u16_at(b, at + 32)? as usize);
+            let (n, x, c) = (
+                u16_at(b, at + 28)? as usize,
+                u16_at(b, at + 30)? as usize,
+                u16_at(b, at + 32)? as usize,
+            );
             let local = u32_at(b, at + 42)? as usize;
-            let name = std::str::from_utf8(b.get(at + 46..at + 46 + n).context("truncated zip")?).context("zip entry name is not UTF-8")?.to_owned();
+            let name = std::str::from_utf8(b.get(at + 46..at + 46 + n).context("truncated zip")?)
+                .context("zip entry name is not UTF-8")?
+                .to_owned();
             at += 46 + n + x + c;
             if name.ends_with('/') {
                 continue;
             }
             crate::check_path(&name).with_context(|| format!("zip entry {name:?}"))?;
             ensure!(flags & 1 == 0, "{name}: encrypted zip entries are not supported");
-            ensure!(method == STORED || method == DEFLATED, "{name}: zip method {method} (only stored and deflated)");
+            ensure!(
+                method == STORED || method == DEFLATED,
+                "{name}: zip method {method} (only stored and deflated)"
+            );
             ensure!(size <= MAX_ENTRY && compressed != 0xFFFF_FFFF, "{name}: too large");
-            if entries.insert(name.clone(), Entry { method, crc, compressed, size, local }).is_some() {
+            if entries
+                .insert(
+                    name.clone(),
+                    Entry {
+                        method,
+                        crc,
+                        compressed,
+                        size,
+                        local,
+                    },
+                )
+                .is_some()
+            {
                 bail!("{name} is in the archive twice");
             }
         }
-        Ok(Self { bytes: Arc::new(bytes), entries })
+        Ok(Self {
+            bytes: Arc::new(bytes),
+            entries,
+        })
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Self::parse(std::fs::read(path).with_context(|| format!("read {}", path.display()))?).with_context(|| format!("archive {}", path.display()))
+        Self::parse(std::fs::read(path).with_context(|| format!("read {}", path.display()))?)
+            .with_context(|| format!("archive {}", path.display()))
     }
 
     /// Every file path, sorted.
@@ -114,9 +152,15 @@ impl Archive {
         let data = b.get(start..start + e.compressed).context("data out of range")?;
         let out = match e.method {
             STORED => data.to_vec(),
-            _ => miniz_oxide::inflate::decompress_to_vec_with_limit(data, e.size).map_err(|err| anyhow::anyhow!("inflate: {err:?}"))?,
+            _ => miniz_oxide::inflate::decompress_to_vec_with_limit(data, e.size)
+                .map_err(|err| anyhow::anyhow!("inflate: {err:?}"))?,
         };
-        ensure!(out.len() == e.size, "size {} where the directory says {}", out.len(), e.size);
+        ensure!(
+            out.len() == e.size,
+            "size {} where the directory says {}",
+            out.len(),
+            e.size
+        );
         ensure!(crc32fast::hash(&out) == e.crc, "CRC mismatch (corrupt archive)");
         Ok(out)
     }
@@ -131,7 +175,11 @@ pub fn write(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
         crate::check_path(name)?;
         ensure!(data.len() < 0xFFFF_FFFF, "{name} is too large for a zip without zip64");
         let deflated = miniz_oxide::deflate::compress_to_vec(data, 6);
-        let (method, body) = if deflated.len() < data.len() { (DEFLATED, &deflated[..]) } else { (STORED, &data[..]) };
+        let (method, body) = if deflated.len() < data.len() {
+            (DEFLATED, &deflated[..])
+        } else {
+            (STORED, &data[..])
+        };
         let crc = crc32fast::hash(data);
         let local = out.len() as u32;
         let header = |sig: u32, out: &mut Vec<u8>, central: bool| {
@@ -186,7 +234,10 @@ mod tests {
         let zip = write(&files).unwrap();
         assert_eq!(write(&files).unwrap(), zip, "same files, same bytes");
         let a = Archive::parse(zip.clone()).unwrap();
-        assert_eq!(a.paths().collect::<Vec<_>>(), ["defs/units.json", "empty", "maps/x.bin"]);
+        assert_eq!(
+            a.paths().collect::<Vec<_>>(),
+            ["defs/units.json", "empty", "maps/x.bin"]
+        );
         for (p, data) in &files {
             assert_eq!(&a.read(p).unwrap().unwrap(), data, "{p}");
         }

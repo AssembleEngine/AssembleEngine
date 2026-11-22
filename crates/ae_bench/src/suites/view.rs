@@ -36,18 +36,37 @@ fn army(n: usize, allies: u32, mixed: bool) -> Army {
         (s >> 40) as f32 / (1u64 << 24) as f32
     };
     let squads: Vec<(f32, f32)> = (0..40).map(|_| (f() * MAP, f() * MAP)).collect();
-    let mut a = Army { entities: vec![], columns: vec![vec![]; 8], ally: vec![], los: vec![], radar: vec![] };
+    let mut a = Army {
+        entities: vec![],
+        columns: vec![vec![]; 8],
+        ally: vec![],
+        los: vec![],
+        radar: vec![],
+    };
     for i in 0..n {
         let squad = i % squads.len();
         let (cx, cy) = squads[squad];
         let (t, d) = (f() * std::f32::consts::TAU, f().sqrt() * 900.0);
-        let row = [(cx + d * t.cos()).to_bits(), (cy + d * t.sin()).to_bits(), 0.5f32.to_bits(), 0.25f32.to_bits(), i as u32, 100, 7, 3];
+        let row = [
+            (cx + d * t.cos()).to_bits(),
+            (cy + d * t.sin()).to_bits(),
+            0.5f32.to_bits(),
+            0.25f32.to_bits(),
+            i as u32,
+            100,
+            7,
+            3,
+        ];
         for (c, w) in a.columns.iter_mut().zip(row) {
             c.push(w);
         }
         a.entities.push((1u64 << 32) | (0x1000 + i as u64 * 3));
         // (i / 40: the unit's place in its squad; i % allies would equal squad % allies.)
-        a.ally.push(if mixed { (i / squads.len()) as u32 % allies } else { squad as u32 % allies });
+        a.ally.push(if mixed {
+            (i / squads.len()) as u32 % allies
+        } else {
+            squad as u32 % allies
+        });
         a.los.push(250.0 + f() * 400.0);
         a.radar.push(if i % 23 == 0 { 2000.0 } else { 0.0 });
     }
@@ -86,11 +105,20 @@ fn spec(ghosting: bool) -> ViewSpec {
 pub fn run(options: &Options) -> Result<Report> {
     let mut report = Report::new("view");
     let grid = SensorGrid::new(MAP, MAP, 32.0);
-    for (n, allies, ghosting, mixed) in [(10_000, 2, false, false), (10_000, 2, true, false), (10_000, 2, false, true), (50_000, 8, false, false)] {
+    for (n, allies, ghosting, mixed) in [
+        (10_000, 2, false, false),
+        (10_000, 2, true, false),
+        (10_000, 2, false, true),
+        (50_000, 8, false, false),
+    ] {
         if options.small && n > 10_000 {
             continue;
         }
-        let tag = format!("units{n}_allies{allies}{}{}", if ghosting { "_ghosts" } else { "" }, if mixed { "_contact" } else { "" });
+        let tag = format!(
+            "units{n}_allies{allies}{}{}",
+            if ghosting { "_ghosts" } else { "" },
+            if mixed { "_contact" } else { "" }
+        );
         let spec = spec(ghosting);
         let mut a = army(n, allies, mixed);
         let mut coverage = Coverage::new(grid, allies as usize);
@@ -101,7 +129,16 @@ pub fn run(options: &Options) -> Result<Report> {
         for _ in 0..30 {
             step(&mut a);
             tick += 1;
-            coverage.stamp(&Sensors { x: &col(&a, 0), y: &col(&a, 1), ally: &a.ally, los: &a.los, radar: &a.radar }, true);
+            coverage.stamp(
+                &Sensors {
+                    x: &col(&a, 0),
+                    y: &col(&a, 1),
+                    ally: &a.ally,
+                    los: &a.los,
+                    radar: &a.radar,
+                },
+                true,
+            );
             let refs: Vec<&[u32]> = a.columns.iter().map(Vec::as_slice).collect();
             let frame = Frame::new(tick, &a.entities, &refs, &a.ally, &coverage);
             for o in &mut observers {
@@ -113,10 +150,18 @@ pub fn run(options: &Options) -> Result<Report> {
             }
         }
         let refs: Vec<&[u32]> = a.columns.iter().map(Vec::as_slice).collect();
-        report.time(&format!("{tag}/frame_prepare"), time(options.budget, || Frame::new(tick, &a.entities, &refs, &a.ally, &coverage).tick));
+        report.time(
+            &format!("{tag}/frame_prepare"),
+            time(options.budget, || {
+                Frame::new(tick, &a.entities, &refs, &a.ally, &coverage).tick
+            }),
+        );
         let frame = Frame::new(tick, &a.entities, &refs, &a.ally, &coverage);
         let mut one = observers[0].clone();
-        report.time(&format!("{tag}/build_1_observer"), time(options.budget, || one.build(&spec, &frame).len()));
+        report.time(
+            &format!("{tag}/build_1_observer"),
+            time(options.budget, || one.build(&spec, &frame).len()),
+        );
         let mut two = observers.clone();
         report.time(
             &format!("{tag}/tick_2_observers"),
@@ -128,7 +173,6 @@ pub fn run(options: &Options) -> Result<Report> {
         for (state, count) in ["own", "seen", "blip", "ghost"].iter().zip(counts) {
             report.counter(&format!("{tag}/rows_{state}_observer1"), count, "");
         }
-
     }
     Ok(report)
 }

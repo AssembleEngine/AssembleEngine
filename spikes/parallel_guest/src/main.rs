@@ -12,10 +12,10 @@
 //! `cargo run -p spike_parallel_guest --release`
 
 use anyhow::{Context, Result, anyhow, ensure};
+use spike_parallel_guest::{GUEST_WASM, Guest, Metering, STACK_BYTES, engine, memory_base, spawn_guests};
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use spike_parallel_guest::{GUEST_WASM, Guest, Metering, STACK_BYTES, engine, memory_base, spawn_guests};
 use wasmtime::{Engine, Module, SharedMemory};
 
 const ROWS: usize = 1 << 20;
@@ -47,7 +47,10 @@ fn fill_native(pos: &mut [[f32; 2]], vel: &mut [[f32; 2]]) {
 
 fn alloc_columns(memory: &SharedMemory, allocator: &mut Guest) -> Result<Columns> {
     let bytes = (ROWS * 8) as u32;
-    let columns = Columns { pos: allocator.alloc(bytes)?, vel: allocator.alloc(bytes)? };
+    let columns = Columns {
+        pos: allocator.alloc(bytes)?,
+        vel: allocator.alloc(bytes)?,
+    };
     reset_columns(memory, columns);
     Ok(columns)
 }
@@ -107,7 +110,9 @@ fn run_ticks(guests: &mut [Guest], columns: Columns, ticks: usize, range_rows: u
                             let first = index * range_rows;
                             let count = range_rows.min(ROWS - first) as u32;
                             let byte = (first * 8) as u32;
-                            guest.integrate.call(&mut guest.store, (columns.pos + byte, columns.vel + byte, count, DT))?;
+                            guest
+                                .integrate
+                                .call(&mut guest.store, (columns.pos + byte, columns.vel + byte, count, DT))?;
                         }
                         done.wait();
                     }
@@ -138,9 +143,17 @@ fn isolation_check(engine: &Engine, module: &Module) -> Result<()> {
     let (a, b) = shared.split_at_mut(1);
     let same_stack = a[0].stack_address.call(&mut a[0].store, ())? == b[0].stack_address.call(&mut b[0].store, ())?;
     let (base_a, base_b) = (a[0].global_i32("__tls_base")?, b[0].global_i32("__tls_base")?);
-    println!("   without setup: same shadow stack = {same_stack}; __tls_base = {base_a:#x} (1st instance), {base_b:#x} (2nd instance)");
-    ensure!(same_stack, "negative control did not show a shared stack; the check below proves nothing");
-    ensure!(base_b == 0 || base_b == base_a, "2nd instance unexpectedly has its own TLS block");
+    println!(
+        "   without setup: same shadow stack = {same_stack}; __tls_base = {base_a:#x} (1st instance), {base_b:#x} (2nd instance)"
+    );
+    ensure!(
+        same_stack,
+        "negative control did not show a shared stack; the check below proves nothing"
+    );
+    ensure!(
+        base_b == 0 || base_b == base_a,
+        "2nd instance unexpectedly has its own TLS block"
+    );
 
     const WORKERS: usize = 8;
     const CALLS: u32 = 2000;
@@ -153,15 +166,24 @@ fn isolation_check(engine: &Engine, module: &Module) -> Result<()> {
     for guest in guests.iter_mut() {
         tls_bases.push(guest.global_i32("__tls_base")?);
     }
-    ensure!(tls_bases.iter().all(|base| *base != 0), "an instance has no TLS block: {tls_bases:x?}");
+    ensure!(
+        tls_bases.iter().all(|base| *base != 0),
+        "an instance has no TLS block: {tls_bases:x?}"
+    );
     let mut distinct = tls_bases.clone();
     distinct.sort_unstable();
     distinct.dedup();
-    ensure!(distinct.len() == tls_bases.len(), "instances share a TLS block: {tls_bases:x?}");
+    ensure!(
+        distinct.len() == tls_bases.len(),
+        "instances share a TLS block: {tls_bases:x?}"
+    );
     let mut sorted = addresses.clone();
     sorted.sort_unstable();
     let min_gap = sorted.windows(2).map(|w| w[1] - w[0]).min().unwrap();
-    ensure!(min_gap >= STACK_BYTES, "shadow stacks overlap (closest pair {min_gap} bytes apart)");
+    ensure!(
+        min_gap >= STACK_BYTES,
+        "shadow stacks overlap (closest pair {min_gap} bytes apart)"
+    );
 
     let start = Barrier::new(WORKERS);
     let results: Vec<Result<(u32, u32)>> = std::thread::scope(|scope| {
@@ -181,14 +203,22 @@ fn isolation_check(engine: &Engine, module: &Module) -> Result<()> {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker panicked"))
+            .collect()
     });
     for (index, result) in results.into_iter().enumerate() {
         let (bad, last) = result?;
         ensure!(bad == 0, "instance {index}: {bad} corrupted stack bytes");
-        ensure!(last == CALLS, "instance {index}: TLS counter is {last}, expected {CALLS}");
+        ensure!(
+            last == CALLS,
+            "instance {index}: TLS counter is {last}, expected {CALLS}"
+        );
     }
-    println!("   with setup: {WORKERS} instances ran {CALLS} concurrent calls each; 0 corrupted stack bytes, every TLS counter = {CALLS}");
+    println!(
+        "   with setup: {WORKERS} instances ran {CALLS} concurrent calls each; 0 corrupted stack bytes, every TLS counter = {CALLS}"
+    );
     println!("   stacks are at least {min_gap} bytes apart");
     Ok(())
 }
@@ -203,7 +233,11 @@ fn correctness_and_scaling(engine: &Engine, module: &Module) -> Result<()> {
     }
     let native = started.elapsed().as_secs_f64();
     let reference = digest(&pos);
-    println!("   native Rust, 1 thread:  {:>7.2} ms/tick  {:>5.2} ns/row  digest {reference:016x}", native * 1e3 / TICKS as f64, native * 1e9 / (TICKS * ROWS) as f64);
+    println!(
+        "   native Rust, 1 thread:  {:>7.2} ms/tick  {:>5.2} ns/row  digest {reference:016x}",
+        native * 1e3 / TICKS as f64,
+        native * 1e9 / (TICKS * ROWS) as f64
+    );
 
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut single = 0.0;
@@ -217,7 +251,10 @@ fn correctness_and_scaling(engine: &Engine, module: &Module) -> Result<()> {
             reset_columns(&memory, columns);
             best = best.min(run_ticks(&mut guests, columns, TICKS, RANGE_ROWS)?);
             result = digest(column(&memory, columns.pos));
-            ensure!(result == reference, "{workers} workers: digest {result:016x} differs from native {reference:016x}");
+            ensure!(
+                result == reference,
+                "{workers} workers: digest {result:016x} differs from native {reference:016x}"
+            );
         }
         if workers == 1 {
             single = best;
@@ -235,7 +272,12 @@ fn correctness_and_scaling(engine: &Engine, module: &Module) -> Result<()> {
 
 fn call_overhead(module_bytes: &[u8]) -> Result<()> {
     println!("== 3. call overhead and metering cost (1 worker)");
-    for (label, metering) in [("no metering", Metering::None), ("fuel", Metering::Fuel), ("epoch interruption", Metering::Epoch), ("raw NaNs (unsafe)", Metering::RawNans)] {
+    for (label, metering) in [
+        ("no metering", Metering::None),
+        ("fuel", Metering::Fuel),
+        ("epoch interruption", Metering::Epoch),
+        ("raw NaNs (unsafe)", Metering::RawNans),
+    ] {
         let engine = engine(metering)?;
         let module = Module::new(&engine, module_bytes)?;
         let (memory, mut guests) = spawn_guests(&engine, &module, 1, metering, true)?;
@@ -266,7 +308,11 @@ fn main() -> Result<()> {
     let module_bytes = std::fs::read(GUEST_WASM).with_context(|| format!("read {GUEST_WASM}"))?;
     let engine = engine(Metering::None)?;
     let module = Module::new(&engine, &module_bytes)?;
-    println!("guest: {} ({} bytes)", GUEST_WASM.rsplit('/').next().unwrap_or(GUEST_WASM), module_bytes.len());
+    println!(
+        "guest: {} ({} bytes)",
+        GUEST_WASM.rsplit('/').next().unwrap_or(GUEST_WASM),
+        module_bytes.len()
+    );
 
     isolation_check(&engine, &module)?;
     correctness_and_scaling(&engine, &module)?;

@@ -284,15 +284,27 @@ pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4]
     let bone_base = anim.len() as u32;
     for b in &model.bones {
         let r = rows(Mat4::from_cols_array(&b.rest));
-        anim.extend([[r[0], r[1], r[2], r[3]], [r[4], r[5], r[6], r[7]], [r[8], r[9], r[10], r[11]], [word(b.parent.unwrap_or(u32::MAX)), 0.0, 0.0, 0.0]]);
+        anim.extend([
+            [r[0], r[1], r[2], r[3]],
+            [r[4], r[5], r[6], r[7]],
+            [r[8], r[9], r[10], r[11]],
+            [word(b.parent.unwrap_or(u32::MAX)), 0.0, 0.0, 0.0],
+        ]);
     }
     let joint_base = anim.len() as u32;
     for j in &model.joints {
         let r = rows(Mat4::from_cols_array(&j.inverse_bind));
-        anim.extend([[r[0], r[1], r[2], r[3]], [r[4], r[5], r[6], r[7]], [r[8], r[9], r[10], r[11]], [word(j.bone), 0.0, 0.0, 0.0]]);
+        anim.extend([
+            [r[0], r[1], r[2], r[3]],
+            [r[4], r[5], r[6], r[7]],
+            [r[8], r[9], r[10], r[11]],
+            [word(j.bone), 0.0, 0.0, 0.0],
+        ]);
     }
     let bones = rig.bones();
-    let clips: Vec<_> = (1..=rig.clip_names().len() as u16).filter_map(|c| rig.clip_table(c)).collect();
+    let clips: Vec<_> = (1..=rig.clip_names().len() as u16)
+        .filter_map(|c| rig.clip_table(c))
+        .collect();
     let masks = rig.masks();
     // Words after the head, in vec4s: track-of words, mask words.
     let head = anim.len();
@@ -300,9 +312,19 @@ pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4]
     let word_count = (clips.len() + masks.len()) * bones;
     let rest_at = words_at + word_count.div_ceil(4);
     let mut keys_at = rest_at + 3 * bones;
-    anim.push([word(clips.len() as u32), word(masks.len() as u32), word(rest_at as u32), word((4 * words_at + clips.len() * bones) as u32)]);
+    anim.push([
+        word(clips.len() as u32),
+        word(masks.len() as u32),
+        word(rest_at as u32),
+        word((4 * words_at + clips.len() * bones) as u32),
+    ]);
     for (c, clip) in clips.iter().enumerate() {
-        anim.push([word(clip.frames), clip.rate, clip.duration, word(clip.tracks.len() as u32)]);
+        anim.push([
+            word(clip.frames),
+            clip.rate,
+            clip.duration,
+            word(clip.tracks.len() as u32),
+        ]);
         anim.push([word(keys_at as u32), word((4 * words_at + c * bones) as u32), 0.0, 0.0]);
         keys_at += 3 * clip.keys.len();
     }
@@ -317,7 +339,11 @@ pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4]
             words[(clips.len() + k) * bones + b] = w.to_bits();
         }
     }
-    anim.extend(words.chunks(4).map(|w| [word(w[0]), word(w[1]), word(w[2]), word(w[3])]));
+    anim.extend(
+        words
+            .chunks(4)
+            .map(|w| [word(w[0]), word(w[1]), word(w[2]), word(w[3])]),
+    );
     let trs = |p: &ae_model::anim::Trs| [[p.t[0], p.t[1], p.t[2], 0.0], p.r, [p.s[0], p.s[1], p.s[2], 0.0]];
     anim.extend(rig.rest().iter().flat_map(trs));
     for clip in &clips {
@@ -342,26 +368,42 @@ impl Textures<'_> {
         if let Some(i) = self.samplers.iter().position(|(k, _)| k == s) {
             return Ok(i);
         }
-        self.samplers.push((*s, unsafe { self.gpu.device.create_sampler(&sampler_info(s), None) }?));
+        self.samplers
+            .push((*s, unsafe { self.gpu.device.create_sampler(&sampler_info(s), None) }?));
         Ok(self.samplers.len() - 1)
     }
 
     /// The descriptor slot (from 1) of `r`, the UV set and the transform.
     fn slot(&mut self, model: &Model, m: usize, r: &Option<TextureRef>) -> Result<(u32, u32, [[f32; 4]; 2])> {
-        let Some(r) = r else { return Ok((0, 0, [[1.0, 0.0, 0.0, 1.0], [0.0; 4]])) };
+        let Some(r) = r else {
+            return Ok((0, 0, [[1.0, 0.0, 0.0, 1.0], [0.0; 4]]));
+        };
         let image = match self.image_of.iter().find(|&&(mm, t, _)| mm == m && t == r.texture) {
             Some(&(_, _, i)) => i,
             None => {
                 let bytes = model.textures.get(r.texture as usize).context("texture index")?;
                 let tex = ktx::read(bytes).with_context(|| format!("texture {}", r.texture))?;
                 let compressed = tex.format.block().is_some_and(|(w, _)| w > 1);
-                ensure!(!compressed || self.gpu.texture_compression_bc, "texture {} is block-compressed and the device has no textureCompressionBC", r.texture);
+                ensure!(
+                    !compressed || self.gpu.texture_compression_bc,
+                    "texture {} is block-compressed and the device has no textureCompressionBC",
+                    r.texture
+                );
                 let levels: Vec<&[u8]> = tex.levels.iter().map(Vec::as_slice).collect();
                 let format = vk::Format::from_raw(tex.format.0 as i32);
                 // An uncompressed texture with level 0 alone (PNG and JPEG from
                 // ae_gltf) gets its mips on the GPU; others bring theirs.
                 let image = if levels.len() == 1 && !compressed && tex.width.max(tex.height) > 1 {
-                    upload::image_mipped(self.gpu, format, tex.width, tex.height, &levels, upload::MipFilter::Average, vk::ImageViewType::TYPE_2D, "model texture")?
+                    upload::image_mipped(
+                        self.gpu,
+                        format,
+                        tex.width,
+                        tex.height,
+                        &levels,
+                        upload::MipFilter::Average,
+                        vk::ImageViewType::TYPE_2D,
+                        "model texture",
+                    )?
                 } else {
                     upload::image(self.gpu, format, tex.width, tex.height, &levels, "model texture")?
                 };
@@ -378,9 +420,17 @@ impl Textures<'_> {
                 self.slots.len() - 1
             }
         };
-        ensure!(slot + 1 < MAX_TEXTURES as usize, "more than {} textures and samplers in the units' models", MAX_TEXTURES - 1);
+        ensure!(
+            slot + 1 < MAX_TEXTURES as usize,
+            "more than {} textures and samplers in the units' models",
+            MAX_TEXTURES - 1
+        );
         let t = r.transform.map_or([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]], |t| t.matrix());
-        Ok(((slot + 1) as u32, r.uv, [[t[0][0], t[0][1], t[1][0], t[1][1]], [t[2][0], t[2][1], 0.0, 0.0]]))
+        Ok((
+            (slot + 1) as u32,
+            r.uv,
+            [[t[0][0], t[0][1], t[1][0], t[1][1]], [t[2][0], t[2][1], 0.0, 0.0]],
+        ))
     }
 
     fn destroy(&mut self) {
@@ -397,7 +447,12 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
     let mut g = GpuMaterial {
         base_color: mat.base_color,
         emissive: [mat.emissive[0], mat.emissive[1], mat.emissive[2], -1.0],
-        params: [mat.normal_scale, mat.occlusion_strength, mat.double_sided as u32 as f32, 0.0],
+        params: [
+            mat.normal_scale,
+            mat.occlusion_strength,
+            mat.double_sided as u32 as f32,
+            0.0,
+        ],
         pbr: [mat.metallic, mat.roughness, 0.0, 0.0],
         tex: [0; 4],
         uv: [0; 4],
@@ -406,7 +461,12 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         xform: [[0.0; 4]; 8],
         xform2: [[0.0; 4]; 2],
     };
-    let refs = [&mat.base_color_texture, &mat.normal_texture, &mat.occlusion_texture, &mat.emissive_texture];
+    let refs = [
+        &mat.base_color_texture,
+        &mat.normal_texture,
+        &mat.occlusion_texture,
+        &mat.emissive_texture,
+    ];
     for (k, r) in refs.into_iter().enumerate() {
         let (slot, uv, x) = tex.slot(model, m, r)?;
         g.tex[k] = slot;
@@ -422,7 +482,10 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         AlphaMode::Opaque => {}
         AlphaMode::Mask { cutoff } => g.emissive[3] = cutoff,
         AlphaMode::Blend => {
-            eprintln!("[models] material `{}` blends: drawn as a mask at 0.5 (blending is not drawn yet)", mat.name);
+            eprintln!(
+                "[models] material `{}` blends: drawn as a mask at 0.5 (blending is not drawn yet)",
+                mat.name
+            );
             g.emissive[3] = 0.5;
         }
     }
@@ -444,8 +507,17 @@ impl ModelSet {
     /// `rigs[class]` (the sim's rig of that model: its clips and masks;
     /// none or beyond the list: one made from the model, without masks);
     /// `capacity` units per visible-list region.
-    pub fn new(gpu: &GpuDevice, models: &[Option<Arc<Model>>], rigs: &[Option<Arc<Rig>>], capacity: u32, max_classes: usize) -> Result<Self> {
-        ensure!(gpu.gpu_driven, "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound");
+    pub fn new(
+        gpu: &GpuDevice,
+        models: &[Option<Arc<Model>>],
+        rigs: &[Option<Arc<Rig>>],
+        capacity: u32,
+        max_classes: usize,
+    ) -> Result<Self> {
+        ensure!(
+            gpu.gpu_driven,
+            "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound"
+        );
         // The fragment stage sees the models' texture array and the units'
         // four samplers.
         let limits = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) }.limits;
@@ -456,7 +528,13 @@ impl ModelSet {
             limits.max_per_stage_descriptor_samplers,
             limits.max_per_stage_descriptor_sampled_images
         );
-        let mut tex = Textures { gpu, images: Vec::new(), samplers: Vec::new(), image_of: Vec::new(), slots: Vec::new() };
+        let mut tex = Textures {
+            gpu,
+            images: Vec::new(),
+            samplers: Vec::new(),
+            image_of: Vec::new(),
+            slots: Vec::new(),
+        };
         match Self::build(gpu, models, rigs, capacity, max_classes, &mut tex) {
             Ok(set) => Ok(set),
             Err(err) => {
@@ -466,7 +544,14 @@ impl ModelSet {
         }
     }
 
-    fn build(gpu: &GpuDevice, models: &[Option<Arc<Model>>], rigs: &[Option<Arc<Rig>>], capacity: u32, max_classes: usize, tex: &mut Textures<'_>) -> Result<Self> {
+    fn build(
+        gpu: &GpuDevice,
+        models: &[Option<Arc<Model>>],
+        rigs: &[Option<Arc<Rig>>],
+        capacity: u32,
+        max_classes: usize,
+        tex: &mut Textures<'_>,
+    ) -> Result<Self> {
         // Unique models: their vertex words, indices and materials.
         let mut unique: Vec<Arc<Model>> = Vec::new();
         let mut words: Vec<u32> = Vec::new();
@@ -500,7 +585,9 @@ impl ModelSet {
             for p in &model.primitives {
                 prims.push((words.len() as u32, indices.len() as u32));
                 words.extend(model.gpu_words(p));
-                indices.extend_from_slice(&model.indices[p.first_index as usize..(p.first_index + p.index_count) as usize]);
+                indices.extend_from_slice(
+                    &model.indices[p.first_index as usize..(p.first_index + p.index_count) as usize],
+                );
             }
             placed.push((prims, materials.len() as u32));
             for mat in &model.materials {
@@ -512,7 +599,12 @@ impl ModelSet {
                 Some(Some(rig)) => rig.clone(),
                 _ => Arc::new(Rig::new(model)),
             };
-            ensure!(rig.bones() == model.bones.len(), "a rig of {} bones for a model of {}", rig.bones(), model.bones.len());
+            ensure!(
+                rig.bones() == model.bones.len(),
+                "a rig of {} bones for a model of {}",
+                rig.bones(),
+                model.bones.len()
+            );
             let pose = animation(model, &rig, &mut anim);
             let (footprint, mut sphere) = fit(model);
             if !model.clips.is_empty() {
@@ -531,15 +623,29 @@ impl ModelSet {
                 .map(|l| GpuModelLight {
                     color: [l.color[0], l.color[1], l.color[2], l.range],
                     params: [
-                        if l.kind == ae_model::LightKind::Spot { l.inner_angle.cos() } else { 1.0 },
-                        if l.kind == ae_model::LightKind::Spot { l.outer_angle.cos() } else { 1.0 },
+                        if l.kind == ae_model::LightKind::Spot {
+                            l.inner_angle.cos()
+                        } else {
+                            1.0
+                        },
+                        if l.kind == ae_model::LightKind::Spot {
+                            l.outer_angle.cos()
+                        } else {
+                            1.0
+                        },
                         l.size.max(1e-3),
                     ],
                     meta: l.joint | ((if l.kind == ae_model::LightKind::Spot { 2 } else { 1 }) << 16),
                     energy: [l.intensity, 0.0, 0.0, 0.0],
                 })
                 .collect();
-            posed.push(Posed { rest_offset, pose, sphere, turned, lights });
+            posed.push(Posed {
+                rest_offset,
+                pose,
+                sphere,
+                turned,
+                lights,
+            });
             unique.push(model.clone());
         }
 
@@ -560,13 +666,40 @@ impl ModelSet {
             let visible_base = capacity * (1 + Self::REGIONS * classes.len() as u32);
             for (p, &(vertex_base, first_index)) in model.primitives.iter().zip(prims) {
                 let masked = !matches!(model.materials[p.material as usize].alpha, AlphaMode::Opaque);
-                let record = GpuDraw { material: base_material + p.material, class: c as u32, visible_base, vertex_base, words: p.layout.words() as u32, pad: [0; 3] };
-                pending.push((masked, classes.len(), record, Draw { class: c as u32, index_count: p.index_count, first_index }));
+                let record = GpuDraw {
+                    material: base_material + p.material,
+                    class: c as u32,
+                    visible_base,
+                    vertex_base,
+                    words: p.layout.words() as u32,
+                    pad: [0; 3],
+                };
+                pending.push((
+                    masked,
+                    classes.len(),
+                    record,
+                    Draw {
+                        class: c as u32,
+                        index_count: p.index_count,
+                        first_index,
+                    },
+                ));
             }
             let (footprint, _) = fit(model);
-            let Posed { rest_offset, pose, sphere, turned, lights } = &posed[m];
+            let Posed {
+                rest_offset,
+                pose,
+                sphere,
+                turned,
+                lights,
+            } = &posed[m];
             let joints = model.joints.len() as u32;
-            table[c] = GpuClass { sphere: *sphere, cmd: [0, model.primitives.len() as u32, *rest_offset, joints], fit: [1.0 / footprint, turned[0], turned[1], 0.0], pose: *pose };
+            table[c] = GpuClass {
+                sphere: *sphere,
+                cmd: [0, model.primitives.len() as u32, *rest_offset, joints],
+                fit: [1.0 / footprint, turned[0], turned[1], 0.0],
+                pose: *pose,
+            };
             if !lights.is_empty() {
                 class_lights[c] = [model_lights.len() as u32, lights.len() as u32];
                 model_lights.extend_from_slice(lights);
@@ -610,9 +743,19 @@ impl ModelSet {
         }
 
         // Slot 0: a white texel.
-        tex.images.push(upload::image(gpu, vk::Format::R8G8B8A8_UNORM, 1, 1, &[&[255; 4]], "model white")?);
+        tex.images.push(upload::image(
+            gpu,
+            vk::Format::R8G8B8A8_UNORM,
+            1,
+            1,
+            &[&[255; 4]],
+            "model white",
+        )?);
         let white = (tex.images.len() - 1, tex.sampler(&Sampler::default())?);
-        let slots: Vec<_> = std::iter::once(white).chain(tex.slots.iter().copied()).map(|(i, s)| (tex.images[i].view, tex.samplers[s].1)).collect();
+        let slots: Vec<_> = std::iter::once(white)
+            .chain(tex.slots.iter().copied())
+            .map(|(i, s)| (tex.images[i].view, tex.samplers[s].1))
+            .collect();
 
         // The geometry: vertex words, then the indices (16-byte aligned).
         let mut geometry: Vec<u8> = pipeline::slice_bytes(&words).to_vec();
@@ -622,14 +765,54 @@ impl ModelSet {
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let mut made: Vec<OwnedBuffer> = Vec::new();
         let result = (|| -> Result<()> {
-            made.push(upload::buffer(gpu, &geometry, storage | vk::BufferUsageFlags::INDEX_BUFFER, "model geometry")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&materials), storage, "model materials")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&table), storage, "model classes")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&records), storage, "model draws")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&class_commands), storage, "model class commands")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&anim), storage, "model animation")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&class_lights), storage, "model class lights")?);
-            made.push(upload::buffer(gpu, pipeline::slice_bytes(&model_lights), storage, "model lights")?);
+            made.push(upload::buffer(
+                gpu,
+                &geometry,
+                storage | vk::BufferUsageFlags::INDEX_BUFFER,
+                "model geometry",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&materials),
+                storage,
+                "model materials",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&table),
+                storage,
+                "model classes",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&records),
+                storage,
+                "model draws",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&class_commands),
+                storage,
+                "model class commands",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&anim),
+                storage,
+                "model animation",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&class_lights),
+                storage,
+                "model class lights",
+            )?);
+            made.push(upload::buffer(
+                gpu,
+                pipeline::slice_bytes(&model_lights),
+                storage,
+                "model lights",
+            )?);
             Ok(())
         })();
         if let Err(err) = result {
@@ -638,7 +821,16 @@ impl ModelSet {
             }
             return Err(err);
         }
-        let [geometry, materials, class_table, draw_table, class_commands, anim, class_light_table, model_light_table]: [OwnedBuffer; 8] = made.try_into().ok().unwrap();
+        let [
+            geometry,
+            materials,
+            class_table,
+            draw_table,
+            class_commands,
+            anim,
+            class_light_table,
+            model_light_table,
+        ]: [OwnedBuffer; 8] = made.try_into().ok().unwrap();
         Ok(Self {
             geometry,
             index_offset,

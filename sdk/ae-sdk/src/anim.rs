@@ -32,7 +32,6 @@
 
 use crate::{Component, abi};
 
-
 pub const LAYERS: usize = 4;
 pub const MANUAL: usize = 8;
 
@@ -287,7 +286,13 @@ impl Anim {
     /// way. A bone a clip or a spin left is taken as within ±180°. Less
     /// than a full turn; more is a spin.
     pub fn turn(&mut self, bone: u16, axis: Axis, angle: f32, speed: f32) -> ManualSet<'_> {
-        self.command(bone, manual_kind::TURN, axis.bone, [axis.v[0], axis.v[1], axis.v[2], angle], speed)
+        self.command(
+            bone,
+            manual_kind::TURN,
+            axis.bone,
+            [axis.v[0], axis.v[1], axis.v[2], angle],
+            speed,
+        )
     }
 
     /// Turn `bone` by `angle` from where it is.
@@ -309,10 +314,23 @@ impl Anim {
             [c[0] / s, c[1] / s, c[2] / s]
         } else {
             // Along or against it: any axis across it.
-            let o = if p[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+            let o = if p[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
             norm(cross(p, o))
         };
-        self.turn(bone, Axis { v: axis, bone: pointing.bone }, libm::atan2f(s, cos), speed).short()
+        self.turn(
+            bone,
+            Axis {
+                v: axis,
+                bone: pointing.bone,
+            },
+            libm::atan2f(s, cos),
+            speed,
+        )
+        .short()
     }
 
     /// Direction `dir` (in the unit's frame) as `bone` sees it, with its
@@ -332,7 +350,15 @@ impl Anim {
         }
         let mut out = [0f32; 3];
         let op = abi::name_id(abi::query::ANIM_DIR_IN);
-        let n = unsafe { crate::host::ae_query(op, input.as_ptr() as usize as u32, input.len() as u32, out.as_mut_ptr() as usize as u32, 12) };
+        let n = unsafe {
+            crate::host::ae_query(
+                op,
+                input.as_ptr() as usize as u32,
+                input.len() as u32,
+                out.as_mut_ptr() as usize as u32,
+                12,
+            )
+        };
         assert!(n == 12, "the engine has no animation service (`ae_query` {})", n);
         out
     }
@@ -340,7 +366,13 @@ impl Anim {
     /// Spin `bone` about `axis` at `rate` radians a second (signed), for
     /// ever; reached at once unless [`ManualSet::accel`].
     pub fn spin(&mut self, bone: u16, axis: Axis, rate: f32) -> ManualSet<'_> {
-        self.command(bone, manual_kind::SPIN, axis.bone, [axis.v[0], axis.v[1], axis.v[2], 0.0], rate)
+        self.command(
+            bone,
+            manual_kind::SPIN,
+            axis.bone,
+            [axis.v[0], axis.v[1], axis.v[2], 0.0],
+            rate,
+        )
     }
 
     /// Slow `bone`'s spin to a stop at `decel` radians a second squared
@@ -355,13 +387,25 @@ impl Anim {
     /// Move `bone` to `offset` from its rest position, in the unit's frame,
     /// at up to `speed` a second (0: at once).
     pub fn move_to(&mut self, bone: u16, offset: [f32; 3], speed: f32) -> ManualSet<'_> {
-        self.command(bone, manual_kind::MOVE, false, [offset[0], offset[1], offset[2], 0.0], speed)
+        self.command(
+            bone,
+            manual_kind::MOVE,
+            false,
+            [offset[0], offset[1], offset[2], 0.0],
+            speed,
+        )
     }
 
     /// Scale `bone` to `factor` times its rest scale (on its own axes), at
     /// up to `speed` a second (0: at once).
     pub fn scale_to(&mut self, bone: u16, factor: [f32; 3], speed: f32) -> ManualSet<'_> {
-        self.command(bone, manual_kind::SCALE, false, [factor[0], factor[1], factor[2], 0.0], speed)
+        self.command(
+            bone,
+            manual_kind::SCALE,
+            false,
+            [factor[0], factor[1], factor[2], 0.0],
+            speed,
+        )
     }
 
     /// Give `bone` back to the clips (its manual entries cleared).
@@ -405,9 +449,20 @@ impl Anim {
         const N: usize = size_of::<Anim>();
         let mut out = [0f32; 6];
         let op = abi::name_id(abi::query::ANIM_BOUNDS);
-        let n = unsafe { crate::host::ae_query(op, (self as *const Anim) as usize as u32, N as u32, out.as_mut_ptr() as usize as u32, 24) };
+        let n = unsafe {
+            crate::host::ae_query(
+                op,
+                (self as *const Anim) as usize as u32,
+                N as u32,
+                out.as_mut_ptr() as usize as u32,
+                24,
+            )
+        };
         assert!(n == 24, "the engine has no animation service (`ae_query` {})", n);
-        Bounds { min: [out[0], out[1], out[2]], max: [out[3], out[4], out[5]] }
+        Bounds {
+            min: [out[0], out[1], out[2]],
+            max: [out[3], out[4], out[5]],
+        }
     }
 
     /// Measure the unit's bounds into `b` ([`Anim::bounds`]).
@@ -428,13 +483,17 @@ impl Anim {
     /// one: the rotation).
     fn find(&self, bone: u16, kind: u8) -> Option<usize> {
         let part = |k: u8| if k == manual_kind::SPIN { manual_kind::TURN } else { k };
-        (0..MANUAL).find(|&k| self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone && part(self.manual_kind[k]) == part(kind))
+        (0..MANUAL).find(|&k| {
+            self.manual_kind[k] != manual_kind::NONE && self.bone[k] == bone && part(self.manual_kind[k]) == part(kind)
+        })
     }
 
     fn command(&mut self, bone: u16, kind: u8, bone_axis: bool, goal: [f32; 4], speed: f32) -> ManualSet<'_> {
         // The bone's entry for this part, else a free one, else the last.
         let found = self.find(bone, kind);
-        let k = found.or_else(|| (0..MANUAL).find(|&k| self.manual_kind[k] == manual_kind::NONE)).unwrap_or(MANUAL - 1);
+        let k = found
+            .or_else(|| (0..MANUAL).find(|&k| self.manual_kind[k] == manual_kind::NONE))
+            .unwrap_or(MANUAL - 1);
         let mut flags = manual_flags::PENDING;
         if found.is_none() {
             self.clear_manual(k);
@@ -542,7 +601,11 @@ impl LayerSet<'_> {
     pub fn fade_to(self, weight: f32, ms: u32) -> Self {
         self.anim.target[self.layer] = weight;
         let d = weight - self.anim.weight[self.layer];
-        self.anim.fade[self.layer] = if ms == 0 { 0.0 } else { (if d < 0.0 { -d } else { d }) / (ms as f32 / 1000.0) };
+        self.anim.fade[self.layer] = if ms == 0 {
+            0.0
+        } else {
+            (if d < 0.0 { -d } else { d }) / (ms as f32 / 1000.0)
+        };
         self
     }
 
@@ -606,12 +669,20 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 pub(crate) fn norm(v: [f32; 3]) -> [f32; 3] {
     let len = libm::sqrtf(dot(v, v));
-    if len > 0.0 { [v[0] / len, v[1] / len, v[2] / len] } else { v }
+    if len > 0.0 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        v
+    }
 }
 
 /// A model's id: [`abi::name_id`] of its name (`models/<name>.*` in the

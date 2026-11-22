@@ -47,13 +47,20 @@ fn run(script: Script<'_>) -> Result<Outcome> {
     let wasm = ae_sim::build::game("crossing")?;
     let nav = NavPlugin::new(Map::WaterCrossing, 256);
     let spatial = SpatialPlugin::square(nav.extent(), 64.0);
-    let cfg = RuntimeConfig { max_workers: 2, ..RuntimeConfig::default() };
+    let cfg = RuntimeConfig {
+        max_workers: 2,
+        ..RuntimeConfig::default()
+    };
     let mut rt = Runtime::with_hosts(&wasm, cfg, vec![Arc::new(nav), Arc::new(spatial)])?;
     let mut world = rt.world_for(PARAM, 2)?;
     let (mut accepted, mut dropped) = (0, 0);
     let mut start: Vec<(u64, Body)> = Vec::new();
     for _ in 0..TICKS {
-        let units: Vec<(u64, Body)> = rt.rows(&world, "Body")?.into_iter().map(|(e, b)| (e, decode(&b))).collect();
+        let units: Vec<(u64, Body)> = rt
+            .rows(&world, "Body")?
+            .into_iter()
+            .map(|(e, b)| (e, decode(&b)))
+            .collect();
         if world.tick == 1 {
             start = units.clone();
         }
@@ -62,10 +69,19 @@ fn run(script: Script<'_>) -> Result<Outcome> {
         accepted += s.commands_in;
         dropped += s.commands_dropped;
     }
-    let end: Vec<(u64, Body)> = rt.rows(&world, "Body")?.into_iter().map(|(e, b)| (e, decode(&b))).collect();
+    let end: Vec<(u64, Body)> = rt
+        .rows(&world, "Body")?
+        .into_iter()
+        .map(|(e, b)| (e, decode(&b)))
+        .collect();
     // Units that travelled over 60 m (ordered ones walk 50 ticks; units
     // they push aside move a few metres).
-    let moved = end.iter().zip(&start).filter(|((_, a), (_, b))| (a.x - b.x).hypot(a.y - b.y) > 60.0).map(|((e, _), _)| *e).collect();
+    let moved = end
+        .iter()
+        .zip(&start)
+        .filter(|((_, a), (_, b))| (a.x - b.x).hypot(a.y - b.y) > 60.0)
+        .map(|((e, _), _)| *e)
+        .collect();
     Ok((rt.digest(&world)?.total, moved, accepted, dropped))
 }
 
@@ -74,7 +90,11 @@ fn orders(tick: u64, units: &[(u64, Body)]) -> TickBundle {
     if tick == 10 {
         for (e, body) in units.iter().take(40) {
             let order = MoveOrder::move_to(Entity(*e), body.x + 300.0, body.y + 200.0, 1 << 40 | 7);
-            b.commands.push(Command { player: 0, stream: MOVE_ORDER, bytes: bytes_of(&order) });
+            b.commands.push(Command {
+                player: 0,
+                stream: MOVE_ORDER,
+                bytes: bytes_of(&order),
+            });
         }
     }
     b
@@ -102,7 +122,10 @@ fn commands_reach_the_sim_identically() -> Result<()> {
     far.sort_unstable();
     // Only ordered units travel far, and nearly all of them do (one may be
     // blocked or its goal unreachable for its class).
-    ensure!(far.iter().all(|e| sent.binary_search(e).is_ok()), "a unit nobody ordered travelled far");
+    ensure!(
+        far.iter().all(|e| sent.binary_search(e).is_ok()),
+        "a unit nobody ordered travelled far"
+    );
     ensure!(far.len() >= 36, "{} of the 40 ordered units travelled far", far.len());
 
     // The same bundles again: the same world.
@@ -113,9 +136,24 @@ fn commands_reach_the_sim_identically() -> Result<()> {
     let with_junk = |t: u64, units: &[(u64, Body)]| {
         let mut b = orders(t, units);
         if t == 10 {
-            b.commands.insert(0, Command { player: 0, stream: 0xDEAD_BEEF, bytes: vec![0; 32] });
-            b.commands.push(Command { player: 1, stream: TERRAIN_EDIT, bytes: vec![0; 32] });
-            b.commands.push(Command { player: 1, stream: MOVE_ORDER, bytes: vec![0; 5] });
+            b.commands.insert(
+                0,
+                Command {
+                    player: 0,
+                    stream: 0xDEAD_BEEF,
+                    bytes: vec![0; 32],
+                },
+            );
+            b.commands.push(Command {
+                player: 1,
+                stream: TERRAIN_EDIT,
+                bytes: vec![0; 32],
+            });
+            b.commands.push(Command {
+                player: 1,
+                stream: MOVE_ORDER,
+                bytes: vec![0; 5],
+            });
         }
         b
     };
@@ -128,13 +166,24 @@ fn commands_reach_the_sim_identically() -> Result<()> {
         let mut b = orders(t, units);
         if t == 10 {
             let order = MoveOrder::move_to(Entity(0x7777_0000_0123_4567), 100.0, 100.0, 1 << 40 | 8);
-            b.commands.push(Command { player: 0, stream: MOVE_ORDER, bytes: bytes_of(&order) });
+            b.commands.push(Command {
+                player: 0,
+                stream: MOVE_ORDER,
+                bytes: bytes_of(&order),
+            });
         }
         b
     };
     let (g1, moved, ..) = run(&ghost)?;
     let (g2, ..) = run(&ghost)?;
-    ensure!(g1 == g2 && moved.len() >= 36, "an order for a missing entity: digests {g1:x} / {g2:x}, {} moved", moved.len());
-    println!("idle {:016x}, ordered {:016x}, with a missing entity {:016x}", idle as u64, ordered as u64, g1 as u64);
+    ensure!(
+        g1 == g2 && moved.len() >= 36,
+        "an order for a missing entity: digests {g1:x} / {g2:x}, {} moved",
+        moved.len()
+    );
+    println!(
+        "idle {:016x}, ordered {:016x}, with a missing entity {:016x}",
+        idle as u64, ordered as u64, g1 as u64
+    );
     Ok(())
 }

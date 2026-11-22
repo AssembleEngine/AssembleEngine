@@ -73,7 +73,11 @@ pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
 pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, size: usize) -> i32 {
     let ptr = aligned_alloc(align, size);
     *out = ptr;
-    if ptr.is_null() { 12 } else { 0 }
+    if ptr.is_null() {
+        12
+    } else {
+        0
+    }
 }
 
 /// Static data: must land in this module's region.

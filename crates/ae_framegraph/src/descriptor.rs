@@ -17,16 +17,38 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DescriptorError {
-    Truncated { needed: usize, got: usize },
+    Truncated {
+        needed: usize,
+        got: usize,
+    },
     TrailingBytes(usize),
     BadMagic(u32),
     UnsupportedVersion(u32),
-    TooMany { what: &'static str, count: usize, max: usize },
-    BadEnum { what: &'static str, index: usize, value: u32 },
-    BadName { what: &'static str, index: usize },
-    BadResource { pass: usize, resource: u32 },
-    BadIntentRange { pass: usize },
-    BadImage { index: usize, reason: &'static str },
+    TooMany {
+        what: &'static str,
+        count: usize,
+        max: usize,
+    },
+    BadEnum {
+        what: &'static str,
+        index: usize,
+        value: u32,
+    },
+    BadName {
+        what: &'static str,
+        index: usize,
+    },
+    BadResource {
+        pass: usize,
+        resource: u32,
+    },
+    BadIntentRange {
+        pass: usize,
+    },
+    BadImage {
+        index: usize,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for DescriptorError {
@@ -59,25 +81,47 @@ impl Words<'_> {
 }
 
 fn stage(value: u32, what: &'static str, index: usize) -> Result<ShaderStage, DescriptorError> {
-    Ok(match abi::ShaderStage::from_wire(value).ok_or(DescriptorError::BadEnum { what, index, value })? {
-        abi::ShaderStage::Vertex => ShaderStage::Vertex,
-        abi::ShaderStage::Fragment => ShaderStage::Fragment,
-        abi::ShaderStage::Graphics => ShaderStage::Graphics,
-        abi::ShaderStage::Compute => ShaderStage::Compute,
-    })
+    Ok(
+        match abi::ShaderStage::from_wire(value).ok_or(DescriptorError::BadEnum { what, index, value })? {
+            abi::ShaderStage::Vertex => ShaderStage::Vertex,
+            abi::ShaderStage::Fragment => ShaderStage::Fragment,
+            abi::ShaderStage::Graphics => ShaderStage::Graphics,
+            abi::ShaderStage::Compute => ShaderStage::Compute,
+        },
+    )
 }
 
 fn role(kind: u32, arg: u32, index: usize) -> Result<Role, DescriptorError> {
     use abi::RoleKind as K;
-    let kind = K::from_wire(kind).ok_or(DescriptorError::BadEnum { what: "intent role", index, value: kind })?;
+    let kind = K::from_wire(kind).ok_or(DescriptorError::BadEnum {
+        what: "intent role",
+        index,
+        value: kind,
+    })?;
     let s = |arg| stage(arg, "intent shader stage", index);
-    let no_arg = |role: Role| if arg == 0 { Ok(role) } else { Err(DescriptorError::BadEnum { what: "intent argument", index, value: arg }) };
+    let no_arg = |role: Role| {
+        if arg == 0 {
+            Ok(role)
+        } else {
+            Err(DescriptorError::BadEnum {
+                what: "intent argument",
+                index,
+                value: arg,
+            })
+        }
+    };
     let load = || {
-        Ok(match abi::LoadOp::from_wire(arg).ok_or(DescriptorError::BadEnum { what: "intent load op", index, value: arg })? {
-            abi::LoadOp::Clear => LoadOp::Clear,
-            abi::LoadOp::Load => LoadOp::Load,
-            abi::LoadOp::DontCare => LoadOp::DontCare,
-        })
+        Ok(
+            match abi::LoadOp::from_wire(arg).ok_or(DescriptorError::BadEnum {
+                what: "intent load op",
+                index,
+                value: arg,
+            })? {
+                abi::LoadOp::Clear => LoadOp::Clear,
+                abi::LoadOp::Load => LoadOp::Load,
+                abi::LoadOp::DontCare => LoadOp::DontCare,
+            },
+        )
     };
     match kind {
         K::ColorAttachment => Ok(Role::ColorAttachment(load()?)),
@@ -107,7 +151,10 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
     use DescriptorError as E;
     let header_bytes = abi::HEADER_WORDS * 4;
     if bytes.len() < header_bytes {
-        return Err(E::Truncated { needed: header_bytes, got: bytes.len() });
+        return Err(E::Truncated {
+            needed: header_bytes,
+            got: bytes.len(),
+        });
     }
     let w = Words(bytes);
     if w.at(0) != abi::MAGIC {
@@ -135,7 +182,10 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
     let names_start = (intent_base + intents * abi::INTENT_WORDS) * 4;
     let total = names_start + name_bytes;
     if bytes.len() < total {
-        return Err(E::Truncated { needed: total, got: bytes.len() });
+        return Err(E::Truncated {
+            needed: total,
+            got: bytes.len(),
+        });
     }
     if bytes.len() > total {
         return Err(E::TrailingBytes(bytes.len() - total));
@@ -154,7 +204,11 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
     graph.plan_version = plan_version;
     for index in 0..resources {
         let r = |k: usize| w.at(resource_base + index * abi::RESOURCE_WORDS + k);
-        let class = match abi::Class::from_wire(r(1)).ok_or(E::BadEnum { what: "resource class", index, value: r(1) })? {
+        let class = match abi::Class::from_wire(r(1)).ok_or(E::BadEnum {
+            what: "resource class",
+            index,
+            value: r(1),
+        })? {
             abi::Class::Transient => ResourceClass::Transient,
             abi::Class::Persistent => ResourceClass::Persistent,
             abi::Class::External => ResourceClass::External,
@@ -193,11 +247,24 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
             }
             abi::RESOURCE_BUFFER => {
                 if (8..13).any(|k| r(k) != 0) {
-                    return Err(E::BadEnum { what: "buffer parameter", index, value: 1 });
+                    return Err(E::BadEnum {
+                        what: "buffer parameter",
+                        index,
+                        value: 1,
+                    });
                 }
-                ResourceDesc::Buffer(BufferDesc { size: r(5) as u64 | (r(6) as u64) << 32, usage: vk::BufferUsageFlags::from_raw(r(7)) })
+                ResourceDesc::Buffer(BufferDesc {
+                    size: r(5) as u64 | (r(6) as u64) << 32,
+                    usage: vk::BufferUsageFlags::from_raw(r(7)),
+                })
             }
-            value => return Err(E::BadEnum { what: "resource kind", index, value }),
+            value => {
+                return Err(E::BadEnum {
+                    what: "resource kind",
+                    index,
+                    value,
+                });
+            }
         };
         let name = name(r(3), r(4), "resource", index)?;
         graph.resource(name, desc, class, Scope(r(2)));
@@ -206,7 +273,11 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
     let mut next_intent = 0usize;
     for index in 0..passes {
         let p = |k: usize| w.at(pass_base + index * abi::PASS_WORDS + k);
-        let kind = match abi::PassKind::from_wire(p(0)).ok_or(E::BadEnum { what: "pass kind", index, value: p(0) })? {
+        let kind = match abi::PassKind::from_wire(p(0)).ok_or(E::BadEnum {
+            what: "pass kind",
+            index,
+            value: p(0),
+        })? {
             abi::PassKind::Graphics => PassKind::Graphics,
             abi::PassKind::Compute => PassKind::Compute,
             abi::PassKind::Transfer => PassKind::Transfer,
@@ -214,7 +285,11 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
         };
         let flags = p(1);
         if flags & !(abi::PASS_FLAG_ROOT | abi::PASS_FLAG_CONDITIONAL) != 0 {
-            return Err(E::BadEnum { what: "pass flags", index, value: flags });
+            return Err(E::BadEnum {
+                what: "pass flags",
+                index,
+                value: flags,
+            });
         }
         let (first, count) = (p(5) as usize, p(6) as usize);
         if first != next_intent || first + count > intents {
@@ -225,15 +300,28 @@ pub fn decode(bytes: &[u8]) -> Result<FrameGraph<u32>, DescriptorError> {
         for i in first..first + count {
             let it = |k: usize| w.at(intent_base + i * abi::INTENT_WORDS + k);
             if it(0) as usize >= resources {
-                return Err(E::BadResource { pass: index, resource: it(0) });
+                return Err(E::BadResource {
+                    pass: index,
+                    resource: it(0),
+                });
             }
             let role = role(it(1), it(2), i)?;
             let discard = match it(3) {
                 0 => false,
                 1 => true,
-                value => return Err(E::BadEnum { what: "intent discard flag", index: i, value }),
+                value => {
+                    return Err(E::BadEnum {
+                        what: "intent discard flag",
+                        index: i,
+                        value,
+                    });
+                }
             };
-            pass_intents.push(Intent { resource: ResourceId(it(0)), role, discard: discard || role.implies_discard() });
+            pass_intents.push(Intent {
+                resource: ResourceId(it(0)),
+                role,
+                discard: discard || role.implies_discard(),
+            });
         }
         graph.passes.push(Pass {
             name: name(p(3), p(4), "pass", index)?,
@@ -330,11 +418,17 @@ pub fn encode<R>(graph: &FrameGraph<R>, payload: impl Fn(&R) -> u32) -> Vec<u8> 
             PassKind::Transfer => abi::PassKind::Transfer,
             PassKind::Present => abi::PassKind::Present,
         };
-        let mut writer = builder.pass(&pass.name, kind, payload(&pass.record)).scope(pass.scope.0);
+        let mut writer = builder
+            .pass(&pass.name, kind, payload(&pass.record))
+            .scope(pass.scope.0);
         for intent in &pass.intents {
             let resource = abi::ResourceRef(intent.resource.0);
             let role = role_to_wire(intent.role);
-            writer = if intent.discard { writer.discard(resource, role) } else { writer.access(resource, role) };
+            writer = if intent.discard {
+                writer.discard(resource, role)
+            } else {
+                writer.access(resource, role)
+            };
         }
         if pass.conditional {
             writer = writer.conditional();

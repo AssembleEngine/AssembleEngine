@@ -57,7 +57,17 @@ use std::time::Instant;
 /// [`RECORD_CELLS`]), with [`POSE_MANUAL`] set when either record shows
 /// a manual joint, or [`NO_POSE`] for the rest pose. Every other
 /// attribute is an `f32`.
-pub const ATTRIBUTES: [&str; 9] = ["x", "y", "prev_x", "prev_y", "heading_x", "heading_y", "radius", "class", "pose"];
+pub const ATTRIBUTES: [&str; 9] = [
+    "x",
+    "y",
+    "prev_x",
+    "prev_y",
+    "heading_x",
+    "heading_y",
+    "radius",
+    "class",
+    "pose",
+];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 const ATTR_CLASS: usize = 7;
 /// The `pose` attribute's column.
@@ -171,7 +181,11 @@ impl AnimWrites {
 
     /// The whole of `table`, from empty.
     pub fn whole(table: &[Cell]) -> Self {
-        Self { reset: true, at: (0..table.len() as u32).collect(), cells: table.to_vec() }
+        Self {
+            reset: true,
+            at: (0..table.len() as u32).collect(),
+            cells: table.to_vec(),
+        }
     }
 }
 
@@ -525,7 +539,9 @@ impl Models {
                 offsets[r] = lights;
                 lights = lights.saturating_add(n);
             }
-            let Some(mc) = self.set.class_model[class_of(r)] else { continue };
+            let Some(mc) = self.set.class_model[class_of(r)] else {
+                continue;
+            };
             let mc = &self.set.classes[mc];
             let pose = stream.columns[ATTR_POSE][r];
             words[r] = match mc.bones > 0 && pose != NO_POSE && pose_cell(pose) as usize + POSE_CELLS <= fit {
@@ -556,7 +572,16 @@ impl UnitRenderer {
     /// pass with a `color_format` target and a `depth_format` reverse-Z
     /// depth buffer.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &UnitsSetup, working: crate::colorspace::WorkingSpace, color_format: vk::Format, depth_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(
+        gpu: &GpuDevice,
+        terrain: &TerrainRenderer,
+        lights: &crate::lights::LightRenderer,
+        setup: &UnitsSetup,
+        working: crate::colorspace::WorkingSpace,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
         ensure!(setup.capacity > 0, "unit capacity 0");
         let device = &gpu.device;
         let capacity = setup.capacity;
@@ -578,16 +603,44 @@ impl UnitRenderer {
         }
         let stream_bytes = capacity as u64 * ATTRIBUTE_COUNT as u64 * 4;
         let instances = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: stream_bytes, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::CpuToGpu, "unit instances"))
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: stream_bytes,
+                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "unit instances",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let ubos = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: size_of::<FrameUbo>() as u64, usage: vk::BufferUsageFlags::UNIFORM_BUFFER }, MemoryLocation::CpuToGpu, "unit frame"))
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: size_of::<FrameUbo>() as u64,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "unit frame",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         // With models: regions of the visible list per model class after
         // the darts' (the camera's and each shadow cascade's), and their
         // commands after the darts'.
         let visible_len = model_set.as_ref().map_or(capacity as u64, |s| s.visible_len(capacity));
-        let visible = OwnedBuffer::new(gpu, BufferDesc { size: visible_len * 4, usage: vk::BufferUsageFlags::STORAGE_BUFFER }, MemoryLocation::GpuOnly, "unit visible")?;
+        let visible = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: visible_len * 4,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            },
+            MemoryLocation::GpuOnly,
+            "unit visible",
+        )?;
         let words = [UNIT_VERTICES, 0, 0, 0];
         let initial: &[u8] = match &model_set {
             Some(set) => &set.template,
@@ -595,15 +648,39 @@ impl UnitRenderer {
         };
         let indirect = upload::buffer(gpu, initial, Self::indirect_usage(), "unit indirect")?;
         let counts = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: initial.len() as u64, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "unit counts"))
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: initial.len() as u64,
+                        usage: vk::BufferUsageFlags::TRANSFER_DST,
+                    },
+                    MemoryLocation::GpuToCpu,
+                    "unit counts",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let palette_usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC;
         let palette = match &model_set {
             Some(set) => {
                 let entries = set.palette_layout(capacity).2;
-                upload::buffer_sized(gpu, entries * models::PALETTE_ENTRY_BYTES, set.rest_palettes(), palette_usage, "unit palette")?
+                upload::buffer_sized(
+                    gpu,
+                    entries * models::PALETTE_ENTRY_BYTES,
+                    set.rest_palettes(),
+                    palette_usage,
+                    "unit palette",
+                )?
             }
-            None => OwnedBuffer::new(gpu, BufferDesc { size: 64, usage: palette_usage }, MemoryLocation::GpuOnly, "unit palette")?,
+            None => OwnedBuffer::new(
+                gpu,
+                BufferDesc {
+                    size: 64,
+                    usage: palette_usage,
+                },
+                MemoryLocation::GpuOnly,
+                "unit palette",
+            )?,
         };
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
@@ -617,17 +694,46 @@ impl UnitRenderer {
         // the models' lights (their tables and the frame's offsets).
         let model_layout = match &model_set {
             Some(_) => Some(unsafe {
-                let storage = |b: u32| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(all);
+                let storage = |b: u32| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(b)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(1)
+                        .stage_flags(all)
+                };
                 let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
-                bindings.push(vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(models::MAX_TEXTURES).stage_flags(vk::ShaderStageFlags::FRAGMENT));
+                bindings.push(
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(7)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .descriptor_count(models::MAX_TEXTURES)
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                );
                 bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 for b in 9..15 {
                     bindings.push(storage(b).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 }
                 let none = vk::DescriptorBindingFlags::empty();
-                let flags = [none; 7].into_iter().chain([vk::DescriptorBindingFlags::PARTIALLY_BOUND, none, none, none, none, none, none, none]).collect::<Vec<_>>();
+                let flags = [none; 7]
+                    .into_iter()
+                    .chain([
+                        vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+                        none,
+                        none,
+                        none,
+                        none,
+                        none,
+                        none,
+                        none,
+                    ])
+                    .collect::<Vec<_>>();
                 let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings).push_next(&mut flag_info), None)?
+                device.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default()
+                        .bindings(&bindings)
+                        .push_next(&mut flag_info),
+                    None,
+                )?
             }),
             None => None,
         };
@@ -652,44 +758,133 @@ impl UnitRenderer {
             let empty_layout = pipeline::set_layout(device, &[])?;
             let pipeline_layout = match model_layout {
                 Some(models) => pipeline::pipeline_layout(device, &[set_layout, models, lights.set_layout()], 8, all)?,
-                None => pipeline::pipeline_layout(device, &[set_layout, empty_layout, lights.set_layout()], 4, vk::ShaderStageFlags::VERTEX)?,
+                None => pipeline::pipeline_layout(
+                    device,
+                    &[set_layout, empty_layout, lights.set_layout()],
+                    4,
+                    vk::ShaderStageFlags::VERTEX,
+                )?,
             };
             let n = frames_in_flight as u32;
             let m = model_layout.is_some() as u32;
             let sizes = [
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: (3 + 14 * m) * n },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: (4 + models::MAX_TEXTURES * m) * n },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: n,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    descriptor_count: (3 + 14 * m) * n,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    descriptor_count: (4 + models::MAX_TEXTURES * m) * n,
+                },
             ];
-            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n * (1 + m)).pool_sizes(&sizes), None)?;
+            let desc_pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(n * (1 + m))
+                    .pool_sizes(&sizes),
+                None,
+            )?;
             let layouts = vec![set_layout; frames_in_flight];
-            let sets = device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))?;
+            let sets = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(desc_pool)
+                    .set_layouts(&layouts),
+            )?;
             for (slot, &set) in sets.iter().enumerate() {
-                let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
-                let buffers = [info(&ubos[slot]), info(&instances[slot]), info(&visible), info(&indirect)];
-                let image = [vk::DescriptorImageInfo { sampler: height_sampler, image_view: height_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+                let info = |buffer: &OwnedBuffer| {
+                    [vk::DescriptorBufferInfo {
+                        buffer: buffer.buffer,
+                        offset: 0,
+                        range: vk::WHOLE_SIZE,
+                    }]
+                };
+                let buffers = [
+                    info(&ubos[slot]),
+                    info(&instances[slot]),
+                    info(&visible),
+                    info(&indirect),
+                ];
+                let image = [vk::DescriptorImageInfo {
+                    sampler: height_sampler,
+                    image_view: height_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
                 let mut writes: Vec<vk::WriteDescriptorSet> = buffers
                     .iter()
                     .enumerate()
                     .map(|(i, info)| {
-                        let ty = if i == 0 { vk::DescriptorType::UNIFORM_BUFFER } else { vk::DescriptorType::STORAGE_BUFFER };
-                        vk::WriteDescriptorSet::default().dst_set(set).dst_binding(i as u32).descriptor_type(ty).buffer_info(info)
+                        let ty = if i == 0 {
+                            vk::DescriptorType::UNIFORM_BUFFER
+                        } else {
+                            vk::DescriptorType::STORAGE_BUFFER
+                        };
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(i as u32)
+                            .descriptor_type(ty)
+                            .buffer_info(info)
                     })
                     .collect();
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&image));
-                let shadow = [vk::DescriptorImageInfo { sampler: shadow_sampler, image_view: shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&shadow));
-                let units = [vk::DescriptorImageInfo { sampler: unit_shadow_sampler, image_view: unit_shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&units));
-                let tint = [vk::DescriptorImageInfo { sampler: tint_sampler, image_view: tint_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&tint));
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(4)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&image),
+                );
+                let shadow = [vk::DescriptorImageInfo {
+                    sampler: shadow_sampler,
+                    image_view: shadow_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(5)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&shadow),
+                );
+                let units = [vk::DescriptorImageInfo {
+                    sampler: unit_shadow_sampler,
+                    image_view: unit_shadow_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(6)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&units),
+                );
+                let tint = [vk::DescriptorImageInfo {
+                    sampler: tint_sampler,
+                    image_view: tint_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(7)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&tint),
+                );
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, empty_layout, pipeline_layout, desc_pool, sets)
         };
-        let cull_code: &[u8] = if model_set.is_some() { spirv!("units_models_cull.comp") } else { spirv!("units_cull.comp") };
+        let cull_code: &[u8] = if model_set.is_some() {
+            spirv!("units_models_cull.comp")
+        } else {
+            spirv!("units_cull.comp")
+        };
         let cull = pipeline::compute_pipeline(device, cull_code, pipeline_layout).context("unit cull pipeline")?;
-        let color_formats = [color_format, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)];
+        let color_formats = [
+            color_format,
+            vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32),
+        ];
         let graphics = |vertex: &[u8], fragment: &[u8], color: bool| {
             pipeline::graphics_pipeline(
                 device,
@@ -699,8 +894,16 @@ impl UnitRenderer {
                     layout: pipeline_layout,
                     color_formats: if color { &color_formats } else { &[] },
                     depth: Some(match color {
-                        true => DepthState { format: depth_format, write: true, compare: vk::CompareOp::GREATER_OR_EQUAL },
-                        false => DepthState { format: crate::shadow::format(), write: true, compare: vk::CompareOp::GREATER_OR_EQUAL },
+                        true => DepthState {
+                            format: depth_format,
+                            write: true,
+                            compare: vk::CompareOp::GREATER_OR_EQUAL,
+                        },
+                        false => DepthState {
+                            format: crate::shadow::format(),
+                            write: true,
+                            compare: vk::CompareOp::GREATER_OR_EQUAL,
+                        },
                     }),
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
@@ -711,11 +914,25 @@ impl UnitRenderer {
         let draw = graphics(spirv!("units.vert"), spirv!("units.frag"), true).context("unit pipeline")?;
         let casts = terrain.unit_shadow_map().is_real();
         let caster = match casts {
-            true => Some(graphics(spirv!("units_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit shadow pipeline")?),
+            true => Some(
+                graphics(spirv!("units_shadow.vert"), spirv!("units_shadow.frag"), false)
+                    .context("unit shadow pipeline")?,
+            ),
             false => None,
         };
         let models = match (model_set, model_layout) {
-            (Some(set), Some(layout)) => Some(Self::models(gpu, set, layout, desc_pool, frames_in_flight, capacity, &palette, pipeline_layout, &graphics, casts)?),
+            (Some(set), Some(layout)) => Some(Self::models(
+                gpu,
+                set,
+                layout,
+                desc_pool,
+                frames_in_flight,
+                capacity,
+                &palette,
+                pipeline_layout,
+                &graphics,
+                casts,
+            )?),
             _ => None,
         };
         Ok(Self {
@@ -760,51 +977,167 @@ impl UnitRenderer {
         casts: bool,
     ) -> Result<Models> {
         let device = &gpu.device;
-        let host = |size: u64, usage: vk::BufferUsageFlags, name: &str| OwnedBuffer::new(gpu, BufferDesc { size, usage }, MemoryLocation::CpuToGpu, name);
+        let host = |size: u64, usage: vk::BufferUsageFlags, name: &str| {
+            OwnedBuffer::new(gpu, BufferDesc { size, usage }, MemoryLocation::CpuToGpu, name)
+        };
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let rows_bytes = 3 * capacity as u64 * 4;
-        let rows = (0..frames_in_flight).map(|_| host(rows_bytes, storage, "unit model rows")).collect::<Result<Vec<_>>>()?;
+        let rows = (0..frames_in_flight)
+            .map(|_| host(rows_bytes, storage, "unit model rows"))
+            .collect::<Result<Vec<_>>>()?;
         // Two records per unit; a frame may write all of them.
         let table_cells = capacity as usize * POSE_CELLS;
-        let table = OwnedBuffer::new(gpu, BufferDesc { size: (table_cells * size_of::<Cell>()) as u64, usage: storage }, MemoryLocation::GpuOnly, "unit animation table")?;
-        let staged = (0..frames_in_flight).map(|_| host((table_cells * size_of::<Cell>()) as u64, storage, "unit animation writes")).collect::<Result<Vec<_>>>()?;
-        let staged_at = (0..frames_in_flight).map(|_| host(table_cells as u64 * 4, storage, "unit animation write places")).collect::<Result<Vec<_>>>()?;
-        let light_offsets = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: storage }, MemoryLocation::CpuToGpu, "unit light offsets"))
+        let table = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: (table_cells * size_of::<Cell>()) as u64,
+                usage: storage,
+            },
+            MemoryLocation::GpuOnly,
+            "unit animation table",
+        )?;
+        let staged = (0..frames_in_flight)
+            .map(|_| {
+                host(
+                    (table_cells * size_of::<Cell>()) as u64,
+                    storage,
+                    "unit animation writes",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
-        let template = upload::buffer(gpu, &set.template, vk::BufferUsageFlags::TRANSFER_SRC, "unit indirect template")?;
+        let staged_at = (0..frames_in_flight)
+            .map(|_| host(table_cells as u64 * 4, storage, "unit animation write places"))
+            .collect::<Result<Vec<_>>>()?;
+        let light_offsets = (0..frames_in_flight)
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: capacity as u64 * 4,
+                        usage: storage,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "unit light offsets",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let template = upload::buffer(
+            gpu,
+            &set.template,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            "unit indirect template",
+        )?;
         let layouts = vec![set_layout; frames_in_flight];
-        let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }?;
+        let sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&layouts),
+            )
+        }?;
         for (slot, &ds) in sets.iter().enumerate() {
-            let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
-            let geometry = [vk::DescriptorBufferInfo { buffer: set.geometry.buffer, offset: 0, range: set.index_offset.max(4) }];
-            let buffers = [geometry, info(&set.materials), info(palette), info(&set.class_table), info(&set.draw_table), info(&set.class_commands), info(&rows[slot])];
-            let mut writes: Vec<vk::WriteDescriptorSet> =
-                buffers.iter().enumerate().map(|(i, b)| vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(b)).collect();
-            let images: Vec<vk::DescriptorImageInfo> =
-                set.slots.iter().map(|&(view, sampler)| vk::DescriptorImageInfo { sampler, image_view: view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }).collect();
-            writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(7).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&images));
+            let info = |buffer: &OwnedBuffer| {
+                [vk::DescriptorBufferInfo {
+                    buffer: buffer.buffer,
+                    offset: 0,
+                    range: vk::WHOLE_SIZE,
+                }]
+            };
+            let geometry = [vk::DescriptorBufferInfo {
+                buffer: set.geometry.buffer,
+                offset: 0,
+                range: set.index_offset.max(4),
+            }];
+            let buffers = [
+                geometry,
+                info(&set.materials),
+                info(palette),
+                info(&set.class_table),
+                info(&set.draw_table),
+                info(&set.class_commands),
+                info(&rows[slot]),
+            ];
+            let mut writes: Vec<vk::WriteDescriptorSet> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(ds)
+                        .dst_binding(i as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(b)
+                })
+                .collect();
+            let images: Vec<vk::DescriptorImageInfo> = set
+                .slots
+                .iter()
+                .map(|&(view, sampler)| vk::DescriptorImageInfo {
+                    sampler,
+                    image_view: view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                })
+                .collect();
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ds)
+                    .dst_binding(7)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&images),
+            );
             let anim = info(&set.anim);
-            writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(8).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&anim));
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ds)
+                    .dst_binding(8)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&anim),
+            );
             let cells = [info(&table), info(&staged[slot]), info(&staged_at[slot])];
             for (b, k) in cells.iter().enumerate() {
-                writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(9 + b as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(k));
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(ds)
+                        .dst_binding(9 + b as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(k),
+                );
             }
-            let lights = [info(&set.class_light_table), info(&set.model_light_table), info(&light_offsets[slot])];
+            let lights = [
+                info(&set.class_light_table),
+                info(&set.model_light_table),
+                info(&light_offsets[slot]),
+            ];
             for (b, k) in lights.iter().enumerate() {
-                writes.push(vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(12 + b as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(k));
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(ds)
+                        .dst_binding(12 + b as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(k),
+                );
             }
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
-        let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout).context("unit pose pipeline")?;
-        let scatter = pipeline::compute_pipeline(device, spirv!("units_anim_writes.comp"), pipeline_layout).context("unit animation write pipeline")?;
-        let lights_append = pipeline::compute_pipeline(device, spirv!("units_lights.comp"), pipeline_layout).context("unit light append pipeline")?;
-        let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true).context("unit model pipeline")?;
-        let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true).context("unit masked model pipeline")?;
+        let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout)
+            .context("unit pose pipeline")?;
+        let scatter = pipeline::compute_pipeline(device, spirv!("units_anim_writes.comp"), pipeline_layout)
+            .context("unit animation write pipeline")?;
+        let lights_append = pipeline::compute_pipeline(device, spirv!("units_lights.comp"), pipeline_layout)
+            .context("unit light append pipeline")?;
+        let opaque = graphics(spirv!("units_models.vert"), spirv!("units_models_opaque.frag"), true)
+            .context("unit model pipeline")?;
+        let masked = graphics(spirv!("units_models.vert"), spirv!("units_models_masked.frag"), true)
+            .context("unit masked model pipeline")?;
         let caster = match casts {
             true => Some((
-                graphics(spirv!("units_models_shadow.vert"), spirv!("units_shadow.frag"), false).context("unit model shadow pipeline")?,
-                graphics(spirv!("units_models_shadow_masked.vert"), spirv!("units_models_shadow_masked.frag"), false).context("unit masked model shadow pipeline")?,
+                graphics(spirv!("units_models_shadow.vert"), spirv!("units_shadow.frag"), false)
+                    .context("unit model shadow pipeline")?,
+                graphics(
+                    spirv!("units_models_shadow_masked.vert"),
+                    spirv!("units_models_shadow_masked.frag"),
+                    false,
+                )
+                .context("unit masked model shadow pipeline")?,
             )),
             false => None,
         };
@@ -835,25 +1168,41 @@ impl UnitRenderer {
     }
 
     fn indirect_usage() -> vk::BufferUsageFlags {
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::INDIRECT_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | vk::BufferUsageFlags::TRANSFER_SRC
     }
 
     /// The host copy of the indirect arguments for `slot` (the copy pass
     /// writes it, a host-read pass makes it visible).
     pub fn counts(&self, slot: usize) -> BufferBinding {
         let b = &self.counts[slot];
-        BufferBinding { buffer: b.buffer, offset: 0, size: b.size, identity: IDENTITY_COUNTS | slot as u64 }
+        BufferBinding {
+            buffer: b.buffer,
+            offset: 0,
+            size: b.size,
+            identity: IDENTITY_COUNTS | slot as u64,
+        }
     }
 
     pub fn counts_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.counts[0].size, usage: vk::BufferUsageFlags::TRANSFER_DST }
+        BufferDesc {
+            size: self.counts[0].size,
+            usage: vk::BufferUsageFlags::TRANSFER_DST,
+        }
     }
 
     /// Units the cull passed in the frame that last used `slot` (call once
     /// that frame has completed: in `prepare`, or after the device idles).
     pub fn read_visible(&mut self, slot: usize) -> u32 {
-        let first: Vec<u32> = self.models.as_ref().map_or(Vec::new(), |m| m.set.classes.iter().map(|c| c.commands[0]).collect());
-        let Some(bytes) = self.counts[slot].mapped() else { return 0 };
+        let first: Vec<u32> = self
+            .models
+            .as_ref()
+            .map_or(Vec::new(), |m| m.set.classes.iter().map(|c| c.commands[0]).collect());
+        let Some(bytes) = self.counts[slot].mapped() else {
+            return 0;
+        };
         let word = |w: usize| u32::from_le_bytes(bytes[w * 4..w * 4 + 4].try_into().unwrap());
         // The darts', then each model class's (its first command's).
         word(1) + first.iter().map(|&k| word(4 + 5 * k as usize + 1)).sum::<u32>()
@@ -864,10 +1213,16 @@ impl UnitRenderer {
     /// count in that cascade's copy; read once the slot's frame finished).
     pub fn read_cascade_counts(&mut self, slot: usize) -> Vec<[u32; crate::shadow::CASCADES]> {
         let Some(m) = &self.models else { return Vec::new() };
-        let Some(bytes) = self.counts[slot].mapped() else { return Vec::new() };
+        let Some(bytes) = self.counts[slot].mapped() else {
+            return Vec::new();
+        };
         let word = |w: usize| u32::from_le_bytes(bytes[w * 4..w * 4 + 4].try_into().unwrap());
         let total = m.set.commands() as usize;
-        m.set.classes.iter().map(|c| std::array::from_fn(|k| word(4 + 5 * ((k + 1) * total + c.commands[0] as usize) + 1))).collect()
+        m.set
+            .classes
+            .iter()
+            .map(|c| std::array::from_fn(|k| word(4 + 5 * ((k + 1) * total + c.commands[0] as usize) + 1)))
+            .collect()
     }
 
     /// Each row's skinning palette in `slot`'s stream as the pose pass left
@@ -876,9 +1231,15 @@ impl UnitRenderer {
     pub fn read_poses(&mut self, gpu: &GpuDevice, slot: usize) -> Result<Vec<Vec<[f32; 12]>>> {
         let rows = self.rows(slot) as usize;
         let capacity = self.capacity as usize;
-        let Some(m) = &mut self.models else { return Ok(vec![Vec::new(); rows]) };
+        let Some(m) = &mut self.models else {
+            return Ok(vec![Vec::new(); rows]);
+        };
         let palette = upload::read_buffer(gpu, self.palette.buffer, 0, self.palette.size)?;
-        let entry = |e: usize| -> [f32; 12] { std::array::from_fn(|k| f32::from_le_bytes(palette[(e * 12 + k) * 4..(e * 12 + k) * 4 + 4].try_into().unwrap())) };
+        let entry = |e: usize| -> [f32; 12] {
+            std::array::from_fn(|k| {
+                f32::from_le_bytes(palette[(e * 12 + k) * 4..(e * 12 + k) * 4 + 4].try_into().unwrap())
+            })
+        };
         let word = |bytes: &[u8], w: usize| u32::from_le_bytes(bytes[w * 4..w * 4 + 4].try_into().unwrap());
         let classes: Vec<u32> = {
             let inst = self.instances[slot].mapped().context("instances not host-visible")?;
@@ -887,7 +1248,8 @@ impl UnitRenderer {
         let offsets = m.rows[slot].mapped().context("rows not host-visible")?;
         let mut out = Vec::with_capacity(rows);
         for (r, &class) in classes.iter().enumerate() {
-            let joints = m.set.class_model[(class as usize).min(MAX_CLASSES - 1)].map_or(0, |mc| m.set.classes[mc].joints as usize);
+            let joints = m.set.class_model[(class as usize).min(MAX_CLASSES - 1)]
+                .map_or(0, |mc| m.set.classes[mc].joints as usize);
             let at = word(offsets, r) as usize;
             out.push((0..joints).map(|j| entry(at + j)).collect());
         }
@@ -901,38 +1263,70 @@ impl UnitRenderer {
     /// The instance buffer of `slot` (host-written in [`Self::write_frame`]).
     pub fn instances(&self, slot: usize) -> BufferBinding {
         let b = &self.instances[slot];
-        BufferBinding { buffer: b.buffer, offset: 0, size: b.size, identity: IDENTITY_INSTANCES | slot as u64 }
+        BufferBinding {
+            buffer: b.buffer,
+            offset: 0,
+            size: b.size,
+            identity: IDENTITY_INSTANCES | slot as u64,
+        }
     }
 
     pub fn instances_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.instances[0].size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+        BufferDesc {
+            size: self.instances[0].size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        }
     }
 
     /// The skinning palettes (`units.pose` writes, the draws read).
     pub fn palette(&self) -> BufferBinding {
-        BufferBinding { buffer: self.palette.buffer, offset: 0, size: self.palette.size, identity: IDENTITY_PALETTE }
+        BufferBinding {
+            buffer: self.palette.buffer,
+            offset: 0,
+            size: self.palette.size,
+            identity: IDENTITY_PALETTE,
+        }
     }
 
     pub fn palette_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.palette.size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+        BufferDesc {
+            size: self.palette.size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        }
     }
 
     /// Visible instance indices (cull writes, draw reads).
     pub fn visible(&self) -> BufferBinding {
-        BufferBinding { buffer: self.visible.buffer, offset: 0, size: self.visible.size, identity: IDENTITY_VISIBLE }
+        BufferBinding {
+            buffer: self.visible.buffer,
+            offset: 0,
+            size: self.visible.size,
+            identity: IDENTITY_VISIBLE,
+        }
     }
 
     pub fn visible_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.visible.size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+        BufferDesc {
+            size: self.visible.size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        }
     }
 
     /// The indirect draw (reset, then counted by the cull, read by the draw).
     pub fn indirect(&self) -> BufferBinding {
-        BufferBinding { buffer: self.indirect.buffer, offset: 0, size: self.indirect.size, identity: IDENTITY_INDIRECT }
+        BufferBinding {
+            buffer: self.indirect.buffer,
+            offset: 0,
+            size: self.indirect.size,
+            identity: IDENTITY_INDIRECT,
+        }
     }
 
     pub fn indirect_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.indirect.size, usage: Self::indirect_usage() }
+        BufferDesc {
+            size: self.indirect.size,
+            usage: Self::indirect_usage(),
+        }
     }
 
     /// Cells the last [`Self::write_frame`] staged for the animation
@@ -965,7 +1359,8 @@ impl UnitRenderer {
                     if let Some(bytes) = self.instances[slot].mapped() {
                         for (a, column) in stream.columns.iter().enumerate() {
                             let words = &column[..rows as usize];
-                            bytes[a * capacity * 4..a * capacity * 4 + words.len() * 4].copy_from_slice(pipeline::slice_bytes(words));
+                            bytes[a * capacity * 4..a * capacity * 4 + words.len() * 4]
+                                .copy_from_slice(pipeline::slice_bytes(words));
                         }
                     }
                     if let Some(m) = &mut self.models {
@@ -984,14 +1379,34 @@ impl UnitRenderer {
             view_proj: frame.view_proj.to_cols_array(),
             cam_pos: frame.cam_pos.extend(frame.proj_scale).to_array(),
             frustum: frustum_planes(frame.view_proj),
-            map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, alpha],
-            height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
+            map: [
+                i.cell_size,
+                1.0 / (i.cells.0 + 1) as f32,
+                1.0 / (i.cells.1 + 1) as f32,
+                alpha,
+            ],
+            height: [
+                i.height_scale,
+                i.height_offset,
+                i.water_level.unwrap_or(0.0),
+                i.water_level.is_some() as u32 as f32,
+            ],
             sun: crate::terrain::sun::direction().extend(self.min_pixels).to_array(),
             fog: frame.fog,
-            counts: [self.rows(slot), self.capacity, (frame.shadows && self.shadows) as u32, self.models.as_ref().map_or(0, |m| m.set.commands())],
+            counts: [
+                self.rows(slot),
+                self.capacity,
+                (frame.shadows && self.shadows) as u32,
+                self.models.as_ref().map_or(0, |m| m.set.commands()),
+            ],
             classes: self.classes,
             unit_shadow,
-            anim: [stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32), alpha.to_bits(), self.models.as_ref().map_or(0, |m| m.writes[slot]), 0],
+            anim: [
+                stream.map_or(0, |s| s.tick.wrapping_sub(1) as u32),
+                alpha.to_bits(),
+                self.models.as_ref().map_or(0, |m| m.writes[slot]),
+                0,
+            ],
             photometry: frame.photometry,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
@@ -1005,7 +1420,14 @@ impl UnitRenderer {
         match &self.models {
             // Every command's instance count (and the darts'), from the
             // template.
-            Some(m) => unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, m.template.buffer, self.indirect.buffer, &[vk::BufferCopy::default().size(self.indirect.size)]) },
+            Some(m) => unsafe {
+                ctx.device.cmd_copy_buffer(
+                    ctx.cmd,
+                    m.template.buffer,
+                    self.indirect.buffer,
+                    &[vk::BufferCopy::default().size(self.indirect.size)],
+                )
+            },
             None => unsafe { ctx.device.cmd_fill_buffer(ctx.cmd, self.indirect.buffer, 4, 4, 0) },
         }
     }
@@ -1014,7 +1436,14 @@ impl UnitRenderer {
     /// transfer pass that reads [`Self::indirect`] and writes [`Self::counts`].
     pub fn record_count(&self, ctx: &PassContext<'_>) {
         let size = if self.models.is_some() { self.indirect.size } else { 16 };
-        unsafe { ctx.device.cmd_copy_buffer(ctx.cmd, self.indirect.buffer, self.counts[ctx.slot].buffer, &[vk::BufferCopy::default().size(size)]) };
+        unsafe {
+            ctx.device.cmd_copy_buffer(
+                ctx.cmd,
+                self.indirect.buffer,
+                self.counts[ctx.slot].buffer,
+                &[vk::BufferCopy::default().size(size)],
+            )
+        };
     }
 
     /// The frame's writes into the animation table, then the units'
@@ -1028,13 +1457,31 @@ impl UnitRenderer {
         if writes > 0 {
             let barrier = |src: vk::AccessFlags, dst: vk::AccessFlags| unsafe {
                 let b = [vk::MemoryBarrier::default().src_access_mask(src).dst_access_mask(dst)];
-                device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &b, &[], &[]);
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &b,
+                    &[],
+                    &[],
+                );
             };
             // After the earlier frames' poses read the table (queue order).
-            barrier(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_WRITE);
+            barrier(
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                vk::AccessFlags::SHADER_WRITE,
+            );
             unsafe {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.scatter);
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.pipeline_layout,
+                    0,
+                    &self.bound_sets(ctx.slot),
+                    &[],
+                );
                 device.cmd_dispatch(cmd, writes.div_ceil(64), 1, 1);
             }
             barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
@@ -1047,7 +1494,14 @@ impl UnitRenderer {
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.pose);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &self.bound_sets(ctx.slot),
+                &[],
+            );
             device.cmd_push_constants(cmd, self.pipeline_layout, all, 0, pipeline::slice_bytes(&[jobs, 0u32]));
             device.cmd_dispatch(cmd, jobs.div_ceil(64), 1, 1);
         }
@@ -1108,7 +1562,14 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &self.bound_sets(ctx.slot),
+                &[],
+            );
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
     }
@@ -1121,8 +1582,22 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 2, &[self.light_sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &self.bound_sets(ctx.slot),
+                &[],
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                2,
+                &[self.light_sets[ctx.slot]],
+                &[],
+            );
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
             if let Some(m) = &self.models {
                 // Every model command in two multi-draws: opaque, masked.
@@ -1133,9 +1608,21 @@ impl UnitRenderer {
                         continue;
                     }
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                    device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pipeline::slice_bytes(&[0u32, first]));
+                    device.cmd_push_constants(
+                        cmd,
+                        self.pipeline_layout,
+                        vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        pipeline::slice_bytes(&[0u32, first]),
+                    );
                     let offset = models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
-                    device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, offset, count, models::COMMAND_BYTES as u32);
+                    device.cmd_draw_indexed_indirect(
+                        cmd,
+                        self.indirect.buffer,
+                        offset,
+                        count,
+                        models::COMMAND_BYTES as u32,
+                    );
                 }
             }
         }
@@ -1158,26 +1645,67 @@ impl UnitRenderer {
     /// [`Self::indirect`] as an indirect buffer, and writes the map.
     pub fn record_shadows(&self, ctx: &PassContext<'_>) {
         let rows = self.rows(ctx.slot);
-        let Some(caster) = self.caster.filter(|_| self.casting[ctx.slot] && rows > 0) else { return };
+        let Some(caster) = self.caster.filter(|_| self.casting[ctx.slot] && rows > 0) else {
+            return;
+        };
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &self.bound_sets(ctx.slot), &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &self.bound_sets(ctx.slot),
+                &[],
+            );
             let push_stages = match self.models {
-                Some(_) => vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                Some(_) => {
+                    vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+                }
                 None => vk::ShaderStageFlags::VERTEX,
             };
-            let model_caster = self.models.as_ref().and_then(|m| m.caster.map(|c| (m, c))).filter(|(m, _)| m.set.commands() > 0);
+            let model_caster = self
+                .models
+                .as_ref()
+                .and_then(|m| m.caster.map(|c| (m, c)))
+                .filter(|(m, _)| m.set.commands() > 0);
             if let Some((m, _)) = model_caster {
                 device.cmd_bind_index_buffer(cmd, m.set.geometry.buffer, m.set.index_offset, vk::IndexType::UINT32);
             }
             for k in 0..crate::shadow::CASCADES as u32 {
-                let viewport = vk::Viewport { x: (k * side) as f32, y: 0.0, width: side as f32, height: side as f32, min_depth: 0.0, max_depth: 1.0 };
+                let viewport = vk::Viewport {
+                    x: (k * side) as f32,
+                    y: 0.0,
+                    width: side as f32,
+                    height: side as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
-                device.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: (k * side) as i32, y: 0 }, extent: vk::Extent2D { width: side, height: side } }]);
+                device.cmd_set_scissor(
+                    cmd,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: (k * side) as i32,
+                            y: 0,
+                        },
+                        extent: vk::Extent2D {
+                            width: side,
+                            height: side,
+                        },
+                    }],
+                );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
                 if self.models.is_some() {
-                    device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, pipeline::slice_bytes(&[k, 0u32]));
+                    device.cmd_push_constants(
+                        cmd,
+                        self.pipeline_layout,
+                        push_stages,
+                        0,
+                        pipeline::slice_bytes(&[k, 0u32]),
+                    );
                 } else {
                     device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, &k.to_le_bytes());
                 }
@@ -1188,14 +1716,29 @@ impl UnitRenderer {
                 // masked ones (alpha-tested) in another.
                 if let Some((m, (opaque_caster, masked_caster))) = model_caster {
                     let (opaque, total) = (m.set.opaque, m.set.commands());
-                    let cascade_commands = models::DART_COMMAND_BYTES + (k + 1) as u64 * total as u64 * models::COMMAND_BYTES;
-                    for (pipeline, first, count) in [(opaque_caster, 0, opaque), (masked_caster, opaque, total - opaque)] {
+                    let cascade_commands =
+                        models::DART_COMMAND_BYTES + (k + 1) as u64 * total as u64 * models::COMMAND_BYTES;
+                    for (pipeline, first, count) in
+                        [(opaque_caster, 0, opaque), (masked_caster, opaque, total - opaque)]
+                    {
                         if count == 0 {
                             continue;
                         }
                         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, pipeline::slice_bytes(&[k, first]));
-                        device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, cascade_commands + first as u64 * models::COMMAND_BYTES, count, models::COMMAND_BYTES as u32);
+                        device.cmd_push_constants(
+                            cmd,
+                            self.pipeline_layout,
+                            push_stages,
+                            0,
+                            pipeline::slice_bytes(&[k, first]),
+                        );
+                        device.cmd_draw_indexed_indirect(
+                            cmd,
+                            self.indirect.buffer,
+                            cascade_commands + first as u64 * models::COMMAND_BYTES,
+                            count,
+                            models::COMMAND_BYTES as u32,
+                        );
                     }
                 }
             }
@@ -1206,12 +1749,21 @@ impl UnitRenderer {
         let device = &gpu.device;
         if let Some(mut m) = self.models.take() {
             unsafe {
-                for p in [m.pose, m.scatter, m.opaque, m.masked, m.lights_append].into_iter().chain(m.caster.into_iter().flat_map(|(a, b)| [a, b])) {
+                for p in [m.pose, m.scatter, m.opaque, m.masked, m.lights_append]
+                    .into_iter()
+                    .chain(m.caster.into_iter().flat_map(|(a, b)| [a, b]))
+                {
                     device.destroy_pipeline(p, None);
                 }
                 device.destroy_descriptor_set_layout(m.set_layout, None);
             }
-            for b in m.rows.iter_mut().chain(&mut m.staged).chain(&mut m.staged_at).chain(&mut m.light_offsets) {
+            for b in m
+                .rows
+                .iter_mut()
+                .chain(&mut m.staged)
+                .chain(&mut m.staged_at)
+                .chain(&mut m.light_offsets)
+            {
                 b.destroy(gpu);
             }
             m.table.destroy(gpu);
@@ -1229,7 +1781,12 @@ impl UnitRenderer {
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_descriptor_set_layout(self.empty_layout, None);
         }
-        for b in self.instances.iter_mut().chain(self.ubos.iter_mut()).chain(self.counts.iter_mut()) {
+        for b in self
+            .instances
+            .iter_mut()
+            .chain(self.ubos.iter_mut())
+            .chain(self.counts.iter_mut())
+        {
             b.destroy(gpu);
         }
         self.visible.destroy(gpu);
@@ -1246,12 +1803,21 @@ impl UnitRenderer {
 /// outside the view).
 /// `ground(x, y, class)` is the height the unit stands at; positions are
 /// interpolated with `alpha` as the shader does.
-pub fn cull_margins(stream: &InstanceStream, frame: &UnitFrame, min_pixels: f32, alpha: f32, ground: impl Fn(f32, f32, u32) -> f32) -> Vec<(f32, usize, f32)> {
+pub fn cull_margins(
+    stream: &InstanceStream,
+    frame: &UnitFrame,
+    min_pixels: f32,
+    alpha: f32,
+    ground: impl Fn(f32, f32, u32) -> f32,
+) -> Vec<(f32, usize, f32)> {
     let planes = frustum_planes(frame.view_proj);
     let f = |a: usize, r: usize| f32::from_bits(stream.columns[a][r]);
     (0..stream.len())
         .map(|r| {
-            let (x, y) = (f(2, r) + (f(0, r) - f(2, r)) * alpha, f(3, r) + (f(1, r) - f(3, r)) * alpha);
+            let (x, y) = (
+                f(2, r) + (f(0, r) - f(2, r)) * alpha,
+                f(3, r) + (f(1, r) - f(3, r)) * alpha,
+            );
             let class = stream.columns[7][r].min(MAX_CLASSES as u32 - 1);
             let pos = Vec3::new(x, ground(x, y, class), y);
             let radius = f(6, r);
@@ -1276,9 +1842,19 @@ mod tests {
 
     #[test]
     fn sim_time_follows_the_sim() {
-        let stream = |tick: u64, tick_seconds: f32| InstanceStream { tick, published: Instant::now(), tick_seconds, sim_seconds: 0.1, columns: Default::default(), anim: AnimWrites::default() };
+        let stream = |tick: u64, tick_seconds: f32| InstanceStream {
+            tick,
+            published: Instant::now(),
+            tick_seconds,
+            sim_seconds: 0.1,
+            columns: Default::default(),
+            anim: AnimWrites::default(),
+        };
         let (a, b) = (stream(10, 0.05), stream(11, 0.05));
-        assert!((a.sim_time(0.0) - 0.9).abs() < 1e-6 && (a.sim_time(1.0) - 1.0).abs() < 1e-6, "a tick behind, by sim seconds");
+        assert!(
+            (a.sim_time(0.0) - 0.9).abs() < 1e-6 && (a.sim_time(1.0) - 1.0).abs() < 1e-6,
+            "a tick behind, by sim seconds"
+        );
         assert!(b.sim_time(0.0) >= a.sim_time(1.0), "the next stream never steps back");
         // At 2x (half the wall time per tick) a tick still gains 0.1 s.
         assert_eq!(stream(11, 0.025).sim_time(0.5), stream(11, 0.2).sim_time(0.5));
@@ -1291,7 +1867,14 @@ mod tests {
     #[test]
     fn feed_hands_out_table_writes() {
         let k = |v: u32| [v; 4];
-        let stream = |anim: AnimWrites| InstanceStream { tick: 1, published: Instant::now(), tick_seconds: 0.0, sim_seconds: 0.1, columns: Default::default(), anim };
+        let stream = |anim: AnimWrites| InstanceStream {
+            tick: 1,
+            published: Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.1,
+            columns: Default::default(),
+            anim,
+        };
         let writes = |w: &[(u32, u32)]| {
             let mut keys = AnimWrites::default();
             for &(at, v) in w {
@@ -1318,7 +1901,11 @@ mod tests {
         let spare = feed.publish_reusing(stream(writes(&[(1, 10), (2, 21)])));
         assert!(spare.at.capacity() >= 3, "the taken batch's memory back");
         feed.publish_reusing(stream(writes(&[(1, 11), (4, 40), (1, 12)])));
-        assert_eq!(take(&mut a), [(1, 12), (2, 21), (4, 40)], "coalesced, the newest write each");
+        assert_eq!(
+            take(&mut a),
+            [(1, 12), (2, 21), (4, 40)],
+            "coalesced, the newest write each"
+        );
         feed.publish_reusing(stream(writes(&[(0, 2)])));
         assert_eq!(take(&mut b), [], "another reader missed writes");
         assert!(feed.wants_whole());

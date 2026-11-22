@@ -41,11 +41,19 @@ pub struct EventStore {
 
 impl EventStore {
     pub fn declare(&mut self, stream: u64, size: usize) {
-        self.streams.entry(stream).or_insert(Stream { size, first: 0, bytes: Vec::new(), cursors: BTreeMap::new() });
+        self.streams.entry(stream).or_insert(Stream {
+            size,
+            first: 0,
+            bytes: Vec::new(),
+            cursors: BTreeMap::new(),
+        });
     }
 
     pub fn add_reader(&mut self, stream: u64, reader: usize) -> Result<()> {
-        let s = self.streams.get_mut(&stream).ok_or_else(|| anyhow::anyhow!("unknown event stream {stream:#x}"))?;
+        let s = self
+            .streams
+            .get_mut(&stream)
+            .ok_or_else(|| anyhow::anyhow!("unknown event stream {stream:#x}"))?;
         s.cursors.insert(reader, 0);
         Ok(())
     }
@@ -59,8 +67,16 @@ impl EventStore {
     /// Append a layer's events, already merged in key order.
     pub fn append(&mut self, events: &[Emitted]) -> Result<()> {
         for (_, stream, bytes) in events {
-            let s = self.streams.get_mut(stream).ok_or_else(|| anyhow::anyhow!("unknown event stream {stream:#x}"))?;
-            ensure!(bytes.len() == s.size, "event of {} bytes in a stream of {}", bytes.len(), s.size);
+            let s = self
+                .streams
+                .get_mut(stream)
+                .ok_or_else(|| anyhow::anyhow!("unknown event stream {stream:#x}"))?;
+            ensure!(
+                bytes.len() == s.size,
+                "event of {} bytes in a stream of {}",
+                bytes.len(),
+                s.size
+            );
             if !s.cursors.is_empty() {
                 s.bytes.extend_from_slice(bytes);
             }
@@ -86,7 +102,11 @@ impl EventStore {
     /// Drop events every reader that may still run has seen.
     pub fn prune(&mut self) {
         for s in self.streams.values_mut() {
-            let live = s.cursors.iter().filter(|(r, _)| !self.retired.contains(r)).map(|(_, &c)| c);
+            let live = s
+                .cursors
+                .iter()
+                .filter(|(r, _)| !self.retired.contains(r))
+                .map(|(_, &c)| c);
             let keep_from = live.min().unwrap_or(s.end());
             let drop = ((keep_from - s.first) as usize) * s.size;
             s.bytes.drain(..drop);
@@ -129,7 +149,15 @@ mod tests {
     use crate::command::CommandKey;
 
     fn ev(v: u8) -> Emitted {
-        (CommandKey { system: 0, range: 0, seq: v as u32 }, 7, vec![v, 0])
+        (
+            CommandKey {
+                system: 0,
+                range: 0,
+                seq: v as u32,
+            },
+            7,
+            vec![v, 0],
+        )
     }
 
     #[test]
@@ -160,6 +188,19 @@ mod tests {
         store.declare(7, 2);
         store.append(&[ev(1)]).unwrap();
         assert_eq!(store.held(), 0);
-        assert!(store.append(&[(CommandKey { system: 0, range: 0, seq: 0 }, 7, vec![1])]).is_err(), "wrong size");
+        assert!(
+            store
+                .append(&[(
+                    CommandKey {
+                        system: 0,
+                        range: 0,
+                        seq: 0
+                    },
+                    7,
+                    vec![1]
+                )])
+                .is_err(),
+            "wrong size"
+        );
     }
 }

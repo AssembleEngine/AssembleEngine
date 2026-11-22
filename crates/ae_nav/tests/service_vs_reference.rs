@@ -7,8 +7,8 @@
 //! bodies changed by the caller between ticks.
 
 use ae_nav::math::{CellPos, WorldPos};
-use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitMode, UnitSpec};
 use ae_nav::reference::sim::brush_patch;
+use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitMode, UnitSpec};
 
 /// Same values as `reference_sim.rs` (pathsim's own output).
 const REFERENCE: &[(u64, u64)] = &[
@@ -58,7 +58,10 @@ impl Columns {
         self.entity.retain(|_| *k.next().unwrap());
     }
     fn step(&mut self, nav: &mut NavService) {
-        assert!(nav.entities().eq(self.entity.iter().copied()), "rows must follow service order");
+        assert!(
+            nav.entities().eq(self.entity.iter().copied()),
+            "rows must follow service order"
+        );
         nav.step(&mut BodyColumns {
             pos_x: &mut self.pos_x,
             pos_y: &mut self.pos_y,
@@ -106,8 +109,11 @@ fn reference_scenario(threads: usize) -> Vec<(u64, u64)> {
         for t in 1..=420u64 {
             if t == 1 {
                 nav.queue_command_at(CommandPayload {
-                    id: 1, unit_ids: ids.clone(), kind: CommandKind::MoveTo,
-                    requested_point: at(cell, 420.0, 468.0), corridor_tolerance_world: 48.0,
+                    id: 1,
+                    unit_ids: ids.clone(),
+                    kind: CommandKind::MoveTo,
+                    requested_point: at(cell, 420.0, 468.0),
+                    corridor_tolerance_world: 48.0,
                 });
             }
             if t == 90 {
@@ -115,11 +121,13 @@ fn reference_scenario(threads: usize) -> Vec<(u64, u64)> {
             }
             if t == 200 {
                 nav.queue_command_at(CommandPayload {
-                    id: 2, unit_ids: half.clone(),
+                    id: 2,
+                    unit_ids: half.clone(),
                     kind: CommandKind::CurveFormation {
                         guide_points: vec![at(cell, 300.0, 600.0), at(cell, 360.0, 560.0), at(cell, 420.0, 600.0)],
                     },
-                    requested_point: at(cell, 420.0, 600.0), corridor_tolerance_world: 48.0,
+                    requested_point: at(cell, 420.0, 600.0),
+                    corridor_tolerance_world: 48.0,
                 });
             }
             cols.step(nav);
@@ -138,7 +146,10 @@ fn same_hashes_as_reference() {
     for threads in [1, 4] {
         let got = reference_scenario(threads);
         for (&(tick, g), &(_, want)) in got.iter().zip(REFERENCE) {
-            assert_eq!(g, want, "tick {tick} at {threads} thread(s): service {g:#018x}, reference {want:#018x}");
+            assert_eq!(
+                g, want,
+                "tick {tick} at {threads} thread(s): service {g:#018x}, reference {want:#018x}"
+            );
         }
         assert_eq!(got.len(), REFERENCE.len());
     }
@@ -154,18 +165,38 @@ fn churn_scenario(threads: usize) -> (u64, usize, Vec<u8>) {
         for t in 1..=300u64 {
             if t == 1 || t == 150 {
                 let ids: Vec<u32> = cols.entity.iter().map(|e| nav.local_id(*e).unwrap()).collect();
-                let target = if t == 1 { at(cell, 420.0, 468.0) } else { at(cell, 200.0, 600.0) };
+                let target = if t == 1 {
+                    at(cell, 420.0, 468.0)
+                } else {
+                    at(cell, 200.0, 600.0)
+                };
                 nav.queue_command_at(CommandPayload {
-                    id: t, unit_ids: ids, kind: CommandKind::MoveTo, requested_point: target, corridor_tolerance_world: 48.0,
+                    id: t,
+                    unit_ids: ids,
+                    kind: CommandKind::MoveTo,
+                    requested_point: target,
+                    corridor_tolerance_world: 48.0,
                 });
             }
             if t % 25 == 0 {
                 // Remove every 9th unit (by row), add a few fresh ones at the spawn.
-                let gone: Vec<u64> = cols.entity.iter().copied().enumerate().filter(|(i, _)| (i + t as usize) % 9 == 0).map(|(_, e)| e).collect();
+                let gone: Vec<u64> = cols
+                    .entity
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(i, _)| (i + t as usize) % 9 == 0)
+                    .map(|(_, e)| e)
+                    .collect();
                 assert_eq!(nav.remove_units(&gone), gone.len());
                 cols.remove(&gone);
                 for k in 0..5 {
-                    let spec = UnitSpec { pos: at(cell, 70.0 + k as f32 * 3.0, 690.0), radius: 2.7, max_speed: 100.0, profile_id: (k % 2) as u8 };
+                    let spec = UnitSpec {
+                        pos: at(cell, 70.0 + k as f32 * 3.0, 690.0),
+                        radius: 2.7,
+                        max_speed: 100.0,
+                        profile_id: (k % 2) as u8,
+                    };
                     nav.add_unit(next_entity, spec);
                     cols.push(next_entity, &spec);
                     next_entity += 1;
@@ -184,8 +215,16 @@ fn units_come_and_go_deterministically() {
     let one = churn_scenario(1);
     let four = churn_scenario(4);
     assert_eq!(one, four);
-    let moving = one.2.iter().filter(|&&m| m == UnitMode::Moving as u8 || m == UnitMode::Arrived as u8).count();
-    assert!(moving > one.1 / 2, "most units should be moving or arrived, got {moving} of {}", one.1);
+    let moving = one
+        .2
+        .iter()
+        .filter(|&&m| m == UnitMode::Moving as u8 || m == UnitMode::Arrived as u8)
+        .count();
+    assert!(
+        moving > one.1 / 2,
+        "most units should be moving or arrived, got {moving} of {}",
+        one.1
+    );
 }
 
 #[test]
@@ -206,7 +245,10 @@ fn caller_owns_bodies_between_ticks() {
             cols.step(nav);
         }
         let moved = WorldPos::new(cols.pos_x[0], cols.pos_y[0]).dist(target);
-        assert!(moved < cell * 0.25, "an idle unit should stand where the caller put it, moved {moved}");
+        assert!(
+            moved < cell * 0.25,
+            "an idle unit should stand where the caller put it, moved {moved}"
+        );
         assert_eq!(nav.units[0].body.pos, WorldPos::new(cols.pos_x[0], cols.pos_y[0]));
     });
 }

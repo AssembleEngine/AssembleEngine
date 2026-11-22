@@ -19,8 +19,8 @@ pub mod descriptor;
 pub mod dot;
 
 pub use bake::{
-    AliasHandoff, BakeError, BakeOptions, BakedAccess, BakedGraph, BakedPass, BakedResource, Edge,
-    PhysicalResource, bake,
+    AliasHandoff, BakeError, BakeOptions, BakedAccess, BakedGraph, BakedPass, BakedResource, Edge, PhysicalResource,
+    bake,
 };
 pub use barriers::{AccessState, BarrierDesc, StateKey, StateStore, pass_barriers};
 
@@ -84,7 +84,11 @@ impl ImageDesc {
 
     /// A depth image; the aspect includes stencil when the format has one.
     pub fn depth_2d(format: vk::Format, width: u32, height: u32, usage: vk::ImageUsageFlags) -> Self {
-        let stencil = if has_stencil(format) { vk::ImageAspectFlags::STENCIL } else { vk::ImageAspectFlags::empty() };
+        let stencil = if has_stencil(format) {
+            vk::ImageAspectFlags::STENCIL
+        } else {
+            vk::ImageAspectFlags::empty()
+        };
         Self {
             aspect: vk::ImageAspectFlags::DEPTH | stencil,
             ..Self::color_2d(format, width, height, usage)
@@ -103,7 +107,10 @@ impl ImageDesc {
 pub fn has_stencil(format: vk::Format) -> bool {
     matches!(
         format,
-        vk::Format::D16_UNORM_S8_UINT | vk::Format::D24_UNORM_S8_UINT | vk::Format::D32_SFLOAT_S8_UINT | vk::Format::S8_UINT
+        vk::Format::D16_UNORM_S8_UINT
+            | vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
+            | vk::Format::S8_UINT
     )
 }
 
@@ -172,9 +179,7 @@ impl ShaderStage {
         match self {
             ShaderStage::Vertex => vk::PipelineStageFlags2::VERTEX_SHADER,
             ShaderStage::Fragment => vk::PipelineStageFlags2::FRAGMENT_SHADER,
-            ShaderStage::Graphics => {
-                vk::PipelineStageFlags2::VERTEX_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER
-            }
+            ShaderStage::Graphics => vk::PipelineStageFlags2::VERTEX_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER,
             ShaderStage::Compute => vk::PipelineStageFlags2::COMPUTE_SHADER,
         }
     }
@@ -281,7 +286,12 @@ impl Role {
                 A::DEPTH_STENCIL_ATTACHMENT_READ,
                 false,
             ),
-            Role::Sampled(stage) => make(L::SHADER_READ_ONLY_OPTIMAL, stage.stages(), A::SHADER_SAMPLED_READ, false),
+            Role::Sampled(stage) => make(
+                L::SHADER_READ_ONLY_OPTIMAL,
+                stage.stages(),
+                A::SHADER_SAMPLED_READ,
+                false,
+            ),
             Role::StorageImageRead(stage) => make(L::GENERAL, stage.stages(), A::SHADER_STORAGE_READ, false),
             Role::StorageImageWrite(stage) => make(L::GENERAL, stage.stages(), A::SHADER_STORAGE_WRITE, true),
             Role::StorageImageReadWrite(stage) => make(
@@ -292,7 +302,12 @@ impl Role {
             ),
             Role::StorageBufferRead(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_READ, false),
             Role::StorageBufferWrite(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_WRITE, true),
-            Role::StorageBufferReadWrite(stage) => make(L::UNDEFINED, stage.stages(), A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE, true),
+            Role::StorageBufferReadWrite(stage) => make(
+                L::UNDEFINED,
+                stage.stages(),
+                A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+                true,
+            ),
             Role::UniformBuffer(stage) => make(L::UNDEFINED, stage.stages(), A::UNIFORM_READ, false),
             Role::VertexBuffer => make(L::UNDEFINED, S::VERTEX_ATTRIBUTE_INPUT, A::VERTEX_ATTRIBUTE_READ, false),
             Role::IndexBuffer => make(L::UNDEFINED, S::INDEX_INPUT, A::INDEX_READ, false),
@@ -313,7 +328,9 @@ impl Role {
         };
         match self {
             Role::ColorAttachment(_) => desc.is_image() && aspect.contains(vk::ImageAspectFlags::COLOR),
-            Role::DepthAttachment(_) | Role::DepthRead => desc.is_image() && aspect.contains(vk::ImageAspectFlags::DEPTH),
+            Role::DepthAttachment(_) | Role::DepthRead => {
+                desc.is_image() && aspect.contains(vk::ImageAspectFlags::DEPTH)
+            }
             Role::Sampled(_)
             | Role::StorageImageRead(_)
             | Role::StorageImageWrite(_)
@@ -353,7 +370,9 @@ impl Role {
             ResourceDesc::Buffer(buffer) => {
                 use vk::BufferUsageFlags as U;
                 let required = match self {
-                    Role::StorageBufferRead(_) | Role::StorageBufferWrite(_) | Role::StorageBufferReadWrite(_) => U::STORAGE_BUFFER,
+                    Role::StorageBufferRead(_) | Role::StorageBufferWrite(_) | Role::StorageBufferReadWrite(_) => {
+                        U::STORAGE_BUFFER
+                    }
                     Role::UniformBuffer(_) => U::UNIFORM_BUFFER,
                     Role::VertexBuffer => U::VERTEX_BUFFER,
                     Role::IndexBuffer => U::INDEX_BUFFER,
@@ -368,7 +387,10 @@ impl Role {
     }
 
     pub fn is_attachment(self) -> bool {
-        matches!(self, Role::ColorAttachment(_) | Role::DepthAttachment(_) | Role::DepthRead)
+        matches!(
+            self,
+            Role::ColorAttachment(_) | Role::DepthAttachment(_) | Role::DepthRead
+        )
     }
 
     pub fn is_depth(self) -> bool {
@@ -379,7 +401,8 @@ impl Role {
     pub fn implies_discard(self) -> bool {
         matches!(
             self,
-            Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare) | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare)
+            Role::ColorAttachment(LoadOp::Clear | LoadOp::DontCare)
+                | Role::DepthAttachment(LoadOp::Clear | LoadOp::DontCare)
         )
     }
 

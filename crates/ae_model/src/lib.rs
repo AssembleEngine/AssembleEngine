@@ -56,7 +56,12 @@ pub const DEFAULT_SOURCE_RADIUS: f32 = 0.25;
 
 /// glTF (+Y up, front +Z, +X left) to the engine (+X forward, +Y up, +Z
 /// right): a quarter turn about +Y, so glTF +Z goes to +X and +X to -Z.
-pub const GLTF_TO_ENGINE: Quat = Quat::from_xyzw(0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2);
+pub const GLTF_TO_ENGINE: Quat = Quat::from_xyzw(
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+);
 
 /// One vertex; 80 bytes.
 #[repr(C)]
@@ -202,7 +207,13 @@ pub struct Sampler {
 
 impl Default for Sampler {
     fn default() -> Self {
-        Sampler { mag: Filter::Linear, min: Filter::Linear, mip: Some(Filter::Linear), wrap_s: Wrap::Repeat, wrap_t: Wrap::Repeat }
+        Sampler {
+            mag: Filter::Linear,
+            min: Filter::Linear,
+            mip: Some(Filter::Linear),
+            wrap_s: Wrap::Repeat,
+            wrap_t: Wrap::Repeat,
+        }
     }
 }
 
@@ -218,7 +229,11 @@ impl UvTransform {
     /// The 3x2 matrix (columns) the shader applies: `m[0] * u + m[1] * v + m[2]`.
     pub fn matrix(&self) -> [[f32; 2]; 3] {
         let (s, c) = self.rotation.sin_cos();
-        [[c * self.scale[0], -s * self.scale[0]], [s * self.scale[1], c * self.scale[1]], self.offset]
+        [
+            [c * self.scale[0], -s * self.scale[0]],
+            [s * self.scale[1], c * self.scale[1]],
+            self.offset,
+        ]
     }
 }
 
@@ -336,7 +351,9 @@ pub struct Clip {
 /// model scaled by `r / footprint` (the renderer's fit, the sim's
 /// `anim:bone_world`).
 pub fn footprint(b: &Bounds) -> f32 {
-    let f = [b.min[0], b.max[0], b.min[2], b.max[2]].iter().fold(0.0f32, |a, v| a.max(v.abs()));
+    let f = [b.min[0], b.max[0], b.min[2], b.max[2]]
+        .iter()
+        .fold(0.0f32, |a, v| a.max(v.abs()));
     if f > 1e-6 {
         f
     } else {
@@ -409,7 +426,15 @@ impl Model {
         let vertices = &self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize];
         let mut out = Vec::with_capacity(vertices.len() * p.layout.words());
         for v in vertices {
-            out.extend(v.position.iter().chain(&v.normal).chain(&v.tangent).chain(&v.uv0).chain(&v.uv1).map(|f| f.to_bits()));
+            out.extend(
+                v.position
+                    .iter()
+                    .chain(&v.normal)
+                    .chain(&v.tangent)
+                    .chain(&v.uv0)
+                    .chain(&v.uv1)
+                    .map(|f| f.to_bits()),
+            );
             out.push(v.color[0] as u32 | (v.color[1] as u32) << 16);
             out.push(v.color[2] as u32 | (v.color[3] as u32) << 16);
             match p.layout {
@@ -433,7 +458,11 @@ impl Model {
     pub fn merge_primitives(&mut self) {
         for p in &mut self.primitives {
             let vs = &self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize];
-            p.layout = if vs.iter().all(|v| v.weights == [65535, 0, 0, 0]) { Layout::Rigid } else { Layout::Skinned };
+            p.layout = if vs.iter().all(|v| v.weights == [65535, 0, 0, 0]) {
+                Layout::Rigid
+            } else {
+                Layout::Skinned
+            };
         }
         let mut groups: Vec<((u32, Layout), Vec<usize>)> = Vec::new();
         for (i, p) in self.primitives.iter().enumerate() {
@@ -448,72 +477,169 @@ impl Model {
             for i in members {
                 let p = &self.primitives[i];
                 let base = vertices.len() as u32 - first_vertex;
-                let mut vs = self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize].to_vec();
+                let mut vs =
+                    self.vertices[p.first_vertex as usize..(p.first_vertex + p.vertex_count) as usize].to_vec();
                 if layout == Layout::Rigid {
                     for v in &mut vs {
                         v.joints = [v.joints[0], 0, 0, 0];
                     }
                 }
                 vertices.extend(vs);
-                indices.extend(self.indices[p.first_index as usize..(p.first_index + p.index_count) as usize].iter().map(|x| x + base));
+                indices.extend(
+                    self.indices[p.first_index as usize..(p.first_index + p.index_count) as usize]
+                        .iter()
+                        .map(|x| x + base),
+                );
             }
-            primitives.push(Primitive { material, layout, first_vertex, vertex_count: vertices.len() as u32 - first_vertex, first_index, index_count: indices.len() as u32 - first_index });
+            primitives.push(Primitive {
+                material,
+                layout,
+                first_vertex,
+                vertex_count: vertices.len() as u32 - first_vertex,
+                first_index,
+                index_count: indices.len() as u32 - first_index,
+            });
         }
         (self.vertices, self.indices, self.primitives) = (vertices, indices, primitives);
     }
 
     /// Checks the references between the parts.
     pub fn validate(&self) -> Result<()> {
-        ensure!(!self.bones.is_empty() && self.bones[0].parent.is_none(), "bone 0 must be the root");
+        ensure!(
+            !self.bones.is_empty() && self.bones[0].parent.is_none(),
+            "bone 0 must be the root"
+        );
         for (i, b) in self.bones.iter().enumerate().skip(1) {
-            let p = b.parent.with_context(|| format!("bone {i} ({}) has no parent", b.name))?;
+            let p = b
+                .parent
+                .with_context(|| format!("bone {i} ({}) has no parent", b.name))?;
             ensure!((p as usize) < i, "bone {i} ({}): parent {p} not before it", b.name);
         }
         for (i, j) in self.joints.iter().enumerate() {
-            ensure!((j.bone as usize) < self.bones.len(), "joint {i}: bone {} out of range", j.bone);
+            ensure!(
+                (j.bone as usize) < self.bones.len(),
+                "joint {i}: bone {} out of range",
+                j.bone
+            );
         }
         for (i, l) in self.lights.iter().enumerate() {
-            ensure!((l.joint as usize) < self.joints.len(), "light {i} ({}): joint {} out of range", l.name, l.joint);
-            ensure!(l.range.is_finite() && l.range >= 0.0, "light {i} ({}): range {}", l.name, l.range);
-            ensure!(l.intensity.is_finite() && l.intensity >= 0.0, "light {i} ({}): intensity {}", l.name, l.intensity);
-            ensure!(l.size.is_finite() && l.size > 0.0, "light {i} ({}): size {}", l.name, l.size);
             ensure!(
-                l.inner_angle.is_finite() && l.outer_angle.is_finite() && 0.0 <= l.inner_angle && l.inner_angle <= l.outer_angle && l.outer_angle <= std::f32::consts::FRAC_PI_2,
+                (l.joint as usize) < self.joints.len(),
+                "light {i} ({}): joint {} out of range",
+                l.name,
+                l.joint
+            );
+            ensure!(
+                l.range.is_finite() && l.range >= 0.0,
+                "light {i} ({}): range {}",
+                l.name,
+                l.range
+            );
+            ensure!(
+                l.intensity.is_finite() && l.intensity >= 0.0,
+                "light {i} ({}): intensity {}",
+                l.name,
+                l.intensity
+            );
+            ensure!(
+                l.size.is_finite() && l.size > 0.0,
+                "light {i} ({}): size {}",
+                l.name,
+                l.size
+            );
+            ensure!(
+                l.inner_angle.is_finite()
+                    && l.outer_angle.is_finite()
+                    && 0.0 <= l.inner_angle
+                    && l.inner_angle <= l.outer_angle
+                    && l.outer_angle <= std::f32::consts::FRAC_PI_2,
                 "light {i} ({}): angles {}..{} rad",
                 l.name,
                 l.inner_angle,
                 l.outer_angle
             );
         }
-        ensure!(self.texture_names.len() == self.textures.len(), "texture names and data differ in count");
+        ensure!(
+            self.texture_names.len() == self.textures.len(),
+            "texture names and data differ in count"
+        );
         let tex_ok = |t: &Option<TextureRef>| t.is_none_or(|t| (t.texture as usize) < self.textures.len() && t.uv < 2);
         for (i, m) in self.materials.iter().enumerate() {
             ensure!(
-                tex_ok(&m.base_color_texture) && tex_ok(&m.metallic_roughness_texture) && tex_ok(&m.normal_texture) && tex_ok(&m.occlusion_texture) && tex_ok(&m.emissive_texture),
+                tex_ok(&m.base_color_texture)
+                    && tex_ok(&m.metallic_roughness_texture)
+                    && tex_ok(&m.normal_texture)
+                    && tex_ok(&m.occlusion_texture)
+                    && tex_ok(&m.emissive_texture),
                 "material {i} ({}): texture reference out of range",
                 m.name
             );
         }
         for (i, p) in self.primitives.iter().enumerate() {
-            ensure!((p.material as usize) < self.materials.len(), "primitive {i}: material out of range");
-            ensure!(p.index_count % 3 == 0, "primitive {i}: {} indices, not triangles", p.index_count);
+            ensure!(
+                (p.material as usize) < self.materials.len(),
+                "primitive {i}: material out of range"
+            );
+            ensure!(
+                p.index_count % 3 == 0,
+                "primitive {i}: {} indices, not triangles",
+                p.index_count
+            );
             let v_end = p.first_vertex as u64 + p.vertex_count as u64;
             let i_end = p.first_index as u64 + p.index_count as u64;
-            ensure!(v_end <= self.vertices.len() as u64 && i_end <= self.indices.len() as u64, "primitive {i}: range out of bounds");
-            ensure!(self.indices[p.first_index as usize..i_end as usize].iter().all(|&x| x < p.vertex_count), "primitive {i}: index out of range");
+            ensure!(
+                v_end <= self.vertices.len() as u64 && i_end <= self.indices.len() as u64,
+                "primitive {i}: range out of bounds"
+            );
+            ensure!(
+                self.indices[p.first_index as usize..i_end as usize]
+                    .iter()
+                    .all(|&x| x < p.vertex_count),
+                "primitive {i}: index out of range"
+            );
             for v in &self.vertices[p.first_vertex as usize..v_end as usize] {
-                ensure!(v.joints.iter().all(|&j| (j as usize) < self.joints.len()), "primitive {i}: joint out of range");
-                ensure!(p.layout == Layout::Skinned || v.weights == [65535, 0, 0, 0], "primitive {i}: rigid with a vertex of several influences");
+                ensure!(
+                    v.joints.iter().all(|&j| (j as usize) < self.joints.len()),
+                    "primitive {i}: joint out of range"
+                );
+                ensure!(
+                    p.layout == Layout::Skinned || v.weights == [65535, 0, 0, 0],
+                    "primitive {i}: rigid with a vertex of several influences"
+                );
             }
         }
         for c in &self.clips {
             for ch in &c.channels {
-                ensure!((ch.bone as usize) < self.bones.len(), "clip {}: bone out of range", c.name);
-                ensure!(ch.times.offset + ch.times.len <= self.clip_data.len() as u64 && ch.values.offset + ch.values.len <= self.clip_data.len() as u64, "clip {}: data out of range", c.name);
+                ensure!(
+                    (ch.bone as usize) < self.bones.len(),
+                    "clip {}: bone out of range",
+                    c.name
+                );
+                ensure!(
+                    ch.times.offset + ch.times.len <= self.clip_data.len() as u64
+                        && ch.values.offset + ch.values.len <= self.clip_data.len() as u64,
+                    "clip {}: data out of range",
+                    c.name
+                );
                 let keys = ch.times.len as usize;
-                let per = ch.path.components() * if ch.interpolation == Interpolation::CubicSpline { 3 } else { 1 };
-                ensure!(keys > 0 && ch.values.len as usize == keys * per, "clip {}: {} keys but {} values", c.name, keys, ch.values.len);
-                ensure!(self.clip_floats(ch.times).windows(2).all(|w| w[0] <= w[1]), "clip {}: key times not increasing", c.name);
+                let per = ch.path.components()
+                    * if ch.interpolation == Interpolation::CubicSpline {
+                        3
+                    } else {
+                        1
+                    };
+                ensure!(
+                    keys > 0 && ch.values.len as usize == keys * per,
+                    "clip {}: {} keys but {} values",
+                    c.name,
+                    keys,
+                    ch.values.len
+                );
+                ensure!(
+                    self.clip_floats(ch.times).windows(2).all(|w| w[0] <= w[1]),
+                    "clip {}: key times not increasing",
+                    c.name
+                );
             }
         }
         Ok(())
@@ -523,21 +649,46 @@ impl Model {
         let mut blob: Vec<u8> = Vec::new();
         let mut put = |bytes: &[u8]| -> Range {
             blob.resize(align16(blob.len()), 0);
-            let r = Range { offset: blob.len() as u64, len: bytes.len() as u64 };
+            let r = Range {
+                offset: blob.len() as u64,
+                len: bytes.len() as u64,
+            };
             blob.extend_from_slice(bytes);
             r
         };
         let vertices = put(self.vertex_bytes());
         let index_bytes: Vec<u8> = self.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
         let indices = put(&index_bytes);
-        let textures = self.textures.iter().zip(&self.texture_names).map(|(t, name)| Texture { name: name.clone(), ktx2: put(t) }).collect();
+        let textures = self
+            .textures
+            .iter()
+            .zip(&self.texture_names)
+            .map(|(t, name)| Texture {
+                name: name.clone(),
+                ktx2: put(t),
+            })
+            .collect();
         let clip_bytes: Vec<u8> = self.clip_data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let clip_base = put(&clip_bytes).offset;
-        let bytes_of = |r: Range| Range { offset: clip_base + r.offset * 4, len: r.len * 4 };
+        let bytes_of = |r: Range| Range {
+            offset: clip_base + r.offset * 4,
+            len: r.len * 4,
+        };
         let clips = self
             .clips
             .iter()
-            .map(|c| Clip { channels: c.channels.iter().map(|ch| Channel { times: bytes_of(ch.times), values: bytes_of(ch.values), ..ch.clone() }).collect(), ..c.clone() })
+            .map(|c| Clip {
+                channels: c
+                    .channels
+                    .iter()
+                    .map(|ch| Channel {
+                        times: bytes_of(ch.times),
+                        values: bytes_of(ch.values),
+                        ..ch.clone()
+                    })
+                    .collect(),
+                ..c.clone()
+            })
             .collect();
         let header = Header {
             bones: self.bones.clone(),
@@ -563,7 +714,10 @@ impl Model {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Model> {
-        ensure!(bytes.len() >= 16 && bytes[..8] == MAGIC, "not an engine model (no AEMODEL magic)");
+        ensure!(
+            bytes.len() >= 16 && bytes[..8] == MAGIC,
+            "not an engine model (no AEMODEL magic)"
+        );
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         if version != VERSION {
             bail!("model version {version}, this build reads {VERSION} (convert it again)");
@@ -573,12 +727,21 @@ impl Model {
         let header: Header = serde_json::from_slice(&bytes[16..16 + header_len]).context("model header")?;
         let blob = &bytes[16 + header_len..];
         let slice = |r: Range, what: &str| -> Result<&[u8]> {
-            let end = r.offset.checked_add(r.len).filter(|&e| e <= blob.len() as u64).with_context(|| format!("model {what} out of the file"))?;
+            let end = r
+                .offset
+                .checked_add(r.len)
+                .filter(|&e| e <= blob.len() as u64)
+                .with_context(|| format!("model {what} out of the file"))?;
             Ok(&blob[r.offset as usize..end as usize])
         };
         let vb = slice(header.vertices, "vertices")?;
         ensure!(vb.len() % VERTEX_BYTES == 0, "vertex data not whole vertices");
-        let vertices = vb.as_chunks::<VERTEX_BYTES>().0.iter().map(|c| vertex_from_le(c)).collect();
+        let vertices = vb
+            .as_chunks::<VERTEX_BYTES>()
+            .0
+            .iter()
+            .map(|c| vertex_from_le(c))
+            .collect();
         let ib = slice(header.indices, "indices")?;
         ensure!(ib.len() % 4 == 0, "index data not whole u32s");
         let indices = ib.as_chunks::<4>().0.iter().map(|&c| u32::from_le_bytes(c)).collect();
@@ -599,11 +762,18 @@ impl Model {
                     ensure!(b.len() % 4 == 0, "clip data not whole f32s");
                     let start = clip_data.len() as u64;
                     clip_data.extend(b.as_chunks::<4>().0.iter().map(|&c| f32::from_le_bytes(c)));
-                    Ok(Range { offset: start, len: (b.len() / 4) as u64 })
+                    Ok(Range {
+                        offset: start,
+                        len: (b.len() / 4) as u64,
+                    })
                 };
                 let times = floats(ch.times)?;
                 let values = floats(ch.values)?;
-                channels.push(Channel { times, values, ..ch.clone() });
+                channels.push(Channel {
+                    times,
+                    values,
+                    ..ch.clone()
+                });
             }
             clips.push(Clip { channels, ..c.clone() });
         }

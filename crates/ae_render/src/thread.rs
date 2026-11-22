@@ -11,9 +11,9 @@
 
 use crate::device::{GpuDevice, GpuInstance};
 use crate::executor::{Binding, Executor, ExecutorConfig, ExecutorStats, ImageBinding, Recorder};
-use ae_framegraph::{FrameGraph, ResourceId};
 use crate::swapchain::{Acquired, HdrRequest, PresentPolicy, Swapchain, SwapchainOptions, TargetFormat, color_range};
 use crate::window::{SdlWindow, SurfaceSource, WindowEvents};
+use ae_framegraph::{FrameGraph, ResourceId};
 use anyhow::{Context as _, Result};
 use ash::vk;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +33,10 @@ pub struct TargetInfo {
 impl TargetInfo {
     /// The pair a swapchain target stores.
     pub fn target(self) -> TargetFormat {
-        TargetFormat { format: self.format, color_space: self.color_space }
+        TargetFormat {
+            format: self.format,
+            color_space: self.color_space,
+        }
     }
 }
 
@@ -105,7 +108,11 @@ pub struct HdrControl {
 
 impl Default for HdrControl {
     fn default() -> Self {
-        Self { request: HdrRequest::Off, capable: false, headroom: 1.0 }
+        Self {
+            request: HdrRequest::Off,
+            capable: false,
+            headroom: 1.0,
+        }
     }
 }
 
@@ -185,7 +192,15 @@ impl GpuRenderThread {
         let join = std::thread::Builder::new()
             .name("gpu-render".into())
             .spawn(move || {
-                let result = render_main(thread_instance, surface, size, app, config, &thread_control, &thread_stats);
+                let result = render_main(
+                    thread_instance,
+                    surface,
+                    size,
+                    app,
+                    config,
+                    &thread_control,
+                    &thread_stats,
+                );
                 if let Err(err) = result {
                     eprintln!("[render] GPU render thread failed: {err:#}");
                     if let Ok(mut stats) = thread_stats.lock() {
@@ -277,7 +292,15 @@ fn render_main<A: RenderApp>(
 ) -> Result<()> {
     let gpu = Arc::new(GpuDevice::new(instance, Some(surface))?);
     let mut hdr = config.hdr;
-    let mut swapchain = Swapchain::new(&gpu, surface, initial_size, SwapchainOptions { present: config.present, hdr: hdr.request})?;
+    let mut swapchain = Swapchain::new(
+        &gpu,
+        surface,
+        initial_size,
+        SwapchainOptions {
+            present: config.present,
+            hdr: hdr.request,
+        },
+    )?;
     let mut executor: Executor<A::Pass> = Executor::new(
         gpu.clone(),
         ExecutorConfig {
@@ -287,7 +310,11 @@ fn render_main<A: RenderApp>(
             ..ExecutorConfig::default()
         },
     )?;
-    let mut target = TargetInfo { extent: swapchain.extent, format: swapchain.format.format, color_space: swapchain.format.color_space };
+    let mut target = TargetInfo {
+        extent: swapchain.extent,
+        format: swapchain.format.format,
+        color_space: swapchain.format.color_space,
+    };
     app.create(&gpu, target, config.frames_in_flight)?;
     if let Some((levels, gamut)) = app.hdr_metadata() {
         swapchain.set_hdr_metadata(&gpu, levels, gamut)?;
@@ -332,7 +359,12 @@ fn render_main<A: RenderApp>(
             if let Some(next) = control.hdr.lock().ok().and_then(|mut pending| pending.take()) {
                 // An HDR state change always recreates (the compositor's
                 // description changed, even if SDL's numbers look the same).
-                println!("[render] HDR state: --hdr {} | SDL HDR {} | headroom {:.3}x", next.request.label(), if next.capable { "capable" } else { "off" }, next.headroom);
+                println!(
+                    "[render] HDR state: --hdr {} | SDL HDR {} | headroom {:.3}x",
+                    next.request.label(),
+                    if next.capable { "capable" } else { "off" },
+                    next.headroom
+                );
                 hdr = next;
                 dirty = true;
             }
@@ -342,7 +374,10 @@ fn render_main<A: RenderApp>(
                 continue;
             }
             if dirty || !swapchain.ready() {
-                swapchain.set_options(SwapchainOptions { present: swapchain.policy(), hdr: hdr.request});
+                swapchain.set_options(SwapchainOptions {
+                    present: swapchain.policy(),
+                    hdr: hdr.request,
+                });
                 if !swapchain.recreate(&gpu, size)? {
                     std::thread::sleep(Duration::from_millis(16));
                     continue;
@@ -350,7 +385,11 @@ fn render_main<A: RenderApp>(
                 stats.swapchain_recreates += 1;
                 stats.present_mode = format!("{:?}", swapchain.present_mode);
                 dirty = false;
-                let next = TargetInfo { extent: swapchain.extent, format: swapchain.format.format, color_space: swapchain.format.color_space };
+                let next = TargetInfo {
+                    extent: swapchain.extent,
+                    format: swapchain.format.format,
+                    color_space: swapchain.format.color_space,
+                };
                 let pair_changed = next.target() != target.target();
                 target = next;
                 if pair_changed {
@@ -428,7 +467,10 @@ fn render_main<A: RenderApp>(
                 token,
                 app.recorder(),
                 &|resource| externals.get(resource.index()).copied().flatten(),
-                &[(executor_wait_semaphore(&executor, token), vk::PipelineStageFlags2::ALL_COMMANDS)],
+                &[(
+                    executor_wait_semaphore(&executor, token),
+                    vk::PipelineStageFlags2::ALL_COMMANDS,
+                )],
                 &[swapchain.render_finished[image as usize]],
             )?;
             let present_started = Instant::now();
@@ -479,10 +521,16 @@ fn render_main<A: RenderApp>(
 }
 
 /// [`GpuRenderStats::output`] for `target` and the app's HDR metadata.
-fn output_label(target: TargetInfo, metadata: Option<(crate::encode::DisplayLevels, crate::colorspace::Gamut)>) -> String {
+fn output_label(
+    target: TargetInfo,
+    metadata: Option<(crate::encode::DisplayLevels, crate::colorspace::Gamut)>,
+) -> String {
     let encoding = target.target().encoding().label();
     match metadata {
-        Some((levels, _)) => format!("{encoding}, white {:.0}, peak {:.0} nits", levels.paper_white, levels.peak),
+        Some((levels, _)) => format!(
+            "{encoding}, white {:.0}, peak {:.0} nits",
+            levels.paper_white, levels.peak
+        ),
         None => encoding.into(),
     }
 }
@@ -498,10 +546,20 @@ pub struct Headless<P> {
 
 impl<P: Sync> Headless<P> {
     /// Create the executor and the app's GPU objects.
-    pub fn new<A: RenderApp<Pass = P>>(gpu: &Arc<GpuDevice>, app: &mut A, target: TargetInfo, config: ExecutorConfig) -> Result<Self> {
+    pub fn new<A: RenderApp<Pass = P>>(
+        gpu: &Arc<GpuDevice>,
+        app: &mut A,
+        target: TargetInfo,
+        config: ExecutorConfig,
+    ) -> Result<Self> {
         let executor = Executor::new(gpu.clone(), config)?;
         app.create(gpu, target, config.frames_in_flight)?;
-        Ok(Self { gpu: gpu.clone(), executor, target, last: None })
+        Ok(Self {
+            gpu: gpu.clone(),
+            executor,
+            target,
+            last: None,
+        })
     }
 
     /// Render `frames` frames.
@@ -515,8 +573,16 @@ impl<P: Sync> Headless<P> {
             let token = self.executor.begin_frame()?;
             app.frame_stats(&self.executor.stats());
             app.prepare(token.slot)?;
-            let externals: Vec<Option<Binding>> = (0..self.executor.graph().resources.len() as u32).map(|index| app.external(ResourceId(index), token.slot)).collect();
-            self.executor.execute(token, app.recorder(), &|resource| externals.get(resource.index()).copied().flatten(), &[], &[])?;
+            let externals: Vec<Option<Binding>> = (0..self.executor.graph().resources.len() as u32)
+                .map(|index| app.external(ResourceId(index), token.slot))
+                .collect();
+            self.executor.execute(
+                token,
+                app.recorder(),
+                &|resource| externals.get(resource.index()).copied().flatten(),
+                &[],
+                &[],
+            )?;
             self.last = Some(token);
         }
         Ok(())
@@ -549,7 +615,13 @@ impl<P: Sync> Headless<P> {
 }
 
 /// Render `frames` frames offscreen (see [`Headless`]) and wait for them.
-pub fn run_headless<A: RenderApp>(gpu: &Arc<GpuDevice>, app: &mut A, target: TargetInfo, frames: usize, config: ExecutorConfig) -> Result<ExecutorStats> {
+pub fn run_headless<A: RenderApp>(
+    gpu: &Arc<GpuDevice>,
+    app: &mut A,
+    target: TargetInfo,
+    frames: usize,
+    config: ExecutorConfig,
+) -> Result<ExecutorStats> {
     let mut headless = Headless::new(gpu, app, target, config)?;
     headless.frames(app, frames)?;
     headless.finish()
@@ -592,6 +664,11 @@ fn dump_plan<R>(executor: &Executor<R>, times_ms: &[f32], print: bool) {
                 )
             })
             .collect();
-        println!("[render]   {index}: {} [{:?}] {}", graph.pass_name(pass.pass), pass.kind, accesses.join(", "));
+        println!(
+            "[render]   {index}: {} [{:?}] {}",
+            graph.pass_name(pass.pass),
+            pass.kind,
+            accesses.join(", ")
+        );
     }
 }

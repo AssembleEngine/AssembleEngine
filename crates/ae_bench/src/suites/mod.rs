@@ -31,15 +31,51 @@ pub struct Suite {
 }
 
 pub const SUITES: &[Suite] = &[
-    Suite { name: "framegraph-bake", about: "frame graph declare, signature, bake and barrier planning", run: framegraph_bake::run },
-    Suite { name: "ecs-structural", about: "spawn, despawn, add and remove commands on the ECS backend; id repeatability", run: ecs_structural::run },
-    Suite { name: "nav", about: "terrain, nav hierarchy, destination context, flow field, ORCA avoidance", run: nav::run },
-    Suite { name: "nav-sim", about: "whole navigation tick (NavService over body columns) at 1..N workers; equal digests required", run: nav_sim::run },
-    Suite { name: "sensors", about: "line-of-sight and radar coverage per allyteam (ae_sensors), serial and parallel; equal bits required", run: sensors::run },
-    Suite { name: "sim-dispatch", about: "sandbox game tick: layered schedule on the worker crew, merge, apply; equal digests at 1..N workers", run: sim_dispatch::run },
-    Suite { name: "view", about: "copy layer view tables per observer (ae_view): frame preparation, one build, a two-observer tick", run: view::run },
-    Suite { name: "anim", about: "animation ticker rows (ae_services::anim) on seeded channels at 1 and N threads; equal digests required", run: anim::run },
-    Suite { name: "spatial", about: "grid rebuild and batch radius / nearest-k / sweep queries; equal hits at 1 and N threads", run: spatial::run },
+    Suite {
+        name: "framegraph-bake",
+        about: "frame graph declare, signature, bake and barrier planning",
+        run: framegraph_bake::run,
+    },
+    Suite {
+        name: "ecs-structural",
+        about: "spawn, despawn, add and remove commands on the ECS backend; id repeatability",
+        run: ecs_structural::run,
+    },
+    Suite {
+        name: "nav",
+        about: "terrain, nav hierarchy, destination context, flow field, ORCA avoidance",
+        run: nav::run,
+    },
+    Suite {
+        name: "nav-sim",
+        about: "whole navigation tick (NavService over body columns) at 1..N workers; equal digests required",
+        run: nav_sim::run,
+    },
+    Suite {
+        name: "sensors",
+        about: "line-of-sight and radar coverage per allyteam (ae_sensors), serial and parallel; equal bits required",
+        run: sensors::run,
+    },
+    Suite {
+        name: "sim-dispatch",
+        about: "sandbox game tick: layered schedule on the worker crew, merge, apply; equal digests at 1..N workers",
+        run: sim_dispatch::run,
+    },
+    Suite {
+        name: "view",
+        about: "copy layer view tables per observer (ae_view): frame preparation, one build, a two-observer tick",
+        run: view::run,
+    },
+    Suite {
+        name: "anim",
+        about: "animation ticker rows (ae_services::anim) on seeded channels at 1 and N threads; equal digests required",
+        run: anim::run,
+    },
+    Suite {
+        name: "spatial",
+        about: "grid rebuild and batch radius / nearest-k / sweep queries; equal hits at 1 and N threads",
+        run: spatial::run,
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Suite> {

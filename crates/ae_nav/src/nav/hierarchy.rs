@@ -26,7 +26,10 @@ pub const NO_REGION: u16 = u16::MAX;
 
 /// Ordered as scanned: vertical boundaries first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum PortalAxis { Vertical, Horizontal }
+pub enum PortalAxis {
+    Vertical,
+    Horizontal,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Portal {
@@ -58,7 +61,9 @@ impl Portal {
             PortalAxis::Horizontal => CellPos::new(along, self.boundary),
         }
     }
-    pub fn mid(&self) -> i32 { (self.lo + self.hi) / 2 }
+    pub fn mid(&self) -> i32 {
+        (self.lo + self.hi) / 2
+    }
     /// Cell on the given side where the straight line `from -> to` crosses
     /// this boundary line, clamped to `lo..=hi` along it (the run, or a
     /// stretch of touching runs). Integer arithmetic.
@@ -68,15 +73,24 @@ impl Portal {
             PortalAxis::Horizontal => (from.y, from.x, to.y, to.x),
         };
         let normal = if a_side { self.boundary - 1 } else { self.boundary };
-        let along = if t_n == f_n { t_a } else {
+        let along = if t_n == f_n {
+            t_a
+        } else {
             f_a + ((normal - f_n) as i64 * (t_a - f_a) as i64 / (t_n - f_n) as i64) as i32
         };
         let along = along.clamp(lo, hi);
-        if a_side { self.a_cell(along) } else { self.b_cell(along) }
+        if a_side {
+            self.a_cell(along)
+        } else {
+            self.b_cell(along)
+        }
     }
     /// Cardinal step from the A side to the B side.
     pub fn a_to_b(&self) -> (i32, i32) {
-        match self.axis { PortalAxis::Vertical => (1, 0), PortalAxis::Horizontal => (0, 1) }
+        match self.axis {
+            PortalAxis::Vertical => (1, 0),
+            PortalAxis::Horizontal => (0, 1),
+        }
     }
     pub fn center_world(&self, geom: &WorldGeometry) -> WorldPos {
         let cs = geom.cell_size;
@@ -128,12 +142,20 @@ pub fn perimeter_len(bounds: (i32, i32, i32, i32)) -> usize {
 pub fn perimeter_index(bounds: (i32, i32, i32, i32), c: CellPos) -> Option<usize> {
     let (x0, y0, x1, y1) = bounds;
     let (w, h) = (x1 - x0, y1 - y0);
-    if c.x < x0 || c.y < y0 || c.x >= x1 || c.y >= y1 { return None; }
-    let i = if c.y == y0 { c.x - x0 }
-        else if c.y == y1 - 1 { w + c.x - x0 }
-        else if c.x == x0 { 2 * w + c.y - y0 }
-        else if c.x == x1 - 1 { 2 * w + h + c.y - y0 }
-        else { return None };
+    if c.x < x0 || c.y < y0 || c.x >= x1 || c.y >= y1 {
+        return None;
+    }
+    let i = if c.y == y0 {
+        c.x - x0
+    } else if c.y == y1 - 1 {
+        w + c.x - x0
+    } else if c.x == x0 {
+        2 * w + c.y - y0
+    } else if c.x == x1 - 1 {
+        2 * w + h + c.y - y0
+    } else {
+        return None;
+    };
     Some(i as usize)
 }
 
@@ -141,8 +163,15 @@ pub fn perimeter_index(bounds: (i32, i32, i32, i32), c: CellPos) -> Option<usize
 pub fn perimeter_offset(bounds: (i32, i32, i32, i32), k: usize) -> usize {
     let (x0, y0, x1, y1) = bounds;
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    let (x, y) = if k < w { (k, 0) } else if k < 2 * w { (k - w, h - 1) }
-        else if k < 2 * w + h { (0, k - 2 * w) } else { (w - 1, k - 2 * w - h) };
+    let (x, y) = if k < w {
+        (k, 0)
+    } else if k < 2 * w {
+        (k - w, h - 1)
+    } else if k < 2 * w + h {
+        (0, k - 2 * w)
+    } else {
+        (w - 1, k - 2 * w - h)
+    };
     y * w + x
 }
 
@@ -150,10 +179,18 @@ pub fn perimeter_offset(bounds: (i32, i32, i32, i32), k: usize) -> usize {
 fn perimeter_cells(bounds: (i32, i32, i32, i32)) -> Vec<CellPos> {
     let (x0, y0, x1, y1) = bounds;
     let mut out = Vec::with_capacity(perimeter_len(bounds));
-    for x in x0..x1 { out.push(CellPos::new(x, y0)); }
-    for x in x0..x1 { out.push(CellPos::new(x, y1 - 1)); }
-    for y in y0..y1 { out.push(CellPos::new(x0, y)); }
-    for y in y0..y1 { out.push(CellPos::new(x1 - 1, y)); }
+    for x in x0..x1 {
+        out.push(CellPos::new(x, y0));
+    }
+    for x in x0..x1 {
+        out.push(CellPos::new(x, y1 - 1));
+    }
+    for y in y0..y1 {
+        out.push(CellPos::new(x0, y));
+    }
+    for y in y0..y1 {
+        out.push(CellPos::new(x1 - 1, y));
+    }
     out
 }
 
@@ -217,7 +254,8 @@ fn label_sector_regions(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos
     let g = &terrain.geom;
     let (x0, y0, x1, y1) = g.sector_bounds(sector);
     let w = x1 - x0;
-    let pass = |x: i32, y: i32| x >= x0 && y >= y0 && x < x1 && y < y1 && grid.passable[(y * g.cells_x + x) as usize] != 0;
+    let pass =
+        |x: i32, y: i32| x >= x0 && y >= y0 && x < x1 && y < y1 && grid.passable[(y * g.cells_x + x) as usize] != 0;
     let local = |x: i32, y: i32| ((y - y0) * w + (x - x0)) as usize;
     let mut region_of = vec![NO_REGION; (w * (y1 - y0)).max(0) as usize];
     let mut count: u16 = 0;
@@ -225,7 +263,9 @@ fn label_sector_regions(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos
     for y in y0..y1 {
         for x in x0..x1 {
             let i = local(x, y);
-            if !pass(x, y) || region_of[i] != NO_REGION { continue; }
+            if !pass(x, y) || region_of[i] != NO_REGION {
+                continue;
+            }
             let label = count;
             count += 1;
             region_of[i] = label;
@@ -233,12 +273,18 @@ fn label_sector_regions(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos
             queue.push((x, y));
             let mut head = 0;
             while head < queue.len() {
-                let (cx, cy) = queue[head]; head += 1;
+                let (cx, cy) = queue[head];
+                head += 1;
                 for &(dx, dy) in &crate::math::NEIGHBORS8 {
                     let (nx, ny) = (cx + dx, cy + dy);
-                    if !pass(nx, ny) || !diagonal_corner_ok(pass, cx, cy, dx, dy) { continue; }
+                    if !pass(nx, ny) || !diagonal_corner_ok(pass, cx, cy, dx, dy) {
+                        continue;
+                    }
                     let ni = local(nx, ny);
-                    if region_of[ni] == NO_REGION { region_of[ni] = label; queue.push((nx, ny)); }
+                    if region_of[ni] == NO_REGION {
+                        region_of[ni] = label;
+                        queue.push((nx, ny));
+                    }
                 }
             }
         }
@@ -260,7 +306,13 @@ fn region_in(region_of: &[Arc<[u16]>], g: &WorldGeometry, c: CellPos) -> u16 {
 /// of one sector pair. Segments between two clean sectors are copied from
 /// `previous` (their cells and regions did not change); the rest are
 /// scanned. The result equals a full scan.
-fn scan_portals(terrain: &Terrain, grid: &ProfileGrid, region_of: &[Arc<[u16]>], previous: Option<&[Portal]>, dirty: &[bool]) -> Vec<Portal> {
+fn scan_portals(
+    terrain: &Terrain,
+    grid: &ProfileGrid,
+    region_of: &[Arc<[u16]>],
+    previous: Option<&[Portal]>,
+    dirty: &[bool],
+) -> Vec<Portal> {
     let g = &terrain.geom;
     let sc = g.sector_cells;
     let mut out = Vec::new();
@@ -283,12 +335,20 @@ fn scan_portals(terrain: &Terrain, grid: &ProfileGrid, region_of: &[Arc<[u16]>],
                 let seg_hi = (seg_lo + sc).min(len);
                 let (a, b) = cells(seg_lo);
                 let (sa, sb) = (g.sector_index(g.sector_of(a)), g.sector_index(g.sector_of(b)));
-                let same_segment = |p: &Portal| p.axis == axis && p.boundary == boundary && p.lo >= seg_lo && p.lo < seg_hi;
+                let same_segment =
+                    |p: &Portal| p.axis == axis && p.boundary == boundary && p.lo >= seg_lo && p.lo < seg_hi;
                 // Previous portals are in the same order: skip any before
                 // this segment, then take or drop the segment's own.
-                while prev.peek().is_some_and(|p| !same_segment(p) && (p.axis, p.boundary, p.lo) < (axis, boundary, seg_lo)) { prev.next(); }
+                while prev
+                    .peek()
+                    .is_some_and(|p| !same_segment(p) && (p.axis, p.boundary, p.lo) < (axis, boundary, seg_lo))
+                {
+                    prev.next();
+                }
                 if previous.is_some() && !dirty[sa] && !dirty[sb] {
-                    while let Some(p) = prev.next_if(|p| same_segment(p)) { out.push(p.clone()); }
+                    while let Some(p) = prev.next_if(|p| same_segment(p)) {
+                        out.push(p.clone());
+                    }
                     seg_lo = seg_hi;
                     continue;
                 }
@@ -296,18 +356,31 @@ fn scan_portals(terrain: &Terrain, grid: &ProfileGrid, region_of: &[Arc<[u16]>],
                 let mut along = seg_lo;
                 while along < seg_hi {
                     let (a, b) = cells(along);
-                    if !pass(a) || !pass(b) { along += 1; continue; }
+                    if !pass(a) || !pass(b) {
+                        along += 1;
+                        continue;
+                    }
                     let (ra, rb) = (reg(a), reg(b));
                     let lo = along;
                     let mut hi = along;
                     while hi + 1 < seg_hi {
                         let (a2, b2) = cells(hi + 1);
-                        if !pass(a2) || !pass(b2) || reg(a2) != ra || reg(b2) != rb { break; }
+                        if !pass(a2) || !pass(b2) || reg(a2) != ra || reg(b2) != rb {
+                            break;
+                        }
                         hi += 1;
                     }
                     out.push(Portal {
-                        axis, sector_a: sa as u32, sector_b: sb as u32,
-                        region_a: ra, region_b: rb, boundary, lo, hi, node_a: 0, node_b: 0,
+                        axis,
+                        sector_a: sa as u32,
+                        sector_b: sb as u32,
+                        region_a: ra,
+                        region_b: rb,
+                        boundary,
+                        lo,
+                        hi,
+                        node_a: 0,
+                        node_b: 0,
                     });
                     along = hi + 1;
                 }
@@ -321,7 +394,13 @@ fn scan_portals(terrain: &Terrain, grid: &ProfileGrid, region_of: &[Arc<[u16]>],
 /// For local node `j` of a sector: the boundary costs to it (one value per
 /// perimeter slot) and the directed edges into it from the other nodes of its
 /// region, from one reverse Dijkstra inside the sector.
-fn node_costs(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos, sig: &[(CellPos, u16)], j: usize) -> (Vec<u32>, Vec<(u16, u16, u32)>) {
+fn node_costs(
+    terrain: &Terrain,
+    grid: &ProfileGrid,
+    sector: SectorPos,
+    sig: &[(CellPos, u16)],
+    j: usize,
+) -> (Vec<u32>, Vec<(u16, u16, u32)>) {
     let g = &terrain.geom;
     let bounds = g.sector_bounds(sector);
     let (x0, y0, x1, _) = bounds;
@@ -329,12 +408,19 @@ fn node_costs(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos, sig: &[(
     let (cell, region) = sig[j];
     let (dist, _) = sector_dijkstra(terrain, grid, sector, &[(cell, 0)], true);
     let at = |c: CellPos| dist[((c.y - y0) * w + (c.x - x0)) as usize];
-    let boundary = perimeter_cells(bounds).iter().map(|&c| at(c).min(u32::MAX as u64) as u32).collect();
+    let boundary = perimeter_cells(bounds)
+        .iter()
+        .map(|&c| at(c).min(u32::MAX as u64) as u32)
+        .collect();
     let mut edges = Vec::new();
     for (i, &(other, oregion)) in sig.iter().enumerate() {
-        if i == j || oregion != region { continue; }
+        if i == j || oregion != region {
+            continue;
+        }
         let d = at(other);
-        if d != u64::MAX { edges.push((i as u16, j as u16, d.min(u32::MAX as u64 - 1) as u32)); }
+        if d != u64::MAX {
+            edges.push((i as u16, j as u16, d.min(u32::MAX as u64 - 1) as u32));
+        }
     }
     (boundary, edges)
 }
@@ -343,19 +429,30 @@ fn node_costs(terrain: &Terrain, grid: &ProfileGrid, sector: SectorPos, sig: &[(
 /// returned in item order, so the output is independent of thread count.
 fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = threads.max(1).min(items.len().max(1));
-    if threads <= 1 { return items.iter().map(&f).collect(); }
+    if threads <= 1 {
+        return items.iter().map(&f).collect();
+    }
     let chunk = items.len().div_ceil(threads);
-    crate::thread_load::idle(|| std::thread::scope(|scope| {
-        let handles: Vec<_> = items.chunks(chunk).enumerate().map(|(i, c)| {
-            let f = &f;
-            scope.spawn(move || {
-                crate::thread_load::register(&format!("hierarchy-helper-{i}"));
-                let _b = crate::thread_load::busy();
-                c.iter().map(f).collect::<Vec<R>>()
-            })
-        }).collect();
-        handles.into_iter().flat_map(|h| h.join().expect("hierarchy worker panicked")).collect()
-    }))
+    crate::thread_load::idle(|| {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = items
+                .chunks(chunk)
+                .enumerate()
+                .map(|(i, c)| {
+                    let f = &f;
+                    scope.spawn(move || {
+                        crate::thread_load::register(&format!("hierarchy-helper-{i}"));
+                        let _b = crate::thread_load::busy();
+                        c.iter().map(f).collect::<Vec<R>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("hierarchy worker panicked"))
+                .collect()
+        })
+    })
 }
 
 impl ProfileHierarchy {
@@ -364,13 +461,29 @@ impl ProfileHierarchy {
     /// reused for every sector that is clean and whose node signature did not
     /// change. Portal scanning and union-find are global but linear in the
     /// number of boundary cells / regions.
-    fn build(terrain: &Terrain, grid: &ProfileGrid, previous: Option<&ProfileHierarchy>, dirty: &[bool], threads: usize) -> (Self, usize) {
+    fn build(
+        terrain: &Terrain,
+        grid: &ProfileGrid,
+        previous: Option<&ProfileHierarchy>,
+        dirty: &[bool],
+        threads: usize,
+    ) -> (Self, usize) {
         let g = &terrain.geom;
         let sector_count = (g.sectors_x() * g.sectors_y()) as usize;
-        let mut region_of: Vec<Arc<[u16]>> = match previous { Some(p) => p.region_of.clone(), None => vec![Arc::from(Vec::new()); sector_count] };
-        let mut sectors: Vec<Arc<SectorGraph>> = match previous { Some(p) => p.sectors.clone(), None => vec![Arc::new(SectorGraph::default()); sector_count] };
-        let relabel: Vec<u32> = (0..sector_count as u32).filter(|s| previous.is_none() || dirty[*s as usize]).collect();
-        let labels = par_map(&relabel, threads, |&s| label_sector_regions(terrain, grid, sector_pos(g, s)));
+        let mut region_of: Vec<Arc<[u16]>> = match previous {
+            Some(p) => p.region_of.clone(),
+            None => vec![Arc::from(Vec::new()); sector_count],
+        };
+        let mut sectors: Vec<Arc<SectorGraph>> = match previous {
+            Some(p) => p.sectors.clone(),
+            None => vec![Arc::new(SectorGraph::default()); sector_count],
+        };
+        let relabel: Vec<u32> = (0..sector_count as u32)
+            .filter(|s| previous.is_none() || dirty[*s as usize])
+            .collect();
+        let labels = par_map(&relabel, threads, |&s| {
+            label_sector_regions(terrain, grid, sector_pos(g, s))
+        });
         for (&s, (regions, count)) in relabel.iter().zip(labels) {
             region_of[s as usize] = regions;
             let sg = Arc::make_mut(&mut sectors[s as usize]);
@@ -383,30 +496,58 @@ impl ProfileHierarchy {
         for (pi, p) in portals.iter_mut().enumerate() {
             let mid = p.mid();
             p.node_a = nodes.len() as u32;
-            nodes.push(AbsNode { sector: p.sector_a, region: p.region_a, cell: p.a_cell(mid), portal: pi as u32, a_side: true });
+            nodes.push(AbsNode {
+                sector: p.sector_a,
+                region: p.region_a,
+                cell: p.a_cell(mid),
+                portal: pi as u32,
+                a_side: true,
+            });
             p.node_b = nodes.len() as u32;
-            nodes.push(AbsNode { sector: p.sector_b, region: p.region_b, cell: p.b_cell(mid), portal: pi as u32, a_side: false });
+            nodes.push(AbsNode {
+                sector: p.sector_b,
+                region: p.region_b,
+                cell: p.b_cell(mid),
+                portal: pi as u32,
+                a_side: false,
+            });
             sector_nodes[p.sector_a as usize].push(p.node_a);
             sector_nodes[p.sector_b as usize].push(p.node_b);
         }
         // Intra-sector edges: reuse where possible, recompute the rest in
         // parallel (each sector is independent).
-        let signatures: Vec<Vec<(CellPos, u16)>> = sector_nodes.iter()
-            .map(|ids| ids.iter().map(|&n| (nodes[n as usize].cell, nodes[n as usize].region)).collect()).collect();
-        let todo: Vec<u32> = (0..sector_count as u32).filter(|&s| {
-            let su = s as usize;
-            previous.is_none() || dirty[su] || sectors[su].signature != signatures[su]
-        }).collect();
+        let signatures: Vec<Vec<(CellPos, u16)>> = sector_nodes
+            .iter()
+            .map(|ids| {
+                ids.iter()
+                    .map(|&n| (nodes[n as usize].cell, nodes[n as usize].region))
+                    .collect()
+            })
+            .collect();
+        let todo: Vec<u32> = (0..sector_count as u32)
+            .filter(|&s| {
+                let su = s as usize;
+                previous.is_none() || dirty[su] || sectors[su].signature != signatures[su]
+            })
+            .collect();
         // One task per node, so a repair touching a few sectors still uses
         // every thread.
-        let tasks: Vec<(u32, usize)> = todo.iter().flat_map(|&s| (0..signatures[s as usize].len()).map(move |j| (s, j))).collect();
-        let costs = par_map(&tasks, threads, |&(s, j)| node_costs(terrain, grid, sector_pos(g, s), &signatures[s as usize], j));
+        let tasks: Vec<(u32, usize)> = todo
+            .iter()
+            .flat_map(|&s| (0..signatures[s as usize].len()).map(move |j| (s, j)))
+            .collect();
+        let costs = par_map(&tasks, threads, |&(s, j)| {
+            node_costs(terrain, grid, sector_pos(g, s), &signatures[s as usize], j)
+        });
         let mut costs = costs.into_iter();
         for &s in &todo {
             let sig = &signatures[s as usize];
             let mut boundary = Vec::new();
             let mut edges = Vec::new();
-            for (b, e) in costs.by_ref().take(sig.len()) { boundary.extend(b); edges.extend(e); }
+            for (b, e) in costs.by_ref().take(sig.len()) {
+                boundary.extend(b);
+                edges.extend(e);
+            }
             edges.sort_unstable_by_key(|&(i, j, _)| (i, j));
             let sg = Arc::make_mut(&mut sectors[s as usize]);
             sg.edges = edges;
@@ -418,15 +559,24 @@ impl ProfileHierarchy {
         let sector_ids: Vec<u32> = (0..sector_count as u32).collect();
         let lists = par_map(&sector_ids, threads, |&s| {
             let ids = &sector_nodes[s as usize];
-            let mut lists: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>)> = ids.iter().map(|&n| {
-                let node = &nodes[n as usize];
-                let p = &portals[node.portal as usize];
-                let (dx, dy) = p.a_to_b();
-                let ab = traversal_cost_units(terrain, nodes[p.node_a as usize].cell, dx, dy).min(u32::MAX as u64) as u32;
-                let ba = traversal_cost_units(terrain, nodes[p.node_b as usize].cell, -dx, -dy).min(u32::MAX as u64) as u32;
-                let (other, out_cost, in_cost) = if node.a_side { (p.node_b, ab, ba) } else { (p.node_a, ba, ab) };
-                (vec![(other, out_cost)], vec![(other, in_cost)])
-            }).collect();
+            let mut lists: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>)> = ids
+                .iter()
+                .map(|&n| {
+                    let node = &nodes[n as usize];
+                    let p = &portals[node.portal as usize];
+                    let (dx, dy) = p.a_to_b();
+                    let ab = traversal_cost_units(terrain, nodes[p.node_a as usize].cell, dx, dy).min(u32::MAX as u64)
+                        as u32;
+                    let ba = traversal_cost_units(terrain, nodes[p.node_b as usize].cell, -dx, -dy).min(u32::MAX as u64)
+                        as u32;
+                    let (other, out_cost, in_cost) = if node.a_side {
+                        (p.node_b, ab, ba)
+                    } else {
+                        (p.node_a, ba, ab)
+                    };
+                    (vec![(other, out_cost)], vec![(other, in_cost)])
+                })
+                .collect();
             for &(i, j, c) in &sectors[s as usize].edges {
                 lists[i as usize].0.push((ids[j as usize], c));
                 lists[j as usize].1.push((ids[i as usize], c));
@@ -445,38 +595,65 @@ impl ProfileHierarchy {
         // Components: union-find over (sector, region) joined by portals.
         let mut region_base = Vec::with_capacity(sector_count + 1);
         let mut acc = 0u32;
-        for sg in &sectors { region_base.push(acc); acc += sg.region_count as u32; }
+        for sg in &sectors {
+            region_base.push(acc);
+            acc += sg.region_count as u32;
+        }
         region_base.push(acc);
         let mut parent: Vec<u32> = (0..acc).collect();
         fn find(p: &mut [u32], mut x: u32) -> u32 {
-            while p[x as usize] != x { p[x as usize] = p[p[x as usize] as usize]; x = p[x as usize]; }
+            while p[x as usize] != x {
+                p[x as usize] = p[p[x as usize] as usize];
+                x = p[x as usize];
+            }
             x
         }
         for p in &portals {
             let a = find(&mut parent, region_base[p.sector_a as usize] + p.region_a as u32);
             let b = find(&mut parent, region_base[p.sector_b as usize] + p.region_b as u32);
-            if a != b { let (lo, hi) = if a < b { (a, b) } else { (b, a) }; parent[hi as usize] = lo; }
+            if a != b {
+                let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                parent[hi as usize] = lo;
+            }
         }
         let mut region_comp = vec![u32::MAX; acc as usize];
         let mut root_label = vec![u32::MAX; acc as usize];
         let mut component_count = 0u32;
         for r in 0..acc {
             let root = find(&mut parent, r);
-            if root_label[root as usize] == u32::MAX { root_label[root as usize] = component_count; component_count += 1; }
+            if root_label[root as usize] == u32::MAX {
+                root_label[root as usize] = component_count;
+                component_count += 1;
+            }
             region_comp[r as usize] = root_label[root as usize];
         }
         let h = Self {
-            profile_id: grid.profile.id, region_of, sectors, portals, nodes, sector_nodes,
-            out_edges, in_edges, region_base, region_comp, component_count,
+            profile_id: grid.profile.id,
+            region_of,
+            sectors,
+            portals,
+            nodes,
+            sector_nodes,
+            out_edges,
+            in_edges,
+            region_base,
+            region_comp,
+            component_count,
         };
         (h, todo.len())
     }
 
     #[inline]
     pub fn region_at(&self, geom: &WorldGeometry, c: CellPos) -> Option<(u32, u16)> {
-        if !geom.in_bounds(c) { return None; }
+        if !geom.in_bounds(c) {
+            return None;
+        }
         let r = region_in(&self.region_of, geom, c);
-        if r == NO_REGION { None } else { Some((geom.sector_index(geom.sector_of(c)) as u32, r)) }
+        if r == NO_REGION {
+            None
+        } else {
+            Some((geom.sector_index(geom.sector_of(c)) as u32, r))
+        }
     }
 
     pub fn component_of(&self, sector: u32, region: u16) -> u32 {
@@ -487,9 +664,19 @@ impl ProfileHierarchy {
         self.region_of.iter().map(|r| r.len() * 2).sum::<usize>()
             + self.nodes.len() * std::mem::size_of::<AbsNode>()
             + self.portals.len() * std::mem::size_of::<Portal>()
-            + self.out_edges.iter().chain(self.in_edges.iter()).map(|e| e.len() * 8 + 24).sum::<usize>()
-            + self.sectors.iter().map(|s| s.edges.len() * 8 + s.signature.len() * 12 + s.boundary_cost.len() * 4 + 64).sum::<usize>()
-            + self.region_comp.len() * 4 + self.region_base.len() * 4
+            + self
+                .out_edges
+                .iter()
+                .chain(self.in_edges.iter())
+                .map(|e| e.len() * 8 + 24)
+                .sum::<usize>()
+            + self
+                .sectors
+                .iter()
+                .map(|s| s.edges.len() * 8 + s.signature.len() * 12 + s.boundary_cost.len() * 4 + 64)
+                .sum::<usize>()
+            + self.region_comp.len() * 4
+            + self.region_base.len() * 4
     }
 }
 
@@ -513,9 +700,13 @@ impl NavHierarchy {
             hierarchies.push(h);
         }
         let mut h = Self {
-            version: terrain.version, terrain, grids, hierarchies,
+            version: terrain.version,
+            terrain,
+            grids,
+            hierarchies,
             build_ms: start.elapsed().as_secs_f64() * 1000.0,
-            dirty_sectors: (0..sectors as u32).collect(), sectors_recomputed: recomputed,
+            dirty_sectors: (0..sectors as u32).collect(),
+            sectors_recomputed: recomputed,
             stats: NavStats::default(),
         };
         h.stats = h.compute_stats();
@@ -537,13 +728,25 @@ impl NavHierarchy {
             let (grid, prev) = (&self.grids[k], &self.hierarchies[k]);
             let mut grid = grid.clone();
             let m = grid.influence_margin();
-            let (ax0, ay0, ax1, ay1) = ((x0 - m).max(0), (y0 - m).max(0), (x1 + m).min(g.cells_x - 1), (y1 + m).min(g.cells_y - 1));
+            let (ax0, ay0, ax1, ay1) = (
+                (x0 - m).max(0),
+                (y0 - m).max(0),
+                (x1 + m).min(g.cells_x - 1),
+                (y1 + m).min(g.cells_y - 1),
+            );
             grid.recompute_rect(&terrain, ax0, ay0, ax1, ay1);
             let mut dirty = vec![false; sector_count];
             // Field costs read the cell across a portal too, so widen by one.
-            let (dx0, dy0, dx1, dy1) = ((ax0 - 1).max(0), (ay0 - 1).max(0), (ax1 + 1).min(g.cells_x - 1), (ay1 + 1).min(g.cells_y - 1));
+            let (dx0, dy0, dx1, dy1) = (
+                (ax0 - 1).max(0),
+                (ay0 - 1).max(0),
+                (ax1 + 1).min(g.cells_x - 1),
+                (ay1 + 1).min(g.cells_y - 1),
+            );
             for sy in dy0 / g.sector_cells..=dy1 / g.sector_cells {
-                for sx in dx0 / g.sector_cells..=dx1 / g.sector_cells { dirty[g.sector_index(SectorPos::new(sx, sy))] = true; }
+                for sx in dx0 / g.sector_cells..=dx1 / g.sector_cells {
+                    dirty[g.sector_index(SectorPos::new(sx, sy))] = true;
+                }
             }
             let (h, n) = ProfileHierarchy::build(&terrain, &grid, Some(prev), &dirty, threads);
             (grid, h, n, dirty)
@@ -559,9 +762,13 @@ impl NavHierarchy {
             hierarchies.push(h);
         }
         let mut h = Self {
-            version: terrain.version, terrain, grids, hierarchies,
+            version: terrain.version,
+            terrain,
+            grids,
+            hierarchies,
             build_ms: start.elapsed().as_secs_f64() * 1000.0,
-            dirty_sectors: all_dirty.into_iter().collect(), sectors_recomputed: recomputed,
+            dirty_sectors: all_dirty.into_iter().collect(),
+            sectors_recomputed: recomputed,
             stats: NavStats::default(),
         };
         h.stats = h.compute_stats();
@@ -571,8 +778,12 @@ impl NavHierarchy {
     fn profile_index(&self, profile_id: u8) -> usize {
         self.grids.iter().position(|g| g.profile.id == profile_id).unwrap_or(0)
     }
-    pub fn grid(&self, profile_id: u8) -> &ProfileGrid { &self.grids[self.profile_index(profile_id)] }
-    pub fn hierarchy(&self, profile_id: u8) -> &ProfileHierarchy { &self.hierarchies[self.profile_index(profile_id)] }
+    pub fn grid(&self, profile_id: u8) -> &ProfileGrid {
+        &self.grids[self.profile_index(profile_id)]
+    }
+    pub fn hierarchy(&self, profile_id: u8) -> &ProfileHierarchy {
+        &self.hierarchies[self.profile_index(profile_id)]
+    }
 
     /// Connected component of a clearance-passable cell for a profile.
     pub fn component_at(&self, profile_id: u8, c: CellPos) -> Option<u32> {
@@ -587,15 +798,23 @@ impl NavHierarchy {
         self.hierarchy(profile_id).sectors[self.terrain.geom.sector_index(sector)].version
     }
 
-    pub fn stats(&self) -> NavStats { self.stats.clone() }
-    pub fn bytes(&self) -> usize { self.stats.bytes }
+    pub fn stats(&self) -> NavStats {
+        self.stats.clone()
+    }
+    pub fn bytes(&self) -> usize {
+        self.stats.bytes
+    }
 
     fn compute_stats(&self) -> NavStats {
         NavStats {
             version: self.version,
             portals: self.hierarchies.iter().map(|h| h.portals.len()).sum(),
             nodes: self.hierarchies.iter().map(|h| h.nodes.len()).sum(),
-            edges: self.hierarchies.iter().map(|h| h.out_edges.iter().map(|e| e.len()).sum::<usize>()).sum(),
+            edges: self
+                .hierarchies
+                .iter()
+                .map(|h| h.out_edges.iter().map(|e| e.len()).sum::<usize>())
+                .sum(),
             regions: self.hierarchies.iter().map(|h| h.region_comp.len()).sum(),
             sectors: (self.terrain.geom.sectors_x() * self.terrain.geom.sectors_y()) as usize,
             build_ms: self.build_ms,
@@ -606,7 +825,8 @@ impl NavHierarchy {
     }
 
     fn compute_bytes(&self) -> usize {
-        self.grids.iter().map(|g| g.passable.len()).sum::<usize>() + self.hierarchies.iter().map(|h| h.bytes()).sum::<usize>()
+        self.grids.iter().map(|g| g.passable.len()).sum::<usize>()
+            + self.hierarchies.iter().map(|h| h.bytes()).sum::<usize>()
     }
 }
 
@@ -617,7 +837,15 @@ mod tests {
     use crate::terrain::TestTerrain;
 
     fn zero_clearance() -> Vec<MovementProfile> {
-        vec![MovementProfile { id: 0, name: "pt".into(), clearance_cells: 0, max_slope: 1000, unit_radius: 0.4, base_speed: 10.0, medium: crate::terrain::Medium::ANY }]
+        vec![MovementProfile {
+            id: 0,
+            name: "pt".into(),
+            clearance_cells: 0,
+            max_slope: 1000,
+            unit_radius: 0.4,
+            base_speed: 10.0,
+            medium: crate::terrain::Medium::ANY,
+        }]
     }
 
     #[test]
@@ -636,7 +864,10 @@ mod tests {
         let right = h.region_at(0, CellPos::new(14, 4)).unwrap();
         assert_eq!(left.0, right.0);
         assert_ne!(left.1, right.1);
-        assert_ne!(h.component_at(0, CellPos::new(2, 2)), h.component_at(0, CellPos::new(30, 2)));
+        assert_ne!(
+            h.component_at(0, CellPos::new(2, 2)),
+            h.component_at(0, CellPos::new(30, 2))
+        );
         // No intra edge may join nodes of different regions.
         for &(i, j, _) in &ph.sectors[s as usize].edges {
             let ni = ph.sector_nodes[s as usize][i as usize];
@@ -653,7 +884,18 @@ mod tests {
         let profiles = default_profiles(1.0);
         let h0 = NavHierarchy::build(base.clone(), &profiles);
         let mut patch = crate::terrain::TerrainPatch::new();
-        for y in 30..34 { for x in 40..50 { patch.push(crate::terrain::CellEdit { x, y, blocked: Some(true), height: None, cost: None, material: None }); } }
+        for y in 30..34 {
+            for x in 40..50 {
+                patch.push(crate::terrain::CellEdit {
+                    x,
+                    y,
+                    blocked: Some(true),
+                    height: None,
+                    cost: None,
+                    material: None,
+                });
+            }
+        }
         patch.finish();
         let (t2, applied) = base.with_patch(patch);
         let t2 = Arc::new(t2);
@@ -666,9 +908,13 @@ mod tests {
             assert_eq!(a.portals.len(), b.portals.len());
             assert_eq!(a.out_edges, b.out_edges);
             assert_eq!(a.region_comp, b.region_comp);
-            for (sa, sb) in a.sectors.iter().zip(&b.sectors) { assert_eq!(sa.boundary_cost, sb.boundary_cost); }
+            for (sa, sb) in a.sectors.iter().zip(&b.sectors) {
+                assert_eq!(sa.boundary_cost, sb.boundary_cost);
+            }
         }
-        for (a, b) in local.grids.iter().zip(&full.grids) { assert_eq!(a.passable, b.passable); }
+        for (a, b) in local.grids.iter().zip(&full.grids) {
+            assert_eq!(a.passable, b.passable);
+        }
     }
 
     /// Everything a full build produces, for exact comparison.
@@ -681,7 +927,10 @@ mod tests {
             assert_eq!(a.in_edges, b.in_edges);
             assert_eq!(a.region_comp, b.region_comp);
             for (sa, sb) in a.sectors.iter().zip(&b.sectors) {
-                assert_eq!((sa.region_count, &sa.edges, &sa.boundary_cost), (sb.region_count, &sb.edges, &sb.boundary_cost));
+                assert_eq!(
+                    (sa.region_count, &sa.edges, &sa.boundary_cost),
+                    (sb.region_count, &sb.edges, &sb.boundary_cost)
+                );
             }
         }
         for (a, b) in local.grids.iter().zip(&full.grids) {
@@ -710,15 +959,24 @@ mod tests {
             let (w, hh) = (rng.range_i32(1, 12), rng.range_i32(1, 12));
             let kind = rng.range_i32(0, 4);
             let mut patch = crate::terrain::TerrainPatch::new();
-            for yy in y..(y + hh).min(83) { for xx in x..(x + w).min(99) {
-                let (blocked, cost, height) = match kind {
-                    0 => (Some(true), None, None),
-                    1 => (Some(false), Some(10), None),
-                    2 => (None, Some(rng.range_i32(8, 20) as u8), None),
-                    _ => (None, None, Some(rng.range_i32(0, 400) as i16)),
-                };
-                patch.push(crate::terrain::CellEdit { x: xx, y: yy, blocked, height, cost, material: None });
-            }}
+            for yy in y..(y + hh).min(83) {
+                for xx in x..(x + w).min(99) {
+                    let (blocked, cost, height) = match kind {
+                        0 => (Some(true), None, None),
+                        1 => (Some(false), Some(10), None),
+                        2 => (None, Some(rng.range_i32(8, 20) as u8), None),
+                        _ => (None, None, Some(rng.range_i32(0, 400) as i16)),
+                    };
+                    patch.push(crate::terrain::CellEdit {
+                        x: xx,
+                        y: yy,
+                        blocked,
+                        height,
+                        cost,
+                        material: None,
+                    });
+                }
+            }
             patch.finish();
             let (t2, applied) = t.with_patch(patch);
             t = Arc::new(t2);
@@ -739,7 +997,9 @@ mod tests {
         let b = NavHierarchy::build_parallel(t, &default_profiles(1.0), 7);
         for (x, y) in a.hierarchies.iter().zip(&b.hierarchies) {
             assert_eq!(x.out_edges, y.out_edges);
-            for (sa, sb) in x.sectors.iter().zip(&y.sectors) { assert_eq!(sa.boundary_cost, sb.boundary_cost); }
+            for (sa, sb) in x.sectors.iter().zip(&y.sectors) {
+                assert_eq!(sa.boundary_cost, sb.boundary_cost);
+            }
         }
     }
 }

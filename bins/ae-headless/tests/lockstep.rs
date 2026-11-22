@@ -28,22 +28,56 @@ const NET: [&str; 6] = ["--latency", "30", "--jitter", "20", "--loss", "5"];
 fn game(port: u16, ticks: u64, record: Option<&str>, fault: Option<(u32, &str)>) -> (Output, Vec<Output>) {
     let addr = format!("127.0.0.1:{port}");
     let mut relay = Command::new(relay_exe());
-    relay.args(["--players", "3", "--ticks", &ticks.to_string(), "--bind", &addr]).args(NET);
+    relay
+        .args(["--players", "3", "--ticks", &ticks.to_string(), "--bind", &addr])
+        .args(NET);
     if let Some(path) = record {
         relay.args(["--record", path]);
     }
-    let relay: Child = relay.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("start the relay");
+    let relay: Child = relay
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the relay");
     let clients: Vec<Child> = (0..3u32)
         .map(|p| {
             let mut c = Command::new(env!("CARGO_BIN_EXE_ae-headless"));
-            c.args(["--game", "crossing", "--nav", "water", "--map-cells", "256", "--units", "600", "--param-hi", "255", "--workers", "1", "--checkpoint-every", "30"]);
-            c.args(["--connect", &addr, "--player", &p.to_string(), "--script", "orders", "--seed", &p.to_string()]).args(NET);
+            c.args([
+                "--game",
+                "crossing",
+                "--nav",
+                "water",
+                "--map-cells",
+                "256",
+                "--units",
+                "600",
+                "--param-hi",
+                "255",
+                "--workers",
+                "1",
+                "--checkpoint-every",
+                "30",
+            ]);
+            c.args([
+                "--connect",
+                &addr,
+                "--player",
+                &p.to_string(),
+                "--script",
+                "orders",
+                "--seed",
+                &p.to_string(),
+            ])
+            .args(NET);
             if let Some((who, inject)) = fault
                 && who == p
             {
                 c.args(["--inject", inject]);
             }
-            c.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("start a client")
+            c.stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start a client")
         })
         .collect();
     let clients: Vec<Output> = clients.into_iter().map(|c| c.wait_with_output().unwrap()).collect();
@@ -63,14 +97,37 @@ fn clients_stay_in_sync_and_a_desync_is_caught() {
 
     let (relay, clients) = game(7651, 240, Some(file), None);
     let r = text(&relay);
-    assert!(relay.status.success() && r.contains("in sync") && r.contains("final digests agree") && r.contains("8 of 8 digest rounds compared"), "{r}");
+    assert!(
+        relay.status.success()
+            && r.contains("in sync")
+            && r.contains("final digests agree")
+            && r.contains("8 of 8 digest rounds compared"),
+        "{r}"
+    );
     for c in &clients {
         assert!(c.status.success() && text(c).contains("240 ticks"), "{}", text(c));
     }
-    let digest = r.split("agree (").nth(1).unwrap().split(')').next().unwrap().to_string();
-    assert!(clients.iter().all(|c| text(c).contains(&digest)), "every client ends at {digest}");
-    let replay = Command::new(env!("CARGO_BIN_EXE_ae-headless")).args(["--game", "crossing", "--replay", file, "--verify", "--workers", "2"]).output().unwrap();
-    assert!(replay.status.success() && text(&replay).contains("8 checkpoints match"), "{}", text(&replay));
+    let digest = r
+        .split("agree (")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(
+        clients.iter().all(|c| text(c).contains(&digest)),
+        "every client ends at {digest}"
+    );
+    let replay = Command::new(env!("CARGO_BIN_EXE_ae-headless"))
+        .args(["--game", "crossing", "--replay", file, "--verify", "--workers", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        replay.status.success() && text(&replay).contains("8 checkpoints match"),
+        "{}",
+        text(&replay)
+    );
 
     // Player 1 flips a bit after tick 100: caught at the checkpoint after it.
     let (relay, _) = game(7652, 180, None, Some((1, "100:Body.x:5")));

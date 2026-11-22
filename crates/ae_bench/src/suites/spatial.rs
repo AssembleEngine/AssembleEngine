@@ -42,15 +42,44 @@ pub fn run(options: &Options) -> Result<Report> {
     let q = n / 5;
     let tag = format!("units{n}_queries{q}");
     let (x, y, r) = army(n);
-    let bounds = Bounds { min_x: 0.0, min_y: 0.0, max_x: MAP, max_y: MAP };
+    let bounds = Bounds {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: MAP,
+        max_y: MAP,
+    };
     // Weapon-range queries from the first q units; sweeps as shots.
-    let circles: Vec<Circle> = (0..q).map(|i| Circle { x: x[i], y: y[i], r: 160.0 }).collect();
-    let nearest: Vec<Nearest> = (0..q).map(|i| Nearest { x: x[i], y: y[i], max_r: 400.0, k: 8 }).collect();
-    let shots: Vec<Segment> = (0..q).map(|i| Segment { x0: x[i], y0: y[i], x1: x[i] + 300.0, y1: y[i] - 200.0, pad: 1.0 }).collect();
+    let circles: Vec<Circle> = (0..q)
+        .map(|i| Circle {
+            x: x[i],
+            y: y[i],
+            r: 160.0,
+        })
+        .collect();
+    let nearest: Vec<Nearest> = (0..q)
+        .map(|i| Nearest {
+            x: x[i],
+            y: y[i],
+            max_r: 400.0,
+            k: 8,
+        })
+        .collect();
+    let shots: Vec<Segment> = (0..q)
+        .map(|i| Segment {
+            x0: x[i],
+            y0: y[i],
+            x1: x[i] + 300.0,
+            y1: y[i] - 200.0,
+            pad: 1.0,
+        })
+        .collect();
 
     // Rebuild is a serial counting sort: timed once.
     let mut grid = Grid::new(bounds, 64.0);
-    report.time(&format!("{tag}/rebuild"), time(options.budget, || grid.rebuild(&x, &y, &r)));
+    report.time(
+        &format!("{tag}/rebuild"),
+        time(options.budget, || grid.rebuild(&x, &y, &r)),
+    );
     grid.rebuild(&x, &y, &r);
     let mut threads = vec![1];
     if options.threads > 1 {
@@ -61,9 +90,18 @@ pub fn run(options: &Options) -> Result<Report> {
         let p = pool(t)?;
         let mut out = [Hits::default(), Hits::default(), Hits::default()];
         p.install(|| {
-            report.time(&format!("{tag}/radius160_{t}t"), time(options.budget, || grid.radius(&circles, &mut out[0])));
-            report.time(&format!("{tag}/nearest8_{t}t"), time(options.budget, || grid.nearest(&nearest, &mut out[1])));
-            report.time(&format!("{tag}/sweep360_{t}t"), time(options.budget, || grid.sweep(&shots, &mut out[2])));
+            report.time(
+                &format!("{tag}/radius160_{t}t"),
+                time(options.budget, || grid.radius(&circles, &mut out[0])),
+            );
+            report.time(
+                &format!("{tag}/nearest8_{t}t"),
+                time(options.budget, || grid.nearest(&nearest, &mut out[1])),
+            );
+            report.time(
+                &format!("{tag}/sweep360_{t}t"),
+                time(options.budget, || grid.sweep(&shots, &mut out[2])),
+            );
         });
         match &first {
             None => {

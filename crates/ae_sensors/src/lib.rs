@@ -28,15 +28,26 @@ pub struct SensorGrid {
 impl SensorGrid {
     /// Cells covering `extent` world units (rounded up).
     pub fn new(extent_x: f32, extent_y: f32, cell_size: f32) -> Self {
-        assert!(cell_size > 0.0 && extent_x > 0.0 && extent_y > 0.0, "a grid needs a positive extent and cell size");
-        Self { width: (extent_x / cell_size).ceil().max(1.0) as u32, height: (extent_y / cell_size).ceil().max(1.0) as u32, cell_size }
+        assert!(
+            cell_size > 0.0 && extent_x > 0.0 && extent_y > 0.0,
+            "a grid needs a positive extent and cell size"
+        );
+        Self {
+            width: (extent_x / cell_size).ceil().max(1.0) as u32,
+            height: (extent_y / cell_size).ceil().max(1.0) as u32,
+            cell_size,
+        }
     }
 
     /// The cell of a world position, clamped to the grid.
     pub fn cell(&self, x: f32, y: f32) -> (u32, u32) {
         let c = |v: f32, n: u32| {
             let f = (v / self.cell_size).floor();
-            if f.is_nan() || f < 0.0 { 0 } else { (f as u32).min(n - 1) }
+            if f.is_nan() || f < 0.0 {
+                0
+            } else {
+                (f as u32).min(n - 1)
+            }
         };
         (c(x, self.width), c(y, self.height))
     }
@@ -44,7 +55,11 @@ impl SensorGrid {
     /// A world radius in whole cells (rounded down; negative or NaN is 0).
     pub fn radius(&self, r: f32) -> u32 {
         let f = (r / self.cell_size).floor();
-        if f.is_nan() || f < 0.0 { 0 } else { f.min(u16::MAX as f32) as u32 }
+        if f.is_nan() || f < 0.0 {
+            0
+        } else {
+            f.min(u16::MAX as f32) as u32
+        }
     }
 }
 
@@ -61,11 +76,18 @@ pub struct Bits {
 impl Bits {
     pub fn new(width: u32, height: u32) -> Self {
         let stride = (width as usize).div_ceil(64);
-        Self { width, height, stride, words: vec![0; stride * height as usize] }
+        Self {
+            width,
+            height,
+            stride,
+            words: vec![0; stride * height as usize],
+        }
     }
 
     pub fn get(&self, x: u32, y: u32) -> bool {
-        x < self.width && y < self.height && self.words[y as usize * self.stride + (x / 64) as usize] >> (x % 64) & 1 != 0
+        x < self.width
+            && y < self.height
+            && self.words[y as usize * self.stride + (x / 64) as usize] >> (x % 64) & 1 != 0
     }
 
     pub fn set(&mut self, x: u32, y: u32) {
@@ -147,7 +169,10 @@ pub struct Sensors<'a> {
 impl Sensors<'_> {
     fn len(&self) -> usize {
         let n = self.x.len();
-        assert!(self.y.len() == n && self.ally.len() == n && self.los.len() == n && self.radar.len() == n, "sensor columns differ in length");
+        assert!(
+            self.y.len() == n && self.ally.len() == n && self.los.len() == n && self.radar.len() == n,
+            "sensor columns differ in length"
+        );
         n
     }
 }
@@ -166,7 +191,12 @@ pub struct Coverage {
 impl Coverage {
     pub fn new(grid: SensorGrid, allies: usize) -> Self {
         let bits = || (0..allies).map(|_| Bits::new(grid.width, grid.height)).collect();
-        Self { grid, los: bits(), radar: bits(), stamped: 0 }
+        Self {
+            grid,
+            los: bits(),
+            radar: bits(),
+            stamped: 0,
+        }
     }
 
     pub fn allies(&self) -> usize {
@@ -273,20 +303,38 @@ mod tests {
 
     fn world(seed: u64, n: usize, allies: u32, extent: f32) -> World {
         let mut rng = Rng(seed);
-        let mut w = World { x: vec![], y: vec![], ally: vec![], los: vec![], radar: vec![] };
+        let mut w = World {
+            x: vec![],
+            y: vec![],
+            ally: vec![],
+            los: vec![],
+            radar: vec![],
+        };
         for i in 0..n {
             // Some off the map, some with no radar, one NaN radius.
             w.x.push(rng.f(extent * 1.1) - extent * 0.05);
             w.y.push(rng.f(extent * 1.1) - extent * 0.05);
             w.ally.push((rng.next() % (allies as u64 + 1)) as u32); // allies: ignored
             w.los.push(rng.f(300.0));
-            w.radar.push(if i % 3 == 0 { 0.0 } else if i == 5 { f32::NAN } else { rng.f(900.0) });
+            w.radar.push(if i % 3 == 0 {
+                0.0
+            } else if i == 5 {
+                f32::NAN
+            } else {
+                rng.f(900.0)
+            });
         }
         w
     }
 
     fn sensors(w: &World) -> Sensors<'_> {
-        Sensors { x: &w.x, y: &w.y, ally: &w.ally, los: &w.los, radar: &w.radar }
+        Sensors {
+            x: &w.x,
+            y: &w.y,
+            ally: &w.ally,
+            los: &w.los,
+            radar: &w.radar,
+        }
     }
 
     /// Brute force: a cell is covered if some unit of the allyteam is within
@@ -323,7 +371,11 @@ mod tests {
             c.stamp(&sensors(&w), false);
             for a in 0..3 {
                 assert_eq!(c.los[a], oracle(&grid, &w, a as u32, false), "seed {seed} ally {a} los");
-                assert_eq!(c.radar[a], oracle(&grid, &w, a as u32, true), "seed {seed} ally {a} radar");
+                assert_eq!(
+                    c.radar[a],
+                    oracle(&grid, &w, a as u32, true),
+                    "seed {seed} ally {a} radar"
+                );
                 assert!(c.los[a].count() > 0 && c.radar[a].count() > c.los[a].count() / 4);
             }
         }
@@ -349,18 +401,47 @@ mod tests {
         b.set_span(1, 3, 3);
         b.set_span(0, 60, 129);
         assert_eq!(b.count(), 1 + 70);
-        assert!(b.get(3, 1) && !b.get(2, 1) && !b.get(4, 1) && b.get(64, 0) && b.get(129, 0) && !b.get(59, 0) && !b.get(130, 0));
+        assert!(
+            b.get(3, 1)
+                && !b.get(2, 1)
+                && !b.get(4, 1)
+                && b.get(64, 0)
+                && b.get(129, 0)
+                && !b.get(59, 0)
+                && !b.get(130, 0)
+        );
         let g = SensorGrid::new(100.0, 100.0, 10.0);
         assert_eq!(g.cell(-5.0, 1e9), (0, 9));
         assert_eq!(g.cell(f32::NAN, 55.0), (0, 5));
         assert_eq!((g.radius(19.9), g.radius(-1.0), g.radius(f32::NAN)), (1, 0, 0));
-        for n in [0u64, 1, 2, 3, 4, 15, 16, 17, 1 << 40, (1 << 40) - 1, u32::MAX as u64 * u32::MAX as u64] {
+        for n in [
+            0u64,
+            1,
+            2,
+            3,
+            4,
+            15,
+            16,
+            17,
+            1 << 40,
+            (1 << 40) - 1,
+            u32::MAX as u64 * u32::MAX as u64,
+        ] {
             let r = isqrt(n) as u128;
             assert!(r * r <= n as u128 && (r + 1) * (r + 1) > n as u128, "{n}");
         }
         // Radius 0 cells: just the unit's cell.
         let mut c = Coverage::new(g, 1);
-        c.stamp(&Sensors { x: &[55.0], y: &[55.0], ally: &[0], los: &[5.0], radar: &[0.0] }, false);
+        c.stamp(
+            &Sensors {
+                x: &[55.0],
+                y: &[55.0],
+                ally: &[0],
+                los: &[5.0],
+                radar: &[0.0],
+            },
+            false,
+        );
         assert_eq!((c.los[0].count(), c.los[0].get(5, 5), c.radar[0].count()), (1, true, 0));
     }
 }

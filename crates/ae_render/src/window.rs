@@ -229,7 +229,10 @@ impl SdlWindow {
                 let event = event.assume_init_ref();
                 let kind = sdl::SDL_EventType(event.r#type);
                 if self.trace && (0x200..0x300).contains(&event.r#type) {
-                    eprintln!("[window] event {:#x} data {} {}", event.r#type, event.window.data1, event.window.data2);
+                    eprintln!(
+                        "[window] event {:#x} data {} {}",
+                        event.r#type, event.window.data1, event.window.data2
+                    );
                 }
                 let escape = kind == sdl::SDL_EVENT_KEY_DOWN && event.key.key == sdl::SDLK_ESCAPE;
                 if kind == sdl::SDL_EVENT_QUIT || kind == sdl::SDL_EVENT_WINDOW_CLOSE_REQUESTED || escape {
@@ -273,7 +276,13 @@ impl SdlWindow {
                             if let Some(slot) = events.clicks.iter_mut().find(|c| c.is_none()) {
                                 let m = sdl::SDL_GetModState();
                                 let (shift, ctrl) = (m.0 & sdl::SDL_KMOD_SHIFT.0 != 0, m.0 & sdl::SDL_KMOD_CTRL.0 != 0);
-                                *slot = Some(Click { button: b as u8, x: x / w.max(1) as f32, y: y / h.max(1) as f32, shift, ctrl });
+                                *slot = Some(Click {
+                                    button: b as u8,
+                                    x: x / w.max(1) as f32,
+                                    y: y / h.max(1) as f32,
+                                    shift,
+                                    ctrl,
+                                });
                             }
                         }
                     }
@@ -330,9 +339,8 @@ impl SurfaceSource for SdlWindow {
 
     fn create_surface(&self, _entry: &ash::Entry, instance: &ash::Instance) -> Result<vk::SurfaceKHR> {
         let mut surface = vk::SurfaceKHR::null();
-        let ok = unsafe {
-            sdl::SDL_Vulkan_CreateSurface(self.window, instance.handle(), std::ptr::null(), &mut surface)
-        };
+        let ok =
+            unsafe { sdl::SDL_Vulkan_CreateSurface(self.window, instance.handle(), std::ptr::null(), &mut surface) };
         if !ok {
             return Err(anyhow!("SDL_Vulkan_CreateSurface failed: {}", sdl_error()));
         }

@@ -29,22 +29,66 @@ impl Default for BakeOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BakeError {
     NoRoot,
-    UnknownRoot { index: u32 },
-    DuplicateRoot { pass: String },
-    UnknownResource { pass: String, index: u32 },
-    WrongResourceKind { pass: String, resource: String, role: Role },
-    MissingUsage { pass: String, resource: String, role: Role, required: String },
-    DuplicateIntent { pass: String, resource: String },
-    RoleNotAllowed { pass: String, kind: PassKind, role: Role },
-    PresentTarget { pass: String, resource: String },
-    PresentShape { pass: String },
-    NoAttachment { pass: String },
-    HostReadShape { pass: String },
-    AttachmentExtent { pass: String },
-    DepthShape { pass: String },
-    UninitializedTransient { resource: String, pass: String },
-    Cycle { passes: Vec<String> },
-    CrossScope { pass: String, resource: String },
+    UnknownRoot {
+        index: u32,
+    },
+    DuplicateRoot {
+        pass: String,
+    },
+    UnknownResource {
+        pass: String,
+        index: u32,
+    },
+    WrongResourceKind {
+        pass: String,
+        resource: String,
+        role: Role,
+    },
+    MissingUsage {
+        pass: String,
+        resource: String,
+        role: Role,
+        required: String,
+    },
+    DuplicateIntent {
+        pass: String,
+        resource: String,
+    },
+    RoleNotAllowed {
+        pass: String,
+        kind: PassKind,
+        role: Role,
+    },
+    PresentTarget {
+        pass: String,
+        resource: String,
+    },
+    PresentShape {
+        pass: String,
+    },
+    NoAttachment {
+        pass: String,
+    },
+    HostReadShape {
+        pass: String,
+    },
+    AttachmentExtent {
+        pass: String,
+    },
+    DepthShape {
+        pass: String,
+    },
+    UninitializedTransient {
+        resource: String,
+        pass: String,
+    },
+    Cycle {
+        passes: Vec<String>,
+    },
+    CrossScope {
+        pass: String,
+        resource: String,
+    },
 }
 
 impl fmt::Display for BakeError {
@@ -57,14 +101,20 @@ impl fmt::Display for BakeError {
                 write!(f, "pass {pass:?} references unknown resource #{index}")
             }
             BakeError::WrongResourceKind { pass, resource, role } => {
-                write!(f, "pass {pass:?} uses {resource:?} as {role:?}, which does not apply to its kind")
+                write!(
+                    f,
+                    "pass {pass:?} uses {resource:?} as {role:?}, which does not apply to its kind"
+                )
             }
             BakeError::MissingUsage {
                 pass,
                 resource,
                 role,
                 required,
-            } => write!(f, "pass {pass:?} uses {resource:?} as {role:?} but it lacks usage {required}"),
+            } => write!(
+                f,
+                "pass {pass:?} uses {resource:?} as {role:?} but it lacks usage {required}"
+            ),
             BakeError::DuplicateIntent { pass, resource } => {
                 write!(f, "pass {pass:?} declares {resource:?} more than once")
             }
@@ -265,16 +315,18 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
                     intent.role,
                     Role::Present | Role::TransferSrc | Role::TransferDst | Role::HostRead
                 ),
-                PassKind::Compute => !intent.role.is_attachment()
-                    && !matches!(
-                        intent.role,
-                        Role::Present
-                            | Role::TransferSrc
-                            | Role::TransferDst
-                            | Role::VertexBuffer
-                            | Role::IndexBuffer
-                            | Role::HostRead
-                    ),
+                PassKind::Compute => {
+                    !intent.role.is_attachment()
+                        && !matches!(
+                            intent.role,
+                            Role::Present
+                                | Role::TransferSrc
+                                | Role::TransferDst
+                                | Role::VertexBuffer
+                                | Role::IndexBuffer
+                                | Role::HostRead
+                        )
+                }
                 PassKind::Transfer => matches!(intent.role, Role::TransferSrc | Role::TransferDst | Role::HostRead),
                 PassKind::Present => intent.role == Role::Present,
             };
@@ -291,8 +343,8 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
                     resource: resource_name(),
                 });
             }
-            let scope_ok = resource.scope == pass.scope
-                || (resource.scope == Scope::GLOBAL && !intent.role.usage().write);
+            let scope_ok =
+                resource.scope == pass.scope || (resource.scope == Scope::GLOBAL && !intent.role.usage().write);
             if !scope_ok {
                 return Err(BakeError::CrossScope {
                     pass: name(),
@@ -319,7 +371,11 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
         }
         // Barriers precede a pass's recording, so a host read in the same
         // pass as a copy would make the buffer host-visible before the copy.
-        let host_reads = pass.intents.iter().filter(|intent| intent.role == Role::HostRead).count();
+        let host_reads = pass
+            .intents
+            .iter()
+            .filter(|intent| intent.role == Role::HostRead)
+            .count();
         if host_reads > 0 && host_reads != pass.intents.len() {
             return Err(BakeError::HostReadShape { pass: name() });
         }
@@ -470,7 +526,10 @@ fn reorder<R>(graph: &FrameGraph<R>, analysis: &Analysis, topo: &[PassId]) -> Ve
         let mut best: Option<(i64, usize, usize)> = None; // (score, topo index, remaining index)
         for (slot, &pass) in remaining.iter().enumerate() {
             let deps = &analysis.deps[pass.index()];
-            if deps.iter().any(|dep| in_set[dep.index()] && position[dep.index()] == usize::MAX) {
+            if deps
+                .iter()
+                .any(|dep| in_set[dep.index()] && position[dep.index()] == usize::MAX)
+            {
                 continue;
             }
             let mut score = 0i64;
@@ -657,9 +716,7 @@ fn assemble<R>(graph: &FrameGraph<R>, analysis: &Analysis, order: Vec<PassId>, o
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, Scope, ShaderStage,
-    };
+    use crate::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, Role, Scope, ShaderStage};
 
     const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
@@ -690,7 +747,10 @@ mod tests {
         let scene = image(&mut graph, "scene", ResourceClass::Transient);
         let blurred = image(&mut graph, "blurred", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
-        graph.pass("scene", PassKind::Graphics, ()).color(scene, LoadOp::Clear).id();
+        graph
+            .pass("scene", PassKind::Graphics, ())
+            .color(scene, LoadOp::Clear)
+            .id();
         graph
             .pass("blur", PassKind::Compute, ())
             .access(scene, Role::StorageImageRead(ShaderStage::Compute))
@@ -752,7 +812,10 @@ mod tests {
         let BakeError::Cycle { passes } = err else {
             panic!("expected a cycle, got {err:?}")
         };
-        assert!(passes.contains(&"p".to_string()) && passes.contains(&"q".to_string()), "{passes:?}");
+        assert!(
+            passes.contains(&"p".to_string()) && passes.contains(&"q".to_string()),
+            "{passes:?}"
+        );
     }
 
     /// A second writer declared before the present draws over the first;
@@ -763,14 +826,22 @@ mod tests {
         let back = ResourceId(2);
         let present = graph.passes.pop().unwrap();
         graph.roots.clear();
-        graph.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
+        graph
+            .pass("overlay", PassKind::Graphics, ())
+            .color(back, LoadOp::Load)
+            .id();
         graph.passes.push(present);
         graph.roots.push(PassId(graph.passes.len() as u32 - 1));
         let baked = bake(&graph, BakeOptions::default()).unwrap();
-        assert_eq!(names(&graph, &baked), ["scene", "blur", "composite", "overlay", "present"]);
+        assert_eq!(
+            names(&graph, &baked),
+            ["scene", "blur", "composite", "overlay", "present"]
+        );
 
         let mut late = chain();
-        late.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
+        late.pass("overlay", PassKind::Graphics, ())
+            .color(back, LoadOp::Load)
+            .id();
         let baked = bake(&late, BakeOptions::default()).unwrap();
         assert_eq!(names(&late, &baked), ["scene", "blur", "composite", "present"]);
     }
@@ -784,11 +855,30 @@ mod tests {
         let b = image(&mut graph, "b", ResourceClass::Transient);
         let c = image(&mut graph, "c", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
-        graph.pass("write a", PassKind::Graphics, ()).color(a, LoadOp::Clear).id();
-        graph.pass("read a v1", PassKind::Compute, ()).access(a, Role::StorageImageRead(ShaderStage::Compute)).discard(b, Role::StorageImageWrite(ShaderStage::Compute)).id();
-        graph.pass("rewrite a", PassKind::Graphics, ()).color(a, LoadOp::Load).id();
-        graph.pass("read a v2", PassKind::Compute, ()).access(a, Role::StorageImageRead(ShaderStage::Compute)).discard(c, Role::StorageImageWrite(ShaderStage::Compute)).id();
-        graph.pass("compose", PassKind::Graphics, ()).sampled(b, ShaderStage::Fragment).sampled(c, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph
+            .pass("write a", PassKind::Graphics, ())
+            .color(a, LoadOp::Clear)
+            .id();
+        graph
+            .pass("read a v1", PassKind::Compute, ())
+            .access(a, Role::StorageImageRead(ShaderStage::Compute))
+            .discard(b, Role::StorageImageWrite(ShaderStage::Compute))
+            .id();
+        graph
+            .pass("rewrite a", PassKind::Graphics, ())
+            .color(a, LoadOp::Load)
+            .id();
+        graph
+            .pass("read a v2", PassKind::Compute, ())
+            .access(a, Role::StorageImageRead(ShaderStage::Compute))
+            .discard(c, Role::StorageImageWrite(ShaderStage::Compute))
+            .id();
+        graph
+            .pass("compose", PassKind::Graphics, ())
+            .sampled(b, ShaderStage::Fragment)
+            .sampled(c, ShaderStage::Fragment)
+            .color(back, LoadOp::Clear)
+            .id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
         let baked = bake(&graph, BakeOptions::default()).unwrap();
         let order = names(&graph, &baked);
@@ -796,7 +886,13 @@ mod tests {
         assert!(at("write a") < at("read a v1"));
         assert!(at("read a v1") < at("rewrite a"), "{order:?}");
         assert!(at("rewrite a") < at("read a v2"), "{order:?}");
-        let edge = |from: u32, to: u32| baked.edges.contains(&Edge { from: PassId(from), to: PassId(to), resource: a });
+        let edge = |from: u32, to: u32| {
+            baked.edges.contains(&Edge {
+                from: PassId(from),
+                to: PassId(to),
+                resource: a,
+            })
+        };
         assert!(edge(0, 1) && edge(0, 2) && edge(1, 2) && edge(2, 3));
         assert!(!edge(0, 3), "v2's reader depends on the rewrite, not the first write");
     }
@@ -811,17 +907,39 @@ mod tests {
         let a = image(&mut graph, "a", ResourceClass::Persistent);
         let other = image(&mut graph, "other", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
-        graph.pass("read", PassKind::Graphics, ()).sampled(a, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph
+            .pass("read", PassKind::Graphics, ())
+            .sampled(a, ShaderStage::Fragment)
+            .color(back, LoadOp::Clear)
+            .id();
         graph.pass("w1", PassKind::Graphics, ()).color(a, LoadOp::Clear).id();
         graph.pass("w2", PassKind::Graphics, ()).color(a, LoadOp::Load).id();
-        graph.pass("use", PassKind::Graphics, ()).sampled(a, ShaderStage::Fragment).color(other, LoadOp::Clear).id();
-        graph.pass("final", PassKind::Graphics, ()).sampled(other, ShaderStage::Fragment).color(back, LoadOp::Load).id();
+        graph
+            .pass("use", PassKind::Graphics, ())
+            .sampled(a, ShaderStage::Fragment)
+            .color(other, LoadOp::Clear)
+            .id();
+        graph
+            .pass("final", PassKind::Graphics, ())
+            .sampled(other, ShaderStage::Fragment)
+            .color(back, LoadOp::Load)
+            .id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
         let baked = bake(&graph, BakeOptions::default()).unwrap();
         let order = names(&graph, &baked);
         let at = |name: &str| order.iter().position(|n| n == name).unwrap();
-        assert!(at("w1") < at("read") && at("read") < at("w2") && at("w2") < at("use"), "{order:?}");
-        assert!(baked.edges.contains(&Edge { from: PassId(0), to: PassId(2), resource: a }), "write after read");
+        assert!(
+            at("w1") < at("read") && at("read") < at("w2") && at("w2") < at("use"),
+            "{order:?}"
+        );
+        assert!(
+            baked.edges.contains(&Edge {
+                from: PassId(0),
+                to: PassId(2),
+                resource: a
+            }),
+            "write after read"
+        );
     }
 
     fn depth_image(graph: &mut FrameGraph, name: &str, class: ResourceClass) -> ResourceId {
@@ -838,16 +956,49 @@ mod tests {
         let gbuf0 = image(&mut graph, "albedo", ResourceClass::Transient);
         let gbuf1 = image(&mut graph, "normal", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
-        graph.pass("terrain", PassKind::Graphics, ()).color(gbuf0, LoadOp::Clear).color(gbuf1, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
-        graph.pass("units", PassKind::Graphics, ()).color(gbuf0, LoadOp::Load).color(gbuf1, LoadOp::Load).depth(depth, LoadOp::Load).id();
-        graph.pass("decals", PassKind::Graphics, ()).color(gbuf0, LoadOp::Load).depth_read(depth).id();
-        graph.pass("light", PassKind::Graphics, ()).sampled(gbuf0, ShaderStage::Fragment).sampled(gbuf1, ShaderStage::Fragment).sampled(depth, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        graph
+            .pass("terrain", PassKind::Graphics, ())
+            .color(gbuf0, LoadOp::Clear)
+            .color(gbuf1, LoadOp::Clear)
+            .depth(depth, LoadOp::Clear)
+            .id();
+        graph
+            .pass("units", PassKind::Graphics, ())
+            .color(gbuf0, LoadOp::Load)
+            .color(gbuf1, LoadOp::Load)
+            .depth(depth, LoadOp::Load)
+            .id();
+        graph
+            .pass("decals", PassKind::Graphics, ())
+            .color(gbuf0, LoadOp::Load)
+            .depth_read(depth)
+            .id();
+        graph
+            .pass("light", PassKind::Graphics, ())
+            .sampled(gbuf0, ShaderStage::Fragment)
+            .sampled(gbuf1, ShaderStage::Fragment)
+            .sampled(depth, ShaderStage::Fragment)
+            .color(back, LoadOp::Clear)
+            .id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
         let baked = bake(&graph, BakeOptions::default()).unwrap();
-        assert_eq!(names(&graph, &baked), ["terrain", "units", "decals", "light", "present"]);
-        let access = |pass: usize| baked.passes[pass].accesses.iter().find(|a| a.resource == depth).copied().unwrap();
+        assert_eq!(
+            names(&graph, &baked),
+            ["terrain", "units", "decals", "light", "present"]
+        );
+        let access = |pass: usize| {
+            baked.passes[pass]
+                .accesses
+                .iter()
+                .find(|a| a.resource == depth)
+                .copied()
+                .unwrap()
+        };
         assert!(access(0).discard && !access(1).discard);
-        assert_eq!(access(0).usage.layout, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        assert_eq!(
+            access(0).usage.layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        );
         assert_eq!(access(2).usage.layout, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
         assert!(!access(2).usage.write);
         assert_eq!(access(1).store, Some(vk::AttachmentStoreOp::STORE));
@@ -855,7 +1006,11 @@ mod tests {
         assert_eq!(graph.passes[0].depth_attachment().map(|i| i.resource), Some(depth));
         // Decals' read-only depth sees the units' version, so it runs after
         // units even though it also writes albedo after them.
-        assert!(baked.edges.contains(&Edge { from: PassId(1), to: PassId(2), resource: depth }));
+        assert!(baked.edges.contains(&Edge {
+            from: PassId(1),
+            to: PassId(2),
+            resource: depth
+        }));
     }
 
     #[test]
@@ -865,23 +1020,56 @@ mod tests {
         let other = depth_image(&mut graph, "other", ResourceClass::Transient);
         let color = image(&mut graph, "color", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
-        graph.pass("two depths", PassKind::Graphics, ()).depth(depth, LoadOp::Clear).depth(other, LoadOp::Clear).color(back, LoadOp::Clear).id();
+        graph
+            .pass("two depths", PassKind::Graphics, ())
+            .depth(depth, LoadOp::Clear)
+            .depth(other, LoadOp::Clear)
+            .color(back, LoadOp::Clear)
+            .id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
-        assert_eq!(bake(&graph, BakeOptions::default()), Err(BakeError::DepthShape { pass: "two depths".into() }));
+        assert_eq!(
+            bake(&graph, BakeOptions::default()),
+            Err(BakeError::DepthShape {
+                pass: "two depths".into()
+            })
+        );
 
         graph.passes[0].intents.remove(1);
         graph.passes[0].intents[0].resource = color;
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::WrongResourceKind { .. })), "a colour image is not a depth attachment");
+        assert!(
+            matches!(
+                bake(&graph, BakeOptions::default()),
+                Err(BakeError::WrongResourceKind { .. })
+            ),
+            "a colour image is not a depth attachment"
+        );
 
-        graph.passes[0].intents[0] = Intent { resource: depth, role: Role::ColorAttachment(LoadOp::Clear), discard: true };
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::WrongResourceKind { .. })), "a depth image is not a colour attachment");
+        graph.passes[0].intents[0] = Intent {
+            resource: depth,
+            role: Role::ColorAttachment(LoadOp::Clear),
+            discard: true,
+        };
+        assert!(
+            matches!(
+                bake(&graph, BakeOptions::default()),
+                Err(BakeError::WrongResourceKind { .. })
+            ),
+            "a depth image is not a colour attachment"
+        );
 
         // A depth-only pass (a shadow map) is a valid graphics pass.
         let mut shadow = FrameGraph::new();
         let map = depth_image(&mut shadow, "shadow", ResourceClass::Transient);
         let back = backbuffer(&mut shadow);
-        shadow.pass("shadow", PassKind::Graphics, ()).depth(map, LoadOp::Clear).id();
-        shadow.pass("lit", PassKind::Graphics, ()).sampled(map, ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+        shadow
+            .pass("shadow", PassKind::Graphics, ())
+            .depth(map, LoadOp::Clear)
+            .id();
+        shadow
+            .pass("lit", PassKind::Graphics, ())
+            .sampled(map, ShaderStage::Fragment)
+            .color(back, LoadOp::Clear)
+            .id();
         shadow.pass("present", PassKind::Present, ()).present(back).root().id();
         let baked = bake(&shadow, BakeOptions::default()).unwrap();
         assert_eq!(names(&shadow, &baked), ["shadow", "lit", "present"]);
@@ -892,7 +1080,10 @@ mod tests {
     fn unreachable_pass_is_pruned() {
         let mut graph = chain();
         let debug = image(&mut graph, "debug", ResourceClass::Transient);
-        graph.pass("debug overlay", PassKind::Graphics, ()).color(debug, LoadOp::Clear).id();
+        graph
+            .pass("debug overlay", PassKind::Graphics, ())
+            .color(debug, LoadOp::Clear)
+            .id();
         let baked = bake(&graph, BakeOptions::default()).unwrap();
         assert_eq!(names(&graph, &baked), ["scene", "blur", "composite", "present"]);
         assert!(!baked.resources[debug.index()].reachable);
@@ -909,11 +1100,12 @@ mod tests {
         for (index, pass) in renamed.passes.iter_mut().enumerate() {
             pass.name = format!("pass{index}");
         }
-        assert_eq!(bake(&renamed, BakeOptions::default()).unwrap(), a, "names do not shape the plan");
         assert_eq!(
-            crate::dot::to_dot(&graph, &a),
-            crate::dot::to_dot(&graph, &b)
+            bake(&renamed, BakeOptions::default()).unwrap(),
+            a,
+            "names do not shape the plan"
         );
+        assert_eq!(crate::dot::to_dot(&graph, &a), crate::dot::to_dot(&graph, &b));
     }
 
     #[test]
@@ -924,7 +1116,11 @@ mod tests {
         assert_eq!(baked.resources[1].lifetime, Some((1, 2)), "blurred");
         assert_eq!(baked.resources[2].lifetime, Some((2, 3)), "backbuffer");
         assert!(baked.passes[1].accesses[1].discard);
-        assert_eq!(baked.passes[0].accesses[0].store, Some(vk::AttachmentStoreOp::STORE), "read later");
+        assert_eq!(
+            baked.passes[0].accesses[0].store,
+            Some(vk::AttachmentStoreOp::STORE),
+            "read later"
+        );
     }
 
     #[test]
@@ -960,21 +1156,33 @@ mod tests {
             role: Role::StorageBufferRead(ShaderStage::Compute),
             discard: false,
         });
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::MissingUsage { .. })));
+        assert!(matches!(
+            bake(&graph, BakeOptions::default()),
+            Err(BakeError::MissingUsage { .. })
+        ));
 
         let mut graph = chain();
         graph.passes[1].intents[0].role = Role::ColorAttachment(LoadOp::Load);
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::RoleNotAllowed { .. })));
+        assert!(matches!(
+            bake(&graph, BakeOptions::default()),
+            Err(BakeError::RoleNotAllowed { .. })
+        ));
 
         let mut graph = chain();
         let not_back = image(&mut graph, "offscreen", ResourceClass::External);
         graph.passes[3].intents[0].resource = not_back;
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::PresentTarget { .. })));
+        assert!(matches!(
+            bake(&graph, BakeOptions::default()),
+            Err(BakeError::PresentTarget { .. })
+        ));
 
         let mut graph = chain();
         let duplicate = graph.passes[1].intents[0];
         graph.passes[1].intents.push(duplicate);
-        assert!(matches!(bake(&graph, BakeOptions::default()), Err(BakeError::DuplicateIntent { .. })));
+        assert!(matches!(
+            bake(&graph, BakeOptions::default()),
+            Err(BakeError::DuplicateIntent { .. })
+        ));
 
         // Host reads: never in a graphics or compute pass, and never mixed
         // with a copy in one transfer pass.
@@ -1012,8 +1220,14 @@ mod tests {
     fn attachment_continuation_is_a_second_writer() {
         let mut graph = FrameGraph::new();
         let back = backbuffer(&mut graph);
-        graph.pass("world", PassKind::Graphics, ()).color(back, LoadOp::Clear).id();
-        graph.pass("overlay", PassKind::Graphics, ()).color(back, LoadOp::Load).id();
+        graph
+            .pass("world", PassKind::Graphics, ())
+            .color(back, LoadOp::Clear)
+            .id();
+        graph
+            .pass("overlay", PassKind::Graphics, ())
+            .color(back, LoadOp::Load)
+            .id();
         graph.pass("present", PassKind::Present, ()).present(back).root().id();
         let baked = bake(&graph, BakeOptions::default()).unwrap();
         assert_eq!(names(&graph, &baked), ["world", "overlay", "present"]);
@@ -1028,7 +1242,10 @@ mod tests {
         let c = image(&mut graph, "c", ResourceClass::Transient);
         let back = backbuffer(&mut graph);
         let storage = |stage| Role::StorageImageWrite(stage);
-        graph.pass("make a", PassKind::Compute, ()).discard(a, storage(ShaderStage::Compute)).id();
+        graph
+            .pass("make a", PassKind::Compute, ())
+            .discard(a, storage(ShaderStage::Compute))
+            .id();
         graph
             .pass("a to b", PassKind::Compute, ())
             .access(a, Role::StorageImageRead(ShaderStage::Compute))
@@ -1051,7 +1268,10 @@ mod tests {
         assert_eq!(plain.physical.len(), 3);
         assert_eq!(aliased.physical.len(), 2, "a and c share one allocation");
         assert!(aliased.estimated_bytes() < plain.estimated_bytes());
-        assert_eq!(aliased.resources[a.index()].physical, aliased.resources[c.index()].physical);
+        assert_eq!(
+            aliased.resources[a.index()].physical,
+            aliased.resources[c.index()].physical
+        );
         assert_eq!(
             aliased.handoffs,
             vec![AliasHandoff {
@@ -1074,7 +1294,10 @@ mod tests {
         let back = backbuffer(&mut graph);
         let write = Role::StorageBufferWrite(ShaderStage::Compute);
         let read = Role::StorageBufferRead(ShaderStage::Compute);
-        graph.pass("fill small", PassKind::Compute, ()).discard(small, write).id();
+        graph
+            .pass("fill small", PassKind::Compute, ())
+            .discard(small, write)
+            .id();
         graph
             .pass("small to large", PassKind::Compute, ())
             .access(small, read)
@@ -1120,7 +1343,12 @@ mod tests {
             .sampled(full_image, ShaderStage::Fragment)
             .color(back, LoadOp::Clear)
             .id();
-        graph.pass("present", PassKind::Present, ()).scope(player).present(back).root().id();
+        graph
+            .pass("present", PassKind::Present, ())
+            .scope(player)
+            .present(back)
+            .root()
+            .id();
         assert!(matches!(
             bake(&graph, BakeOptions::default()),
             Err(BakeError::CrossScope { pass, resource }) if pass == "player draw" && resource == "full target"

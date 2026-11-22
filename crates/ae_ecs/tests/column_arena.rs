@@ -74,7 +74,16 @@ fn columns_live_in_the_arena_and_entity_ids_do_not() {
         let mut entities = Vec::with_capacity(N);
         for i in 0..N {
             let e = fb::create_entity(world);
-            fb::set_component(world, e, position, bytes_of(&Position { x: i as f32, y: -(i as f32) })).unwrap();
+            fb::set_component(
+                world,
+                e,
+                position,
+                bytes_of(&Position {
+                    x: i as f32,
+                    y: -(i as f32),
+                }),
+            )
+            .unwrap();
             // Two archetypes: every third entity also has Health.
             if i % 3 == 0 {
                 fb::set_component(world, e, health, bytes_of(&Health(i as u32))).unwrap();
@@ -83,7 +92,10 @@ fn columns_live_in_the_arena_and_entity_ids_do_not() {
         }
         assert!(ALLOCS.load(Ordering::Relaxed) > 0, "column allocator was never called");
 
-        let terms = [Term { component: position, access: Access::Write }];
+        let terms = [Term {
+            component: position,
+            access: Access::Write,
+        }];
         let query = fb::create_query(world, &terms).unwrap();
         let (mut rows, mut chunks, mut sum) = (0usize, 0usize, 0f64);
         fb::for_each_chunk(world, query, &terms, |chunk| {

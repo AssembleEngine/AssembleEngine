@@ -110,7 +110,9 @@ impl Run {
     /// `desc` must be the descriptor offset the host passed to the system export.
     #[doc(hidden)]
     pub unsafe fn from_desc(desc: u32) -> Self {
-        Self { desc: unsafe { &*(desc as usize as *const RunDesc) } }
+        Self {
+            desc: unsafe { &*(desc as usize as *const RunDesc) },
+        }
     }
 
     pub fn tick(&self) -> u64 {
@@ -164,7 +166,11 @@ impl Run {
     #[doc(hidden)]
     pub fn column_ptr<T: Component>(&self, write: bool) -> *mut T {
         let i = self.term::<T>();
-        assert!(!write || self.desc.write_mask & (1 << i) != 0, "{} is a read-only term", T::NAME);
+        assert!(
+            !write || self.desc.write_mask & (1 << i) != 0,
+            "{} is a read-only term",
+            T::NAME
+        );
         self.desc.columns[i] as usize as *mut T
     }
 
@@ -193,7 +199,9 @@ impl Run {
     /// event emitted since this system last ran (see `ae_sim::events`).
     pub fn events<E: Event>(&self) -> &[E] {
         let spans = &self.desc.events[..self.desc.event_count as usize];
-        let Some(span) = spans.iter().find(|s| s.stream == E::ID) else { panic!("system does not read events of {}", E::NAME) };
+        let Some(span) = spans.iter().find(|s| s.stream == E::ID) else {
+            panic!("system does not read events of {}", E::NAME)
+        };
         if span.count == 0 {
             return &[];
         }
@@ -297,7 +305,11 @@ impl Spawn {
 
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self { buf: [0; Self::WORDS], len: 8, count: 0 }
+        Self {
+            buf: [0; Self::WORDS],
+            len: 8,
+            count: 0,
+        }
     }
 
     fn bytes(&mut self) -> &mut [u8] {
@@ -307,7 +319,10 @@ impl Spawn {
     pub fn with<C: Component>(mut self, value: &C) -> Self {
         let size = size_of::<C>();
         let at = self.len;
-        assert!(at + 16 + size.next_multiple_of(8) <= Self::WORDS * 8, "spawn record too large");
+        assert!(
+            at + 16 + size.next_multiple_of(8) <= Self::WORDS * 8,
+            "spawn record too large"
+        );
         let src = unsafe { core::slice::from_raw_parts((value as *const C).cast::<u8>(), size) };
         let b = self.bytes();
         abi::put_u64(b, at, C::ID);

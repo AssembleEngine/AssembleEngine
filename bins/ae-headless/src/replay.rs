@@ -52,8 +52,14 @@ pub fn orders(rt: &Runtime, world: &World, players: u32) -> Result<TickBundle> {
         let (dx, dy) = (((h >> 8) % 1600) as f32 - 800.0, ((h >> 24) % 1600) as f32 - 800.0);
         let group = 1 << 40 | tick << 8 | player as u64;
         let order = MoveOrder::move_to(Entity(e), body.x + dx, body.y + dy, group);
-        let bytes = unsafe { std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec() };
-        b.commands.push(Command { player, stream: MOVE_ORDER, bytes });
+        let bytes = unsafe {
+            std::slice::from_raw_parts((&order as *const MoveOrder).cast::<u8>(), size_of::<MoveOrder>()).to_vec()
+        };
+        b.commands.push(Command {
+            player,
+            stream: MOVE_ORDER,
+            bytes,
+        });
     }
     // Canonical order: by player, then as gathered (entity order).
     b.commands.sort_by_key(|c| c.player);
@@ -71,10 +77,18 @@ pub fn record(o: &Opts, path: &str) -> Result<bool> {
     let file = std::fs::File::create(path).with_context(|| format!("create {path}"))?;
     let mut rec = Recorder::new(std::io::BufWriter::new(file), &header)?;
     let (mut commands, mut checkpoints) = (0usize, 0usize);
-    let bots = if o.script == Script::Bot { ae_bot::SkirmishBot::pair(&rt)?.to_vec() } else { Vec::new() };
+    let bots = if o.script == Script::Bot {
+        ae_bot::SkirmishBot::pair(&rt)?.to_vec()
+    } else {
+        Vec::new()
+    };
     let started = Instant::now();
     for _ in 0..o.ticks {
-        let mut bundle = if o.script == Script::Orders { orders(&rt, &world, 2)? } else { TickBundle::new(world.tick) };
+        let mut bundle = if o.script == Script::Orders {
+            orders(&rt, &world, 2)?
+        } else {
+            TickBundle::new(world.tick)
+        };
         for b in &bots {
             b.commands(&rt, &world, &mut bundle.commands)?;
         }
@@ -101,7 +115,8 @@ pub fn replay(o: &Opts, path: &str, verify: bool) -> Result<bool> {
     let replay = Replay::load(Path::new(path))?;
     let h = replay.header()?.clone();
     let setup = Setup::new(o, Some(&h))?;
-    h.check(&setup.header(h.param, h.checkpoint_every)?).context("this replay does not match the world (a game with content needs the same --content or packages)")?;
+    h.check(&setup.header(h.param, h.checkpoint_every)?)
+        .context("this replay does not match the world (a game with content needs the same --content or packages)")?;
     let workers = o.workers[0];
     let mut rt = setup.runtime(workers, o.range_rows)?;
     let mut world = rt.world_for(h.param, workers)?;
@@ -118,7 +133,13 @@ pub fn replay(o: &Opts, path: &str, verify: bool) -> Result<bool> {
             }
             let here = Checkpoint::of(world.tick, &rt.digest(&world)?);
             if here.total != c.total {
-                println!("DESYNC at checkpoint tick {}: digest {:016x}, the replay has {:016x}; parts that differ: {}", c.tick, here.total as u64, c.total as u64, here.differing(c).join(", "));
+                println!(
+                    "DESYNC at checkpoint tick {}: digest {:016x}, the replay has {:016x}; parts that differ: {}",
+                    c.tick,
+                    here.total as u64,
+                    c.total as u64,
+                    here.differing(c).join(", ")
+                );
                 return Ok(false);
             }
             checked += 1;
@@ -128,7 +149,11 @@ pub fn replay(o: &Opts, path: &str, verify: bool) -> Result<bool> {
         "replayed {path}: {} ticks, {commands} commands, {:.2} s at {workers} worker(s); {}; final digest {:016x}",
         world.tick,
         started.elapsed().as_secs_f64(),
-        if verify { format!("{checked} checkpoints match") } else { "not verified".into() },
+        if verify {
+            format!("{checked} checkpoints match")
+        } else {
+            "not verified".into()
+        },
         rt.digest(&world)?.short()
     );
     Ok(true)
@@ -149,9 +174,16 @@ impl Inject {
     /// `TICK:Component.field:ROW`.
     pub fn parse(text: &str) -> Result<Self> {
         let parts: Vec<&str> = text.split(':').collect();
-        let [tick, cf, row] = parts.as_slice() else { bail!("--inject TICK:Component.field:ROW") };
+        let [tick, cf, row] = parts.as_slice() else {
+            bail!("--inject TICK:Component.field:ROW")
+        };
         let (component, field) = cf.split_once('.').context("--inject TICK:Component.field:ROW")?;
-        Ok(Self { tick: tick.parse()?, component: component.into(), field: field.into(), row: row.parse()? })
+        Ok(Self {
+            tick: tick.parse()?,
+            component: component.into(),
+            field: field.into(),
+            row: row.parse()?,
+        })
     }
 
     /// Apply it if the world is at its tick; the entity it hit.
@@ -160,9 +192,15 @@ impl Inject {
             return Ok(None);
         }
         let rows = rt.rows(w, &self.component)?;
-        let (entity, bytes) = rows.get(self.row).with_context(|| format!("no row {} of `{}`", self.row, self.component))?;
+        let (entity, bytes) = rows
+            .get(self.row)
+            .with_context(|| format!("no row {} of `{}`", self.row, self.component))?;
         let c = rt.schema.components.iter().find(|c| c.name == self.component).unwrap();
-        let f = c.fields.iter().find(|f| f.name == self.field).with_context(|| format!("no field `{}`", self.field))?;
+        let f = c
+            .fields
+            .iter()
+            .find(|f| f.name == self.field)
+            .with_context(|| format!("no field `{}`", self.field))?;
         let old = u32::from_le_bytes(bytes[f.offset as usize..f.offset as usize + 4].try_into().unwrap());
         rt.poke(w, *entity, &self.component, &self.field, old ^ 1)?;
         Ok(Some(*entity))
@@ -181,7 +219,11 @@ fn dump(rt: &Runtime, w: &World) -> Result<Rows> {
 }
 
 fn show(kind: u32, bits: u32) -> String {
-    if kind == ae_abi::FIELD_F32 { format!("{} ({bits:#010x})", f32::from_bits(bits)) } else { format!("{bits} ({bits:#010x})") }
+    if kind == ae_abi::FIELD_F32 {
+        format!("{} ({bits:#010x})", f32::from_bits(bits))
+    } else {
+        format!("{bits} ({bits:#010x})")
+    }
 }
 
 /// `--replay FILE --bisect --inject ...`: find where a run with the fault
@@ -196,25 +238,27 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
     let replay = Replay::load(Path::new(path))?;
     let h = replay.header()?.clone();
     let setup = Setup::new(o, Some(&h))?;
-    h.check(&setup.header(h.param, h.checkpoint_every)?).context("this replay does not match the world (a game with content needs the same --content or packages)")?;
+    h.check(&setup.header(h.param, h.checkpoint_every)?)
+        .context("this replay does not match the world (a game with content needs the same --content or packages)")?;
     let workers = o.workers[0];
     // Run to `until`, calling `each` after every tick (stop when it says).
-    let play = |fault: bool, until: u64, each: &mut dyn FnMut(&Runtime, &World) -> Result<bool>| -> Result<Option<u64>> {
-        let mut rt = setup.runtime(workers, o.range_rows)?;
-        let mut world = rt.world_for(h.param, workers)?;
-        let mut hit = None;
-        while world.tick < until {
-            if fault && let Some(e) = inject.apply(&rt, &mut world)? {
-                hit = Some(e);
+    let play =
+        |fault: bool, until: u64, each: &mut dyn FnMut(&Runtime, &World) -> Result<bool>| -> Result<Option<u64>> {
+            let mut rt = setup.runtime(workers, o.range_rows)?;
+            let mut world = rt.world_for(h.param, workers)?;
+            let mut hit = None;
+            while world.tick < until {
+                if fault && let Some(e) = inject.apply(&rt, &mut world)? {
+                    hit = Some(e);
+                }
+                let bundle = replay.bundle(world.tick);
+                rt.tick_with(&mut world, workers, &bundle)?;
+                if each(&rt, &world)? {
+                    break;
+                }
             }
-            let bundle = replay.bundle(world.tick);
-            rt.tick_with(&mut world, workers, &bundle)?;
-            if each(&rt, &world)? {
-                break;
-            }
-        }
-        Ok(hit)
-    };
+            Ok(hit)
+        };
     let started = Instant::now();
     // 1. The faulty run: every tick's digest.
     let mut faulty: Vec<u128> = vec![0];
@@ -238,7 +282,10 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
         Ok(false)
     })?;
     let Some(t) = first else {
-        println!("no divergence: the fault at tick {} (entity {hit:#x}) left every tick's digest unchanged", inject.tick);
+        println!(
+            "no divergence: the fault at tick {} (entity {hit:#x}) left every tick's digest unchanged",
+            inject.tick
+        );
         return Ok(true);
     };
     // 3. The faulty run again, to that tick.
@@ -252,7 +299,11 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
         Ok(false)
     })?;
     let parts = clean_parts.unwrap().differing(&faulty_parts.unwrap());
-    println!("first divergence after tick {t} (the fault was applied after tick {}); digest parts that differ: {}", inject.tick, parts.join(", "));
+    println!(
+        "first divergence after tick {t} (the fault was applied after tick {}); digest parts that differ: {}",
+        inject.tick,
+        parts.join(", ")
+    );
     // Rows that differ, field by field.
     let schema = {
         let rt = setup.runtime(workers, o.range_rows)?;
@@ -260,7 +311,10 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
     };
     let mut lines = 0;
     for (name, clean) in &clean_rows {
-        let other: BTreeMap<u64, &Vec<u8>> = faulty_rows.get(name).map(|v| v.iter().map(|(e, b)| (*e, b)).collect()).unwrap_or_default();
+        let other: BTreeMap<u64, &Vec<u8>> = faulty_rows
+            .get(name)
+            .map(|v| v.iter().map(|(e, b)| (*e, b)).collect())
+            .unwrap_or_default();
         let c = schema.components.iter().find(|c| &c.name == name).unwrap();
         for (e, a) in clean {
             let Some(b) = other.get(e) else {
@@ -272,10 +326,23 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
                 let (o0, o1) = (f.offset as usize, (f.offset + f.size) as usize);
                 if a[o0..o1] != b[o0..o1] {
                     if f.size == 4 {
-                        let (x, y) = (u32::from_le_bytes(a[o0..o1].try_into().unwrap()), u32::from_le_bytes(b[o0..o1].try_into().unwrap()));
-                        println!("  {name}.{} of entity {e:#x}: clean {}, faulty {}", f.name, show(f.kind, x), show(f.kind, y));
+                        let (x, y) = (
+                            u32::from_le_bytes(a[o0..o1].try_into().unwrap()),
+                            u32::from_le_bytes(b[o0..o1].try_into().unwrap()),
+                        );
+                        println!(
+                            "  {name}.{} of entity {e:#x}: clean {}, faulty {}",
+                            f.name,
+                            show(f.kind, x),
+                            show(f.kind, y)
+                        );
                     } else {
-                        println!("  {name}.{} of entity {e:#x}: {:?} vs {:?}", f.name, &a[o0..o1], &b[o0..o1]);
+                        println!(
+                            "  {name}.{} of entity {e:#x}: {:?} vs {:?}",
+                            f.name,
+                            &a[o0..o1],
+                            &b[o0..o1]
+                        );
                     }
                     lines += 1;
                 }
@@ -283,8 +350,17 @@ pub fn bisect(o: &Opts, path: &str, inject: &Inject) -> Result<bool> {
         }
     }
     if lines == 0 {
-        println!("  no component row differs: the divergence is inside host service state ({})", parts.join(", "));
+        println!(
+            "  no component row differs: the divergence is inside host service state ({})",
+            parts.join(", ")
+        );
     }
-    println!("injected: {}.{} of entity {hit:#x} after tick {}; bisect took {:.2} s", inject.component, inject.field, inject.tick, started.elapsed().as_secs_f64());
+    println!(
+        "injected: {}.{} of entity {hit:#x} after tick {}; bisect took {:.2} s",
+        inject.component,
+        inject.field,
+        inject.tick,
+        started.elapsed().as_secs_f64()
+    );
     Ok(false)
 }

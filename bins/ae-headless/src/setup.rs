@@ -69,7 +69,10 @@ impl Setup {
         if specs.is_empty()
             && let Some(p) = recorded.and_then(|h| h.config.get("packages"))
         {
-            ensure!(!o.package_dirs.is_empty(), "the replay was made from packages {p}: name a --packages DIR to find them");
+            ensure!(
+                !o.package_dirs.is_empty(),
+                "the replay was made from packages {p}: name a --packages DIR to find them"
+            );
             specs = p.split(',').map(String::from).collect();
         }
         let packages = ae_vfs::resolve_specs(&o.package_dirs, &specs)?;
@@ -89,7 +92,9 @@ impl Setup {
             None
         } else {
             let schema = ae_sim::schema::Schema::from_module(&wasm)?;
-            Some(Arc::new(ae_catalog::Catalog::load(&vfs, "defs", &schema).context("the content's catalogue")?))
+            Some(Arc::new(
+                ae_catalog::Catalog::load(&vfs, "defs", &schema).context("the content's catalogue")?,
+            ))
         };
         let teams = match recorded.and_then(|h| h.config.get("teams")) {
             Some(t) => t.parse()?,
@@ -97,21 +102,45 @@ impl Setup {
         };
         let nav = if vfs.exists(ae_map::MAP_JSON) {
             let map = ae_map::GameMap::load(&vfs)?;
-            Some(NavPlugin { teams, ..NavPlugin::loaded(Arc::new(map.to_terrain()), map.info.starts.clone()) })
+            Some(NavPlugin {
+                teams,
+                ..NavPlugin::loaded(Arc::new(map.to_terrain()), map.info.starts.clone())
+            })
         } else if let Some(h) = recorded {
             match h.config.get("map") {
                 Some(m) => {
                     let map = map_of(m)?;
-                    ensure!(map != Map::Loaded, "the replay's map came from a package; mount the same packages");
-                    Some(NavPlugin { teams, ..NavPlugin::new(map, h.config["map_cells"].parse()?) })
+                    ensure!(
+                        map != Map::Loaded,
+                        "the replay's map came from a package; mount the same packages"
+                    );
+                    Some(NavPlugin {
+                        teams,
+                        ..NavPlugin::new(map, h.config["map_cells"].parse()?)
+                    })
                 }
                 None => None,
             }
         } else {
-            o.nav.map(|m| NavPlugin { teams, ..NavPlugin::new(m, o.map_cells) })
+            o.nav.map(|m| NavPlugin {
+                teams,
+                ..NavPlugin::new(m, o.map_cells)
+            })
         };
         let anim = ae_services::anim::AnimPlugin::from_content(&vfs, ae_nav::math::TICK_SECONDS)?;
-        let content = if mounted { Some(Content { hash: vfs.content_hash()?, packages: packages.iter().map(|p| format!("{}@{}", p.manifest.name, p.manifest.version)).collect(), catalog, anim }) } else { None };
+        let content = if mounted {
+            Some(Content {
+                hash: vfs.content_hash()?,
+                packages: packages
+                    .iter()
+                    .map(|p| format!("{}@{}", p.manifest.name, p.manifest.version))
+                    .collect(),
+                catalog,
+                anim,
+            })
+        } else {
+            None
+        };
         Ok(Self { wasm, nav, content })
     }
 
@@ -130,7 +159,14 @@ impl Setup {
             config.insert("map_cells".into(), n.map_cells.to_string());
             config.insert("teams".into(), n.teams.to_string());
         }
-        Ok(Header { engine: env!("CARGO_PKG_VERSION").into(), module_hash: ae_replay::hash(&self.wasm), schema_hash: ae_replay::hash(&schema), param, config, checkpoint_every })
+        Ok(Header {
+            engine: env!("CARGO_PKG_VERSION").into(),
+            module_hash: ae_replay::hash(&self.wasm),
+            schema_hash: ae_replay::hash(&schema),
+            param,
+            config,
+            checkpoint_every,
+        })
     }
 
     /// The host plugins: nav and spatial with a map, the catalogue with
@@ -151,7 +187,11 @@ impl Setup {
     }
 
     pub fn runtime(&self, workers: usize, range_rows: usize) -> Result<Runtime> {
-        let cfg = RuntimeConfig { max_workers: workers, range_rows, ..RuntimeConfig::default() };
+        let cfg = RuntimeConfig {
+            max_workers: workers,
+            range_rows,
+            ..RuntimeConfig::default()
+        };
         Runtime::with_hosts(&self.wasm, cfg, self.plugins())
     }
 }

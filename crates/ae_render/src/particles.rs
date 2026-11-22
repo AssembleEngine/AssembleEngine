@@ -55,12 +55,12 @@
 //! particle's depth kept by a max, and the terrain, the units and the
 //! water multiply their sunlight by what it lets through.
 
+use crate::colorspace::Gamut;
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, ImageBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
-use crate::colorspace::Gamut;
 use crate::upload;
 use ae_framegraph::{BufferDesc, ImageDesc};
 use anyhow::{Context as _, Result, ensure};
@@ -202,7 +202,9 @@ pub mod effect {
 /// (`assets/effects.json`).
 pub fn default_effects() -> Vec<EffectDef> {
     static EFFECTS: OnceLock<Vec<EffectDef>> = OnceLock::new();
-    EFFECTS.get_or_init(|| parse_effects(EFFECTS_JSON).expect("the bundled effects catalogue is valid")).clone()
+    EFFECTS
+        .get_or_init(|| parse_effects(EFFECTS_JSON).expect("the bundled effects catalogue is valid"))
+        .clone()
 }
 
 /// The catalogue's effect names, in [`effect`] index order.
@@ -230,7 +232,11 @@ struct EffectsFile {
 /// space.
 pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
     let file: EffectsFile = serde_json::from_str(text).context("parsing the effects catalogue")?;
-    ensure!(file.version == EFFECTS_VERSION, "effects catalogue version {}; this engine reads {EFFECTS_VERSION}", file.version);
+    ensure!(
+        file.version == EFFECTS_VERSION,
+        "effects catalogue version {}; this engine reads {EFFECTS_VERSION}",
+        file.version
+    );
     ensure!(
         file.effects.len() == EFFECT_NAMES.len(),
         "the effects catalogue has {} effects; the engine's table has {} ({})",
@@ -238,10 +244,25 @@ pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
         EFFECT_NAMES.len(),
         EFFECT_NAMES.join(", ")
     );
-    let effects: Vec<EffectDef> = EFFECT_NAMES.iter().map(|name| file.effects.get(*name).copied().with_context(|| format!("the effects catalogue has no `{name}`"))).collect::<Result<_>>()?;
+    let effects: Vec<EffectDef> = EFFECT_NAMES
+        .iter()
+        .map(|name| {
+            file.effects
+                .get(*name)
+                .copied()
+                .with_context(|| format!("the effects catalogue has no `{name}`"))
+        })
+        .collect::<Result<_>>()?;
     for (name, def) in EFFECT_NAMES.iter().zip(&effects) {
-        ensure!((0.0..=1.0).contains(&def.cover), "effect `{name}`: cover {} is outside 0..1", def.cover);
-        ensure!(def.emissive || def.cover == 0.0, "effect `{name}`: cover is for emissive effects (a medium covers by its opacity)");
+        ensure!(
+            (0.0..=1.0).contains(&def.cover),
+            "effect `{name}`: cover {} is outside 0..1",
+            def.cover
+        );
+        ensure!(
+            def.emissive || def.cover == 0.0,
+            "effect `{name}`: cover is for emissive effects (a medium covers by its opacity)"
+        );
     }
     Ok(effects)
 }
@@ -266,10 +287,38 @@ pub struct Burst {
 pub fn explosion(pos: [f32; 3], ground: bool, scale: f32, seed: u32) -> [Burst; 4] {
     let n = |base: f32| (base * scale.clamp(0.5, 4.0)).round() as u32;
     [
-        Burst { pos, ground, effect: effect::FLASH, count: 2, scale, seed },
-        Burst { pos, ground, effect: effect::FIRE, count: n(24.0), scale, seed: seed ^ 0x9e37_79b9 },
-        Burst { pos, ground, effect: effect::SPARKS, count: n(40.0), scale, seed: seed ^ 0x7f4a_7c15 },
-        Burst { pos, ground, effect: effect::SMOKE, count: n(20.0), scale, seed: seed ^ 0x2545_f491 },
+        Burst {
+            pos,
+            ground,
+            effect: effect::FLASH,
+            count: 2,
+            scale,
+            seed,
+        },
+        Burst {
+            pos,
+            ground,
+            effect: effect::FIRE,
+            count: n(24.0),
+            scale,
+            seed: seed ^ 0x9e37_79b9,
+        },
+        Burst {
+            pos,
+            ground,
+            effect: effect::SPARKS,
+            count: n(40.0),
+            scale,
+            seed: seed ^ 0x7f4a_7c15,
+        },
+        Burst {
+            pos,
+            ground,
+            effect: effect::SMOKE,
+            count: n(20.0),
+            scale,
+            seed: seed ^ 0x2545_f491,
+        },
     ]
 }
 
@@ -285,7 +334,10 @@ impl ParticleFeed {
     }
 
     pub fn emit_all(&self, bursts: &[Burst]) {
-        self.queued.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(bursts);
+        self.queued
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend_from_slice(bursts);
     }
 
     /// Every queued burst, oldest first.
@@ -320,7 +372,13 @@ pub struct ParticlesSetup {
 impl ParticlesSetup {
     /// `capacity` slots, the default effects, half resolution, sorted.
     pub fn new(feed: Arc<ParticleFeed>, capacity: u32) -> Self {
-        Self { feed, capacity, effects: default_effects(), downscale: 2, blend: ParticleBlend::Sorted }
+        Self {
+            feed,
+            capacity,
+            effects: default_effects(),
+            downscale: 2,
+            blend: ParticleBlend::Sorted,
+        }
     }
 }
 
@@ -469,8 +527,19 @@ impl PacketTargets {
     }
 }
 
-const SLICE_FORMATS: [vk::Format; 1 + SLICES] = [vk::Format::R16G16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
-const MOMENT_FORMATS: [vk::Format; 4] = [vk::Format::R32_SFLOAT, vk::Format::R32G32B32A32_SFLOAT, vk::Format::R16G16B16A16_SFLOAT, vk::Format::R16G16B16A16_SFLOAT];
+const SLICE_FORMATS: [vk::Format; 1 + SLICES] = [
+    vk::Format::R16G16_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+];
+const MOMENT_FORMATS: [vk::Format; 4] = [
+    vk::Format::R32_SFLOAT,
+    vk::Format::R32G32B32A32_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+    vk::Format::R16G16B16A16_SFLOAT,
+];
 
 const HALF_COLOR: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const HALF_DEPTH: vk::Format = vk::Format::R32_SFLOAT;
@@ -623,9 +692,25 @@ pub struct ParticleRenderer {
 }
 
 impl ParticleRenderer {
-    pub fn new(gpu: &GpuDevice, terrain: &TerrainRenderer, lights: &crate::lights::LightRenderer, setup: &ParticlesSetup, working: crate::colorspace::WorkingSpace, color_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
-        ensure!((1..=MAX_CAPACITY).contains(&setup.capacity), "particle capacity {} (1..={MAX_CAPACITY})", setup.capacity);
-        ensure!(setup.effects.len() <= MAX_EFFECTS, "{} particle effects (at most {MAX_EFFECTS})", setup.effects.len());
+    pub fn new(
+        gpu: &GpuDevice,
+        terrain: &TerrainRenderer,
+        lights: &crate::lights::LightRenderer,
+        setup: &ParticlesSetup,
+        working: crate::colorspace::WorkingSpace,
+        color_format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
+        ensure!(
+            (1..=MAX_CAPACITY).contains(&setup.capacity),
+            "particle capacity {} (1..={MAX_CAPACITY})",
+            setup.capacity
+        );
+        ensure!(
+            setup.effects.len() <= MAX_EFFECTS,
+            "{} particle effects (at most {MAX_EFFECTS})",
+            setup.effects.len()
+        );
         // The authored colours (and the bursts' light tints) enter the
         // working space here, once, at upload (M13 stage 4). Nothing maps
         // them to the output: the tonemap or post.encode does that.
@@ -644,37 +729,123 @@ impl ParticleRenderer {
                 light.color = working.unit_tint_from(gamut, light.color);
             }
         }
-        ensure!(matches!(setup.downscale, 1 | 2), "particle downscale {} (1 or 2)", setup.downscale);
-        ensure!(setup.blend.needs_sort() || setup.downscale == 2, "{:?} particles need downscale 2", setup.blend);
-        ensure!(setup.blend != ParticleBlend::Packets || gpu.compute_subgroups_32, "the packets' blend needs pinned, full 32-lane compute subgroups (subgroupSizeControl, computeFullSubgroups)");
-        ensure!(!setup.blend.lists() || gpu.fragment_stores, "the particles' reference needs fragmentStoresAndAtomics");
+        ensure!(
+            matches!(setup.downscale, 1 | 2),
+            "particle downscale {} (1 or 2)",
+            setup.downscale
+        );
+        ensure!(
+            setup.blend.needs_sort() || setup.downscale == 2,
+            "{:?} particles need downscale 2",
+            setup.blend
+        );
+        ensure!(
+            setup.blend != ParticleBlend::Packets || gpu.compute_subgroups_32,
+            "the packets' blend needs pinned, full 32-lane compute subgroups (subgroupSizeControl, computeFullSubgroups)"
+        );
+        ensure!(
+            !setup.blend.lists() || gpu.fragment_stores,
+            "the particles' reference needs fragmentStoresAndAtomics"
+        );
         let formats: &[vk::Format] = match setup.blend {
             ParticleBlend::Moments => &MOMENT_FORMATS,
             ParticleBlend::Slices => &SLICE_FORMATS,
             _ => &[],
         };
         for &format in formats {
-            let features = unsafe { gpu.instance.instance.get_physical_device_format_properties(gpu.physical, format) }.optimal_tiling_features;
-            ensure!(features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND), "{format:?} cannot be blended into ({:?} particles)", setup.blend);
+            let features = unsafe {
+                gpu.instance
+                    .instance
+                    .get_physical_device_format_properties(gpu.physical, format)
+            }
+            .optimal_tiling_features;
+            ensure!(
+                features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND),
+                "{format:?} cannot be blended into ({:?} particles)",
+                setup.blend
+            );
         }
         let device = &gpu.device;
         let capacity = setup.capacity;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         // Zeroed: every slot starts dead (life 0).
-        let state = upload::buffer(gpu, &vec![0u8; (capacity as u64 * STATE_BYTES) as usize], storage, "particle state")?;
+        let state = upload::buffer(
+            gpu,
+            &vec![0u8; (capacity as u64 * STATE_BYTES) as usize],
+            storage,
+            "particle state",
+        )?;
         // The visible keys, then the coloured shadows' casters.
-        let keys = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 8, usage: storage }, MemoryLocation::GpuOnly, "particle keys")?;
-        let keys_tmp = OwnedBuffer::new(gpu, BufferDesc { size: capacity as u64 * 4, usage: storage }, MemoryLocation::GpuOnly, "particle keys (sort)")?;
+        let keys = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: capacity as u64 * 8,
+                usage: storage,
+            },
+            MemoryLocation::GpuOnly,
+            "particle keys",
+        )?;
+        let keys_tmp = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: capacity as u64 * 4,
+                usage: storage,
+            },
+            MemoryLocation::GpuOnly,
+            "particle keys (sort)",
+        )?;
         let groups = Self::sort_groups(capacity);
-        let histograms = OwnedBuffer::new(gpu, BufferDesc { size: groups as u64 * SORT_BINS * 4, usage: storage }, MemoryLocation::GpuOnly, "particle sort histograms")?;
-        let indirect = upload::buffer(gpu, pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0, 4, 0, 0, 0]), Self::indirect_usage(), "particle indirect")?;
+        let histograms = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: groups as u64 * SORT_BINS * 4,
+                usage: storage,
+            },
+            MemoryLocation::GpuOnly,
+            "particle sort histograms",
+        )?;
+        let indirect = upload::buffer(
+            gpu,
+            pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0, 4, 0, 0, 0]),
+            Self::indirect_usage(),
+            "particle indirect",
+        )?;
         let ubos = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: size_of::<FrameUbo>() as u64, usage: vk::BufferUsageFlags::UNIFORM_BUFFER }, MemoryLocation::CpuToGpu, "particle frame"))
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: size_of::<FrameUbo>() as u64,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "particle frame",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let spawns = (0..frames_in_flight)
-            .map(|_| OwnedBuffer::new(gpu, BufferDesc { size: (MAX_BURSTS * size_of::<SpawnRecord>()) as u64, usage: storage }, MemoryLocation::CpuToGpu, "particle spawns"))
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: (MAX_BURSTS * size_of::<SpawnRecord>()) as u64,
+                        usage: storage,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "particle spawns",
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
-        let puff = upload::image_mipped(gpu, vk::Format::R8_UNORM, PUFF as u32, PUFF as u32, &[&puff_texels()], upload::MipFilter::Average, vk::ImageViewType::TYPE_2D, "particle puff")?;
+        let puff = upload::image_mipped(
+            gpu,
+            vk::Format::R8_UNORM,
+            PUFF as u32,
+            PUFF as u32,
+            &[&puff_texels()],
+            upload::MipFilter::Average,
+            vk::ImageViewType::TYPE_2D,
+            "particle puff",
+        )?;
         let puff_sampler = unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -701,45 +872,135 @@ impl ParticleRenderer {
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (shadow_view, shadow_sampler) = terrain.shadow_texture();
         let (height_view, height_sampler) = terrain.height_texture();
-        let (set_layout, depth_layout, packet_layout, pipeline_layout, packet_pipeline_layout, desc_pool, sets, depth_sets, half_sets, packet_sets, composite_layout, composite_pipeline_layout, composite_sets, packet_composite_sets) = unsafe {
+        let (
+            set_layout,
+            depth_layout,
+            packet_layout,
+            pipeline_layout,
+            packet_pipeline_layout,
+            desc_pool,
+            sets,
+            depth_sets,
+            half_sets,
+            packet_sets,
+            composite_layout,
+            composite_pipeline_layout,
+            composite_sets,
+            packet_composite_sets,
+        ) = unsafe {
             let ssbo = vk::DescriptorType::STORAGE_BUFFER;
             let storage_image = vk::DescriptorType::STORAGE_IMAGE;
             let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
             let set_layout = pipeline::set_layout(
                 device,
-                &[(vk::DescriptorType::UNIFORM_BUFFER, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (ssbo, all), (image, all), (image, all), (image, all)],
+                &[
+                    (vk::DescriptorType::UNIFORM_BUFFER, all),
+                    (ssbo, all),
+                    (ssbo, all),
+                    (ssbo, all),
+                    (ssbo, all),
+                    (ssbo, all),
+                    (ssbo, all),
+                    (image, all),
+                    (image, all),
+                    (image, all),
+                ],
             )?;
             // Set 1 of the draws: the depth, the puff; the moments' four
             // targets or the slices' five; the reference's counts and
             // fragments; or the froxels' bins, froxels and puffs (also in
             // compute).
             let f = vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE;
-            let depth_layout = pipeline::set_layout(device, &[(image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (image, f), (ssbo, f), (ssbo, f), (ssbo, f)])?;
+            let depth_layout = pipeline::set_layout(
+                device,
+                &[
+                    (image, f),
+                    (image, f),
+                    (image, f),
+                    (image, f),
+                    (image, f),
+                    (image, f),
+                    (image, f),
+                    (ssbo, f),
+                    (ssbo, f),
+                    (ssbo, f),
+                ],
+            )?;
             // Set 1 of the packets' compute: the depth and the puff, the
             // colour and glow storage images, the tile masks and the packed
             // puffs.
             let c = vk::ShaderStageFlags::COMPUTE;
-            let packet_layout = pipeline::set_layout(device, &[(image, c), (image, c), (storage_image, c), (storage_image, c), (ssbo, c), (ssbo, c)])?;
+            let packet_layout = pipeline::set_layout(
+                device,
+                &[
+                    (image, c),
+                    (image, c),
+                    (storage_image, c),
+                    (storage_image, c),
+                    (ssbo, c),
+                    (ssbo, c),
+                ],
+            )?;
             // The sort's push constant: shift, direction. Set 2: the
             // clustered lights (the simulation lights each particle).
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, depth_layout, lights.set_layout()], 8, vk::ShaderStageFlags::COMPUTE)?;
+            let pipeline_layout = pipeline::pipeline_layout(
+                device,
+                &[set_layout, depth_layout, lights.set_layout()],
+                8,
+                vk::ShaderStageFlags::COMPUTE,
+            )?;
             // The packets' push constant: target width and height, tile
             // size, tiles across, summary and mask words.
-            let packet_pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, packet_layout], 6 * size_of::<u32>() as u32, c)?;
+            let packet_pipeline_layout =
+                pipeline::pipeline_layout(device, &[set_layout, packet_layout], 6 * size_of::<u32>() as u32, c)?;
             let fragment = vk::ShaderStageFlags::FRAGMENT;
-            let composite_layout = pipeline::set_layout(device, &[(image, fragment), (image, fragment), (image, fragment), (image, fragment)])?;
-            let composite_pipeline_layout = pipeline::pipeline_layout(device, &[set_layout, composite_layout], 0, vk::ShaderStageFlags::FRAGMENT)?;
+            let composite_layout = pipeline::set_layout(
+                device,
+                &[
+                    (image, fragment),
+                    (image, fragment),
+                    (image, fragment),
+                    (image, fragment),
+                ],
+            )?;
+            let composite_pipeline_layout = pipeline::pipeline_layout(
+                device,
+                &[set_layout, composite_layout],
+                0,
+                vk::ShaderStageFlags::FRAGMENT,
+            )?;
             let n = frames_in_flight as u32;
             let sizes = [
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: n },
-                vk::DescriptorPoolSize { ty: ssbo, descriptor_count: 14 * n },
-                vk::DescriptorPoolSize { ty: storage_image, descriptor_count: 2 * n },
-                vk::DescriptorPoolSize { ty: image, descriptor_count: 27 * n },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: n,
+                },
+                vk::DescriptorPoolSize {
+                    ty: ssbo,
+                    descriptor_count: 14 * n,
+                },
+                vk::DescriptorPoolSize {
+                    ty: storage_image,
+                    descriptor_count: 2 * n,
+                },
+                vk::DescriptorPoolSize {
+                    ty: image,
+                    descriptor_count: 27 * n,
+                },
             ];
-            let desc_pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(6 * n).pool_sizes(&sizes), None)?;
+            let desc_pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(6 * n)
+                    .pool_sizes(&sizes),
+                None,
+            )?;
             let allocate = |layout: vk::DescriptorSetLayout| {
                 let layouts = vec![layout; frames_in_flight];
-                device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&layouts))
+                device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(desc_pool)
+                        .set_layouts(&layouts),
+                )
             };
             let sets = allocate(set_layout)?;
             let depth_sets = allocate(depth_layout)?;
@@ -747,48 +1008,145 @@ impl ParticleRenderer {
             let packet_sets = allocate(packet_layout)?;
             let composite_sets = allocate(composite_layout)?;
             let packet_composite_sets = allocate(composite_layout)?;
-            let shape = [vk::DescriptorImageInfo { sampler: puff_sampler, image_view: puff.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+            let shape = [vk::DescriptorImageInfo {
+                sampler: puff_sampler,
+                image_view: puff.view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }];
             // The puff, in both the full- and the half-resolution draw's set
             // (the downsample, bound with the full one, does not read it),
             // and in the packets' set.
-            let writes: Vec<_> = depth_sets.iter().chain(&half_sets).map(|&set| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(image).image_info(&shape)).collect();
+            let writes: Vec<_> = depth_sets
+                .iter()
+                .chain(&half_sets)
+                .map(|&set| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(1)
+                        .descriptor_type(image)
+                        .image_info(&shape)
+                })
+                .collect();
             device.update_descriptor_sets(&writes, &[]);
-            let writes: Vec<_> = packet_sets.iter().map(|&set| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(image).image_info(&shape)).collect();
+            let writes: Vec<_> = packet_sets
+                .iter()
+                .map(|&set| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(1)
+                        .descriptor_type(image)
+                        .image_info(&shape)
+                })
+                .collect();
             device.update_descriptor_sets(&writes, &[]);
             for (slot, &set) in sets.iter().enumerate() {
-                let info = |buffer: &OwnedBuffer| [vk::DescriptorBufferInfo { buffer: buffer.buffer, offset: 0, range: vk::WHOLE_SIZE }];
-                let buffers = [info(&ubos[slot]), info(&state), info(&keys), info(&indirect), info(&spawns[slot]), info(&keys_tmp), info(&histograms)];
+                let info = |buffer: &OwnedBuffer| {
+                    [vk::DescriptorBufferInfo {
+                        buffer: buffer.buffer,
+                        offset: 0,
+                        range: vk::WHOLE_SIZE,
+                    }]
+                };
+                let buffers = [
+                    info(&ubos[slot]),
+                    info(&state),
+                    info(&keys),
+                    info(&indirect),
+                    info(&spawns[slot]),
+                    info(&keys_tmp),
+                    info(&histograms),
+                ];
                 let mut writes: Vec<vk::WriteDescriptorSet> = buffers
                     .iter()
                     .enumerate()
                     .map(|(i, info)| {
-                        let ty = if i == 0 { vk::DescriptorType::UNIFORM_BUFFER } else { ssbo };
-                        vk::WriteDescriptorSet::default().dst_set(set).dst_binding(i as u32).descriptor_type(ty).buffer_info(info)
+                        let ty = if i == 0 {
+                            vk::DescriptorType::UNIFORM_BUFFER
+                        } else {
+                            ssbo
+                        };
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(i as u32)
+                            .descriptor_type(ty)
+                            .buffer_info(info)
                     })
                     .collect();
-                let shadow = [vk::DescriptorImageInfo { sampler: shadow_sampler, image_view: shadow_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(image).image_info(&shadow));
-                let height = [vk::DescriptorImageInfo { sampler: height_sampler, image_view: height_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(image).image_info(&height));
+                let shadow = [vk::DescriptorImageInfo {
+                    sampler: shadow_sampler,
+                    image_view: shadow_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(7)
+                        .descriptor_type(image)
+                        .image_info(&shadow),
+                );
+                let height = [vk::DescriptorImageInfo {
+                    sampler: height_sampler,
+                    image_view: height_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                }];
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(8)
+                        .descriptor_type(image)
+                        .image_info(&height),
+                );
                 // The puff again, for the coloured shadows (bound with set 0
                 // alone: set 1 is rewritten when the draw records).
-                writes.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(9).descriptor_type(image).image_info(&shape));
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(9)
+                        .descriptor_type(image)
+                        .image_info(&shape),
+                );
                 device.update_descriptor_sets(&writes, &[]);
             }
-            (set_layout, depth_layout, packet_layout, pipeline_layout, packet_pipeline_layout, desc_pool, sets, depth_sets, half_sets, packet_sets, composite_layout, composite_pipeline_layout, composite_sets, packet_composite_sets)
+            (
+                set_layout,
+                depth_layout,
+                packet_layout,
+                pipeline_layout,
+                packet_pipeline_layout,
+                desc_pool,
+                sets,
+                depth_sets,
+                half_sets,
+                packet_sets,
+                composite_layout,
+                composite_pipeline_layout,
+                composite_sets,
+                packet_composite_sets,
+            )
         };
-        let compute = |code: &[u8], what: &str| pipeline::compute_pipeline(device, code, pipeline_layout).with_context(|| format!("particle {what} pipeline"));
+        let compute = |code: &[u8], what: &str| {
+            pipeline::compute_pipeline(device, code, pipeline_layout)
+                .with_context(|| format!("particle {what} pipeline"))
+        };
         let spawn = compute(spirv!("particles_spawn.comp"), "spawn")?;
         let sim = compute(spirv!("particles_sim.comp"), "sim")?;
         let histogram = compute(spirv!("particles_sort_histogram.comp"), "sort histogram")?;
         let scatter = compute(spirv!("particles_sort_scatter.comp"), "sort scatter")?;
         let packets = setup.blend == ParticleBlend::Packets;
-        let packet_stage = |code: &[u8], what: &str| pipeline::compute_pipeline(device, code, packet_pipeline_layout).with_context(|| format!("particle {what} pipeline"));
-        let packet_bin = packets.then(|| packet_stage(spirv!("particles_bins.comp"), "bins")).transpose()?;
+        let packet_stage = |code: &[u8], what: &str| {
+            pipeline::compute_pipeline(device, code, packet_pipeline_layout)
+                .with_context(|| format!("particle {what} pipeline"))
+        };
+        let packet_bin = packets
+            .then(|| packet_stage(spirv!("particles_bins.comp"), "bins"))
+            .transpose()?;
         // The blend's ballots are 32-bit and its packets are one subgroup
         // each: pinned to 32 full lanes.
         let packet_blend = packets
-            .then(|| pipeline::compute_pipeline_subgroup32(device, spirv!("particles_packets.comp"), packet_pipeline_layout).context("particle packets pipeline"))
+            .then(|| {
+                pipeline::compute_pipeline_subgroup32(device, spirv!("particles_packets.comp"), packet_pipeline_layout)
+                    .context("particle packets pipeline")
+            })
             .transpose()?;
         let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
         // The sorted half-resolution draw writes the colour and its glow
@@ -797,12 +1155,20 @@ impl ParticleRenderer {
         // colour alone and the composite clears their glow.
         let sorted = setup.blend == ParticleBlend::Sorted;
         let draw_formats: Vec<vk::Format> = if setup.downscale > 1 {
-            if sorted { vec![HALF_COLOR, glow_format] } else { vec![HALF_COLOR] }
+            if sorted {
+                vec![HALF_COLOR, glow_format]
+            } else {
+                vec![HALF_COLOR]
+            }
         } else {
             vec![color_format, glow_format]
         };
         let draw_fragment: &[u8] = if setup.downscale > 1 {
-            if sorted { spirv!("particles_half.frag") } else { spirv!("particles.frag") }
+            if sorted {
+                spirv!("particles_half.frag")
+            } else {
+                spirv!("particles.frag")
+            }
         } else {
             spirv!("particles_scene.frag")
         };
@@ -822,9 +1188,27 @@ impl ParticleRenderer {
         )
         .context("particle pipeline")?;
         let fullscreen = |fragment: &[u8], layout, format, blend| {
-            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("fullscreen.vert"), fragment, layout, color_formats: &[format], depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend, glow_blend: Blend::Off })
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex: spirv!("fullscreen.vert"),
+                    fragment,
+                    layout,
+                    color_formats: &[format],
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend,
+                    glow_blend: Blend::Off,
+                },
+            )
         };
-        let depth_down = fullscreen(spirv!("particles_depth_down.frag"), pipeline_layout, HALF_DEPTH, Blend::Off).context("particle depth downsample pipeline")?;
+        let depth_down = fullscreen(
+            spirv!("particles_depth_down.frag"),
+            pipeline_layout,
+            HALF_DEPTH,
+            Blend::Off,
+        )
+        .context("particle depth downsample pipeline")?;
         let composite_formats = [color_format, glow_format];
         let composite = pipeline::graphics_pipeline(
             device,
@@ -845,7 +1229,11 @@ impl ParticleRenderer {
         // depth-aware upsample, full resolution is one to one.
         let packet_composite = packets
             .then(|| {
-                let fragment: &[u8] = if setup.downscale > 1 { spirv!("particles_packets_composite.frag") } else { spirv!("particles_packets_scene.frag") };
+                let fragment: &[u8] = if setup.downscale > 1 {
+                    spirv!("particles_packets_composite.frag")
+                } else {
+                    spirv!("particles_packets_scene.frag")
+                };
                 pipeline::graphics_pipeline(
                     device,
                     &GraphicsDesc {
@@ -863,34 +1251,86 @@ impl ParticleRenderer {
             .transpose()
             .context("particle packets composite pipeline")?;
         let particle_pipeline = |fragment: &[u8], formats: &[vk::Format], blend| {
-            pipeline::graphics_pipeline(device, &GraphicsDesc { vertex: spirv!("particles.vert"), fragment, layout: pipeline_layout, color_formats: formats, depth: None, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend, glow_blend: Blend::Off })
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex: spirv!("particles.vert"),
+                    fragment,
+                    layout: pipeline_layout,
+                    color_formats: formats,
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend,
+                    glow_blend: Blend::Off,
+                },
+            )
         };
         let oit = match setup.blend {
             ParticleBlend::Sorted => Vec::new(),
             ParticleBlend::Moments => vec![
-                particle_pipeline(spirv!("particles_moments.frag"), &MOMENT_FORMATS[..2], Blend::Additive).context("particle moments pipeline")?,
-                particle_pipeline(spirv!("particles_moments_shade.frag"), &MOMENT_FORMATS[2..], Blend::Additive).context("particle moments shade pipeline")?,
-                fullscreen(spirv!("particles_moments_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle moments resolve pipeline")?,
+                particle_pipeline(spirv!("particles_moments.frag"), &MOMENT_FORMATS[..2], Blend::Additive)
+                    .context("particle moments pipeline")?,
+                particle_pipeline(
+                    spirv!("particles_moments_shade.frag"),
+                    &MOMENT_FORMATS[2..],
+                    Blend::Additive,
+                )
+                .context("particle moments shade pipeline")?,
+                fullscreen(
+                    spirv!("particles_moments_resolve.frag"),
+                    pipeline_layout,
+                    HALF_COLOR,
+                    Blend::Off,
+                )
+                .context("particle moments resolve pipeline")?,
             ],
             ParticleBlend::Reference => vec![
-                particle_pipeline(spirv!("particles_reference.frag"), &[], Blend::Off).context("particle reference pipeline")?,
-                fullscreen(spirv!("particles_reference_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle reference resolve pipeline")?,
+                particle_pipeline(spirv!("particles_reference.frag"), &[], Blend::Off)
+                    .context("particle reference pipeline")?,
+                fullscreen(
+                    spirv!("particles_reference_resolve.frag"),
+                    pipeline_layout,
+                    HALF_COLOR,
+                    Blend::Off,
+                )
+                .context("particle reference resolve pipeline")?,
             ],
             ParticleBlend::Slices => vec![
-                particle_pipeline(spirv!("particles_slices_range.frag"), &SLICE_FORMATS[..1], Blend::Max).context("particle slices range pipeline")?,
-                particle_pipeline(spirv!("particles_slices.frag"), &SLICE_FORMATS[1..], Blend::Additive).context("particle slices pipeline")?,
-                fullscreen(spirv!("particles_slices_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle slices resolve pipeline")?,
+                particle_pipeline(spirv!("particles_slices_range.frag"), &SLICE_FORMATS[..1], Blend::Max)
+                    .context("particle slices range pipeline")?,
+                particle_pipeline(spirv!("particles_slices.frag"), &SLICE_FORMATS[1..], Blend::Additive)
+                    .context("particle slices pipeline")?,
+                fullscreen(
+                    spirv!("particles_slices_resolve.frag"),
+                    pipeline_layout,
+                    HALF_COLOR,
+                    Blend::Off,
+                )
+                .context("particle slices resolve pipeline")?,
             ],
             ParticleBlend::Volume => vec![
-                particle_pipeline(spirv!("particles_volume.frag"), &[], Blend::Off).context("particle volume pipeline")?,
-                fullscreen(spirv!("particles_volume_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle volume resolve pipeline")?,
+                particle_pipeline(spirv!("particles_volume.frag"), &[], Blend::Off)
+                    .context("particle volume pipeline")?,
+                fullscreen(
+                    spirv!("particles_volume_resolve.frag"),
+                    pipeline_layout,
+                    HALF_COLOR,
+                    Blend::Off,
+                )
+                .context("particle volume resolve pipeline")?,
             ],
             ParticleBlend::Packets => Vec::new(),
             ParticleBlend::Froxels => vec![
                 compute(spirv!("particles_froxels_bin.comp"), "froxel bin")?,
                 compute(spirv!("particles_froxels_inject.comp"), "froxel inject")?,
                 compute(spirv!("particles_froxels_integrate.comp"), "froxel integrate")?,
-                fullscreen(spirv!("particles_froxels_resolve.frag"), pipeline_layout, HALF_COLOR, Blend::Off).context("particle froxel resolve pipeline")?,
+                fullscreen(
+                    spirv!("particles_froxels_resolve.frag"),
+                    pipeline_layout,
+                    HALF_COLOR,
+                    Blend::Off,
+                )
+                .context("particle froxel resolve pipeline")?,
             ],
         };
         let caster_layout = pipeline::pipeline_layout(device, &[set_layout], 4, vk::ShaderStageFlags::VERTEX)?;
@@ -971,7 +1411,10 @@ impl ParticleRenderer {
     /// remade (the slot's previous submission has completed), and the sets
     /// that read them.
     fn ensure_half(&mut self, gpu: &GpuDevice, slot: usize, extent: vk::Extent2D) -> Result<()> {
-        let half = vk::Extent2D { width: extent.width.div_ceil(2).max(1), height: extent.height.div_ceil(2).max(1) };
+        let half = vk::Extent2D {
+            width: extent.width.div_ceil(2).max(1),
+            height: extent.height.div_ceil(2).max(1),
+        };
         if self.half[slot].as_ref().is_some_and(|h| h.extent == half) {
             return Ok(());
         }
@@ -979,39 +1422,103 @@ impl ParticleRenderer {
             old.destroy(gpu);
         }
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
-        let image = |format, name: &str| OwnedImage::new(gpu, ImageDesc::color_2d(format, half.width, half.height, usage), name);
+        let image = |format, name: &str| {
+            OwnedImage::new(gpu, ImageDesc::color_2d(format, half.width, half.height, usage), name)
+        };
         // The glow is a colour attachment for the sorted draw and is
         // cleared by transfer for the test-only blends that do not write
         // it.
         let glow_usage = usage | vk::ImageUsageFlags::TRANSFER_DST;
         let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
-        let glow = OwnedImage::new(gpu, ImageDesc::color_2d(glow_format, half.width, half.height, glow_usage), "particles glow (half resolution)")?;
+        let glow = OwnedImage::new(
+            gpu,
+            ImageDesc::color_2d(glow_format, half.width, half.height, glow_usage),
+            "particles glow (half resolution)",
+        )?;
         // Built up so that a failure part way frees what was made.
-        let mut targets = HalfTargets { extent: half, color: image(HALF_COLOR, "particles (half resolution)")?, glow, depth: image(HALF_DEPTH, "particle depth (half resolution)")?, moments: Vec::new(), reference: Vec::new() };
+        let mut targets = HalfTargets {
+            extent: half,
+            color: image(HALF_COLOR, "particles (half resolution)")?,
+            glow,
+            depth: image(HALF_DEPTH, "particle depth (half resolution)")?,
+            moments: Vec::new(),
+            reference: Vec::new(),
+        };
         let made = (|| -> Result<()> {
             if self.blend == ParticleBlend::Moments {
-                for (format, name) in MOMENT_FORMATS.iter().zip(["particle moment b0", "particle moments", "particle media", "particle emissive"]) {
+                for (format, name) in MOMENT_FORMATS.iter().zip([
+                    "particle moment b0",
+                    "particle moments",
+                    "particle media",
+                    "particle emissive",
+                ]) {
                     targets.moments.push(image(*format, name)?);
                 }
             }
             if self.blend == ParticleBlend::Slices {
-                for (format, name) in SLICE_FORMATS.iter().zip(["particle slice range", "particle slice 0", "particle slice 1", "particle slice 2", "particle slice 3"]) {
+                for (format, name) in SLICE_FORMATS.iter().zip([
+                    "particle slice range",
+                    "particle slice 0",
+                    "particle slice 1",
+                    "particle slice 2",
+                    "particle slice 3",
+                ]) {
                     targets.moments.push(image(*format, name)?);
                 }
             }
             if self.blend.lists() {
                 let pixels = half.width as u64 * half.height as u64;
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: pixels * 4, usage }, MemoryLocation::GpuOnly, "particle reference counts")?);
-                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: pixels * REFERENCE_LAYERS * 16, usage }, MemoryLocation::GpuOnly, "particle reference fragments")?);
+                targets.reference.push(OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: pixels * 4,
+                        usage,
+                    },
+                    MemoryLocation::GpuOnly,
+                    "particle reference counts",
+                )?);
+                targets.reference.push(OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: pixels * REFERENCE_LAYERS * 16,
+                        usage,
+                    },
+                    MemoryLocation::GpuOnly,
+                    "particle reference fragments",
+                )?);
             }
             if self.blend == ParticleBlend::Froxels {
                 let columns = froxel_grid(half);
                 let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: 16, usage: usage | vk::BufferUsageFlags::INDIRECT_BUFFER }, MemoryLocation::GpuOnly, "particle froxel dispatch")?);
+                targets.reference.push(OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: 16,
+                        usage: usage | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                    },
+                    MemoryLocation::GpuOnly,
+                    "particle froxel dispatch",
+                )?);
                 let froxels = columns.0 as u64 * columns.1 as u64 * (FROXEL_SLICES as u64 + 1);
-                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: froxels * 16, usage }, MemoryLocation::GpuOnly, "particle froxels")?);
-                targets.reference.push(OwnedBuffer::new(gpu, BufferDesc { size: self.capacity as u64 * 48, usage }, MemoryLocation::GpuOnly, "particle froxel puffs")?);
+                targets.reference.push(OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: froxels * 16,
+                        usage,
+                    },
+                    MemoryLocation::GpuOnly,
+                    "particle froxels",
+                )?);
+                targets.reference.push(OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: self.capacity as u64 * 48,
+                        usage,
+                    },
+                    MemoryLocation::GpuOnly,
+                    "particle froxel puffs",
+                )?);
             }
             Ok(())
         })();
@@ -1019,22 +1526,70 @@ impl ParticleRenderer {
             targets.destroy(gpu);
             return Err(err);
         }
-        let info = |view| [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
-        let (color_info, depth_info, glow_info) = (info(targets.color.view), info(targets.depth.view), info(targets.glow.view));
+        let info = |view| {
+            [vk::DescriptorImageInfo {
+                sampler: self.depth_sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }]
+        };
+        let (color_info, depth_info, glow_info) = (
+            info(targets.color.view),
+            info(targets.depth.view),
+            info(targets.glow.view),
+        );
         let moment_infos: Vec<_> = targets.moments.iter().map(|m| info(m.view)).collect();
-        let buffer_infos: Vec<_> = targets.reference.iter().map(|b| [vk::DescriptorBufferInfo { buffer: b.buffer, offset: 0, range: vk::WHOLE_SIZE }]).collect();
+        let buffer_infos: Vec<_> = targets
+            .reference
+            .iter()
+            .map(|b| {
+                [vk::DescriptorBufferInfo {
+                    buffer: b.buffer,
+                    offset: 0,
+                    range: vk::WHOLE_SIZE,
+                }]
+            })
+            .collect();
         let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
         let mut writes = vec![
-            vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&depth_info),
-            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&color_info),
-            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(1).descriptor_type(image).image_info(&depth_info),
-            vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(3).descriptor_type(image).image_info(&glow_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.half_sets[slot])
+                .dst_binding(0)
+                .descriptor_type(image)
+                .image_info(&depth_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.composite_sets[slot])
+                .dst_binding(0)
+                .descriptor_type(image)
+                .image_info(&color_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.composite_sets[slot])
+                .dst_binding(1)
+                .descriptor_type(image)
+                .image_info(&depth_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.composite_sets[slot])
+                .dst_binding(3)
+                .descriptor_type(image)
+                .image_info(&glow_info),
         ];
         for (i, info) in moment_infos.iter().enumerate() {
-            writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(2 + i as u32).descriptor_type(image).image_info(info));
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.half_sets[slot])
+                    .dst_binding(2 + i as u32)
+                    .descriptor_type(image)
+                    .image_info(info),
+            );
         }
         for (i, info) in buffer_infos.iter().enumerate() {
-            writes.push(vk::WriteDescriptorSet::default().dst_set(self.half_sets[slot]).dst_binding(7 + i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(info));
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.half_sets[slot])
+                    .dst_binding(7 + i as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(info),
+            );
         }
         unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
         self.half[slot] = Some(targets);
@@ -1045,7 +1600,10 @@ impl ParticleRenderer {
     /// the scene's extent at 1.
     fn packet_extent(extent: vk::Extent2D, downscale: u32) -> vk::Extent2D {
         if downscale > 1 {
-            vk::Extent2D { width: extent.width.div_ceil(2).max(1), height: extent.height.div_ceil(2).max(1) }
+            vk::Extent2D {
+                width: extent.width.div_ceil(2).max(1),
+                height: extent.height.div_ceil(2).max(1),
+            }
         } else {
             extent
         }
@@ -1081,7 +1639,13 @@ impl ParticleRenderer {
             old.destroy(gpu);
         }
         let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
-        let image = |name: &str| OwnedImage::new(gpu, ImageDesc::color_2d(HALF_COLOR, extent.width, extent.height, usage), name);
+        let image = |name: &str| {
+            OwnedImage::new(
+                gpu,
+                ImageDesc::color_2d(HALF_COLOR, extent.width, extent.height, usage),
+                name,
+            )
+        };
         let (bin_size, bins_x, summary_words, mask_words) = Self::packet_bin_layout(extent, self.capacity);
         let bins = (bins_x as u64) * (extent.height.div_ceil(bin_size) as u64);
         let scratch = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
@@ -1089,8 +1653,24 @@ impl ParticleRenderer {
             extent,
             color: image("particles packets (colour)")?,
             glow: image("particles packets (glow)")?,
-            masks: OwnedBuffer::new(gpu, BufferDesc { size: bins * (summary_words + mask_words) as u64 * 4, usage: scratch }, MemoryLocation::GpuOnly, "particle tile masks")?,
-            puffs: OwnedBuffer::new(gpu, BufferDesc { size: self.capacity as u64 * 48, usage: scratch }, MemoryLocation::GpuOnly, "particle packed puffs")?,
+            masks: OwnedBuffer::new(
+                gpu,
+                BufferDesc {
+                    size: bins * (summary_words + mask_words) as u64 * 4,
+                    usage: scratch,
+                },
+                MemoryLocation::GpuOnly,
+                "particle tile masks",
+            )?,
+            puffs: OwnedBuffer::new(
+                gpu,
+                BufferDesc {
+                    size: self.capacity as u64 * 48,
+                    usage: scratch,
+                },
+                MemoryLocation::GpuOnly,
+                "particle packed puffs",
+            )?,
             bin_size,
             bins_x,
             summary_words,
@@ -1098,27 +1678,72 @@ impl ParticleRenderer {
         };
         let image = vk::DescriptorType::STORAGE_IMAGE;
         let storage = vk::DescriptorType::STORAGE_BUFFER;
-        let color = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: targets.color.view, image_layout: vk::ImageLayout::GENERAL }];
-        let glow = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: targets.glow.view, image_layout: vk::ImageLayout::GENERAL }];
-        let masks = [vk::DescriptorBufferInfo { buffer: targets.masks.buffer, offset: 0, range: vk::WHOLE_SIZE }];
-        let puffs = [vk::DescriptorBufferInfo { buffer: targets.puffs.buffer, offset: 0, range: vk::WHOLE_SIZE }];
+        let color = [vk::DescriptorImageInfo {
+            sampler: self.depth_sampler,
+            image_view: targets.color.view,
+            image_layout: vk::ImageLayout::GENERAL,
+        }];
+        let glow = [vk::DescriptorImageInfo {
+            sampler: self.depth_sampler,
+            image_view: targets.glow.view,
+            image_layout: vk::ImageLayout::GENERAL,
+        }];
+        let masks = [vk::DescriptorBufferInfo {
+            buffer: targets.masks.buffer,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        }];
+        let puffs = [vk::DescriptorBufferInfo {
+            buffer: targets.puffs.buffer,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        }];
         let writes = [
-            vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(2).descriptor_type(image).image_info(&color),
-            vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(3).descriptor_type(image).image_info(&glow),
-            vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(4).descriptor_type(storage).buffer_info(&masks),
-            vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(5).descriptor_type(storage).buffer_info(&puffs),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_sets[slot])
+                .dst_binding(2)
+                .descriptor_type(image)
+                .image_info(&color),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_sets[slot])
+                .dst_binding(3)
+                .descriptor_type(image)
+                .image_info(&glow),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_sets[slot])
+                .dst_binding(4)
+                .descriptor_type(storage)
+                .buffer_info(&masks),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_sets[slot])
+                .dst_binding(5)
+                .descriptor_type(storage)
+                .buffer_info(&puffs),
         ];
         unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
         // The composite's colour and glow are fixed for this extent; its
         // depth bindings are the frame's (record_draw). A combined image
         // sampler needs a valid sampler even for the composite's texelFetch;
         // the nearest one is fine.
-        let sampled = |info: [vk::DescriptorImageInfo; 1]| [vk::DescriptorImageInfo { image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, ..info[0] }];
+        let sampled = |info: [vk::DescriptorImageInfo; 1]| {
+            [vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                ..info[0]
+            }]
+        };
         let color = sampled(color);
         let glow = sampled(glow);
         let writes = [
-            vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&color),
-            vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(3).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&glow),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_composite_sets[slot])
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&color),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.packet_composite_sets[slot])
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&glow),
         ];
         unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
         self.packets[slot] = Some(targets);
@@ -1130,7 +1755,9 @@ impl ParticleRenderer {
     }
 
     fn indirect_usage() -> vk::BufferUsageFlags {
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::INDIRECT_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_DST
     }
 
     /// The lights of the bursts still glowing (after [`Self::write_frame`]:
@@ -1140,10 +1767,17 @@ impl ParticleRenderer {
     pub fn lights(&mut self, ground: &dyn Fn(glam::Vec2) -> f32, out: &mut Vec<crate::lights::Light>) {
         let now = self.sim_time;
         let effects = &self.effects;
-        self.burst_lights.retain(|(b, born)| effects.get(b.effect as usize).and_then(|d| d.light).is_some_and(|l| now - born < l.life * b.scale.max(0.25).sqrt()));
+        self.burst_lights.retain(|(b, born)| {
+            effects
+                .get(b.effect as usize)
+                .and_then(|d| d.light)
+                .is_some_and(|l| now - born < l.life * b.scale.max(0.25).sqrt())
+        });
         let water = self.info.water_level;
         for (b, born) in &self.burst_lights {
-            let Some(l) = self.effects[b.effect as usize].light else { continue };
+            let Some(l) = self.effects[b.effect as usize].light else {
+                continue;
+            };
             let scale = b.scale.max(1e-3);
             let life = l.life * scale.max(0.25).sqrt();
             let t = ((now - born) / life).clamp(0.0, 1.0);
@@ -1166,7 +1800,13 @@ impl ParticleRenderer {
             let intensity = l.intensity * fade;
             // The tint was converted to the working space and normalised
             // there at upload; keep it as it is.
-            out.push(crate::lights::Light::point_raw(pos, color, intensity, l.range * scale, l.size * scale));
+            out.push(crate::lights::Light::point_raw(
+                pos,
+                color,
+                intensity,
+                l.range * scale,
+                l.size * scale,
+            ));
         }
     }
 
@@ -1180,27 +1820,51 @@ impl ParticleRenderer {
     }
 
     pub fn state(&self) -> BufferBinding {
-        BufferBinding { buffer: self.state.buffer, offset: 0, size: self.state.size, identity: IDENTITY_STATE }
+        BufferBinding {
+            buffer: self.state.buffer,
+            offset: 0,
+            size: self.state.size,
+            identity: IDENTITY_STATE,
+        }
     }
 
     pub fn state_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.state.size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+        BufferDesc {
+            size: self.state.size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        }
     }
 
     pub fn keys(&self) -> BufferBinding {
-        BufferBinding { buffer: self.keys.buffer, offset: 0, size: self.keys.size, identity: IDENTITY_KEYS }
+        BufferBinding {
+            buffer: self.keys.buffer,
+            offset: 0,
+            size: self.keys.size,
+            identity: IDENTITY_KEYS,
+        }
     }
 
     pub fn keys_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.keys.size, usage: vk::BufferUsageFlags::STORAGE_BUFFER }
+        BufferDesc {
+            size: self.keys.size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        }
     }
 
     pub fn indirect(&self) -> BufferBinding {
-        BufferBinding { buffer: self.indirect.buffer, offset: 0, size: self.indirect.size, identity: IDENTITY_INDIRECT }
+        BufferBinding {
+            buffer: self.indirect.buffer,
+            offset: 0,
+            size: self.indirect.size,
+            identity: IDENTITY_INDIRECT,
+        }
     }
 
     pub fn indirect_desc(&self) -> BufferDesc {
-        BufferDesc { size: self.indirect.size, usage: Self::indirect_usage() }
+        BufferDesc {
+            size: self.indirect.size,
+            usage: Self::indirect_usage(),
+        }
     }
 
     /// Take this frame's bursts from the feed and write `slot`'s uniforms
@@ -1214,7 +1878,9 @@ impl ParticleRenderer {
         let mut records = Vec::with_capacity(bursts.len());
         let mut total = 0u32;
         for b in &bursts {
-            let Some(def) = self.effects.get(b.effect as usize) else { continue };
+            let Some(def) = self.effects.get(b.effect as usize) else {
+                continue;
+            };
             let count = b.count.min(self.capacity - total);
             if count == 0 {
                 continue;
@@ -1222,7 +1888,10 @@ impl ParticleRenderer {
             if def.light.is_some() {
                 self.burst_lights.push((*b, self.sim_time));
             }
-            records.push(SpawnRecord { pos: [b.pos[0], b.pos[1], b.pos[2], b.scale], info: [b.effect | (b.ground as u32) << 16, count, total, b.seed] });
+            records.push(SpawnRecord {
+                pos: [b.pos[0], b.pos[1], b.pos[2], b.scale],
+                info: [b.effect | (b.ground as u32) << 16, count, total, b.seed],
+            });
             total += count;
             self.alive_until = self.alive_until.max(self.sim_time + def.max_life());
         }
@@ -1249,7 +1918,12 @@ impl ParticleRenderer {
             up: up.extend(0.0).to_array(),
             forward: forward.extend(0.0).to_array(),
             frustum: frustum_planes(frame.view_proj),
-            step: [dt, self.sim_time, 1.0 / frame.extent.width.max(1) as f32, 1.0 / frame.extent.height.max(1) as f32],
+            step: [
+                dt,
+                self.sim_time,
+                1.0 / frame.extent.width.max(1) as f32,
+                1.0 / frame.extent.height.max(1) as f32,
+            ],
             pool: [self.capacity, records.len() as u32, total, head],
             flags: [
                 (frame.shadows && self.shadows) as u32,
@@ -1257,8 +1931,18 @@ impl ParticleRenderer {
                 frame.unit_shadows.is_some() as u32,
                 (self.downscale == 1) as u32,
             ],
-            map: [i.cell_size, 1.0 / (i.cells.0 + 1) as f32, 1.0 / (i.cells.1 + 1) as f32, 0.0],
-            height: [i.height_scale, i.height_offset, i.water_level.unwrap_or(0.0), i.water_level.is_some() as u32 as f32],
+            map: [
+                i.cell_size,
+                1.0 / (i.cells.0 + 1) as f32,
+                1.0 / (i.cells.1 + 1) as f32,
+                0.0,
+            ],
+            height: [
+                i.height_scale,
+                i.height_offset,
+                i.water_level.unwrap_or(0.0),
+                i.water_level.is_some() as u32 as f32,
+            ],
             sun: crate::terrain::sun::direction().extend(0.0).to_array(),
             fog: frame.fog,
             shadow: crate::shadow::Cascades::uniforms(frame.unit_shadows.as_ref()),
@@ -1273,7 +1957,8 @@ impl ParticleRenderer {
             self.ensure_half(gpu, slot, frame.extent).context("particle targets")?;
         }
         if self.blend == ParticleBlend::Packets && self.active[slot] {
-            self.ensure_packets(gpu, slot, frame.extent).context("particle packet targets")?;
+            self.ensure_packets(gpu, slot, frame.extent)
+                .context("particle packet targets")?;
         }
         Ok(())
     }
@@ -1296,8 +1981,22 @@ impl ParticleRenderer {
             unsafe { device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory)) };
         };
         unsafe {
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[ctx.slot]], &[]);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 2, &[self.light_sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[self.sets[ctx.slot]],
+                &[],
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                2,
+                &[self.light_sets[ctx.slot]],
+                &[],
+            );
             // Spawn (its first invocation also zeroes the instance count).
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.spawn);
             device.cmd_dispatch(cmd, total.div_ceil(64).max(1), 1, 1);
@@ -1314,7 +2013,13 @@ impl ParticleRenderer {
             let groups = Self::sort_groups(self.capacity);
             for pass in 0..4u32 {
                 let push = [pass * 8, pass & 1];
-                device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, pipeline::push_bytes(&push));
+                device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    pipeline::push_bytes(&push),
+                );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.histogram);
                 device.cmd_dispatch(cmd, groups, 1, 1);
                 barrier();
@@ -1340,12 +2045,45 @@ impl ParticleRenderer {
         let side = ae_render_abi::module::PARTICLE_SHADOW_HEIGHT;
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.caster);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.caster_layout, 0, &[self.sets[ctx.slot]], &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.caster_layout,
+                0,
+                &[self.sets[ctx.slot]],
+                &[],
+            );
             for k in 0..crate::shadow::CASCADES as u32 {
-                let viewport = vk::Viewport { x: (k * side) as f32, y: 0.0, width: side as f32, height: side as f32, min_depth: 0.0, max_depth: 1.0 };
+                let viewport = vk::Viewport {
+                    x: (k * side) as f32,
+                    y: 0.0,
+                    width: side as f32,
+                    height: side as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
-                device.cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: vk::Offset2D { x: (k * side) as i32, y: 0 }, extent: vk::Extent2D { width: side, height: side } }]);
-                device.cmd_push_constants(cmd, self.caster_layout, vk::ShaderStageFlags::VERTEX, 0, &k.to_le_bytes());
+                device.cmd_set_scissor(
+                    cmd,
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: (k * side) as i32,
+                            y: 0,
+                        },
+                        extent: vk::Extent2D {
+                            width: side,
+                            height: side,
+                        },
+                    }],
+                );
+                device.cmd_push_constants(
+                    cmd,
+                    self.caster_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    &k.to_le_bytes(),
+                );
                 device.cmd_draw_indirect(cmd, self.indirect.buffer, CASTER_DRAW, 1, 0);
             }
         }
@@ -1364,26 +2102,55 @@ impl ParticleRenderer {
     /// own barriers), then begins a scope on `color` and `glow` again
     /// (load, store) for the composite, which the graph ends. The pass's
     /// contract stays the same at either resolution.
-    pub fn record_draw(&self, ctx: &PassContext<'_>, color: ImageBinding, depth: ImageBinding, glow: ImageBinding) -> Result<()> {
+    pub fn record_draw(
+        &self,
+        ctx: &PassContext<'_>,
+        color: ImageBinding,
+        depth: ImageBinding,
+        glow: ImageBinding,
+    ) -> Result<()> {
         if !self.active[ctx.slot] {
             return Ok(());
         }
         let (device, cmd, slot) = (ctx.device, ctx.cmd, ctx.slot);
         let depth_set = self.depth_sets[slot];
         let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
-        let full = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: depth.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+        let full = [vk::DescriptorImageInfo {
+            sampler: self.depth_sampler,
+            image_view: depth.view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
         // The slot's previous frame has completed, and nothing in this one
         // has bound these sets yet: they are idle.
-        let mut writes = vec![vk::WriteDescriptorSet::default().dst_set(depth_set).dst_binding(0).descriptor_type(image).image_info(&full)];
+        let mut writes = vec![
+            vk::WriteDescriptorSet::default()
+                .dst_set(depth_set)
+                .dst_binding(0)
+                .descriptor_type(image)
+                .image_info(&full),
+        ];
         if self.downscale > 1 {
-            writes.push(vk::WriteDescriptorSet::default().dst_set(self.composite_sets[slot]).dst_binding(2).descriptor_type(image).image_info(&full));
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.composite_sets[slot])
+                    .dst_binding(2)
+                    .descriptor_type(image)
+                    .image_info(&full),
+            );
         }
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         let packets = self.blend == ParticleBlend::Packets;
         if self.downscale == 1 && !packets {
             unsafe {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[slot], depth_set], &[]);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &[self.sets[slot], depth_set],
+                    &[],
+                );
                 device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
             }
             return Ok(());
@@ -1392,7 +2159,13 @@ impl ParticleRenderer {
         // the OIT test blends leave it black (and the composite then adds no
         // emission).
         let sorted = self.blend == ParticleBlend::Sorted || packets;
-        let color_range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let color_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
         let to_attachment = |image: vk::Image| {
             vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
@@ -1448,43 +2221,113 @@ impl ParticleRenderer {
                         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                         .load_op(load)
                         .store_op(vk::AttachmentStoreOp::STORE)
-                        .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } })
+                        .clear_value(vk::ClearValue {
+                            color: vk::ClearColorValue { float32: [0.0; 4] },
+                        })
                 })
                 .collect();
-            let area = vk::Rect2D { offset: vk::Offset2D::default(), extent };
+            let area = vk::Rect2D {
+                offset: vk::Offset2D::default(),
+                extent,
+            };
             unsafe {
-                device.cmd_begin_rendering(cmd, &vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&attachments));
-                device.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 }]);
+                device.cmd_begin_rendering(
+                    cmd,
+                    &vk::RenderingInfo::default()
+                        .render_area(area)
+                        .layer_count(1)
+                        .color_attachments(&attachments),
+                );
+                device.cmd_set_viewport(
+                    cmd,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: extent.width as f32,
+                        height: extent.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
                 device.cmd_set_scissor(cmd, 0, &[area]);
             }
         };
-        let barrier = |barriers: &[vk::ImageMemoryBarrier2]| unsafe { device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(barriers)) };
-        let buffer_barrier = |buffer: vk::Buffer, src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
-            let barriers = [vk::BufferMemoryBarrier2::default().src_stage_mask(src.0).src_access_mask(src.1).dst_stage_mask(dst.0).dst_access_mask(dst.1).buffer(buffer).offset(0).size(vk::WHOLE_SIZE)];
-            unsafe { device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().buffer_memory_barriers(&barriers)) };
+        let barrier = |barriers: &[vk::ImageMemoryBarrier2]| unsafe {
+            device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(barriers))
         };
-        let fragment_read = (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
+        let buffer_barrier = |buffer: vk::Buffer,
+                              src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                              dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+            let barriers = [vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(src.0)
+                .src_access_mask(src.1)
+                .dst_stage_mask(dst.0)
+                .dst_access_mask(dst.1)
+                .buffer(buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)];
+            unsafe {
+                device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().buffer_memory_barriers(&barriers))
+            };
+        };
+        let fragment_read = (
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            vk::AccessFlags2::SHADER_STORAGE_READ,
+        );
         let half_sets = [self.half_sets[slot]];
         let draw_particles = |pipeline: vk::Pipeline| unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 1, &half_sets, &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &half_sets,
+                &[],
+            );
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
         };
         let fullscreen = |pipeline: vk::Pipeline| unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 1, &half_sets, &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                1,
+                &half_sets,
+                &[],
+            );
             device.cmd_draw(cmd, 3, 1, 0, 0);
         };
         // Packets at full resolution: there is no half target, so the scene's
         // depth is the blend's, and the composite is one to one. (The half
         // path below shares the same compute.)
         if self.downscale == 1 {
-            let target = self.packets[slot].as_ref().context("particle packet targets not made (write_frame)")?;
-            let used = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: depth.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+            let target = self.packets[slot]
+                .as_ref()
+                .context("particle packet targets not made (write_frame)")?;
+            let used = [vk::DescriptorImageInfo {
+                sampler: self.depth_sampler,
+                image_view: depth.view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }];
             let writes = [
-                vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&used),
-                vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(1).descriptor_type(image).image_info(&used),
-                vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(2).descriptor_type(image).image_info(&used),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.packet_sets[slot])
+                    .dst_binding(0)
+                    .descriptor_type(image)
+                    .image_info(&used),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.packet_composite_sets[slot])
+                    .dst_binding(1)
+                    .descriptor_type(image)
+                    .image_info(&used),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.packet_composite_sets[slot])
+                    .dst_binding(2)
+                    .descriptor_type(image)
+                    .image_info(&used),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
             let to_general = |image: vk::Image| {
@@ -1509,7 +2352,14 @@ impl ParticleRenderer {
                     .image(image)
                     .subresource_range(color_range)
             };
-            let push = [target.extent.width, target.extent.height, target.bin_size, target.bins_x, target.summary_words, target.mask_words];
+            let push = [
+                target.extent.width,
+                target.extent.height,
+                target.bin_size,
+                target.bins_x,
+                target.summary_words,
+                target.mask_words,
+            ];
             unsafe {
                 device.cmd_end_rendering(cmd);
                 // The graph made the scene's depth readable by the fragment
@@ -1517,7 +2367,11 @@ impl ParticleRenderer {
                 // the graph's barrier (its second scope is the fragment
                 // stage), the depth writes become visible to compute.
                 let depth_to_compute = [vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                    .src_stage_mask(
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER
+                            | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    )
                     .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
                     .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                     .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)];
@@ -1533,9 +2387,26 @@ impl ParticleRenderer {
                     .offset(0)
                     .size(vk::WHOLE_SIZE)];
                 device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().buffer_memory_barriers(&clear));
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_pipeline_layout, 0, &[self.sets[slot], self.packet_sets[slot]], &[]);
-                device.cmd_push_constants(cmd, self.packet_pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, pipeline::slice_bytes(&push));
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_bin.context("packet bin pipeline")?);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.packet_pipeline_layout,
+                    0,
+                    &[self.sets[slot], self.packet_sets[slot]],
+                    &[],
+                );
+                device.cmd_push_constants(
+                    cmd,
+                    self.packet_pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    pipeline::slice_bytes(&push),
+                );
+                device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.packet_bin.context("packet bin pipeline")?,
+                );
                 device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
                 let compute = [vk::MemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -1543,15 +2414,29 @@ impl ParticleRenderer {
                     .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                     .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
                 device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&compute));
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_blend.context("packet blend pipeline")?);
-                device.cmd_dispatch(cmd, target.extent.width.div_ceil(16), target.extent.height.div_ceil(16), 1);
-                barrier(&[to_sampled_general(target.color.image), to_sampled_general(target.glow.image)]);
+                device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.packet_blend.context("packet blend pipeline")?,
+                );
+                device.cmd_dispatch(
+                    cmd,
+                    target.extent.width.div_ceil(16),
+                    target.extent.height.div_ceil(16),
+                    1,
+                );
+                barrier(&[
+                    to_sampled_general(target.color.image),
+                    to_sampled_general(target.glow.image),
+                ]);
                 let scene = |image: vk::Image, range: vk::ImageSubresourceRange| {
                     vk::ImageMemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                         .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                         .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                        .dst_access_mask(
+                            vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                        )
                         .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                         .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                         .image(image)
@@ -1559,13 +2444,26 @@ impl ParticleRenderer {
                 };
                 barrier(&[scene(color.image, color.range), scene(glow.image, glow.range)]);
                 begin(&[color.view, glow.view], color.extent, vk::AttachmentLoadOp::LOAD);
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.packet_composite.context("packet composite pipeline")?);
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.packet_composite_sets[slot]], &[]);
+                device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.packet_composite.context("packet composite pipeline")?,
+                );
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.composite_pipeline_layout,
+                    0,
+                    &[self.sets[slot], self.packet_composite_sets[slot]],
+                    &[],
+                );
                 device.cmd_draw(cmd, 3, 1, 0, 0);
             }
             return Ok(());
         }
-        let half = self.half[slot].as_ref().context("particle targets not made (write_frame)")?;
+        let half = self.half[slot]
+            .as_ref()
+            .context("particle targets not made (write_frame)")?;
         unsafe {
             device.cmd_end_rendering(cmd);
             if self.blend.lists() {
@@ -1577,14 +2475,35 @@ impl ParticleRenderer {
             // The scene depth's farthest per 2x2 block; the glow joins the
             // sorted draw as its second attachment (or is cleared black for
             // the test-only blends that do not write it).
-            barrier(&[to_attachment(half.depth.image), to_attachment(half.color.image), if sorted { to_attachment(half.glow.image) } else { to_transfer(half.glow.image) }]);
+            barrier(&[
+                to_attachment(half.depth.image),
+                to_attachment(half.color.image),
+                if sorted {
+                    to_attachment(half.glow.image)
+                } else {
+                    to_transfer(half.glow.image)
+                },
+            ]);
             if !sorted {
                 let black = vk::ClearColorValue { float32: [0.0; 4] };
-                device.cmd_clear_color_image(cmd, half.glow.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[color_range]);
+                device.cmd_clear_color_image(
+                    cmd,
+                    half.glow.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &black,
+                    &[color_range],
+                );
             }
             begin(&[half.depth.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.depth_down);
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.sets[slot], depth_set], &[]);
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.sets[slot], depth_set],
+                &[],
+            );
             device.cmd_draw(cmd, 3, 1, 0, 0);
             device.cmd_end_rendering(cmd);
             match self.blend {
@@ -1592,19 +2511,39 @@ impl ParticleRenderer {
                     // The particles, softened against it, into cleared
                     // targets: the colour and their per-particle glow.
                     barrier(&[to_sampled(half.depth.image)]);
-                    begin(&[half.color.view, half.glow.view], half.extent, vk::AttachmentLoadOp::CLEAR);
+                    begin(
+                        &[half.color.view, half.glow.view],
+                        half.extent,
+                        vk::AttachmentLoadOp::CLEAR,
+                    );
                     draw_particles(self.draw);
                     device.cmd_end_rendering(cmd);
                 }
                 ParticleBlend::Moments => {
                     // The depth range the simulation found, for the warp.
-                    buffer_barrier(self.indirect.buffer, (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), fragment_read);
+                    buffer_barrier(
+                        self.indirect.buffer,
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        fragment_read,
+                    );
                     let m = &half.moments;
-                    barrier(&[to_sampled(half.depth.image), to_attachment(m[0].image), to_attachment(m[1].image)]);
+                    barrier(&[
+                        to_sampled(half.depth.image),
+                        to_attachment(m[0].image),
+                        to_attachment(m[1].image),
+                    ]);
                     begin(&[m[0].view, m[1].view], half.extent, vk::AttachmentLoadOp::CLEAR);
                     draw_particles(self.oit[0]);
                     device.cmd_end_rendering(cmd);
-                    barrier(&[to_sampled(m[0].image), to_sampled(m[1].image), to_attachment(m[2].image), to_attachment(m[3].image)]);
+                    barrier(&[
+                        to_sampled(m[0].image),
+                        to_sampled(m[1].image),
+                        to_attachment(m[2].image),
+                        to_attachment(m[3].image),
+                    ]);
                     begin(&[m[2].view, m[3].view], half.extent, vk::AttachmentLoadOp::CLEAR);
                     draw_particles(self.oit[1]);
                     device.cmd_end_rendering(cmd);
@@ -1619,7 +2558,11 @@ impl ParticleRenderer {
                     begin(&[m[0].view], half.extent, vk::AttachmentLoadOp::CLEAR);
                     draw_particles(self.oit[0]);
                     device.cmd_end_rendering(cmd);
-                    let slices: Vec<_> = m[1..].iter().map(|s| to_attachment(s.image)).chain([to_sampled(m[0].image)]).collect();
+                    let slices: Vec<_> = m[1..]
+                        .iter()
+                        .map(|s| to_attachment(s.image))
+                        .chain([to_sampled(m[0].image)])
+                        .collect();
                     barrier(&slices);
                     let views: Vec<_> = m[1..].iter().map(|s| s.view).collect();
                     begin(&views, half.extent, vk::AttachmentLoadOp::CLEAR);
@@ -1632,38 +2575,106 @@ impl ParticleRenderer {
                     device.cmd_end_rendering(cmd);
                 }
                 ParticleBlend::Froxels => {
-                    let memory = |src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
-                        let barriers = [vk::MemoryBarrier2::default().src_stage_mask(src.0).src_access_mask(src.1).dst_stage_mask(dst.0).dst_access_mask(dst.1)];
+                    let memory = |src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+                                  dst: (vk::PipelineStageFlags2, vk::AccessFlags2)| {
+                        let barriers = [vk::MemoryBarrier2::default()
+                            .src_stage_mask(src.0)
+                            .src_access_mask(src.1)
+                            .dst_stage_mask(dst.0)
+                            .dst_access_mask(dst.1)];
                         device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barriers));
                     };
-                    let compute_rw = (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
+                    let compute_rw = (
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                    );
                     // The simulation's keys and range, the cleared sums.
-                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE), compute_rw);
-                    device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &[self.sets[slot], self.half_sets[slot]], &[]);
+                    memory(
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::CLEAR,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+                        ),
+                        compute_rw,
+                    );
+                    device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.pipeline_layout,
+                        0,
+                        &[self.sets[slot], self.half_sets[slot]],
+                        &[],
+                    );
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[0]);
                     device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
-                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), compute_rw);
-                    let indirect = (vk::PipelineStageFlags2::DRAW_INDIRECT | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::INDIRECT_COMMAND_READ | vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
-                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), indirect);
+                    memory(
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        compute_rw,
+                    );
+                    let indirect = (
+                        vk::PipelineStageFlags2::DRAW_INDIRECT | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::INDIRECT_COMMAND_READ
+                            | vk::AccessFlags2::SHADER_STORAGE_READ
+                            | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                    );
+                    memory(
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        indirect,
+                    );
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[1]);
                     device.cmd_dispatch_indirect(cmd, half.reference[0].buffer, 0);
-                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), compute_rw);
+                    memory(
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        compute_rw,
+                    );
                     let columns = froxel_grid(half.extent);
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.oit[2]);
                     device.cmd_dispatch(cmd, columns.0.div_ceil(8), columns.1.div_ceil(8), 1);
-                    memory((vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), fragment_read);
+                    memory(
+                        (
+                            vk::PipelineStageFlags2::COMPUTE_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        fragment_read,
+                    );
                     barrier(&[to_sampled(half.depth.image)]);
                     begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
                     fullscreen(self.oit[3]);
                     device.cmd_end_rendering(cmd);
                 }
                 ParticleBlend::Packets => {
-                    let target = self.packets[slot].as_ref().context("particle packet targets not made (write_frame)")?;
-                    let used = [vk::DescriptorImageInfo { sampler: self.depth_sampler, image_view: half.depth.view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }];
+                    let target = self.packets[slot]
+                        .as_ref()
+                        .context("particle packet targets not made (write_frame)")?;
+                    let used = [vk::DescriptorImageInfo {
+                        sampler: self.depth_sampler,
+                        image_view: half.depth.view,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    }];
                     let writes = [
-                        vk::WriteDescriptorSet::default().dst_set(self.packet_sets[slot]).dst_binding(0).descriptor_type(image).image_info(&used),
-                        vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(1).descriptor_type(image).image_info(&used),
-                        vk::WriteDescriptorSet::default().dst_set(self.packet_composite_sets[slot]).dst_binding(2).descriptor_type(image).image_info(&full),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.packet_sets[slot])
+                            .dst_binding(0)
+                            .descriptor_type(image)
+                            .image_info(&used),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.packet_composite_sets[slot])
+                            .dst_binding(1)
+                            .descriptor_type(image)
+                            .image_info(&used),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(self.packet_composite_sets[slot])
+                            .dst_binding(2)
+                            .descriptor_type(image)
+                            .image_info(&full),
                     ];
                     device.update_descriptor_sets(&writes, &[]);
                     let to_general = |image: vk::Image| {
@@ -1688,10 +2699,19 @@ impl ParticleRenderer {
                             .image(image)
                             .subresource_range(color_range)
                     };
-                    let push = [target.extent.width, target.extent.height, target.bin_size, target.bins_x, target.summary_words, target.mask_words];
+                    let push = [
+                        target.extent.width,
+                        target.extent.height,
+                        target.bin_size,
+                        target.bins_x,
+                        target.summary_words,
+                        target.mask_words,
+                    ];
                     // The downsample left the half depth an attachment; the
                     // blend (compute) and the composite sample it.
-                    barrier(&[to_sampled(half.depth.image).dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER)]);
+                    barrier(&[to_sampled(half.depth.image).dst_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    )]);
                     barrier(&[to_general(target.color.image), to_general(target.glow.image)]);
                     device.cmd_fill_buffer(cmd, target.masks.buffer, 0, vk::WHOLE_SIZE, 0);
                     let clear = [vk::BufferMemoryBarrier2::default()
@@ -1703,30 +2723,82 @@ impl ParticleRenderer {
                         .offset(0)
                         .size(vk::WHOLE_SIZE)];
                     device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().buffer_memory_barriers(&clear));
-                    device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_pipeline_layout, 0, &[self.sets[slot], self.packet_sets[slot]], &[]);
-                    device.cmd_push_constants(cmd, self.packet_pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, pipeline::slice_bytes(&push));
-                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_bin.context("packet bin pipeline")?);
+                    device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.packet_pipeline_layout,
+                        0,
+                        &[self.sets[slot], self.packet_sets[slot]],
+                        &[],
+                    );
+                    device.cmd_push_constants(
+                        cmd,
+                        self.packet_pipeline_layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        pipeline::slice_bytes(&push),
+                    );
+                    device.cmd_bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.packet_bin.context("packet bin pipeline")?,
+                    );
                     device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
                     let compute = [vk::MemoryBarrier2::default()
                         .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                         .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
                         .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
+                        .dst_access_mask(
+                            vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        )];
                     device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&compute));
-                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.packet_blend.context("packet blend pipeline")?);
-                    device.cmd_dispatch(cmd, target.extent.width.div_ceil(16), target.extent.height.div_ceil(16), 1);
-                    barrier(&[to_sampled_general(target.color.image), to_sampled_general(target.glow.image)]);
+                    device.cmd_bind_pipeline(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.packet_blend.context("packet blend pipeline")?,
+                    );
+                    device.cmd_dispatch(
+                        cmd,
+                        target.extent.width.div_ceil(16),
+                        target.extent.height.div_ceil(16),
+                        1,
+                    );
+                    barrier(&[
+                        to_sampled_general(target.color.image),
+                        to_sampled_general(target.glow.image),
+                    ]);
                 }
                 ParticleBlend::Reference | ParticleBlend::Volume => {
                     let (counts, fragments) = (half.reference[0].buffer, half.reference[1].buffer);
-                    let stores = (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
-                    buffer_barrier(counts, (vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE), stores);
+                    let stores = (
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                        vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                    );
+                    buffer_barrier(
+                        counts,
+                        (vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE),
+                        stores,
+                    );
                     barrier(&[to_sampled(half.depth.image)]);
                     begin(&[], half.extent, vk::AttachmentLoadOp::DONT_CARE);
                     draw_particles(self.oit[0]);
                     device.cmd_end_rendering(cmd);
-                    buffer_barrier(counts, (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), fragment_read);
-                    buffer_barrier(fragments, (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE), fragment_read);
+                    buffer_barrier(
+                        counts,
+                        (
+                            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        fragment_read,
+                    );
+                    buffer_barrier(
+                        fragments,
+                        (
+                            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                        ),
+                        fragment_read,
+                    );
                     begin(&[half.color.view], half.extent, vk::AttachmentLoadOp::DONT_CARE);
                     fullscreen(self.oit[1]);
                     device.cmd_end_rendering(cmd);
@@ -1750,13 +2822,40 @@ impl ParticleRenderer {
             if packets {
                 barrier(&[scene(color.image, color.range), scene(glow.image, glow.range)]);
                 begin(&[color.view, glow.view], color.extent, vk::AttachmentLoadOp::LOAD);
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.packet_composite.context("packet composite pipeline")?);
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.packet_composite_sets[slot]], &[]);
+                device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.packet_composite.context("packet composite pipeline")?,
+                );
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.composite_pipeline_layout,
+                    0,
+                    &[self.sets[slot], self.packet_composite_sets[slot]],
+                    &[],
+                );
             } else {
-                barrier(&[to_sampled(half.color.image), if sorted { to_sampled(half.glow.image) } else { to_sampled_transfer(half.glow.image) }, scene(color.image, color.range), scene(glow.image, glow.range)]);
+                barrier(&[
+                    to_sampled(half.color.image),
+                    if sorted {
+                        to_sampled(half.glow.image)
+                    } else {
+                        to_sampled_transfer(half.glow.image)
+                    },
+                    scene(color.image, color.range),
+                    scene(glow.image, glow.range),
+                ]);
                 begin(&[color.view, glow.view], color.extent, vk::AttachmentLoadOp::LOAD);
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite);
-                device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, self.composite_pipeline_layout, 0, &[self.sets[slot], self.composite_sets[slot]], &[]);
+                device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.composite_pipeline_layout,
+                    0,
+                    &[self.sets[slot], self.composite_sets[slot]],
+                    &[],
+                );
             }
             device.cmd_draw(cmd, 3, 1, 0, 0);
         }
@@ -1766,12 +2865,21 @@ impl ParticleRenderer {
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
-            for &p in [self.spawn, self.sim, self.histogram, self.scatter, self.draw, self.depth_down, self.composite, self.caster]
-                .iter()
-                .chain(&self.oit)
-                .chain(self.packet_bin.iter())
-                .chain(self.packet_blend.iter())
-                .chain(self.packet_composite.iter())
+            for &p in [
+                self.spawn,
+                self.sim,
+                self.histogram,
+                self.scatter,
+                self.draw,
+                self.depth_down,
+                self.composite,
+                self.caster,
+            ]
+            .iter()
+            .chain(&self.oit)
+            .chain(self.packet_bin.iter())
+            .chain(self.packet_blend.iter())
+            .chain(self.packet_composite.iter())
             {
                 device.destroy_pipeline(p, None);
             }
@@ -1797,7 +2905,13 @@ impl ParticleRenderer {
         for b in self.ubos.iter_mut().chain(self.spawns.iter_mut()) {
             b.destroy(gpu);
         }
-        for b in [&mut self.state, &mut self.keys, &mut self.keys_tmp, &mut self.histograms, &mut self.indirect] {
+        for b in [
+            &mut self.state,
+            &mut self.keys,
+            &mut self.keys_tmp,
+            &mut self.histograms,
+            &mut self.indirect,
+        ] {
             b.destroy(gpu);
         }
     }
@@ -1808,7 +2922,9 @@ impl ParticleRenderer {
 /// billows.
 fn puff_texels() -> Vec<u8> {
     fn hash(x: i32, y: i32, octave: i32) -> f32 {
-        let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
+        let mut h = (x as u32).wrapping_mul(0x8da6_b343)
+            ^ (y as u32).wrapping_mul(0xd816_3841)
+            ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
         h ^= h >> 13;
         h = h.wrapping_mul(0x5bd1_e995);
         h ^= h >> 15;
@@ -1866,7 +2982,10 @@ mod tests {
         let end = WorkingSpace::Bt709.from_gamut(fire.gamut, [fire.color_end[0], fire.color_end[1], fire.color_end[2]]);
         assert!(end[2] < -0.01, "the fire's end is outside BT.709: {end:?}");
         // Luminance is kept by the conversion (the tint's scale).
-        let (wide_y, narrow_y) = (Gamut::P3.luminance([fire.color_end[0], fire.color_end[1], fire.color_end[2]]), Gamut::Bt709.luminance(end));
+        let (wide_y, narrow_y) = (
+            Gamut::P3.luminance([fire.color_end[0], fire.color_end[1], fire.color_end[2]]),
+            Gamut::Bt709.luminance(end),
+        );
         assert!((wide_y - narrow_y).abs() < 1e-3, "{wide_y} vs {narrow_y}");
         // The burst's light tint is unit luminance in its own gamut.
         let light = fire.light.unwrap().color;
@@ -1888,7 +3007,11 @@ mod tests {
                 // catalogue (kept: it is the SDR frame's look); every other
                 // tint is unit luminance.
                 let tolerance = if (*name, k) == ("flash", 1) { 0.025 } else { 1e-3 };
-                assert!((y - 1.0).abs() < tolerance, "{name}: {c:?} has luminance {y} in {:?}", def.gamut);
+                assert!(
+                    (y - 1.0).abs() < tolerance,
+                    "{name}: {c:?} has luminance {y} in {:?}",
+                    def.gamut
+                );
             }
         }
     }

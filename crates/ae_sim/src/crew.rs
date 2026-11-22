@@ -56,8 +56,26 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn new(systems: Vec<BatchSystem>, jobs: Vec<Job>, tick: u64, param: u64, ids: Arc<IdMap>, memory: GuestMemory, spatial: Option<Arc<SpatialIndex>>) -> Self {
-        Self { systems, jobs, tick, param, ids, memory, spatial, next: AtomicUsize::new(0), failed: AtomicBool::new(false) }
+    pub fn new(
+        systems: Vec<BatchSystem>,
+        jobs: Vec<Job>,
+        tick: u64,
+        param: u64,
+        ids: Arc<IdMap>,
+        memory: GuestMemory,
+        spatial: Option<Arc<SpatialIndex>>,
+    ) -> Self {
+        Self {
+            systems,
+            jobs,
+            tick,
+            param,
+            ids,
+            memory,
+            spatial,
+            next: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+        }
     }
 }
 
@@ -85,7 +103,10 @@ pub struct Worker {
 
 impl Worker {
     pub fn run(&mut self, batch: &Batch) -> WorkerOut {
-        let mut out = WorkerOut { fuel: vec![0; batch.systems.len()], ..Default::default() };
+        let mut out = WorkerOut {
+            fuel: vec![0; batch.systems.len()],
+            ..Default::default()
+        };
         let ctx = self.instance.store.data_mut();
         ctx.ids = Some(batch.ids.clone());
         ctx.spatial = batch.spatial.clone();
@@ -105,7 +126,9 @@ impl Worker {
             if batch.failed.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let Some(job) = batch.jobs.get(batch.next.fetch_add(1, Ordering::Relaxed)) else { return Ok(()) };
+            let Some(job) = batch.jobs.get(batch.next.fetch_add(1, Ordering::Relaxed)) else {
+                return Ok(());
+            };
             let sys = &batch.systems[job.system];
             let _zone = ae_profile::zone_dyn(&sys.name);
             for range in &sys.ranges[job.first..job.end] {
@@ -132,13 +155,23 @@ impl Worker {
                 unsafe {
                     if range.count > 0 {
                         // flecs keeps entity ids on the host heap; the guest gets a copy.
-                        std::ptr::copy_nonoverlapping(range.entities, batch.memory.ptr(self.ids_buf).cast::<u64>(), range.count as usize);
+                        std::ptr::copy_nonoverlapping(
+                            range.entities,
+                            batch.memory.ptr(self.ids_buf).cast::<u64>(),
+                            range.count as usize,
+                        );
                     }
                     batch.memory.ptr(self.desc).cast::<RunDesc>().write(desc);
                 }
                 self.instance.store.data_mut().commands.begin(sys.position, range.index);
-                let before = if self.metered { self.instance.store.get_fuel()? } else { 0 };
-                self.funcs[sys.module].call(&mut self.instance.store, self.desc).map_err(|e| anyhow!("system trapped: {e:?}"))?;
+                let before = if self.metered {
+                    self.instance.store.get_fuel()?
+                } else {
+                    0
+                };
+                self.funcs[sys.module]
+                    .call(&mut self.instance.store, self.desc)
+                    .map_err(|e| anyhow!("system trapped: {e:?}"))?;
                 if self.metered {
                     out.fuel[job.system] += before - self.instance.store.get_fuel()?;
                 }
@@ -192,40 +225,51 @@ impl Crew {
         let mut mailboxes = Vec::new();
         let mut threads = Vec::new();
         for (i, mut worker) in rest.into_iter().enumerate() {
-            let mailbox = Arc::new(Mailbox { slot: Mutex::new(Slot::Idle), cv: Condvar::new(), posted: AtomicBool::new(false), finished: AtomicBool::new(false) });
+            let mailbox = Arc::new(Mailbox {
+                slot: Mutex::new(Slot::Idle),
+                cv: Condvar::new(),
+                posted: AtomicBool::new(false),
+                finished: AtomicBool::new(false),
+            });
             let mb = mailbox.clone();
-            let handle = std::thread::Builder::new().name(format!("sim-worker-{}", i + 1)).spawn(move || {
-                ae_profile::set_thread_name(&format!("sim-worker-{}", i + 1));
-                loop {
-                    spin_until(&mb.posted);
-                    let batch = {
-                        let mut slot = mb.slot.lock().unwrap();
-                        loop {
-                            match std::mem::replace(&mut *slot, Slot::Idle) {
-                                Slot::Work(batch) => {
-                                    *slot = Slot::Running;
-                                    mb.posted.store(false, Ordering::Release);
-                                    break batch;
-                                }
-                                Slot::Shutdown => return,
-                                other => {
-                                    *slot = other;
-                                    slot = mb.cv.wait(slot).unwrap();
+            let handle = std::thread::Builder::new()
+                .name(format!("sim-worker-{}", i + 1))
+                .spawn(move || {
+                    ae_profile::set_thread_name(&format!("sim-worker-{}", i + 1));
+                    loop {
+                        spin_until(&mb.posted);
+                        let batch = {
+                            let mut slot = mb.slot.lock().unwrap();
+                            loop {
+                                match std::mem::replace(&mut *slot, Slot::Idle) {
+                                    Slot::Work(batch) => {
+                                        *slot = Slot::Running;
+                                        mb.posted.store(false, Ordering::Release);
+                                        break batch;
+                                    }
+                                    Slot::Shutdown => return,
+                                    other => {
+                                        *slot = other;
+                                        slot = mb.cv.wait(slot).unwrap();
+                                    }
                                 }
                             }
-                        }
-                    };
-                    let out = worker.run(&batch);
-                    drop(batch);
-                    *mb.slot.lock().unwrap() = Slot::Done(out);
-                    mb.finished.store(true, Ordering::Release);
-                    mb.cv.notify_all();
-                }
-            })?;
+                        };
+                        let out = worker.run(&batch);
+                        drop(batch);
+                        *mb.slot.lock().unwrap() = Slot::Done(out);
+                        mb.finished.store(true, Ordering::Release);
+                        mb.cv.notify_all();
+                    }
+                })?;
             mailboxes.push(mailbox);
             threads.push(handle);
         }
-        Ok(Self { main, mailboxes, threads })
+        Ok(Self {
+            main,
+            mailboxes,
+            threads,
+        })
     }
 
     /// Most workers a batch can use.
@@ -242,7 +286,12 @@ impl Crew {
 
     /// [`Self::run`], but the caller first runs `first` while the helpers
     /// start on the batch, then joins them on the jobs left.
-    pub fn run_beside<R>(&mut self, batch: Arc<Batch>, active: usize, first: impl FnOnce() -> R) -> (Vec<WorkerOut>, R) {
+    pub fn run_beside<R>(
+        &mut self,
+        batch: Arc<Batch>,
+        active: usize,
+        first: impl FnOnce() -> R,
+    ) -> (Vec<WorkerOut>, R) {
         let helpers = active.clamp(1, self.size()).min(batch.jobs.len().max(1)) - 1;
         for mb in &self.mailboxes[..helpers] {
             *mb.slot.lock().unwrap() = Slot::Work(batch.clone());

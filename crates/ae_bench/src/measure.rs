@@ -20,8 +20,16 @@ pub struct Budget {
 }
 
 impl Budget {
-    pub const QUICK: Budget = Budget { min_samples: 5, max_samples: 200, target: Duration::from_millis(300) };
-    pub const FULL: Budget = Budget { min_samples: 15, max_samples: 2000, target: Duration::from_secs(2) };
+    pub const QUICK: Budget = Budget {
+        min_samples: 5,
+        max_samples: 200,
+        target: Duration::from_millis(300),
+    };
+    pub const FULL: Budget = Budget {
+        min_samples: 15,
+        max_samples: 2000,
+        target: Duration::from_secs(2),
+    };
 }
 
 /// Time `f` repeatedly (after one warm-up call) and summarise the samples.
@@ -30,7 +38,9 @@ pub fn time<R>(budget: Budget, mut f: impl FnMut() -> R) -> Sample {
     std::hint::black_box(f());
     let mut samples = Vec::with_capacity(budget.min_samples);
     let started = Instant::now();
-    while samples.len() < budget.min_samples || (samples.len() < budget.max_samples && started.elapsed() < budget.target) {
+    while samples.len() < budget.min_samples
+        || (samples.len() < budget.max_samples && started.elapsed() < budget.target)
+    {
         let t = Instant::now();
         std::hint::black_box(f());
         samples.push(t.elapsed().as_nanos() as f64);
@@ -43,7 +53,16 @@ pub fn summarise(samples: &mut [f64]) -> Sample {
     samples.sort_by(|a, b| a.total_cmp(b));
     let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
     let median = at(0.5);
-    Sample { median_ns: median, min_ns: samples[0], spread: if median > 0.0 { (at(0.9) - at(0.1)) / median } else { 0.0 }, samples: samples.len() }
+    Sample {
+        median_ns: median,
+        min_ns: samples[0],
+        spread: if median > 0.0 {
+            (at(0.9) - at(0.1)) / median
+        } else {
+            0.0
+        },
+        samples: samples.len(),
+    }
 }
 
 #[cfg(test)]

@@ -30,7 +30,9 @@ impl Default for Facing {
 }
 
 impl Facing {
-    pub const IDENTITY: Facing = Facing { rot: [0.0, 0.0, 0.0, 1.0] };
+    pub const IDENTITY: Facing = Facing {
+        rot: [0.0, 0.0, 0.0, 1.0],
+    };
 
     /// Upright, facing ground direction `(dx, dy)` (nav; need not be unit
     /// length; zero: [`Facing::IDENTITY`]).
@@ -42,18 +44,24 @@ impl Facing {
         // The shortest turn from +x to (dx, 0, dy), about up.
         let (c, s) = (dx / len, dy / len);
         if c <= -1.0 + 1e-6 {
-            return Facing { rot: [0.0, 1.0, 0.0, 0.0] };
+            return Facing {
+                rot: [0.0, 1.0, 0.0, 0.0],
+            };
         }
         // Half-way vector: (1 + c, 0, s) normalised; the axis +x × it.
         let q = [0.0, -s, 0.0, 1.0 + c];
         let n = libm::sqrtf(q[1] * q[1] + q[3] * q[3]);
-        Facing { rot: [0.0, q[1] / n, 0.0, q[3] / n] }
+        Facing {
+            rot: [0.0, q[1] / n, 0.0, q[3] / n],
+        }
     }
 
     /// Turned further by `q` (in the unit's frame: a tilt about
     /// [`Axis::RIGHT`] is `rot · q`).
     pub fn then(self, q: [f32; 4]) -> Facing {
-        Facing { rot: qnorm(qmul(self.rot, q)) }
+        Facing {
+            rot: qnorm(qmul(self.rot, q)),
+        }
     }
 
     /// A world direction in the unit's frame (by its full orientation).
@@ -164,22 +172,47 @@ impl Anim {
         let mut input = [0u8; N + 32];
         // SAFETY: `Anim` is plain data (`repr(C)`, no padding read back).
         input[..N].copy_from_slice(unsafe { core::slice::from_raw_parts((self as *const Anim).cast::<u8>(), N) });
-        let words = [bone as u32, body.x.to_bits(), body.y.to_bits(), body.radius.to_bits(), facing.rot[0].to_bits(), facing.rot[1].to_bits(), facing.rot[2].to_bits(), facing.rot[3].to_bits()];
+        let words = [
+            bone as u32,
+            body.x.to_bits(),
+            body.y.to_bits(),
+            body.radius.to_bits(),
+            facing.rot[0].to_bits(),
+            facing.rot[1].to_bits(),
+            facing.rot[2].to_bits(),
+            facing.rot[3].to_bits(),
+        ];
         for (k, w) in words.iter().enumerate() {
             input[N + 4 * k..N + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
         }
         let mut out = [0f32; 7];
         let op = abi::name_id(abi::query::ANIM_BONE_WORLD);
-        let n = unsafe { crate::host::ae_query(op, input.as_ptr() as usize as u32, input.len() as u32, out.as_mut_ptr() as usize as u32, 28) };
+        let n = unsafe {
+            crate::host::ae_query(
+                op,
+                input.as_ptr() as usize as u32,
+                input.len() as u32,
+                out.as_mut_ptr() as usize as u32,
+                28,
+            )
+        };
         assert!(n == 28, "the engine has no animation service (`ae_query` {})", n);
-        BoneWorld { pos: [out[0], out[1], out[2]], rot: [out[3], out[4], out[5], out[6]] }
+        BoneWorld {
+            pos: [out[0], out[1], out[2]],
+            rot: [out[3], out[4], out[5], out[6]],
+        }
     }
 }
 
 fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let [ax, ay, az, aw] = a;
     let [bx, by, bz, bw] = b;
-    [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
 }
 
 fn qconj(q: [f32; 4]) -> [f32; 4] {
@@ -188,7 +221,11 @@ fn qconj(q: [f32; 4]) -> [f32; 4] {
 
 fn qnorm(q: [f32; 4]) -> [f32; 4] {
     let n = libm::sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-    if n > 0.0 { [q[0] / n, q[1] / n, q[2] / n, q[3] / n] } else { [0.0, 0.0, 0.0, 1.0] }
+    if n > 0.0 {
+        [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 /// `v` rotated by `q` (as `ae_model::anim::qrot`).

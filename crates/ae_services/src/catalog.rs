@@ -29,7 +29,12 @@ impl CatalogPlugin {
 
     /// Every component any def has, plus `Team` and `Def`.
     fn creates(&self) -> Vec<u64> {
-        let mut ids: BTreeSet<u64> = self.catalog.defs.values().flat_map(|d| d.components.iter().map(|c| c.component)).collect();
+        let mut ids: BTreeSet<u64> = self
+            .catalog
+            .defs
+            .values()
+            .flat_map(|d| d.components.iter().map(|c| c.component))
+            .collect();
         ids.extend([TEAM, DEF]);
         ids.into_iter().collect()
     }
@@ -51,7 +56,12 @@ impl HostPlugin for CatalogPlugin {
         for def in self.catalog.defs.values() {
             for c in &def.components {
                 let decl = schema.component(c.component);
-                ensure!(decl.is_some_and(|d| d.size as usize == c.bytes.len()), "def `{}`: component `{}` does not match the module's schema (resolve the catalogue against this module)", def.name, c.name);
+                ensure!(
+                    decl.is_some_and(|d| d.size as usize == c.bytes.len()),
+                    "def `{}`: component `{}` does not match the module's schema (resolve the catalogue against this module)",
+                    def.name,
+                    c.name
+                );
             }
         }
         Ok(())
@@ -62,7 +72,11 @@ impl HostPlugin for CatalogPlugin {
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 match name {
-                    "catalog_spawn" => Ok(Box::new(Spawner { catalog: self.catalog.clone(), spawned: 0, unknown: 0 })),
+                    "catalog_spawn" => Ok(Box::new(Spawner {
+                        catalog: self.catalog.clone(),
+                        spawned: 0,
+                        unknown: 0,
+                    })),
                     other => bail!("no host system `{other}` in the catalogue plugin"),
                 }
             })
@@ -86,7 +100,8 @@ impl HostSystem for Spawner {
             };
             let team = Team { ally: r.ally };
             let tag = Def { id: def.id };
-            let mut parts: Vec<(u64, Vec<u8>)> = def.components.iter().map(|c| (c.component, c.bytes.clone())).collect();
+            let mut parts: Vec<(u64, Vec<u8>)> =
+                def.components.iter().map(|c| (c.component, c.bytes.clone())).collect();
             match parts.iter_mut().find(|(id, _)| *id == BODY) {
                 Some((_, bytes)) => {
                     let mut body: Body = unsafe { bytes.as_ptr().cast::<Body>().read_unaligned() };
@@ -94,7 +109,17 @@ impl HostSystem for Spawner {
                     body.y = r.y;
                     *bytes = bytes_of(&body).to_vec();
                 }
-                None => parts.push((BODY, bytes_of(&Body { x: r.x, y: r.y, vx: 0.0, vy: 0.0, radius: 0.0 }).to_vec())),
+                None => parts.push((
+                    BODY,
+                    bytes_of(&Body {
+                        x: r.x,
+                        y: r.y,
+                        vx: 0.0,
+                        vy: 0.0,
+                        radius: 0.0,
+                    })
+                    .to_vec(),
+                )),
             }
             parts.retain(|(id, _)| *id != TEAM && *id != DEF);
             parts.push((TEAM, bytes_of(&team).to_vec()));

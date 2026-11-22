@@ -2,8 +2,8 @@
 //! no suballocation of aliased resources, §1.6).
 
 use crate::device::GpuDevice;
-use ae_framegraph::{BufferDesc, ImageDesc};
 use crate::swapchain::color_range;
+use ae_framegraph::{BufferDesc, ImageDesc};
 use anyhow::{Result, anyhow};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -45,7 +45,13 @@ impl OwnedImage {
     /// [`Self::with_view`] with image create `flags` (`MUTABLE_FORMAT` for
     /// a view of another format, as the mip generator's storage view of an
     /// sRGB image).
-    pub fn with_view_flags(gpu: &GpuDevice, desc: ImageDesc, view_type: vk::ImageViewType, flags: vk::ImageCreateFlags, name: &str) -> Result<Self> {
+    pub fn with_view_flags(
+        gpu: &GpuDevice,
+        desc: ImageDesc,
+        view_type: vk::ImageViewType,
+        flags: vk::ImageCreateFlags,
+        name: &str,
+    ) -> Result<Self> {
         let info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(vk::ImageType::TYPE_2D)
@@ -82,7 +88,10 @@ impl OwnedImage {
                 return Err(anyhow!("allocating {name}: {err}"));
             }
         };
-        unsafe { gpu.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }?;
+        unsafe {
+            gpu.device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())
+        }?;
         // With EXTENDED_USAGE the image's usage may name one its own format
         // lacks (storage on sRGB, for a view of another format); the
         // whole-image view drops storage.
@@ -149,7 +158,10 @@ impl OwnedBuffer {
                 return Err(anyhow!("allocating {name}: {err}"));
             }
         };
-        unsafe { gpu.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+        unsafe {
+            gpu.device
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+        }?;
         gpu.set_name(buffer, name);
         Ok(Self {
             buffer,

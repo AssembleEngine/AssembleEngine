@@ -36,7 +36,10 @@ pub const MAX_COMMAND_BYTES: usize = 4096;
 
 impl TickBundle {
     pub fn new(tick: u64) -> Self {
-        Self { tick, commands: Vec::new() }
+        Self {
+            tick,
+            commands: Vec::new(),
+        }
     }
 
     /// `tick: u64, count: u32`, then per command `player: u32, stream: u64,
@@ -70,7 +73,11 @@ impl TickBundle {
             let stream = u64::from_le_bytes(take(8)?.try_into().unwrap());
             let len = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
             ensure!(len <= MAX_COMMAND_BYTES, "a command of {len} bytes");
-            commands.push(Command { player, stream, bytes: take(len)?.to_vec() });
+            commands.push(Command {
+                player,
+                stream,
+                bytes: take(len)?.to_vec(),
+            });
         }
         Ok((Self { tick, commands }, at))
     }
@@ -82,7 +89,21 @@ mod tests {
 
     #[test]
     fn bundles_round_trip_and_truncation_is_an_error() {
-        let b = TickBundle { tick: 42, commands: vec![Command { player: 1, stream: 7, bytes: vec![1, 2, 3] }, Command { player: 0, stream: 9, bytes: vec![] }] };
+        let b = TickBundle {
+            tick: 42,
+            commands: vec![
+                Command {
+                    player: 1,
+                    stream: 7,
+                    bytes: vec![1, 2, 3],
+                },
+                Command {
+                    player: 0,
+                    stream: 9,
+                    bytes: vec![],
+                },
+            ],
+        };
         let mut bytes = Vec::new();
         b.encode(&mut bytes);
         bytes.extend_from_slice(&[0xFF; 3]);

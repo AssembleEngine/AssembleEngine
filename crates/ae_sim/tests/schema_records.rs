@@ -47,7 +47,18 @@ fn record(kind: u32, body: &[u8]) -> Vec<u8> {
 
 fn system(name: &str, terms: &[(u64, u32)], emits: &[u64], reads: &[u64], cadence: (u32, u32, u32)) -> Vec<u8> {
     let mut b = Vec::new();
-    for v in [abi::MODE_SERIAL, cadence.0, cadence.1, cadence.2, terms.len() as u32, emits.len() as u32, reads.len() as u32, 0, name.len() as u32, 0] {
+    for v in [
+        abi::MODE_SERIAL,
+        cadence.0,
+        cadence.1,
+        cadence.2,
+        terms.len() as u32,
+        emits.len() as u32,
+        reads.len() as u32,
+        0,
+        name.len() as u32,
+        0,
+    ] {
         b.extend_from_slice(&v.to_le_bytes());
     }
     b.extend_from_slice(name.as_bytes());
@@ -79,23 +90,56 @@ fn section(parts: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn derive_records_parse_back() {
-    let sys = system("apply", &[(Body::ID, abi::ACCESS_WRITE), (Tagged::ID, abi::ACCESS_READ)], &[], &[Hit::ID], (abi::CADENCE_EVERY, 3, 1));
+    let sys = system(
+        "apply",
+        &[(Body::ID, abi::ACCESS_WRITE), (Tagged::ID, abi::ACCESS_READ)],
+        &[],
+        &[Hit::ID],
+        (abi::CADENCE_EVERY, 3, 1),
+    );
     // Record order must not matter.
-    let a = Schema::parse(&section(&[Body::SCHEMA, &sys, Tagged::SCHEMA, <Hit as Event>::SCHEMA, &order(&["apply"])])).unwrap();
-    let b = Schema::parse(&section(&[&order(&["apply"]), <Hit as Event>::SCHEMA, Tagged::SCHEMA, &sys, Body::SCHEMA])).unwrap();
+    let a = Schema::parse(&section(&[
+        Body::SCHEMA,
+        &sys,
+        Tagged::SCHEMA,
+        <Hit as Event>::SCHEMA,
+        &order(&["apply"]),
+    ]))
+    .unwrap();
+    let b = Schema::parse(&section(&[
+        &order(&["apply"]),
+        <Hit as Event>::SCHEMA,
+        Tagged::SCHEMA,
+        &sys,
+        Body::SCHEMA,
+    ]))
+    .unwrap();
     assert_eq!(a.components, b.components);
     assert_eq!(a.systems, b.systems);
 
     let body = a.component(Body::ID).unwrap();
     assert_eq!(Body::ID, abi::name_id("Body"));
-    assert_eq!((body.name.as_str(), body.size, body.align, body.event), ("Body", size_of::<Body>() as u32, align_of::<Body>() as u32, false));
-    let f: Vec<_> = body.fields.iter().map(|f| (f.name.as_str(), f.offset, f.size, f.kind, f.hashed())).collect();
+    assert_eq!(
+        (body.name.as_str(), body.size, body.align, body.event),
+        ("Body", size_of::<Body>() as u32, align_of::<Body>() as u32, false)
+    );
+    let f: Vec<_> = body
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.offset, f.size, f.kind, f.hashed()))
+        .collect();
     assert_eq!(
         f,
         [
             ("pos", 0, 8, abi::FIELD_F32 | abi::FIELD_ARRAY, true),
             ("scratch", 8, 1, abi::FIELD_U8, false),
-            ("owner", std::mem::offset_of!(Body, owner) as u32, 8, abi::FIELD_ENTITY, true),
+            (
+                "owner",
+                std::mem::offset_of!(Body, owner) as u32,
+                8,
+                abi::FIELD_ENTITY,
+                true
+            ),
         ]
     );
     let tagged = a.component(77).unwrap();
@@ -103,7 +147,10 @@ fn derive_records_parse_back() {
     assert!(a.component(Hit::ID).unwrap().event);
 
     let s = &a.systems[0];
-    assert_eq!((s.name.as_str(), s.mode, s.cadence), ("apply", Mode::Serial, Cadence::Every { n: 3, phase: 1 }));
+    assert_eq!(
+        (s.name.as_str(), s.mode, s.cadence),
+        ("apply", Mode::Serial, Cadence::Every { n: 3, phase: 1 })
+    );
     assert_eq!(s.reads_events, [Hit::ID]);
     assert_eq!(s.export(), "ae_sys_apply");
 }

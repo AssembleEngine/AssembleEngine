@@ -75,7 +75,10 @@ impl Cadence {
 
     pub fn validate(self) -> Result<()> {
         match self {
-            Cadence::Every { n, phase } => ensure!(n > 0 && phase < n, "cadence every({n}, {phase}) needs n > 0 and phase < n"),
+            Cadence::Every { n, phase } => ensure!(
+                n > 0 && phase < n,
+                "cadence every({n}, {phase}) needs n > 0 and phase < n"
+            ),
             Cadence::Staggered { n } => ensure!(n > 0, "cadence staggered({n}) needs n > 0"),
             _ => {}
         }
@@ -152,8 +155,14 @@ pub fn compute(systems: &[SystemDecl]) -> Result<Schedule> {
     let count = systems.len();
     let mut by_name = BTreeMap::new();
     for (index, s) in systems.iter().enumerate() {
-        ensure!(by_name.insert(s.name.as_str(), index).is_none(), "two systems are named `{}`", s.name);
-        s.cadence.validate().map_err(|e| anyhow::anyhow!("system `{}`: {e}", s.name))?;
+        ensure!(
+            by_name.insert(s.name.as_str(), index).is_none(),
+            "two systems are named `{}`",
+            s.name
+        );
+        s.cadence
+            .validate()
+            .map_err(|e| anyhow::anyhow!("system `{}`: {e}", s.name))?;
     }
     let access: Vec<_> = systems.iter().map(SystemDecl::access).collect::<Result<_>>()?;
 
@@ -162,7 +171,9 @@ pub fn compute(systems: &[SystemDecl]) -> Result<Schedule> {
     let mut indegree = vec![0usize; count];
     for (index, s) in systems.iter().enumerate() {
         for dep in &s.after {
-            let Some(&d) = by_name.get(dep.as_str()) else { bail!("system `{}` runs after unknown system `{dep}`", s.name) };
+            let Some(&d) = by_name.get(dep.as_str()) else {
+                bail!("system `{}` runs after unknown system `{dep}`", s.name)
+            };
             ensure!(d != index, "system `{}` runs after itself", s.name);
             if explicit[d].insert(index) {
                 indegree[index] += 1;
@@ -181,7 +192,10 @@ pub fn compute(systems: &[SystemDecl]) -> Result<Schedule> {
         }
     }
     if order.len() != count {
-        let blocked: Vec<&str> = (0..count).filter(|i| indegree[*i] > 0).map(|i| systems[i].name.as_str()).collect();
+        let blocked: Vec<&str> = (0..count)
+            .filter(|i| indegree[*i] > 0)
+            .map(|i| systems[i].name.as_str())
+            .collect();
         bail!("`after` cycle between systems: {}", blocked.join(", "));
     }
     let mut position = vec![0u32; count];
@@ -198,7 +212,12 @@ pub fn compute(systems: &[SystemDecl]) -> Result<Schedule> {
                 continue;
             }
             let ((ra, wa), (rb, wb)) = (&access[a], &access[b]);
-            let conflict = wa.intersection(wb).chain(wa.intersection(rb)).chain(ra.intersection(wb)).min().copied();
+            let conflict = wa
+                .intersection(wb)
+                .chain(wa.intersection(rb))
+                .chain(ra.intersection(wb))
+                .min()
+                .copied();
             if let Some(r) = conflict {
                 edges.push((a, b, EdgeReason::Conflict(r)));
             }
@@ -217,7 +236,13 @@ pub fn compute(systems: &[SystemDecl]) -> Result<Schedule> {
     for &i in &order {
         layers[layer_of[i] as usize].push(i);
     }
-    Ok(Schedule { order, position, layer_of, layers, edges })
+    Ok(Schedule {
+        order,
+        position,
+        layer_of,
+        layers,
+        edges,
+    })
 }
 
 #[cfg(test)]
@@ -226,9 +251,22 @@ mod tests {
     use ae_ecs::Term;
 
     fn sys(name: &str, reads: &[u64], writes: &[u64]) -> SystemDecl {
-        let mut terms: Vec<Term> = reads.iter().map(|&c| Term { component: ComponentId(c), access: Access::Read }).collect();
-        terms.extend(writes.iter().map(|&c| Term { component: ComponentId(c), access: Access::Write }));
-        SystemDecl { name: name.into(), terms, ..Default::default() }
+        let mut terms: Vec<Term> = reads
+            .iter()
+            .map(|&c| Term {
+                component: ComponentId(c),
+                access: Access::Read,
+            })
+            .collect();
+        terms.extend(writes.iter().map(|&c| Term {
+            component: ComponentId(c),
+            access: Access::Write,
+        }));
+        SystemDecl {
+            name: name.into(),
+            terms,
+            ..Default::default()
+        }
     }
 
     fn after(mut s: SystemDecl, deps: &[&str]) -> SystemDecl {
@@ -237,12 +275,20 @@ mod tests {
     }
 
     fn names(systems: &[SystemDecl], s: &Schedule) -> Vec<Vec<String>> {
-        s.layers.iter().map(|l| l.iter().map(|&i| systems[i].name.clone()).collect()).collect()
+        s.layers
+            .iter()
+            .map(|l| l.iter().map(|&i| systems[i].name.clone()).collect())
+            .collect()
     }
 
     #[test]
     fn readers_share_a_layer_writers_split() {
-        let systems = [sys("a", &[1], &[]), sys("b", &[1], &[]), sys("w", &[], &[1]), sys("c", &[1], &[])];
+        let systems = [
+            sys("a", &[1], &[]),
+            sys("b", &[1], &[]),
+            sys("w", &[], &[1]),
+            sys("c", &[1], &[]),
+        ];
         let s = compute(&systems).unwrap();
         assert_eq!(names(&systems, &s), [vec!["a", "b"], vec!["w"], vec!["c"]]);
     }
@@ -274,7 +320,12 @@ mod tests {
             for (k, &a) in layer.iter().enumerate() {
                 for &b in &layer[k + 1..] {
                     let ((ra, wa), (rb, wb)) = (systems[a].access().unwrap(), systems[b].access().unwrap());
-                    assert!(wa.is_disjoint(&wb) && wa.is_disjoint(&rb) && ra.is_disjoint(&wb), "{} and {} share a layer", systems[a].name, systems[b].name);
+                    assert!(
+                        wa.is_disjoint(&wb) && wa.is_disjoint(&rb) && ra.is_disjoint(&wb),
+                        "{} and {} share a layer",
+                        systems[a].name,
+                        systems[b].name
+                    );
                 }
             }
         }
@@ -282,7 +333,11 @@ mod tests {
 
     #[test]
     fn explicit_after_reorders_and_adds_a_layer() {
-        let systems = [after(sys("late", &[], &[1]), &["early"]), sys("early", &[], &[2]), sys("free", &[], &[3])];
+        let systems = [
+            after(sys("late", &[], &[1]), &["early"]),
+            sys("early", &[], &[2]),
+            sys("free", &[], &[3]),
+        ];
         let s = compute(&systems).unwrap();
         assert_eq!(s.order, [1, 0, 2]);
         assert_eq!(names(&systems, &s), [vec!["early", "free"], vec!["late"]]);
@@ -310,8 +365,14 @@ mod tests {
         let systems = [after(sys("a", &[], &[]), &["b"]), after(sys("b", &[], &[]), &["a"])];
         assert!(compute(&systems).unwrap_err().to_string().contains("cycle"));
         assert!(compute(&[after(sys("a", &[], &[]), &["nope"])]).is_err());
-        assert!(compute(&[sys("a", &[], &[]), sys("a", &[], &[])]).is_err(), "duplicate name");
-        assert!(compute(&[sys("a", &[1], &[1])]).is_err(), "read and write of one component");
+        assert!(
+            compute(&[sys("a", &[], &[]), sys("a", &[], &[])]).is_err(),
+            "duplicate name"
+        );
+        assert!(
+            compute(&[sys("a", &[1], &[1])]).is_err(),
+            "read and write of one component"
+        );
         let mut s = sys("a", &[], &[]);
         s.cadence = Cadence::Every { n: 4, phase: 4 };
         assert!(compute(&[s]).is_err());
@@ -319,7 +380,9 @@ mod tests {
 
     #[test]
     fn layers_are_a_function_of_the_declarations() {
-        let systems: Vec<SystemDecl> = (0..12u64).map(|i| sys(&format!("s{i}"), &[i % 4], &[4 + i % 3])).collect();
+        let systems: Vec<SystemDecl> = (0..12u64)
+            .map(|i| sys(&format!("s{i}"), &[i % 4], &[4 + i % 3]))
+            .collect();
         let a = compute(&systems).unwrap();
         let b = compute(&systems.clone()).unwrap();
         assert_eq!(a.layers, b.layers);

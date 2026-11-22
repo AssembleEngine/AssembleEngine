@@ -32,15 +32,21 @@
 //! digest part. Driven by the same plan, it reaches the same state hash as
 //! the standalone [`ae_nav::scenario`] run (`tests/crossing.rs`).
 
-use ae_abi::engine::{BODY, COST_OVERLAY, GOAL, MAP_START, MOVE_ORDER, NAV_AGENT, ORDER_POINT, SENSOR, TEAM, TERRAIN_CHANGED, TERRAIN_EDIT};
+use ae_abi::engine::{
+    BODY, COST_OVERLAY, GOAL, MAP_START, MOVE_ORDER, NAV_AGENT, ORDER_POINT, SENSOR, TEAM, TERRAIN_CHANGED,
+    TERRAIN_EDIT,
+};
 use ae_ecs::Access;
 use ae_nav::math::WorldPos;
-use ae_nav::scenario::{self, Plan};
 use ae_nav::nav::{MovementProfile, min_clearance_cells, profiles_for, water_profiles};
+use ae_nav::scenario::{self, Plan};
 use ae_nav::service::{BodyColumns, CommandKind, CommandPayload, NavConfig, NavService, UnitSpec};
 use ae_nav::terrain::Medium;
 use ae_nav::terrain::{CellEdit, SharedTerrain, TerrainPatch};
-use ae_sdk::nav::{ANY_DEPTH, Body, CELL_SIZE, CostOverlay, changed, overlay, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, Goal, MapStart, MoveOrder, NavAgent, OrderPoint, Sensor, Team, TerrainChanged, TerrainEdit, order, terrain};
+use ae_sdk::nav::{
+    ANY_DEPTH, Body, CELL_SIZE, CLASS_BYTES, CLASS_NAME_MAX, CLASSES_DATA, CostOverlay, Goal, MapStart, MoveOrder,
+    NavAgent, OrderPoint, Sensor, Team, TerrainChanged, TerrainEdit, changed, order, overlay, terrain,
+};
 use ae_sdk::{Component, Event};
 use ae_sim::host::{HostCtx, HostDecl, HostInit, HostPlugin, HostSystem, bytes_of, expect_component};
 use ae_sim::schedule::Cadence;
@@ -116,10 +122,19 @@ impl GroundFeed {
     pub fn publish(&self, version: u32, cells: (i32, i32, i32, i32), terrain: SharedTerrain) {
         let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         let cells = match pending.as_ref() {
-            Some(old) => (old.cells.0.min(cells.0), old.cells.1.min(cells.1), old.cells.2.max(cells.2), old.cells.3.max(cells.3)),
+            Some(old) => (
+                old.cells.0.min(cells.0),
+                old.cells.1.min(cells.1),
+                old.cells.2.max(cells.2),
+                old.cells.3.max(cells.3),
+            ),
             None => cells,
         };
-        *pending = Some(GroundUpdate { version, cells, terrain });
+        *pending = Some(GroundUpdate {
+            version,
+            cells,
+            terrain,
+        });
     }
 
     /// The latest change and everything that changed before it since the
@@ -131,12 +146,26 @@ impl GroundFeed {
 
 impl NavPlugin {
     pub fn new(map: Map, map_cells: i32) -> Self {
-        Self { map, map_cells, ground: None, teams: 0, terrain: None, starts: Vec::new() }
+        Self {
+            map,
+            map_cells,
+            ground: None,
+            teams: 0,
+            terrain: None,
+            starts: Vec::new(),
+        }
     }
 
     /// A loaded map's terrain and start points ([`Map::Loaded`]).
     pub fn loaded(terrain: Arc<ae_nav::terrain::Terrain>, starts: Vec<[f32; 2]>) -> Self {
-        Self { map: Map::Loaded, map_cells: terrain.geom.cells_x, ground: None, teams: 0, terrain: Some(terrain), starts }
+        Self {
+            map: Map::Loaded,
+            map_cells: terrain.geom.cells_x,
+            ground: None,
+            teams: 0,
+            terrain: Some(terrain),
+            starts,
+        }
     }
 
     /// The allyteam of each of the map's units from their spawn x: units
@@ -158,7 +187,11 @@ impl NavPlugin {
     /// [`RADAR_EVERY`]th unit a radar.
     pub fn sensor_of(&self, index: usize, profile: u8) -> Sensor {
         let los = CLASS_LOS.get(profile as usize).copied().unwrap_or(400.0);
-        let radar = if index.is_multiple_of(RADAR_EVERY) { RADAR_RANGE } else { 0.0 };
+        let radar = if index.is_multiple_of(RADAR_EVERY) {
+            RADAR_RANGE
+        } else {
+            0.0
+        };
         Sensor { los, radar }
     }
 
@@ -174,7 +207,12 @@ impl NavPlugin {
         match self.map {
             Map::WaterCrossing => scenario::water_crossing_plan_with(units, self.map_cells, workers, profiles),
             Map::LandCrossing => scenario::land_crossing_plan_with(units, self.map_cells, workers, profiles),
-            Map::Loaded => scenario::terrain_plan_with(units, (**self.terrain.as_ref().expect("Map::Loaded without a terrain")).clone(), workers, profiles),
+            Map::Loaded => scenario::terrain_plan_with(
+                units,
+                (**self.terrain.as_ref().expect("Map::Loaded without a terrain")).clone(),
+                workers,
+                profiles,
+            ),
         }
     }
 
@@ -193,7 +231,12 @@ impl NavPlugin {
     pub fn profiles(&self, schema: &Schema) -> Result<Vec<MovementProfile>> {
         let map = self.map_profiles();
         let Some(game) = classes(schema)? else { return Ok(map) };
-        ensure!(game.len() >= map.len(), "the module declares {} movement classes; the map's units use {}", game.len(), map.len());
+        ensure!(
+            game.len() >= map.len(),
+            "the module declares {} movement classes; the map's units use {}",
+            game.len(),
+            map.len()
+        );
         Ok(game)
     }
 
@@ -235,8 +278,17 @@ impl HostPlugin for NavPlugin {
                 Ok(())
             }
             _ => {
-                ensure!(CELL_SIZE == ae_nav::service::NavConfig::default().cell_size, "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size");
-                for record in [<MoveOrder as Event>::SCHEMA, <OrderPoint as Event>::SCHEMA, <TerrainEdit as Event>::SCHEMA, <TerrainChanged as Event>::SCHEMA, <CostOverlay as Event>::SCHEMA] {
+                ensure!(
+                    CELL_SIZE == ae_nav::service::NavConfig::default().cell_size,
+                    "ae_sdk::nav::CELL_SIZE differs from the nav service's cell size"
+                );
+                for record in [
+                    <MoveOrder as Event>::SCHEMA,
+                    <OrderPoint as Event>::SCHEMA,
+                    <TerrainEdit as Event>::SCHEMA,
+                    <TerrainChanged as Event>::SCHEMA,
+                    <CostOverlay as Event>::SCHEMA,
+                ] {
                     expect_component(schema, record)?;
                 }
                 self.profiles(schema).map(drop)
@@ -253,9 +305,18 @@ impl HostPlugin for NavPlugin {
             .iter()
             .map(|&name| -> Result<Box<dyn HostSystem>> {
                 Ok(match name {
-                    "nav_spawn" => Box::new(Spawner { plan: plan.take().context("nav_spawn listed twice")?, plugin: self.clone() }),
-                    "nav" => Box::new(Nav::new(service.take().context("nav listed twice")?, self.ground.clone())),
-                    "map_starts" => Box::new(Starts { starts: self.starts.clone(), extent: self.extent() }),
+                    "nav_spawn" => Box::new(Spawner {
+                        plan: plan.take().context("nav_spawn listed twice")?,
+                        plugin: self.clone(),
+                    }),
+                    "nav" => Box::new(Nav::new(
+                        service.take().context("nav listed twice")?,
+                        self.ground.clone(),
+                    )),
+                    "map_starts" => Box::new(Starts {
+                        starts: self.starts.clone(),
+                        extent: self.extent(),
+                    }),
                     other => bail!("no host system `{other}` in the nav plugin"),
                 })
             })
@@ -272,7 +333,17 @@ struct Starts {
 impl HostSystem for Starts {
     fn run(&mut self, ctx: &mut HostCtx<'_>) -> Result<()> {
         for (index, &[x, y]) in self.starts.iter().enumerate() {
-            ctx.emit(MAP_START, bytes_of(&MapStart { index: index as u32, count: self.starts.len() as u32, x, y, extent: self.extent, reserved: 0 }))?;
+            ctx.emit(
+                MAP_START,
+                bytes_of(&MapStart {
+                    index: index as u32,
+                    count: self.starts.len() as u32,
+                    x,
+                    y,
+                    extent: self.extent,
+                    reserved: 0,
+                }),
+            )?;
         }
         Ok(())
     }
@@ -286,17 +357,49 @@ struct Spawner {
 impl HostSystem for Spawner {
     fn run(&mut self, ctx: &mut HostCtx<'_>) -> Result<()> {
         let orders = self.plan.order_of();
-        let allies = if self.plugin.teams > 0 { self.plugin.allies(&self.plan.units.iter().map(|u| u.pos.x).collect::<Vec<_>>()) } else { Vec::new() };
+        let allies = if self.plugin.teams > 0 {
+            self.plugin
+                .allies(&self.plan.units.iter().map(|u| u.pos.x).collect::<Vec<_>>())
+        } else {
+            Vec::new()
+        };
         for (index, (spec, order)) in self.plan.units.iter().zip(orders).enumerate() {
-            let body = Body { x: spec.pos.x, y: spec.pos.y, vx: 0.0, vy: 0.0, radius: spec.radius };
-            let agent = NavAgent { max_speed: spec.max_speed, profile: spec.profile_id as u32, mode: 0 };
+            let body = Body {
+                x: spec.pos.x,
+                y: spec.pos.y,
+                vx: 0.0,
+                vy: 0.0,
+                radius: spec.radius,
+            };
+            let agent = NavAgent {
+                max_speed: spec.max_speed,
+                profile: spec.profile_id as u32,
+                mode: 0,
+            };
             let (group, to) = order.unwrap_or((0, spec.pos));
-            let goal = Goal { x: to.x, y: to.y, group };
+            let goal = Goal {
+                x: to.x,
+                y: to.y,
+                group,
+            };
             if self.plugin.teams > 0 {
-                let (team, sensor) = (Team { ally: allies[index] }, self.plugin.sensor_of(index, spec.profile_id));
-                ctx.spawn(&[(BODY, bytes_of(&body)), (NAV_AGENT, bytes_of(&agent)), (GOAL, bytes_of(&goal)), (TEAM, bytes_of(&team)), (SENSOR, bytes_of(&sensor))])?;
+                let (team, sensor) = (
+                    Team { ally: allies[index] },
+                    self.plugin.sensor_of(index, spec.profile_id),
+                );
+                ctx.spawn(&[
+                    (BODY, bytes_of(&body)),
+                    (NAV_AGENT, bytes_of(&agent)),
+                    (GOAL, bytes_of(&goal)),
+                    (TEAM, bytes_of(&team)),
+                    (SENSOR, bytes_of(&sensor)),
+                ])?;
             } else {
-                ctx.spawn(&[(BODY, bytes_of(&body)), (NAV_AGENT, bytes_of(&agent)), (GOAL, bytes_of(&goal))])?;
+                ctx.spawn(&[
+                    (BODY, bytes_of(&body)),
+                    (NAV_AGENT, bytes_of(&agent)),
+                    (GOAL, bytes_of(&goal)),
+                ])?;
             }
         }
         Ok(())
@@ -339,7 +442,12 @@ unsafe impl Send for Scratch {}
 
 impl Nav {
     fn new(service: NavService, ground: Option<Arc<GroundFeed>>) -> Self {
-        Self { service, used_groups: BTreeSet::new(), scratch: Scratch::default(), ground }
+        Self {
+            service,
+            used_groups: BTreeSet::new(),
+            scratch: Scratch::default(),
+            ground,
+        }
     }
 }
 
@@ -353,7 +461,11 @@ impl HostSystem for Nav {
         for chunk in ctx.chunks() {
             let (bodies, agents) = unsafe { (chunk.column::<Body>(0), chunk.column::<NavAgent>(1)) };
             for (k, &entity) in chunk.entities.iter().enumerate() {
-                s.rows.push(Row { entity, body: &mut bodies[k], agent: &mut agents[k] });
+                s.rows.push(Row {
+                    entity,
+                    body: &mut bodies[k],
+                    agent: &mut agents[k],
+                });
             }
         }
         s.rows.sort_unstable_by_key(|r| r.entity);
@@ -389,8 +501,20 @@ impl HostSystem for Nav {
             for &k in &new {
                 let r = s.rows[k];
                 let (b, a) = unsafe { (*r.body, *r.agent) };
-                ensure!((a.profile as usize) < nav.profiles.len(), "entity {:#x}: movement profile {} of {}", r.entity, a.profile, nav.profiles.len());
-                ensure!(b.radius > 0.0 && a.max_speed >= 0.0, "entity {:#x}: bad body radius {} or speed {}", r.entity, b.radius, a.max_speed);
+                ensure!(
+                    (a.profile as usize) < nav.profiles.len(),
+                    "entity {:#x}: movement profile {} of {}",
+                    r.entity,
+                    a.profile,
+                    nav.profiles.len()
+                );
+                ensure!(
+                    b.radius > 0.0 && a.max_speed >= 0.0,
+                    "entity {:#x}: bad body radius {} or speed {}",
+                    r.entity,
+                    b.radius,
+                    a.max_speed
+                );
                 // Paths are only as wide as the class's clearance.
                 let class = &nav.profiles[a.profile as usize];
                 ensure!(
@@ -401,7 +525,15 @@ impl HostSystem for Nav {
                     class.name,
                     class.clearance_cells
                 );
-                nav.add_unit(r.entity, UnitSpec { pos: WorldPos::new(b.x, b.y), radius: b.radius, max_speed: a.max_speed, profile_id: a.profile as u8 });
+                nav.add_unit(
+                    r.entity,
+                    UnitSpec {
+                        pos: WorldPos::new(b.x, b.y),
+                        radius: b.radius,
+                        max_speed: a.max_speed,
+                        profile_id: a.profile as u8,
+                    },
+                );
             }
             s.units.clear();
             s.units.extend(nav.entities().enumerate().map(|(i, e)| (e, i as u32)));
@@ -413,7 +545,11 @@ impl HostSystem for Nav {
         let orders: Vec<MoveOrder> = ctx.events(MOVE_ORDER)?;
         let points: Vec<OrderPoint> = ctx.events(ORDER_POINT)?;
         for (command, facing) in group_orders(&orders, &points, |e| nav.local_id(e))? {
-            ensure!(self.used_groups.insert(command.id), "move order group {} was used before: a group id is a nav command id and must be new", command.id);
+            ensure!(
+                self.used_groups.insert(command.id),
+                "move order group {} was used before: a group id is a nav command id and must be new",
+                command.id
+            );
             if command.unit_ids.is_empty() {
                 continue;
             }
@@ -436,11 +572,24 @@ impl HostSystem for Nav {
         for o in ctx.events::<CostOverlay>(COST_OVERLAY)? {
             match o.op {
                 overlay::ADD => {
-                    ensure!((1..=254).contains(&o.cost), "cost overlay {}: cost {} outside 1..=254", o.id, o.cost);
+                    ensure!(
+                        (1..=254).contains(&o.cost),
+                        "cost overlay {}: cost {} outside 1..=254",
+                        o.id,
+                        o.cost
+                    );
                     ensure!(o.x0 <= o.x1 && o.y0 <= o.y1, "cost overlay {}: empty rectangle", o.id);
-                    ensure!(nav.add_cost_overlay(o.id, (o.x0, o.y0, o.x1, o.y1), o.cost as u8), "cost overlay {} added twice", o.id);
+                    ensure!(
+                        nav.add_cost_overlay(o.id, (o.x0, o.y0, o.x1, o.y1), o.cost as u8),
+                        "cost overlay {} added twice",
+                        o.id
+                    );
                 }
-                overlay::REMOVE => ensure!(nav.remove_cost_overlay(o.id), "cost overlay {} removed but not in use", o.id),
+                overlay::REMOVE => ensure!(
+                    nav.remove_cost_overlay(o.id),
+                    "cost overlay {} removed but not in use",
+                    o.id
+                ),
                 op => bail!("cost overlay {}: unknown op {op}", o.id),
             }
         }
@@ -465,7 +614,13 @@ impl HostSystem for Nav {
         }
         {
             ae_profile::zone!("nav_step");
-            let mut cols = BodyColumns { pos_x: &mut s.px, pos_y: &mut s.py, vel_x: &mut s.vx, vel_y: &mut s.vy, radius: &s.radius };
+            let mut cols = BodyColumns {
+                pos_x: &mut s.px,
+                pos_y: &mut s.py,
+                vel_x: &mut s.vx,
+                vel_y: &mut s.vy,
+                radius: &s.radius,
+            };
             nav.in_pool(|nav| nav.step(&mut cols));
         }
         s.modes.resize(n, 0);
@@ -484,7 +639,17 @@ impl HostSystem for Nav {
         for c in nav.take_terrain_changes() {
             let (x0, y0, x1, y1) = c.cells;
             let flags = if c.ground { changed::GROUND } else { 0 };
-            ctx.emit(TERRAIN_CHANGED, bytes_of(&TerrainChanged { version: c.version, x0, y0, x1, y1, flags }))?;
+            ctx.emit(
+                TERRAIN_CHANGED,
+                bytes_of(&TerrainChanged {
+                    version: c.version,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    flags,
+                }),
+            )?;
             if let (true, Some(feed)) = (c.ground, &self.ground) {
                 // The service's terrain is the newest landed version (this
                 // change's, or a later one in the same step: the feed
@@ -507,17 +672,40 @@ impl HostSystem for Nav {
 pub fn terrain_patch(edits: &[TerrainEdit], cells_x: i32, cells_y: i32) -> Result<TerrainPatch> {
     let mut patch = TerrainPatch::new();
     for e in edits {
-        ensure!(e.set & !(terrain::BLOCKED | terrain::HEIGHT | terrain::COST) == 0, "terrain edit with unknown flags {:#x}", e.set);
+        ensure!(
+            e.set & !(terrain::BLOCKED | terrain::HEIGHT | terrain::COST) == 0,
+            "terrain edit with unknown flags {:#x}",
+            e.set
+        );
         let blocked = (e.set & terrain::BLOCKED != 0).then_some(e.blocked);
         let height = (e.set & terrain::HEIGHT != 0).then_some(e.height);
         let cost = (e.set & terrain::COST != 0).then_some(e.cost);
-        ensure!(blocked.is_none_or(|b| b <= 1), "terrain edit: blocked must be 0 or 1, not {}", e.blocked);
-        ensure!(height.is_none_or(|h| (0..=2400).contains(&h)), "terrain edit: height {} outside 0..=2400 decimetres", e.height);
-        ensure!(cost.is_none_or(|c| (1..=255).contains(&c)), "terrain edit: cost {} outside 1..=255", e.cost);
+        ensure!(
+            blocked.is_none_or(|b| b <= 1),
+            "terrain edit: blocked must be 0 or 1, not {}",
+            e.blocked
+        );
+        ensure!(
+            height.is_none_or(|h| (0..=2400).contains(&h)),
+            "terrain edit: height {} outside 0..=2400 decimetres",
+            e.height
+        );
+        ensure!(
+            cost.is_none_or(|c| (1..=255).contains(&c)),
+            "terrain edit: cost {} outside 1..=255",
+            e.cost
+        );
         let (x0, y0, x1, y1) = (e.x0.max(0), e.y0.max(0), e.x1.min(cells_x - 1), e.y1.min(cells_y - 1));
         for y in y0..=y1 {
             for x in x0..=x1 {
-                patch.push(CellEdit { x, y, blocked: blocked.map(|b| b == 1), height: height.map(|h| h as i16), cost: cost.map(|c| c as u8), material: None });
+                patch.push(CellEdit {
+                    x,
+                    y,
+                    blocked: blocked.map(|b| b == 1),
+                    height: height.map(|h| h as i16),
+                    cost: cost.map(|c| c as u8),
+                    material: None,
+                });
             }
         }
     }
@@ -531,32 +719,75 @@ pub fn terrain_patch(edits: &[TerrainEdit], cells_x: i32, cells_y: i32) -> Resul
 /// names, a clearance that fits the nominal radius (at most 16 cells),
 /// depths in range and `min_depth <= max_depth`.
 pub fn classes(schema: &Schema) -> Result<Option<Vec<MovementProfile>>> {
-    let Some(data) = schema.data.get(CLASSES_DATA) else { return Ok(None) };
-    ensure!(!data.is_empty() && data.len().is_multiple_of(CLASS_BYTES) && data.len() / CLASS_BYTES <= 255, "`{CLASSES_DATA}`: {} bytes is not 1..=255 classes of {CLASS_BYTES}", data.len());
+    let Some(data) = schema.data.get(CLASSES_DATA) else {
+        return Ok(None);
+    };
+    ensure!(
+        !data.is_empty() && data.len().is_multiple_of(CLASS_BYTES) && data.len() / CLASS_BYTES <= 255,
+        "`{CLASSES_DATA}`: {} bytes is not 1..=255 classes of {CLASS_BYTES}",
+        data.len()
+    );
     let word = |c: &[u8], at: usize| u32::from_le_bytes(c[at..at + 4].try_into().unwrap());
     let cell_size = NavConfig::default().cell_size;
     let mut out: Vec<MovementProfile> = Vec::new();
     for (id, c) in data.as_chunks::<CLASS_BYTES>().0.iter().enumerate() {
-        let name_len = c[..CLASS_NAME_MAX].iter().position(|&b| b == 0).unwrap_or(CLASS_NAME_MAX);
+        let name_len = c[..CLASS_NAME_MAX]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(CLASS_NAME_MAX);
         let name = std::str::from_utf8(&c[..name_len]).context("movement class name is not UTF-8")?;
-        ensure!(!name.is_empty() && c[name_len..CLASS_NAME_MAX].iter().all(|&b| b == 0), "movement class {id}: bad name");
-        ensure!(!out.iter().any(|p| p.name == name), "two movement classes are named `{name}`");
-        let [clearance, slope, radius, speed, min_depth, max_depth, hover, reserved] = [32, 36, 40, 44, 48, 52, 56, 60].map(|at| word(c, at));
+        ensure!(
+            !name.is_empty() && c[name_len..CLASS_NAME_MAX].iter().all(|&b| b == 0),
+            "movement class {id}: bad name"
+        );
+        ensure!(
+            !out.iter().any(|p| p.name == name),
+            "two movement classes are named `{name}`"
+        );
+        let [clearance, slope, radius, speed, min_depth, max_depth, hover, reserved] =
+            [32, 36, 40, 44, 48, 52, 56, 60].map(|at| word(c, at));
         let (radius, speed) = (f32::from_bits(radius), f32::from_bits(speed));
         let depth = |d: u32| -> Result<i16> {
             if d == ANY_DEPTH {
                 return Ok(i16::MAX);
             }
-            i16::try_from(d).ok().filter(|&d| d < i16::MAX).with_context(|| format!("movement class `{name}`: depth {d} decimetres out of range"))
+            i16::try_from(d)
+                .ok()
+                .filter(|&d| d < i16::MAX)
+                .with_context(|| format!("movement class `{name}`: depth {d} decimetres out of range"))
         };
-        let medium = Medium { min_depth: depth(min_depth)?, max_depth: depth(max_depth)?, hover: hover == 1 };
+        let medium = Medium {
+            min_depth: depth(min_depth)?,
+            max_depth: depth(max_depth)?,
+            hover: hover == 1,
+        };
         ensure!(hover <= 1 && reserved == 0, "movement class `{name}`: bad flags");
-        ensure!(medium.min_depth <= medium.max_depth, "movement class `{name}`: min depth above max depth");
-        ensure!(radius.is_finite() && radius > 0.0 && speed.is_finite() && speed >= 0.0, "movement class `{name}`: radius {radius}, speed {speed}");
+        ensure!(
+            medium.min_depth <= medium.max_depth,
+            "movement class `{name}`: min depth above max depth"
+        );
+        ensure!(
+            radius.is_finite() && radius > 0.0 && speed.is_finite() && speed >= 0.0,
+            "movement class `{name}`: radius {radius}, speed {speed}"
+        );
         let clearance = clearance as i32;
-        ensure!((min_clearance_cells(radius, cell_size)..=16).contains(&clearance), "movement class `{name}`: clearance {clearance} cells does not fit radius {radius} (or exceeds 16)");
-        ensure!((1..i16::MAX as u32).contains(&slope), "movement class `{name}`: max slope {slope}");
-        out.push(MovementProfile { id: id as u8, name: name.into(), clearance_cells: clearance, max_slope: slope as i16, unit_radius: radius, base_speed: speed, medium });
+        ensure!(
+            (min_clearance_cells(radius, cell_size)..=16).contains(&clearance),
+            "movement class `{name}`: clearance {clearance} cells does not fit radius {radius} (or exceeds 16)"
+        );
+        ensure!(
+            (1..i16::MAX as u32).contains(&slope),
+            "movement class `{name}`: max slope {slope}"
+        );
+        out.push(MovementProfile {
+            id: id as u8,
+            name: name.into(),
+            clearance_cells: clearance,
+            max_slope: slope as i16,
+            unit_radius: radius,
+            base_speed: speed,
+            medium,
+        });
     }
     Ok(Some(out))
 }
@@ -572,7 +803,11 @@ pub fn classes(schema: &Schema) -> Result<Option<Vec<MovementProfile>>> {
 /// group without orders in the same run, for a move or stop, beyond
 /// `MAX_POINTS`, with a gap, two copies of one point that differ, or a
 /// facing for a route.
-pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl Fn(u64) -> Option<u32>) -> Result<Vec<(CommandPayload, Option<WorldPos>)>> {
+pub fn group_orders(
+    orders: &[MoveOrder],
+    points: &[OrderPoint],
+    local_id: impl Fn(u64) -> Option<u32>,
+) -> Result<Vec<(CommandPayload, Option<WorldPos>)>> {
     struct Group {
         id: u64,
         kind: u32,
@@ -585,43 +820,94 @@ pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl 
     let mut slot: BTreeMap<u64, usize> = BTreeMap::new();
     for o in orders {
         ensure!(o.group != 0, "move order for {:#x} without a group", o.entity.0);
-        ensure!(o.kind <= order::FORMATION, "move order for {:#x}: unknown kind {}", o.entity.0, o.kind);
+        ensure!(
+            o.kind <= order::FORMATION,
+            "move order for {:#x}: unknown kind {}",
+            o.entity.0,
+            o.kind
+        );
         let g = *slot.entry(o.group).or_insert_with(|| {
-            groups.push(Group { id: o.group, kind: o.kind, to: WorldPos::new(o.x, o.y), units: Vec::new(), points: Vec::new(), facing: None });
+            groups.push(Group {
+                id: o.group,
+                kind: o.kind,
+                to: WorldPos::new(o.x, o.y),
+                units: Vec::new(),
+                points: Vec::new(),
+                facing: None,
+            });
             groups.len() - 1
         });
         let group = &mut groups[g];
-        ensure!(group.kind == o.kind, "move order group {}: kinds {} and {}", o.group, group.kind, o.kind);
+        ensure!(
+            group.kind == o.kind,
+            "move order group {}: kinds {} and {}",
+            o.group,
+            group.kind,
+            o.kind
+        );
         if let Some(id) = local_id(o.entity.0) {
             group.units.push(id);
         }
     }
     for p in points {
-        let Some(&g) = slot.get(&p.group) else { bail!("guide point for group {} without orders in the same tick", p.group) };
+        let Some(&g) = slot.get(&p.group) else {
+            bail!("guide point for group {} without orders in the same tick", p.group)
+        };
         let group = &mut groups[g];
-        ensure!(matches!(group.kind, order::ROUTE | order::FORMATION), "guide point for group {}, whose orders are not a route or formation", p.group);
+        ensure!(
+            matches!(group.kind, order::ROUTE | order::FORMATION),
+            "guide point for group {}, whose orders are not a route or formation",
+            p.group
+        );
         let at = WorldPos::new(p.x, p.y);
         let same = |q: WorldPos| [q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits);
         if p.index == order::FACING {
-            ensure!(group.kind == order::FORMATION, "facing for group {}, which is not a formation", p.group);
-            ensure!(group.facing.is_none_or(same), "facing of group {}: two different points", p.group);
+            ensure!(
+                group.kind == order::FORMATION,
+                "facing for group {}, which is not a formation",
+                p.group
+            );
+            ensure!(
+                group.facing.is_none_or(same),
+                "facing of group {}: two different points",
+                p.group
+            );
             group.facing = Some(at);
             continue;
         }
-        ensure!(p.index < order::MAX_POINTS, "guide point {} of group {}: at most {} points", p.index, p.group, order::MAX_POINTS);
+        ensure!(
+            p.index < order::MAX_POINTS,
+            "guide point {} of group {}: at most {} points",
+            p.index,
+            p.group,
+            order::MAX_POINTS
+        );
         let i = p.index as usize;
         if group.points.len() <= i {
             group.points.resize(i + 1, None);
         }
         match group.points[i] {
             None => group.points[i] = Some(at),
-            Some(q) => ensure!([q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits), "guide point {i} of group {}: ({}, {}) and ({}, {})", p.group, q.x, q.y, at.x, at.y),
+            Some(q) => ensure!(
+                [q.x, q.y].map(f32::to_bits) == [at.x, at.y].map(f32::to_bits),
+                "guide point {i} of group {}: ({}, {}) and ({}, {})",
+                p.group,
+                q.x,
+                q.y,
+                at.x,
+                at.y
+            ),
         }
     }
     groups
         .into_iter()
         .map(|mut g| {
-            let guide_points = g.points.iter().enumerate().map(|(i, p)| p.with_context(|| format!("group {}: guide point {i} missing", g.id))).collect::<Result<Vec<_>>>()?;
+            let guide_points = g
+                .points
+                .iter()
+                .enumerate()
+                .map(|(i, p)| p.with_context(|| format!("group {}: guide point {i} missing", g.id)))
+                .collect::<Result<Vec<_>>>()?;
             let kind = match g.kind {
                 order::MOVE => CommandKind::MoveTo,
                 order::STOP => CommandKind::Stop,
@@ -630,7 +916,16 @@ pub fn group_orders(orders: &[MoveOrder], points: &[OrderPoint], local_id: impl 
             };
             g.units.sort_unstable();
             g.units.dedup();
-            Ok((CommandPayload { id: g.id, unit_ids: g.units, kind, requested_point: g.to, corridor_tolerance_world: CORRIDOR_TOLERANCE }, g.facing))
+            Ok((
+                CommandPayload {
+                    id: g.id,
+                    unit_ids: g.units,
+                    kind,
+                    requested_point: g.to,
+                    corridor_tolerance_world: CORRIDOR_TOLERANCE,
+                },
+                g.facing,
+            ))
         })
         .collect()
 }
@@ -644,12 +939,21 @@ mod tests {
     use ae_sdk::Entity;
 
     fn point(group: u64, index: u32, x: f32) -> OrderPoint {
-        OrderPoint { group, index, x, y: 0.0, reserved: 0 }
+        OrderPoint {
+            group,
+            index,
+            x,
+            y: 0.0,
+            reserved: 0,
+        }
     }
 
     /// Entity `e` is unit `e` (entities above 100 have no unit).
     fn run(orders: &[MoveOrder], points: &[OrderPoint]) -> Result<Vec<CommandPayload>> {
-        Ok(group_orders(orders, points, |e| (e <= 100).then_some(e as u32))?.into_iter().map(|(c, _)| c).collect())
+        Ok(group_orders(orders, points, |e| (e <= 100).then_some(e as u32))?
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect())
     }
 
     #[test]
@@ -667,14 +971,23 @@ mod tests {
         assert_eq!(out.iter().map(|c| c.id).collect::<Vec<_>>(), [7, 2]);
         assert_eq!(out[0].unit_ids, [1, 5]);
         assert_eq!(out[0].requested_point, WorldPos::new(10.0, 20.0));
-        let CommandKind::FollowCurve { guide_points } = &out[0].kind else { panic!("{:?}", out[0].kind) };
+        let CommandKind::FollowCurve { guide_points } = &out[0].kind else {
+            panic!("{:?}", out[0].kind)
+        };
         assert_eq!(guide_points, &[WorldPos::new(1.0, 0.0), WorldPos::new(2.0, 0.0)]);
         assert!(matches!(out[1].kind, CommandKind::Stop));
         let formation = run(&[MoveOrder::formation(Entity(1), 0.0, 0.0, 9)], &[])?;
         assert!(matches!(&formation[0].kind, CommandKind::CurveFormation { guide_points } if guide_points.is_empty()));
         // A facing, sent by every unit.
-        let orders = [MoveOrder::formation(Entity(1), 0.0, 0.0, 9), MoveOrder::formation(Entity(2), 0.0, 0.0, 9)];
-        let facing = [point(9, order::FACING, 5.0), point(9, 0, 1.0), point(9, order::FACING, 5.0)];
+        let orders = [
+            MoveOrder::formation(Entity(1), 0.0, 0.0, 9),
+            MoveOrder::formation(Entity(2), 0.0, 0.0, 9),
+        ];
+        let facing = [
+            point(9, order::FACING, 5.0),
+            point(9, 0, 1.0),
+            point(9, order::FACING, 5.0),
+        ];
         let out = group_orders(&orders, &facing, |e| Some(e as u32))?;
         assert_eq!(out[0].1, Some(WorldPos::new(5.0, 0.0)));
         assert!(matches!(&out[0].0.kind, CommandKind::CurveFormation { guide_points } if guide_points.len() == 1));
@@ -691,14 +1004,37 @@ mod tests {
         Schema::parse(&section).unwrap()
     }
 
-    const TANK: ae_sdk::nav::MovementClass = ae_sdk::nav::MovementClass { name: "tank", clearance_cells: 1, max_slope: 95, radius: 4.0, speed: 80.0, min_depth: 0, max_depth: 20, hover: false };
+    const TANK: ae_sdk::nav::MovementClass = ae_sdk::nav::MovementClass {
+        name: "tank",
+        clearance_cells: 1,
+        max_slope: 95,
+        radius: 4.0,
+        speed: 80.0,
+        min_depth: 0,
+        max_depth: 20,
+        hover: false,
+    };
 
     #[test]
     fn declared_classes_become_profiles() -> Result<()> {
-        let boat = ae_sdk::nav::MovementClass { name: "boat", clearance_cells: 2, min_depth: 30, max_depth: ANY_DEPTH, ..TANK };
+        let boat = ae_sdk::nav::MovementClass {
+            name: "boat",
+            clearance_cells: 2,
+            min_depth: 30,
+            max_depth: ANY_DEPTH,
+            ..TANK
+        };
         let got = classes(&schema_with(&[TANK, boat]))?.unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!((got[1].id, got[1].name.as_str(), got[1].clearance_cells, got[1].max_slope), (1, "boat", 2, 95));
+        assert_eq!(
+            (
+                got[1].id,
+                got[1].name.as_str(),
+                got[1].clearance_cells,
+                got[1].max_slope
+            ),
+            (1, "boat", 2, 95)
+        );
         assert_eq!(got[0].medium, Medium::land(20));
         assert_eq!(got[1].medium, Medium::ship(30));
         assert_eq!((got[0].unit_radius, got[0].base_speed), (4.0, 80.0));
@@ -710,11 +1046,63 @@ mod tests {
     fn bad_classes_are_errors() {
         let cases = [
             ([TANK, TANK], "two movement classes"),
-            ([TANK, ae_sdk::nav::MovementClass { name: "x", clearance_cells: 0, radius: 9.0, ..TANK }], "does not fit"),
-            ([TANK, ae_sdk::nav::MovementClass { name: "x", min_depth: 30, max_depth: 20, ..TANK }], "min depth"),
-            ([TANK, ae_sdk::nav::MovementClass { name: "x", max_depth: 40_000, ..TANK }], "out of range"),
-            ([TANK, ae_sdk::nav::MovementClass { name: "x", max_slope: 0, ..TANK }], "max slope"),
-            ([TANK, ae_sdk::nav::MovementClass { name: "x", radius: f32::NAN, ..TANK }], "radius"),
+            (
+                [
+                    TANK,
+                    ae_sdk::nav::MovementClass {
+                        name: "x",
+                        clearance_cells: 0,
+                        radius: 9.0,
+                        ..TANK
+                    },
+                ],
+                "does not fit",
+            ),
+            (
+                [
+                    TANK,
+                    ae_sdk::nav::MovementClass {
+                        name: "x",
+                        min_depth: 30,
+                        max_depth: 20,
+                        ..TANK
+                    },
+                ],
+                "min depth",
+            ),
+            (
+                [
+                    TANK,
+                    ae_sdk::nav::MovementClass {
+                        name: "x",
+                        max_depth: 40_000,
+                        ..TANK
+                    },
+                ],
+                "out of range",
+            ),
+            (
+                [
+                    TANK,
+                    ae_sdk::nav::MovementClass {
+                        name: "x",
+                        max_slope: 0,
+                        ..TANK
+                    },
+                ],
+                "max slope",
+            ),
+            (
+                [
+                    TANK,
+                    ae_sdk::nav::MovementClass {
+                        name: "x",
+                        radius: f32::NAN,
+                        ..TANK
+                    },
+                ],
+                "radius",
+            ),
         ];
         for (c, error) in cases {
             let e = classes(&schema_with(&c)).unwrap_err().to_string();
@@ -728,12 +1116,20 @@ mod tests {
         let formation = MoveOrder::formation(Entity(1), 0.0, 0.0, 7);
         let cases: [(&[MoveOrder], &[OrderPoint], &str); 10] = [
             (&[route], &[point(7, order::FACING, 0.0)], "not a formation"),
-            (&[formation], &[point(7, order::FACING, 0.0), point(7, order::FACING, 1.0)], "two different points"),
+            (
+                &[formation],
+                &[point(7, order::FACING, 0.0), point(7, order::FACING, 1.0)],
+                "two different points",
+            ),
             (&[MoveOrder::move_to(Entity(1), 0.0, 0.0, 0)], &[], "without a group"),
             (&[MoveOrder { kind: 4, ..route }], &[], "unknown kind"),
             (&[route, MoveOrder::stop(Entity(2), 7)], &[], "kinds"),
             (&[route], &[point(8, 0, 0.0)], "without orders"),
-            (&[MoveOrder::move_to(Entity(1), 0.0, 0.0, 7)], &[point(7, 0, 0.0)], "not a route or formation"),
+            (
+                &[MoveOrder::move_to(Entity(1), 0.0, 0.0, 7)],
+                &[point(7, 0, 0.0)],
+                "not a route or formation",
+            ),
             (&[route], &[point(7, order::MAX_POINTS, 0.0)], "at most"),
             (&[route], &[point(7, 1, 0.0)], "missing"),
             (&[route], &[point(7, 0, 0.0), point(7, 0, 1.0)], "guide point 0"),

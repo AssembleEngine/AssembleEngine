@@ -29,10 +29,19 @@ fn chain(passes: usize) -> FrameGraph {
     }
     let back = graph.image(
         "backbuffer",
-        ImageDesc::color_2d(vk::Format::B8G8R8A8_UNORM, 1920, 1080, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+        ImageDesc::color_2d(
+            vk::Format::B8G8R8A8_UNORM,
+            1920,
+            1080,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
         ResourceClass::Backbuffer,
     );
-    graph.pass("composite", PassKind::Graphics, ()).sampled(previous.unwrap(), ShaderStage::Fragment).color(back, LoadOp::Clear).id();
+    graph
+        .pass("composite", PassKind::Graphics, ())
+        .sampled(previous.unwrap(), ShaderStage::Fragment)
+        .color(back, LoadOp::Clear)
+        .id();
     graph.pass("present", PassKind::Present, ()).present(back).root().id();
     graph
 }
@@ -41,7 +50,9 @@ fn benches(c: &mut Criterion) {
     for passes in [16usize, 128] {
         let graph = chain(passes);
         let baked = bake(&graph, BakeOptions::default()).unwrap();
-        c.bench_with_input(BenchmarkId::new("signature", passes), &graph, |b, graph| b.iter(|| black_box(graph).signature()));
+        c.bench_with_input(BenchmarkId::new("signature", passes), &graph, |b, graph| {
+            b.iter(|| black_box(graph).signature())
+        });
         c.bench_with_input(BenchmarkId::new("bake", passes), &graph, |b, graph| {
             b.iter(|| bake(black_box(graph), BakeOptions::default()))
         });

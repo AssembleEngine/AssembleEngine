@@ -60,8 +60,18 @@ const BIG_MIN: usize = 64 << 10;
 fn setup(run: &Run) {
     for _ in 0..run.param() {
         Spawn::new()
-            .with(&Lists { checksum: 0, len: 0, bad: 0 })
-            .with(&Blocks { checksum: 0, held: 0, held_len: 0, held_seed: 0, bad: 0 })
+            .with(&Lists {
+                checksum: 0,
+                len: 0,
+                bad: 0,
+            })
+            .with(&Blocks {
+                checksum: 0,
+                held: 0,
+                held_len: 0,
+                held_seed: 0,
+                bad: 0,
+            })
             .submit();
     }
 }
@@ -95,8 +105,13 @@ fn lists(run: &Run) {
         let (hex, n) = text.split_once('-').unwrap();
         ok &= u64::from_str_radix(hex, 16) == Ok(sum) && n.parse::<usize>() == Ok(len);
         // Order-sensitive: depends on the sort and the map's iteration.
-        let weighted = v.iter().enumerate().fold(0u64, |a, (j, &x)| a.wrapping_add(x.wrapping_mul(j as u64 + 1)));
-        let spread = buckets.iter().fold(0u64, |a, (&b, &c)| mix(a ^ (b as u64) << 32 ^ c as u64));
+        let weighted = v
+            .iter()
+            .enumerate()
+            .fold(0u64, |a, (j, &x)| a.wrapping_add(x.wrapping_mul(j as u64 + 1)));
+        let spread = buckets
+            .iter()
+            .fold(0u64, |a, (&b, &c)| mix(a ^ (b as u64) << 32 ^ c as u64));
         let r = &mut rows[i];
         r.checksum = mix(r.checksum ^ weighted ^ spread);
         r.len = len as u32;
@@ -111,7 +126,12 @@ fn blocks(run: &Run) {
         let r = &mut rows[i];
         if r.held != 0 {
             // Allocated on an earlier tick, usually by another instance.
-            let block = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(r.held as usize as *mut u8, r.held_len as usize)) };
+            let block = unsafe {
+                Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                    r.held as usize as *mut u8,
+                    r.held_len as usize,
+                ))
+            };
             let mut ok = true;
             let mut sum = 0u64;
             for (j, &b) in block.iter().enumerate() {
@@ -123,7 +143,11 @@ fn blocks(run: &Run) {
             drop(block);
         }
         let k = mix(ids[i].0 ^ run.tick() << 40 ^ 0xB10C);
-        let len = if k % 128 == 0 { BIG_MIN + (k >> 8) as usize % (192 << 10) } else { 16 + (k >> 8) as usize % 4000 };
+        let len = if k % 128 == 0 {
+            BIG_MIN + (k >> 8) as usize % (192 << 10)
+        } else {
+            16 + (k >> 8) as usize % 4000
+        };
         let seed = (k >> 32) as u32;
         let block: Box<[u8]> = (0..len).map(|j| pattern(seed, j)).collect();
         r.held_len = len as u32;

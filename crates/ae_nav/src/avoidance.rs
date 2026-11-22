@@ -23,7 +23,12 @@ pub struct AvoidanceConfig {
 }
 
 impl Default for AvoidanceConfig {
-    fn default() -> Self { Self { time_horizon: 1.0, max_neighbors: 10 } }
+    fn default() -> Self {
+        Self {
+            time_horizon: 1.0,
+            max_neighbors: 10,
+        }
+    }
 }
 
 /// One agent's state for this tick.
@@ -52,13 +57,25 @@ pub struct Agent {
 }
 
 #[derive(Clone, Copy)]
-struct Line { point: WorldPos, dir: WorldPos }
+struct Line {
+    point: WorldPos,
+    dir: WorldPos,
+}
 
 const EPS: f32 = 1e-5;
 
-#[inline] fn det(a: WorldPos, b: WorldPos) -> f32 { a.x * b.y - a.y * b.x }
-#[inline] fn dot(a: WorldPos, b: WorldPos) -> f32 { a.x * b.x + a.y * b.y }
-#[inline] fn len_sq(a: WorldPos) -> f32 { dot(a, a) }
+#[inline]
+fn det(a: WorldPos, b: WorldPos) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+#[inline]
+fn dot(a: WorldPos, b: WorldPos) -> f32 {
+    a.x * b.x + a.y * b.y
+}
+#[inline]
+fn len_sq(a: WorldPos) -> f32 {
+    dot(a, a)
+}
 
 /// Agents sorted by (bucket row, bucket column, index), with a dense index
 /// of where each bucket row starts. A row's buckets are a contiguous range
@@ -73,15 +90,33 @@ struct Grid {
 
 impl Grid {
     fn build(agents: &[Agent], cell: f32, par: &Par) -> Self {
-        let mut keys: Vec<(i32, i32, u32)> = agents.iter().enumerate()
-            .map(|(i, a)| ((a.pos.y / cell).floor() as i32, (a.pos.x / cell).floor() as i32, i as u32)).collect();
+        let mut keys: Vec<(i32, i32, u32)> = agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                (
+                    (a.pos.y / cell).floor() as i32,
+                    (a.pos.x / cell).floor() as i32,
+                    i as u32,
+                )
+            })
+            .collect();
         par.sort_unstable(&mut keys);
         let min_y = keys.first().map(|k| k.0).unwrap_or(0);
         let max_y = keys.last().map(|k| k.0).unwrap_or(0);
         let mut row_start = vec![0u32; (max_y - min_y + 2) as usize];
-        for k in &keys { row_start[(k.0 - min_y + 1) as usize] += 1; }
-        for r in 1..row_start.len() { row_start[r] += row_start[r - 1]; }
-        Self { cell, keys, min_y, row_start }
+        for k in &keys {
+            row_start[(k.0 - min_y + 1) as usize] += 1;
+        }
+        for r in 1..row_start.len() {
+            row_start[r] += row_start[r - 1];
+        }
+        Self {
+            cell,
+            keys,
+            min_y,
+            row_start,
+        }
     }
 
     /// Whether any agent other than `i` lies within `range` of `p`.
@@ -90,14 +125,19 @@ impl Grid {
         let bx = (p.x / self.cell).floor() as i32;
         let by = (p.y / self.cell).floor() as i32;
         let range_sq = range * range;
-        (by - r..=by + r).any(|y| self.row(y, bx - r, bx + r).iter()
-            .any(|&(_, _, j)| j as usize != i && len_sq(agents[j as usize].pos.sub(p)) <= range_sq))
+        (by - r..=by + r).any(|y| {
+            self.row(y, bx - r, bx + r)
+                .iter()
+                .any(|&(_, _, j)| j as usize != i && len_sq(agents[j as usize].pos.sub(p)) <= range_sq)
+        })
     }
 
     /// Agents in bucket row `y`, columns `x0..=x1`.
     fn row(&self, y: i32, x0: i32, x1: i32) -> &[(i32, i32, u32)] {
         let r = y - self.min_y;
-        if r < 0 || r as usize + 1 >= self.row_start.len() { return &[]; }
+        if r < 0 || r as usize + 1 >= self.row_start.len() {
+            return &[];
+        }
         let row = &self.keys[self.row_start[r as usize] as usize..self.row_start[r as usize + 1] as usize];
         let lo = row.partition_point(|k| k.1 < x0);
         let hi = row.partition_point(|k| k.1 <= x1);
@@ -122,13 +162,19 @@ impl Grid {
         let less = |a: (f32, u32), b: (f32, u32)| a.0 < b.0 || (a.0 == b.0 && a.1 < b.1);
         let take = |items: &[(i32, i32, u32)], out: &mut Vec<(f32, u32)>| {
             for &(_, _, j) in items {
-                if j as usize == i { continue; }
+                if j as usize == i {
+                    continue;
+                }
                 let d = len_sq(agents[j as usize].pos.sub(p));
-                if d > range_sq { continue; }
+                if d > range_sq {
+                    continue;
+                }
                 let c = (d, j);
                 // Bounded insertion: `out` stays sorted and at most k long.
                 if out.len() == k {
-                    if !less(c, out[k - 1]) { continue; }
+                    if !less(c, out[k - 1]) {
+                        continue;
+                    }
                     out.pop();
                 }
                 let pos = out.iter().position(|&o| less(c, o)).unwrap_or(out.len());
@@ -138,7 +184,9 @@ impl Grid {
         for ring in 0..=max_ring {
             if ring >= 1 && out.len() == k {
                 let near = edge + (ring - 1) as f32 * self.cell;
-                if near * near > out[k - 1].0 { break; }
+                if near * near > out[k - 1].0 {
+                    break;
+                }
             }
             if ring == 0 {
                 take(self.row(by, bx, bx), out);
@@ -158,12 +206,17 @@ impl Grid {
 /// `threads` > 1 splits agents into contiguous chunks on scoped threads; the
 /// result is identical for any value.
 pub fn compute_velocities(agents: &[Agent], cfg: &AvoidanceConfig, dt: f32, par: &Par) -> Vec<WorldPos> {
-    if agents.is_empty() { return Vec::new(); }
+    if agents.is_empty() {
+        return Vec::new();
+    }
     // A crowd entirely at rest: every agent gets what the per-agent idle
     // shortcut below would give it, without building the grids.
     let still = |a: &Agent| !a.moving && len_sq(a.vel) < EPS && len_sq(a.pref) < EPS;
     if agents.iter().all(|a| !a.avoids || still(a)) {
-        return agents.iter().map(|a| if a.avoids { WorldPos::ZERO } else { a.vel }).collect();
+        return agents
+            .iter()
+            .map(|a| if a.avoids { WorldPos::ZERO } else { a.vel })
+            .collect();
     }
     let max_r = agents.iter().map(|a| a.radius).fold(0.0f32, f32::max);
     let max_v = agents.iter().map(|a| a.max_speed).fold(0.0f32, f32::max);
@@ -171,28 +224,40 @@ pub fn compute_velocities(agents: &[Agent], cfg: &AvoidanceConfig, dt: f32, par:
     let movers: Vec<Agent> = agents.iter().filter(|a| a.moving).copied().collect();
     let (grid, mover_grid) = par.join(
         || Grid::build(agents, (max_r * 4.0).max(1.0), par),
-        || Grid::build(&movers, (max_v * cfg.time_horizon).max(max_r * 4.0).max(1.0), par));
+        || Grid::build(&movers, (max_v * cfg.time_horizon).max(max_r * 4.0).max(1.0), par),
+    );
     let solve_range = |lo: usize, hi: usize| -> Vec<WorldPos> {
         let mut nbrs = Vec::with_capacity(cfg.max_neighbors * 4);
         let mut lines = Vec::with_capacity(cfg.max_neighbors);
-        (lo..hi).map(|i| {
-            let a = &agents[i];
-            if !a.avoids { return a.vel; }
-            let range = a.max_speed.max(max_v) * cfg.time_horizon + a.radius + max_r;
-            // A still agent that wants to stay put keeps standing unless a
-            // mover is within reach (overlaps between still agents are left
-            // to the collision pass).
-            if still(a) && !mover_grid.any_within(&movers, usize::MAX, a.pos, range) {
-                return WorldPos::ZERO;
-            }
-            grid.nearest(agents, i, cfg.max_neighbors, range, &mut nbrs);
-            agent_velocity(agents, i, &nbrs, cfg, dt, &mut lines)
-        }).collect()
+        (lo..hi)
+            .map(|i| {
+                let a = &agents[i];
+                if !a.avoids {
+                    return a.vel;
+                }
+                let range = a.max_speed.max(max_v) * cfg.time_horizon + a.radius + max_r;
+                // A still agent that wants to stay put keeps standing unless a
+                // mover is within reach (overlaps between still agents are left
+                // to the collision pass).
+                if still(a) && !mover_grid.any_within(&movers, usize::MAX, a.pos, range) {
+                    return WorldPos::ZERO;
+                }
+                grid.nearest(agents, i, cfg.max_neighbors, range, &mut nbrs);
+                agent_velocity(agents, i, &nbrs, cfg, dt, &mut lines)
+            })
+            .collect()
     };
     par.ranges(agents.len(), solve_range).into_iter().flatten().collect()
 }
 
-fn agent_velocity(agents: &[Agent], i: usize, nbrs: &[(f32, u32)], cfg: &AvoidanceConfig, dt: f32, lines: &mut Vec<Line>) -> WorldPos {
+fn agent_velocity(
+    agents: &[Agent],
+    i: usize,
+    nbrs: &[(f32, u32)],
+    cfg: &AvoidanceConfig,
+    dt: f32,
+    lines: &mut Vec<Line>,
+) -> WorldPos {
     let a = &agents[i];
     let inv_tau = 1.0 / if a.horizon > 0.0 { a.horizon } else { cfg.time_horizon };
     lines.clear();
@@ -218,9 +283,11 @@ fn agent_velocity(agents: &[Agent], i: usize, nbrs: &[(f32, u32)], cfg: &Avoidan
                 // Legs.
                 let leg = (dist_sq - r_sq).sqrt();
                 dir = if det(rel_pos, w) > 0.0 {
-                    WorldPos::new(rel_pos.x * leg - rel_pos.y * r, rel_pos.x * r + rel_pos.y * leg).scaled(1.0 / dist_sq)
+                    WorldPos::new(rel_pos.x * leg - rel_pos.y * r, rel_pos.x * r + rel_pos.y * leg)
+                        .scaled(1.0 / dist_sq)
                 } else {
-                    WorldPos::new(rel_pos.x * leg + rel_pos.y * r, -rel_pos.x * r + rel_pos.y * leg).scaled(-1.0 / dist_sq)
+                    WorldPos::new(rel_pos.x * leg + rel_pos.y * r, -rel_pos.x * r + rel_pos.y * leg)
+                        .scaled(-1.0 / dist_sq)
                 };
                 u = dir.scaled(dot(rel_vel, dir)).sub(rel_vel);
             }
@@ -235,12 +302,21 @@ fn agent_velocity(agents: &[Agent], i: usize, nbrs: &[(f32, u32)], cfg: &Avoidan
         }
         // Reciprocal: half the correction when the other agent also avoids.
         let share = if b.avoids { 0.5 } else { 1.0 };
-        lines.push(Line { point: a.vel.add(u.scaled(share)), dir });
+        lines.push(Line {
+            point: a.vel.add(u.scaled(share)),
+            dir,
+        });
     }
-    let pref = if a.moving { a.pref } else { a.pref.add(make_way(agents, i, nbrs)) };
+    let pref = if a.moving {
+        a.pref
+    } else {
+        a.pref.add(make_way(agents, i, nbrs))
+    };
     let mut result = WorldPos::ZERO;
     let fail = linear_program2(lines, a.max_speed, pref, false, &mut result);
-    if fail < lines.len() { linear_program3(lines, fail, a.max_speed, &mut result); }
+    if fail < lines.len() {
+        linear_program3(lines, fail, a.max_speed, &mut result);
+    }
     result
 }
 
@@ -253,9 +329,13 @@ fn make_way(agents: &[Agent], i: usize, nbrs: &[(f32, u32)]) -> WorldPos {
     let mut push = WorldPos::ZERO;
     for &(_, j) in nbrs {
         let b = &agents[j as usize];
-        if !b.moving { continue; }
+        if !b.moving {
+            continue;
+        }
         let speed = b.pref.length();
-        if speed <= EPS { continue; }
+        if speed <= EPS {
+            continue;
+        }
         let fwd = b.pref.scaled(1.0 / speed);
         let off = a.pos.sub(b.pos);
         let ahead = dot(off, fwd);
@@ -265,23 +345,38 @@ fn make_way(agents: &[Agent], i: usize, nbrs: &[(f32, u32)]) -> WorldPos {
         let touching = len_sq(off) < clear * clear;
         // Otherwise only movers about to reach us: ahead within half a
         // second of travel.
-        if !touching && (ahead <= 0.0 || ahead > clear + speed * 0.5) { continue; }
+        if !touching && (ahead <= 0.0 || ahead > clear + speed * 0.5) {
+            continue;
+        }
         let lateral = det(fwd, off);
-        if !touching && lateral.abs() >= clear { continue; }
+        if !touching && lateral.abs() >= clear {
+            continue;
+        }
         let side = if lateral >= 0.0 { 1.0 } else { -1.0 };
         let urgency = if touching { 1.0 } else { 1.0 - lateral.abs() / clear };
         push = push.add(WorldPos::new(-fwd.y, fwd.x).scaled(side * urgency));
     }
     let len = push.length();
-    if len <= EPS { return WorldPos::ZERO; }
+    if len <= EPS {
+        return WorldPos::ZERO;
+    }
     push.scaled(a.max_speed * 0.6 * len.min(1.0) / len)
 }
 
-fn linear_program1(lines: &[Line], line_no: usize, radius: f32, opt: WorldPos, direction_opt: bool, result: &mut WorldPos) -> bool {
+fn linear_program1(
+    lines: &[Line],
+    line_no: usize,
+    radius: f32,
+    opt: WorldPos,
+    direction_opt: bool,
+    result: &mut WorldPos,
+) -> bool {
     let l = lines[line_no];
     let dot_p = dot(l.point, l.dir);
     let disc = dot_p * dot_p + radius * radius - len_sq(l.point);
-    if disc < 0.0 { return false; }
+    if disc < 0.0 {
+        return false;
+    }
     let sqrt_disc = disc.sqrt();
     let mut t_left = -dot_p - sqrt_disc;
     let mut t_right = -dot_p + sqrt_disc;
@@ -289,15 +384,27 @@ fn linear_program1(lines: &[Line], line_no: usize, radius: f32, opt: WorldPos, d
         let denom = det(l.dir, other.dir);
         let numer = det(other.dir, l.point.sub(other.point));
         if denom.abs() <= EPS {
-            if numer < 0.0 { return false; }
+            if numer < 0.0 {
+                return false;
+            }
             continue;
         }
         let t = numer / denom;
-        if denom >= 0.0 { t_right = t_right.min(t); } else { t_left = t_left.max(t); }
-        if t_left > t_right { return false; }
+        if denom >= 0.0 {
+            t_right = t_right.min(t);
+        } else {
+            t_left = t_left.max(t);
+        }
+        if t_left > t_right {
+            return false;
+        }
     }
     *result = if direction_opt {
-        if dot(opt, l.dir) > 0.0 { l.point.add(l.dir.scaled(t_right)) } else { l.point.add(l.dir.scaled(t_left)) }
+        if dot(opt, l.dir) > 0.0 {
+            l.point.add(l.dir.scaled(t_right))
+        } else {
+            l.point.add(l.dir.scaled(t_left))
+        }
     } else {
         let t = dot(l.dir, opt.sub(l.point));
         l.point.add(l.dir.scaled(t.clamp(t_left, t_right)))
@@ -306,9 +413,13 @@ fn linear_program1(lines: &[Line], line_no: usize, radius: f32, opt: WorldPos, d
 }
 
 fn linear_program2(lines: &[Line], radius: f32, opt: WorldPos, direction_opt: bool, result: &mut WorldPos) -> usize {
-    *result = if direction_opt { opt.scaled(radius) }
-        else if len_sq(opt) > radius * radius { opt.normalized_or(WorldPos::ZERO).scaled(radius) }
-        else { opt };
+    *result = if direction_opt {
+        opt.scaled(radius)
+    } else if len_sq(opt) > radius * radius {
+        opt.normalized_or(WorldPos::ZERO).scaled(radius)
+    } else {
+        opt
+    };
     for i in 0..lines.len() {
         if det(lines[i].dir, lines[i].point.sub(*result)) > 0.0 {
             let saved = *result;
@@ -331,16 +442,29 @@ fn linear_program3(lines: &[Line], begin: usize, radius: f32, result: &mut World
             for j in 0..i {
                 let d = det(lines[i].dir, lines[j].dir);
                 let point = if d.abs() <= EPS {
-                    if dot(lines[i].dir, lines[j].dir) > 0.0 { continue; }
+                    if dot(lines[i].dir, lines[j].dir) > 0.0 {
+                        continue;
+                    }
                     lines[i].point.add(lines[j].point).scaled(0.5)
                 } else {
-                    lines[i].point.add(lines[i].dir.scaled(det(lines[j].dir, lines[i].point.sub(lines[j].point)) / d))
+                    lines[i].point.add(
+                        lines[i]
+                            .dir
+                            .scaled(det(lines[j].dir, lines[i].point.sub(lines[j].point)) / d),
+                    )
                 };
                 let dir = lines[j].dir.sub(lines[i].dir).normalized_or(WorldPos::ZERO);
                 proj.push(Line { point, dir });
             }
             let saved = *result;
-            if linear_program2(&proj, radius, WorldPos::new(-lines[i].dir.y, lines[i].dir.x), true, result) < proj.len() {
+            if linear_program2(
+                &proj,
+                radius,
+                WorldPos::new(-lines[i].dir.y, lines[i].dir.x),
+                true,
+                result,
+            ) < proj.len()
+            {
                 *result = saved;
             }
             distance = det(lines[i].dir, lines[i].point.sub(*result));
@@ -353,18 +477,33 @@ mod tests {
     use super::*;
 
     fn agent(x: f32, y: f32, vx: f32, vy: f32) -> Agent {
-        Agent { pos: WorldPos::new(x, y), vel: WorldPos::new(vx, vy), radius: 1.0, max_speed: 2.0, pref: WorldPos::new(vx, vy), avoids: true, moving: true, horizon: 0.0 }
+        Agent {
+            pos: WorldPos::new(x, y),
+            vel: WorldPos::new(vx, vy),
+            radius: 1.0,
+            max_speed: 2.0,
+            pref: WorldPos::new(vx, vy),
+            avoids: true,
+            moving: true,
+            horizon: 0.0,
+        }
     }
 
     #[test]
     fn head_on_agents_sidestep_and_never_overlap() {
         let mut a = vec![agent(0.0, 0.0, 1.0, 0.0), agent(10.0, 0.05, -1.0, 0.0)];
-        let cfg = AvoidanceConfig { time_horizon: 2.0, max_neighbors: 10 };
+        let cfg = AvoidanceConfig {
+            time_horizon: 2.0,
+            max_neighbors: 10,
+        };
         let dt = 0.1;
         let mut min_gap = f32::MAX;
         for _ in 0..200 {
             let v = compute_velocities(&a, &cfg, dt, &Par::new(1));
-            for (ag, nv) in a.iter_mut().zip(v) { ag.vel = nv; ag.pos = ag.pos.add(nv.scaled(dt)); }
+            for (ag, nv) in a.iter_mut().zip(v) {
+                ag.vel = nv;
+                ag.pos = ag.pos.add(nv.scaled(dt));
+            }
             min_gap = min_gap.min(a[0].pos.dist(a[1].pos) - 2.0);
         }
         assert!(min_gap > -0.05, "agents overlapped by {}", -min_gap);
@@ -385,7 +524,12 @@ mod tests {
         let one = compute_velocities(&agents, &cfg, 1.0 / 30.0, &Par::new(1));
         for t in [2, 3, 8] {
             let many = compute_velocities(&agents, &cfg, 1.0 / 30.0, &Par::new(t));
-            assert!(one.iter().zip(&many).all(|(a, b)| a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()), "threads={t}");
+            assert!(
+                one.iter()
+                    .zip(&many)
+                    .all(|(a, b)| a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()),
+                "threads={t}"
+            );
         }
     }
 }
@@ -399,22 +543,41 @@ mod timing {
         let mut agents = Vec::new();
         for k in 0..10000u32 {
             let (x, y) = ((k % 100) as f32 * 11.0 + 100.0, (k / 100) as f32 * 11.0 + 100.0);
-            agents.push(Agent { pos: WorldPos::new(x, y), vel: WorldPos::new(80.0, 10.0), radius: 5.0, max_speed: 112.0,
-                pref: WorldPos::new(100.0, 20.0), avoids: true, moving: k % 5 != 0, horizon: 0.0 });
+            agents.push(Agent {
+                pos: WorldPos::new(x, y),
+                vel: WorldPos::new(80.0, 10.0),
+                radius: 5.0,
+                max_speed: 112.0,
+                pref: WorldPos::new(100.0, 20.0),
+                avoids: true,
+                moving: k % 5 != 0,
+                horizon: 0.0,
+            });
         }
         let cfg = AvoidanceConfig::default();
-        let max_r = 5.0; let max_v = 112.0;
+        let max_r = 5.0;
+        let max_v = 112.0;
         let t = std::time::Instant::now();
         let grid = Grid::build(&agents, max_r * 4.0, &Par::new(1));
         let build = t.elapsed();
         let mut nb = Vec::new();
         let t = std::time::Instant::now();
         let mut total = 0usize;
-        for i in 0..agents.len() { grid.nearest(&agents, i, 10, max_v * cfg.time_horizon + 2.0 * max_r, &mut nb); total += nb.len(); }
+        for i in 0..agents.len() {
+            grid.nearest(&agents, i, 10, max_v * cfg.time_horizon + 2.0 * max_r, &mut nb);
+            total += nb.len();
+        }
         let search = t.elapsed();
         let t = std::time::Instant::now();
         let v = compute_velocities(&agents, &cfg, 1.0 / 30.0, &Par::new(1));
         let all = t.elapsed();
-        eprintln!("build {:?} search {:?} ({} nbrs) full serial {:?} ({})", build, search, total, all, v.len());
+        eprintln!(
+            "build {:?} search {:?} ({} nbrs) full serial {:?} ({})",
+            build,
+            search,
+            total,
+            all,
+            v.len()
+        );
     }
 }

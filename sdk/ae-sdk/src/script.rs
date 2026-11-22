@@ -182,7 +182,10 @@ pub const RECORD_LEN: usize = crate::abi::data_header_len(abi_script::DATA) + 8;
 
 /// The arena record: `slots` slots of `slot_bytes`.
 pub const fn slots_record(slot_bytes: u32, slots: u32) -> [u8; RECORD_LEN] {
-    assert!(slot_bytes > 0 && slot_bytes.is_multiple_of(abi_script::SLOT_ALIGN), "slot bytes must be a positive multiple of 16");
+    assert!(
+        slot_bytes > 0 && slot_bytes.is_multiple_of(abi_script::SLOT_ALIGN),
+        "slot bytes must be a positive multiple of 16"
+    );
     let mut b = [0u8; RECORD_LEN];
     let at = crate::abi::put_data_header(&mut b, abi_script::DATA);
     crate::abi::put_u32(&mut b, at, slot_bytes);
@@ -192,7 +195,10 @@ pub const fn slots_record(slot_bytes: u32, slots: u32) -> [u8; RECORD_LEN] {
 
 /// `size_of` the future `script` returns (for [`script_slots!`]).
 pub const fn future_bytes<F: Fn(Unit) -> Fut, Fut: Future<Output = ()>>(_script: &F) -> u32 {
-    assert!(align_of::<Fut>() <= abi_script::SLOT_ALIGN as usize, "a script future aligned past 16");
+    assert!(
+        align_of::<Fut>() <= abi_script::SLOT_ALIGN as usize,
+        "a script future aligned past 16"
+    );
     size_of::<Fut>() as u32
 }
 
@@ -261,7 +267,10 @@ pub fn tick_hz() -> u32 {
     match HZ.load(Ordering::Relaxed) {
         0 => {
             let hz = unsafe { crate::host::ae_lookup(crate::abi::sim::SCOPE, crate::abi::sim::TICK_HZ) };
-            assert!(hz != crate::abi::lookup::MISSING && hz > 0, "the host gives no tick rate");
+            assert!(
+                hz != crate::abi::lookup::MISSING && hz > 0,
+                "the host gives no tick rate"
+            );
             HZ.store(hz, Ordering::Relaxed);
             hz
         }
@@ -323,7 +332,10 @@ impl Unit {
 
     /// Wait `ticks` ticks (at least one).
     pub fn sleep_ticks(&self, ticks: u64) -> Sleep {
-        Sleep { ticks: ticks.max(1), until: 0 }
+        Sleep {
+            ticks: ticks.max(1),
+            until: 0,
+        }
     }
 
     /// Wait for the next tick.
@@ -433,7 +445,10 @@ impl Future for CallinWait {
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u32> {
         let c = cx();
-        assert!(c.callins, "a script waits for a callin, and the resuming system does not write Callins");
+        assert!(
+            c.callins,
+            "a script waits for a callin, and the resuming system does not write Callins"
+        );
         let got = c.seen.get() & self.kinds;
         if got != 0 {
             c.seen.set(c.seen.get() & !got);
@@ -481,7 +496,10 @@ impl<F: Future> Branch<F> {
 
 /// Run `a` and `b` together; done when both are.
 pub fn join<A: Future, B: Future>(a: A, b: B) -> Join<A, B> {
-    Join { a: Branch::Running(a), b: Branch::Running(b) }
+    Join {
+        a: Branch::Running(a),
+        b: Branch::Running(b),
+    }
 }
 
 /// [`join`].
@@ -497,7 +515,11 @@ impl<A: Future, B: Future> Future for Join<A, B> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         let (a, b) = unsafe { (this.a.poll(cx), this.b.poll(cx)) };
-        if a && b { Poll::Ready((this.a.take(), this.b.take())) } else { Poll::Pending }
+        if a && b {
+            Poll::Ready((this.a.take(), this.b.take()))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -511,7 +533,10 @@ pub enum Either<A, B> {
 /// Run `a` and `b` together until one is done (`a` first if both finish
 /// in one poll); the other is dropped where it waits.
 pub fn race<A: Future, B: Future>(a: A, b: B) -> Race<A, B> {
-    Race { a: Branch::Running(a), b: Branch::Running(b) }
+    Race {
+        a: Branch::Running(a),
+        b: Branch::Running(b),
+    }
 }
 
 /// [`race`].
@@ -544,9 +569,20 @@ struct Slots {
 
 fn slots() -> Slots {
     let look = |name| unsafe { crate::host::ae_lookup(abi_script::SCOPE, name) };
-    let (base, slot_bytes, slots) = (look(abi_script::BASE), look(abi_script::SLOT_BYTES), look(abi_script::SLOTS));
-    assert!(base != crate::abi::lookup::MISSING, "the module declares no script slots (script_slots!)");
-    Slots { base: base as usize, slot_bytes: slot_bytes as usize, slots }
+    let (base, slot_bytes, slots) = (
+        look(abi_script::BASE),
+        look(abi_script::SLOT_BYTES),
+        look(abi_script::SLOTS),
+    );
+    assert!(
+        base != crate::abi::lookup::MISSING,
+        "the module declares no script slots (script_slots!)"
+    );
+    Slots {
+        base: base as usize,
+        slot_bytes: slot_bytes as usize,
+        slots,
+    }
 }
 
 /// A tag for the future type `Fut` (never 0): its name, size and alignment.
@@ -554,7 +590,12 @@ fn type_tag<Fut>() -> u32 {
     let mut h: u32 = 0x811C_9DC5;
     let size = (size_of::<Fut>() as u32).to_le_bytes();
     let align = (align_of::<Fut>() as u32).to_le_bytes();
-    for &b in core::any::type_name::<Fut>().as_bytes().iter().chain(&size).chain(&align) {
+    for &b in core::any::type_name::<Fut>()
+        .as_bytes()
+        .iter()
+        .chain(&size)
+        .chain(&align)
+    {
         h = (h ^ b as u32).wrapping_mul(0x0100_0193);
     }
     h | 1
@@ -592,7 +633,8 @@ unsafe fn clear_slot(slot: usize, slot_bytes: usize) {
 pub fn resume<Fut: Future<Output = ()> + 'static>(run: &Run, script: impl Fn(Unit) -> Fut) {
     let arena = slots();
     assert!(
-        HEADER_BYTES as usize + size_of::<Fut>() <= arena.slot_bytes && align_of::<Fut>() <= abi_script::SLOT_ALIGN as usize,
+        HEADER_BYTES as usize + size_of::<Fut>() <= arena.slot_bytes
+            && align_of::<Fut>() <= abi_script::SLOT_ALIGN as usize,
         "the script future does not fit a slot (is its function in script_slots!?)"
     );
     let (tag, drop) = (type_tag::<Fut>(), drop_index::<Fut>());
@@ -622,12 +664,25 @@ pub fn resume<Fut: Future<Output = ()> + 'static>(run: &Run, script: impl Fn(Uni
             unsafe { clear_slot(slot, arena.slot_bytes) };
             unsafe {
                 fut.write(script(Unit::default()));
-                header.write(Header { owner: ids[i].0, tag, drop });
+                header.write(Header {
+                    owner: ids[i].0,
+                    tag,
+                    drop,
+                });
             }
-            s = Script { state: state::RUNNING, due: tick, size: size_of::<Fut>() as u32, waits: 0, ..s };
+            s = Script {
+                state: state::RUNNING,
+                due: tick,
+                size: size_of::<Fut>() as u32,
+                waits: 0,
+                ..s
+            };
         } else {
             let h = unsafe { &*header };
-            assert!(h.owner == ids[i].0 && h.tag == tag, "a unit resumed with another script than its slot holds");
+            assert!(
+                h.owner == ids[i].0 && h.tag == tag,
+                "a unit resumed with another script than its slot holds"
+            );
         }
         if s.due > tick && pending & s.waits == 0 {
             continue;
@@ -644,7 +699,9 @@ pub fn resume<Fut: Future<Output = ()> + 'static>(run: &Run, script: impl Fn(Uni
         };
         CX.with(|c| c.set(&poll_cx));
         bump_enter();
-        let done = unsafe { Pin::new_unchecked(&mut *fut) }.poll(&mut Context::from_waker(waker)).is_ready();
+        let done = unsafe { Pin::new_unchecked(&mut *fut) }
+            .poll(&mut Context::from_waker(waker))
+            .is_ready();
         bump_leave();
         CX.with(|c| c.set(core::ptr::null()));
         // The script may have written its own row; this one is the resumer's.
@@ -654,10 +711,18 @@ pub fn resume<Fut: Future<Output = ()> + 'static>(run: &Run, script: impl Fn(Uni
         s.last = me;
         if done {
             unsafe { clear_slot(slot, arena.slot_bytes) };
-            s = Script { state: state::DONE, due: u64::MAX, waits: 0, ..s };
+            s = Script {
+                state: state::DONE,
+                due: u64::MAX,
+                waits: 0,
+                ..s
+            };
         } else {
             let (due, waits) = (poll_cx.due.get(), poll_cx.waits.get());
-            assert!(due != u64::MAX || waits != 0, "a script waits for something that is not the engine's");
+            assert!(
+                due != u64::MAX || waits != 0,
+                "a script waits for something that is not the engine's"
+            );
             assert!(due > tick, "a script asked to wake in the past");
             s.due = due;
             s.waits = waits;
@@ -695,7 +760,10 @@ static ARENA_COUNT: AtomicUsize = AtomicUsize::new(0);
 fn arena_of(p: usize) -> Option<usize> {
     let base = p & !(BUMP_BYTES - 1);
     let n = ARENA_COUNT.load(Ordering::Acquire).min(MAX_ARENAS);
-    ARENAS[..n].iter().any(|a| a.load(Ordering::Relaxed) == base).then_some(base)
+    ARENAS[..n]
+        .iter()
+        .any(|a| a.load(Ordering::Relaxed) == base)
+        .then_some(base)
 }
 
 fn bump_enter() {

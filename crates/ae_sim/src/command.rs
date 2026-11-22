@@ -52,8 +52,18 @@ impl CommandBuffer {
     /// Record an event under the current range's key. Events have their own
     /// sequence, so emitting one never shifts command keys.
     pub fn push_event(&mut self, stream: u64, bytes: Vec<u8>) -> Result<()> {
-        let (system, range) = self.current.ok_or_else(|| anyhow::anyhow!("event emitted outside a system call"))?;
-        self.events.push((CommandKey { system, range, seq: self.event_seq }, stream, bytes));
+        let (system, range) = self
+            .current
+            .ok_or_else(|| anyhow::anyhow!("event emitted outside a system call"))?;
+        self.events.push((
+            CommandKey {
+                system,
+                range,
+                seq: self.event_seq,
+            },
+            stream,
+            bytes,
+        ));
         self.event_seq += 1;
         Ok(())
     }
@@ -63,8 +73,17 @@ impl CommandBuffer {
     }
 
     pub fn push(&mut self, command: Command) -> Result<()> {
-        let (system, range) = self.current.ok_or_else(|| anyhow::anyhow!("command emitted outside a system call"))?;
-        self.entries.push((CommandKey { system, range, seq: self.seq }, command));
+        let (system, range) = self
+            .current
+            .ok_or_else(|| anyhow::anyhow!("command emitted outside a system call"))?;
+        self.entries.push((
+            CommandKey {
+                system,
+                range,
+                seq: self.seq,
+            },
+            command,
+        ));
         self.seq += 1;
         Ok(())
     }
@@ -93,7 +112,10 @@ impl CommandBuffer {
 pub fn merge(buffers: impl IntoIterator<Item = Vec<(CommandKey, Command)>>) -> Result<Vec<(CommandKey, Command)>> {
     let mut all: Vec<(CommandKey, Command)> = buffers.into_iter().flatten().collect();
     all.sort_unstable_by_key(|(key, _)| *key);
-    ensure!(all.windows(2).all(|w| w[0].0 != w[1].0), "duplicate command key: a work range ran twice");
+    ensure!(
+        all.windows(2).all(|w| w[0].0 != w[1].0),
+        "duplicate command key: a work range ran twice"
+    );
     Ok(all)
 }
 
@@ -189,9 +211,14 @@ mod tests {
         b.push(Command::Despawn(EntityId(10))).unwrap();
         a.begin(1, 0);
         a.push(Command::Despawn(EntityId(100))).unwrap();
-        let order = |buffers: Vec<Vec<(CommandKey, Command)>>| -> Vec<Command> { merge(buffers).unwrap().into_iter().map(|(_, c)| c).collect() };
+        let order = |buffers: Vec<Vec<(CommandKey, Command)>>| -> Vec<Command> {
+            merge(buffers).unwrap().into_iter().map(|(_, c)| c).collect()
+        };
         let (ta, tb) = (a.take(), b.take());
-        let expected: Vec<Command> = [10, 30, 31, 100].iter().map(|&e| Command::Despawn(EntityId(e))).collect();
+        let expected: Vec<Command> = [10, 30, 31, 100]
+            .iter()
+            .map(|&e| Command::Despawn(EntityId(e)))
+            .collect();
         assert_eq!(order(vec![ta.clone(), tb.clone()]), expected);
         assert_eq!(order(vec![tb, ta]), expected);
     }
@@ -215,7 +242,10 @@ mod tests {
         unsafe {
             let world = fb::init().unwrap();
             let c = fb::register_component(world, "C", 4, 4).unwrap();
-            let terms = [ae_ecs::Term { component: c, access: ae_ecs::Access::Read }];
+            let terms = [ae_ecs::Term {
+                component: c,
+                access: ae_ecs::Access::Read,
+            }];
             let query = fb::create_query(world, &terms).unwrap();
             let count = || {
                 let mut n = 0;
@@ -227,8 +257,14 @@ mod tests {
                 n
             };
             let mut applier = Applier::default();
-            let key = |seq| CommandKey { system: 0, range: 0, seq };
-            let spawned = applier.apply(world, &[(key(0), Command::Spawn(vec![(c, vec![1, 0, 0, 0])]))]).unwrap();
+            let key = |seq| CommandKey {
+                system: 0,
+                range: 0,
+                seq,
+            };
+            let spawned = applier
+                .apply(world, &[(key(0), Command::Spawn(vec![(c, vec![1, 0, 0, 0])]))])
+                .unwrap();
             assert_eq!(spawned.spawned, 1);
             let live = {
                 let mut id = 0;
@@ -241,10 +277,17 @@ mod tests {
             };
             // Despawn it, then spawn again so the slot is recycled under a new generation.
             applier.apply(world, &[(key(0), Command::Despawn(live))]).unwrap();
-            applier.apply(world, &[(key(0), Command::Spawn(vec![(c, vec![2, 0, 0, 0])]))]).unwrap();
+            applier
+                .apply(world, &[(key(0), Command::Spawn(vec![(c, vec![2, 0, 0, 0])]))])
+                .unwrap();
             assert_eq!(count(), 1);
 
-            let missing = [EntityId(live.0), EntityId(123_456_789), EntityId(0xFFFF_FFFF), EntityId(live.0 | 1 << 40)];
+            let missing = [
+                EntityId(live.0),
+                EntityId(123_456_789),
+                EntityId(0xFFFF_FFFF),
+                EntityId(live.0 | 1 << 40),
+            ];
             for entity in missing {
                 let commands = [
                     (key(0), Command::Add(entity, c, vec![9, 0, 0, 0])),
@@ -252,10 +295,26 @@ mod tests {
                     (key(2), Command::Despawn(entity)),
                 ];
                 let stats = applier.apply(world, &commands).unwrap();
-                assert_eq!(stats, ApplyStats { ignored: 3, ..ApplyStats::default() }, "entity {:#x}", entity.0);
-                assert!(!fb::entity_alive(world, entity), "entity {:#x} came into existence", entity.0);
+                assert_eq!(
+                    stats,
+                    ApplyStats {
+                        ignored: 3,
+                        ..ApplyStats::default()
+                    },
+                    "entity {:#x}",
+                    entity.0
+                );
+                assert!(
+                    !fb::entity_alive(world, entity),
+                    "entity {:#x} came into existence",
+                    entity.0
+                );
             }
-            assert_eq!(count(), 1, "no entity may be created or deleted by commands on missing ids");
+            assert_eq!(
+                count(),
+                1,
+                "no entity may be created or deleted by commands on missing ids"
+            );
             fb::fini_query(query);
             fb::fini(world);
         }

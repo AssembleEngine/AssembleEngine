@@ -118,7 +118,19 @@ impl Decal {
     /// fading out over the last third.
     pub fn scorch(pos: [f32; 2], radius: f32, seed: u32) -> Self {
         let angle = (seed.wrapping_mul(0x9e37_79b9) >> 8) as f32 / (1u32 << 24) as f32 * std::f32::consts::TAU;
-        Self { pos, half: [radius, radius], angle, layer: layer::SCORCH, opacity: 0.9, fade_in: SCORCH_FADE_IN, life: SCORCH_LIFE, fade_out: SCORCH_LIFE / 3.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
+        Self {
+            pos,
+            half: [radius, radius],
+            angle,
+            layer: layer::SCORCH,
+            opacity: 0.9,
+            fade_in: SCORCH_FADE_IN,
+            life: SCORCH_LIFE,
+            fade_out: SCORCH_LIFE / 3.0,
+            glow: 0.0,
+            glow_life: 0.0,
+            blend: Blend::Replace,
+        }
     }
 
     /// An explosion's scar on atlas layer `layer`, as Recoil sets one from
@@ -128,12 +140,31 @@ impl Decal {
     /// `clamp(3 damage, 15, 1800)` frames times the decal level setting).
     pub fn scar(pos: [f32; 2], radius: f32, seed: u32, damage: f32, layer: u32, blend: Blend) -> Self {
         let k = 2.0 * damage / 255.0;
-        Self { layer, blend, opacity: k.clamp(0.8, 1.0), glow: k.clamp(0.0, 1.0), glow_life: SCAR_GLOW_LIFE, ..Self::scorch(pos, radius, seed) }
+        Self {
+            layer,
+            blend,
+            opacity: k.clamp(0.8, 1.0),
+            glow: k.clamp(0.0, 1.0),
+            glow_life: SCAR_GLOW_LIFE,
+            ..Self::scorch(pos, radius, seed)
+        }
     }
 
     /// A decal that stays until evicted, at full opacity at once.
     pub fn permanent(pos: [f32; 2], half: [f32; 2], angle: f32, layer: u32) -> Self {
-        Self { pos, half, angle, layer, opacity: 1.0, fade_in: 0.0, life: 0.0, fade_out: 0.0, glow: 0.0, glow_life: 0.0, blend: Blend::Replace }
+        Self {
+            pos,
+            half,
+            angle,
+            layer,
+            opacity: 1.0,
+            fade_in: 0.0,
+            life: 0.0,
+            fade_out: 0.0,
+            glow: 0.0,
+            glow_life: 0.0,
+            blend: Blend::Replace,
+        }
     }
 
     /// Bounding radius in plan.
@@ -154,7 +185,10 @@ impl DecalFeed {
     }
 
     pub fn place_all(&self, decals: &[Decal]) {
-        self.queued.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(decals);
+        self.queued
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend_from_slice(decals);
     }
 
     /// Every queued decal, oldest first (the render thread takes them each
@@ -211,32 +245,58 @@ fn unorm8(c: f32) -> u8 {
 
 fn srgb_encode(c: f32) -> u8 {
     let c = c.clamp(0.0, 1.0);
-    unorm8(if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 })
+    unorm8(if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    })
 }
 
 fn srgb_decode(c: u8) -> f32 {
     let c = c as f32 / 255.0;
-    if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// A colour texel from linear RGB and alpha.
 pub fn colour_texel(linear: [f32; 4]) -> [u8; 4] {
-    [srgb_encode(linear[0]), srgb_encode(linear[1]), srgb_encode(linear[2]), unorm8(linear[3])]
+    [
+        srgb_encode(linear[0]),
+        srgb_encode(linear[1]),
+        srgb_encode(linear[2]),
+        unorm8(linear[3]),
+    ]
 }
 
 /// A surface texel from a tangent normal (any length; z out of the
 /// ground), the roughness and the glow mask.
 pub fn surface_texel(normal: [f32; 3], roughness: f32, glow: f32) -> [u8; 4] {
     let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-    let (x, y) = if len > 1e-6 { (normal[0] / len, normal[1] / len) } else { (0.0, 0.0) };
-    [unorm8(x * 0.5 + 0.5), unorm8(y * 0.5 + 0.5), unorm8(roughness), unorm8(glow)]
+    let (x, y) = if len > 1e-6 {
+        (normal[0] / len, normal[1] / len)
+    } else {
+        (0.0, 0.0)
+    };
+    [
+        unorm8(x * 0.5 + 0.5),
+        unorm8(y * 0.5 + 0.5),
+        unorm8(roughness),
+        unorm8(glow),
+    ]
 }
 
 impl DecalAtlas {
     /// Each layer's surface, [`FLAT_SURFACE`] throughout when the atlas
     /// has none.
     pub(crate) fn surface_layers(&self) -> Vec<Vec<[u8; 4]>> {
-        if self.surface.is_empty() { vec![vec![FLAT_SURFACE; (self.size * self.size) as usize]; self.colour.len()] } else { self.surface.clone() }
+        if self.surface.is_empty() {
+            vec![vec![FLAT_SURFACE; (self.size * self.size) as usize]; self.colour.len()]
+        } else {
+            self.surface.clone()
+        }
     }
 
     /// Set layer `layer`'s surface material (its metallic factor). Every
@@ -287,18 +347,39 @@ impl DecalAtlas {
         let colour_layer = if colour.width == size {
             colour.texels.clone()
         } else {
-            let linear: Vec<[f32; 4]> = colour.texels.iter().map(|t| [srgb_decode(t[0]), srgb_decode(t[1]), srgb_decode(t[2]), t[3] as f32 / 255.0]).collect();
-            resample(&linear, colour.width, size).into_iter().map(colour_texel).collect()
+            let linear: Vec<[f32; 4]> = colour
+                .texels
+                .iter()
+                .map(|t| {
+                    [
+                        srgb_decode(t[0]),
+                        srgb_decode(t[1]),
+                        srgb_decode(t[2]),
+                        t[3] as f32 / 255.0,
+                    ]
+                })
+                .collect();
+            resample(&linear, colour.width, size)
+                .into_iter()
+                .map(colour_texel)
+                .collect()
         };
         let surface_layer = match normals {
             Some((img, up)) => {
                 square(img)?;
-                let flipped: Vec<[u8; 4]> = img.texels.iter().map(|t| [t[0], if up { 255 - t[1] } else { t[1] }, t[2], t[3]]).collect();
+                let flipped: Vec<[u8; 4]> = img
+                    .texels
+                    .iter()
+                    .map(|t| [t[0], if up { 255 - t[1] } else { t[1] }, t[2], t[3]])
+                    .collect();
                 Some(if img.width == size {
                     flipped
                 } else {
                     let unorm: Vec<[f32; 4]> = flipped.iter().map(|t| t.map(|c| c as f32 / 255.0)).collect();
-                    resample(&unorm, img.width, size).into_iter().map(|t| t.map(unorm8)).collect()
+                    resample(&unorm, img.width, size)
+                        .into_iter()
+                        .map(|t| t.map(unorm8))
+                        .collect()
                 })
             }
             None => None,
@@ -308,7 +389,8 @@ impl DecalAtlas {
         // A surface for every layer once any layer has one.
         if surface_layer.is_some() || !self.surface.is_empty() {
             self.surface.resize(self.colour.len(), vec![FLAT_SURFACE; texels]);
-            self.surface.push(surface_layer.unwrap_or_else(|| vec![FLAT_SURFACE; texels]));
+            self.surface
+                .push(surface_layer.unwrap_or_else(|| vec![FLAT_SURFACE; texels]));
         }
         if !self.materials.is_empty() {
             self.materials.push(LayerMaterial::default());
@@ -325,20 +407,42 @@ impl DecalAtlas {
             return Err("decal atlas has no layers".into());
         }
         if !self.surface.is_empty() && self.surface.len() != self.colour.len() {
-            return Err(format!("decal atlas has {} surface layers for {} colour layers", self.surface.len(), self.colour.len()));
+            return Err(format!(
+                "decal atlas has {} surface layers for {} colour layers",
+                self.surface.len(),
+                self.colour.len()
+            ));
         }
         if !self.materials.is_empty() && self.materials.len() != self.colour.len() {
-            return Err(format!("decal atlas has {} material layers for {} colour layers", self.materials.len(), self.colour.len()));
+            return Err(format!(
+                "decal atlas has {} material layers for {} colour layers",
+                self.materials.len(),
+                self.colour.len()
+            ));
         }
-        if let Some((i, m)) = self.materials.iter().enumerate().find(|(_, m)| !(0.0..=1.0).contains(&m.metallic)) {
-            return Err(format!("decal atlas layer {i} material metallic {} out of range", m.metallic));
+        if let Some((i, m)) = self
+            .materials
+            .iter()
+            .enumerate()
+            .find(|(_, m)| !(0.0..=1.0).contains(&m.metallic))
+        {
+            return Err(format!(
+                "decal atlas layer {i} material metallic {} out of range",
+                m.metallic
+            ));
         }
         let texels = (self.size * self.size) as usize;
         if let Some(i) = self.colour.iter().position(|l| l.len() != texels) {
-            return Err(format!("decal atlas layer {i} has {} texels, not {texels}", self.colour[i].len()));
+            return Err(format!(
+                "decal atlas layer {i} has {} texels, not {texels}",
+                self.colour[i].len()
+            ));
         }
         if let Some(i) = self.surface.iter().position(|l| l.len() != texels) {
-            return Err(format!("decal atlas surface layer {i} has {} texels, not {texels}", self.surface[i].len()));
+            return Err(format!(
+                "decal atlas surface layer {i} has {} texels, not {texels}",
+                self.surface[i].len()
+            ));
         }
         Ok(())
     }
@@ -357,14 +461,24 @@ pub struct Image {
 pub fn read_tga(bytes: &[u8]) -> Result<Image, String> {
     let header = bytes.get(..18).ok_or("TGA: short header")?;
     let (id_len, kind, bpp, descriptor) = (header[0] as usize, header[2], header[16], header[17]);
-    let (width, height) = (u16::from_le_bytes([header[12], header[13]]) as u32, u16::from_le_bytes([header[14], header[15]]) as u32);
+    let (width, height) = (
+        u16::from_le_bytes([header[12], header[13]]) as u32,
+        u16::from_le_bytes([header[14], header[15]]) as u32,
+    );
     if header[1] != 0 || !(kind == 2 || kind == 10) || bpp != 32 {
-        return Err(format!("TGA: only 32-bit true colour is read (colour map {}, type {kind}, {bpp} bits)", header[1]));
+        return Err(format!(
+            "TGA: only 32-bit true colour is read (colour map {}, type {kind}, {bpp} bits)",
+            header[1]
+        ));
     }
     let n = (width * height) as usize;
     let mut data = bytes.get(18 + id_len..).ok_or("TGA: short data")?;
     let mut bgra: Vec<[u8; 4]> = Vec::with_capacity(n);
-    let texel = |d: &[u8]| -> Result<[u8; 4], String> { d.get(..4).map(|t| [t[2], t[1], t[0], t[3]]).ok_or_else(|| "TGA: data ends early".to_string()) };
+    let texel = |d: &[u8]| -> Result<[u8; 4], String> {
+        d.get(..4)
+            .map(|t| [t[2], t[1], t[0], t[3]])
+            .ok_or_else(|| "TGA: data ends early".to_string())
+    };
     while bgra.len() < n {
         if kind == 2 {
             bgra.push(texel(data)?);
@@ -389,7 +503,11 @@ pub fn read_tga(bytes: &[u8]) -> Result<Image, String> {
     if descriptor & 32 == 0 {
         bgra = bgra.chunks(width as usize).rev().flatten().copied().collect();
     }
-    Ok(Image { width, height, texels: bgra })
+    Ok(Image {
+        width,
+        height,
+        texels: bgra,
+    })
 }
 
 /// Whether a tangent normal map's green points up the image (OpenGL/glTF
@@ -450,10 +568,15 @@ pub fn resample(texels: &[[f32; 4]], from: u32, to: u32) -> Vec<[f32; 4]> {
                 }
                 sum.map(|c| c / (k * k) as f32)
             } else {
-                let (u, v) = (((x as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0), ((y as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0));
+                let (u, v) = (
+                    ((x as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0),
+                    ((y as f32 + 0.5) * f as f32 / t as f32 - 0.5).max(0.0),
+                );
                 let (x0, y0, fx, fy) = (u as usize, v as usize, u.fract(), v.fract());
                 let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
-                std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+                std::array::from_fn(|k| {
+                    (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
+                })
             }
         })
         .collect()
@@ -469,7 +592,9 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
     // Heights are in texels of depth per texel at 128².
     let relief = size as f32 / 128.0;
     fn hash(x: i32, y: i32, octave: i32) -> f32 {
-        let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
+        let mut h = (x as u32).wrapping_mul(0x8da6_b343)
+            ^ (y as u32).wrapping_mul(0xd816_3841)
+            ^ (octave as u32).wrapping_mul(0xcb1a_b31f);
         h ^= h >> 13;
         h = h.wrapping_mul(0x5bd1_e995);
         h ^= h >> 15;
@@ -496,7 +621,13 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
         let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
     let layer = |f: &dyn Fn(f32, f32, f32, f32) -> [f32; 4]| -> Vec<[f32; 4]> {
         (0..n * n)
             .map(|i| {
@@ -538,7 +669,8 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
     // crater a pit inside a raised rim. Normals from the heights (in
     // texels of depth per texel), and the scorch's glow mask: its centre,
     // cracked by the noise.
-    let scorch_height = |u: f32, v: f32, r: f32| relief * (-2.5 * (1.0 - smooth(0.0, 0.7, r)) + 2.0 * fbm(u * 2.0, v * 2.0, 3));
+    let scorch_height =
+        |u: f32, v: f32, r: f32| relief * (-2.5 * (1.0 - smooth(0.0, 0.7, r)) + 2.0 * fbm(u * 2.0, v * 2.0, 3));
     let crater_height = |u: f32, v: f32, r: f32| {
         let rr = r + (fbm(u, v, 7) - 0.5) * 0.18;
         relief * (-5.0 * (1.0 - smooth(0.2, 0.55, rr)) + 3.0 * smooth(0.45, 0.6, rr) * (1.0 - smooth(0.6, 0.9, rr)))
@@ -551,15 +683,28 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
         (0..n * n)
             .map(|i| {
                 let (x, y) = ((i % n) as f32 + 0.5, (i / n) as f32 + 0.5);
-                let (dx, dy) = ((h(x + 1.0, y) - h(x - 1.0, y)) * 0.5, (h(x, y + 1.0) - h(x, y - 1.0)) * 0.5);
+                let (dx, dy) = (
+                    (h(x + 1.0, y) - h(x - 1.0, y)) * 0.5,
+                    (h(x, y + 1.0) - h(x, y - 1.0)) * 0.5,
+                );
                 let len = (dx * dx + dy * dy + 1.0).sqrt();
                 let (u, v) = (x / n as f32, y / n as f32);
-                [-dx / len, -dy / len, 1.0 / len, glow(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0))]
+                [
+                    -dx / len,
+                    -dy / len,
+                    1.0 / len,
+                    glow(u, v, (u * 2.0 - 1.0).hypot(v * 2.0 - 1.0)),
+                ]
             })
             .collect()
     };
-    let scorch_glow = |u: f32, v: f32, r: f32| ((1.0 - smooth(0.05, 0.6, r)) * (0.35 + 0.8 * fbm(u * 1.5, v * 1.5, 11))).clamp(0.0, 0.85);
-    let normals = [normals(&scorch_height, &scorch_glow), normals(&crater_height, &|_, _, _| 0.0)];
+    let scorch_glow = |u: f32, v: f32, r: f32| {
+        ((1.0 - smooth(0.05, 0.6, r)) * (0.35 + 0.8 * fbm(u * 1.5, v * 1.5, 11))).clamp(0.0, 0.85)
+    };
+    let normals = [
+        normals(&scorch_height, &scorch_glow),
+        normals(&crater_height, &|_, _, _| 0.0),
+    ];
     // Roughness textures: the final roughness, since layers have no roughness
     // factor. Char and cinders are rougher than the burnt ring, the crater's
     // pit than its rim. 8 bits is plenty for both.
@@ -574,10 +719,24 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
     });
     // Char and ash are matte dielectrics; the crater's loose earth less so.
     let materials = vec![LayerMaterial::default(); 2];
-    let surface = |normals: &[[f32; 4]], rough: &[f32]| -> Vec<[u8; 4]> { normals.iter().zip(rough).map(|(t, &r)| surface_texel([t[0], t[1], t[2]], r, t[3])).collect() };
+    let surface = |normals: &[[f32; 4]], rough: &[f32]| -> Vec<[u8; 4]> {
+        normals
+            .iter()
+            .zip(rough)
+            .map(|(t, &r)| surface_texel([t[0], t[1], t[2]], r, t[3]))
+            .collect()
+    };
     let surface = vec![surface(&normals[0], &scorch_rough), surface(&normals[1], &crater_rough)];
-    let colour = vec![scorch.into_iter().map(colour_texel).collect(), crater.into_iter().map(colour_texel).collect()];
-    DecalAtlas { size, colour, surface, materials }
+    let colour = vec![
+        scorch.into_iter().map(colour_texel).collect(),
+        crater.into_iter().map(colour_texel).collect(),
+    ];
+    DecalAtlas {
+        size,
+        colour,
+        surface,
+        materials,
+    }
 }
 
 pub struct DecalsSetup {
@@ -590,7 +749,11 @@ pub struct DecalsSetup {
 
 impl DecalsSetup {
     pub fn new(feed: Arc<DecalFeed>, capacity: u32) -> Self {
-        Self { feed, capacity, atlas: None }
+        Self {
+            feed,
+            capacity,
+            atlas: None,
+        }
     }
 }
 
@@ -639,7 +802,14 @@ pub(crate) struct DecalSet {
 
 impl DecalSet {
     pub fn new(capacity: u32) -> Self {
-        Self { capacity: capacity as usize, live: VecDeque::new(), version: 0, words: Vec::new(), count: Vec::new(), cursor: Vec::new() }
+        Self {
+            capacity: capacity as usize,
+            live: VecDeque::new(),
+            version: 0,
+            words: Vec::new(),
+            count: Vec::new(),
+            cursor: Vec::new(),
+        }
     }
 
     /// Place `decal` at `time` (seconds, the frame's animation time).
@@ -664,7 +834,11 @@ impl DecalSet {
         let end = if d.life > 0.0 { time + d.life } else { 0.0 };
         let fade_out = if d.life > 0.0 { 1.0 / d.fade_out.max(1e-6) } else { 0.0 };
         // 1 / the glow's life (0: no glow).
-        let glow_inv = if d.glow > 0.0 && d.glow_life > 0.0 { 1.0 / d.glow_life } else { 0.0 };
+        let glow_inv = if d.glow > 0.0 && d.glow_life > 0.0 {
+            1.0 / d.glow_life
+        } else {
+            0.0
+        };
         let blend = match d.blend {
             Blend::Replace => 0.0,
             Blend::Modulate => 1.0,
@@ -705,7 +879,13 @@ impl DecalSet {
                 }
             }
         }
-        self.live.push_back(Placed { words, buckets: list, n_buckets: n as u8, bounds: [d.pos[0], d.pos[1], r], end });
+        self.live.push_back(Placed {
+            words,
+            buckets: list,
+            n_buckets: n as u8,
+            bounds: [d.pos[0], d.pos[1], r],
+            end,
+        });
         self.version += 1;
     }
 
@@ -807,7 +987,19 @@ mod tests {
         let words = set.encode().to_vec();
         assert!(words.len() <= buffer_words(3));
         // Distinct buckets for these cells at this table size.
-        let cells = [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (2, 1), (-1, 0), (0, -1), (3, 0), (0, 2), (5, 5)];
+        let cells = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (2, 0),
+            (2, 1),
+            (-1, 0),
+            (0, -1),
+            (3, 0),
+            (0, 2),
+            (5, 5),
+        ];
         let mask = buckets(3) - 1;
         let mut seen: Vec<usize> = cells.iter().map(|&(x, z)| bucket(x, z, mask)).collect();
         seen.sort_unstable();
@@ -839,8 +1031,21 @@ mod tests {
     fn decals_expire_at_the_end_of_their_life() {
         let mut set = DecalSet::new(4);
         set.insert(decal(0.0, 0.0, 4.0), 0.0);
-        set.insert(Decal { life: 2.0, fade_out: 0.5, ..decal(1.0, 0.0, 4.0) }, 1.0);
-        set.insert(Decal { life: 1.0, ..decal(2.0, 0.0, 4.0) }, 1.0);
+        set.insert(
+            Decal {
+                life: 2.0,
+                fade_out: 0.5,
+                ..decal(1.0, 0.0, 4.0)
+            },
+            1.0,
+        );
+        set.insert(
+            Decal {
+                life: 1.0,
+                ..decal(2.0, 0.0, 4.0)
+            },
+            1.0,
+        );
         let words = set.encode().to_vec();
         let at = |i: usize, k: usize| f32::from_bits(words[HEADER_WORDS + i * DECAL_WORDS + k]);
         assert_eq!((at(0, 10), at(0, 11)), (0.0, 0.0), "permanent");
@@ -884,22 +1089,45 @@ mod tests {
 
     #[test]
     fn layers_carry_their_material_and_default_to_matte() {
-        let plain = DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]; 2], surface: Vec::new(), materials: Vec::new() };
-        assert_eq!(plain.gpu_materials(), vec![[0.0; 4]; 2], "without materials: dielectric, roughness from the texture");
-        assert_eq!(plain.surface_layers(), vec![vec![FLAT_SURFACE; 4]; 2], "without a surface: flat, fully rough");
+        let plain = DecalAtlas {
+            size: 2,
+            colour: vec![vec![[0; 4]; 4]; 2],
+            surface: Vec::new(),
+            materials: Vec::new(),
+        };
+        assert_eq!(
+            plain.gpu_materials(),
+            vec![[0.0; 4]; 2],
+            "without materials: dielectric, roughness from the texture"
+        );
+        assert_eq!(
+            plain.surface_layers(),
+            vec![vec![FLAT_SURFACE; 4]; 2],
+            "without a surface: flat, fully rough"
+        );
         let mut atlas = default_atlas(32);
         assert!(atlas.validate().is_ok());
         assert_eq!(atlas.materials.len(), atlas.colour.len());
-        assert_eq!(atlas.surface.len(), atlas.colour.len(), "the default atlas has a surface");
+        assert_eq!(
+            atlas.surface.len(),
+            atlas.colour.len(),
+            "the default atlas has a surface"
+        );
         assert_eq!(atlas.materials[layer::SCORCH as usize].metallic, 0.0);
         assert_eq!(atlas.materials[layer::CRATER as usize].metallic, 0.0);
         // A new layer without a normal map takes the default material until
         // it is told otherwise, and a flat, fully rough surface.
-        let grey = Image { width: 4, height: 4, texels: vec![[128; 4]; 16] };
+        let grey = Image {
+            width: 4,
+            height: 4,
+            texels: vec![[128; 4]; 16],
+        };
         let added = atlas.add_layer(&grey, None).unwrap();
         assert_eq!(atlas.materials[added as usize], LayerMaterial::default());
         assert_eq!(atlas.surface[added as usize], vec![FLAT_SURFACE; 32 * 32]);
-        atlas.set_layer_material(added, LayerMaterial { metallic: 1.0 }).unwrap();
+        atlas
+            .set_layer_material(added, LayerMaterial { metallic: 1.0 })
+            .unwrap();
         assert_eq!(atlas.gpu_materials()[added as usize], [1.0, 0.0, 0.0, 0.0]);
         assert!(atlas.set_layer_material(99, LayerMaterial::default()).is_err());
         atlas.materials[0].metallic = 1.5;
@@ -913,11 +1141,17 @@ mod tests {
         let (small, big) = (default_atlas(128), default_atlas(512));
         let tilt = |a: &DecalAtlas, l: usize| -> f32 {
             let s = &a.surface[l];
-            s.iter().map(|t| ((t[0] as f32 - 127.5).powi(2) + (t[1] as f32 - 127.5).powi(2)).sqrt()).sum::<f32>() / s.len() as f32
+            s.iter()
+                .map(|t| ((t[0] as f32 - 127.5).powi(2) + (t[1] as f32 - 127.5).powi(2)).sqrt())
+                .sum::<f32>()
+                / s.len() as f32
         };
         for l in 0..2 {
             let (t0, t1) = (tilt(&small, l), tilt(&big, l));
-            assert!(t0 > 5.0 && (t0 - t1).abs() < t0 * 0.15, "layer {l}: mean tilt {t0} at 128, {t1} at 512");
+            assert!(
+                t0 > 5.0 && (t0 - t1).abs() < t0 * 0.15,
+                "layer {l}: mean tilt {t0} at 128, {t1} at 512"
+            );
         }
     }
 
@@ -938,7 +1172,11 @@ mod tests {
         out.extend(width.to_le_bytes());
         out.extend(height.to_le_bytes());
         out.extend([32, if top_first { 8 | 32 } else { 8 }]);
-        let rows: Vec<&[[u8; 4]]> = if top_first { texels.chunks(width as usize).collect() } else { texels.chunks(width as usize).rev().collect() };
+        let rows: Vec<&[[u8; 4]]> = if top_first {
+            texels.chunks(width as usize).collect()
+        } else {
+            texels.chunks(width as usize).rev().collect()
+        };
         let bgra = |t: &[u8; 4]| [t[2], t[1], t[0], t[3]];
         for row in rows {
             if rle {
@@ -969,12 +1207,25 @@ mod tests {
 
     #[test]
     fn layers_are_resampled_and_normals_take_the_atlas_convention() {
-        let mut atlas = DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]], surface: Vec::new(), materials: Vec::new() };
+        let mut atlas = DecalAtlas {
+            size: 2,
+            colour: vec![vec![[0; 4]; 4]],
+            surface: Vec::new(),
+            materials: Vec::new(),
+        };
         // 4x4 colour, mid grey: box-filtered to 2x2 in linear light.
-        let grey = Image { width: 4, height: 4, texels: vec![[188, 188, 188, 255]; 16] };
+        let grey = Image {
+            width: 4,
+            height: 4,
+            texels: vec![[188, 188, 188, 255]; 16],
+        };
         // A normal map leaning up the image (green 1, OpenGL style),
         // roughness 0.5, glow 0.5.
-        let up = Image { width: 4, height: 4, texels: vec![[128, 255, 128, 128]; 16] };
+        let up = Image {
+            width: 4,
+            height: 4,
+            texels: vec![[128, 255, 128, 128]; 16],
+        };
         let layer = atlas.add_layer(&grey, Some((&up, true))).unwrap();
         assert_eq!(layer, 1);
         assert_eq!(atlas.colour[1][0], [188, 188, 188, 255]);
@@ -983,25 +1234,69 @@ mod tests {
         // (glow) pass through.
         assert_eq!(atlas.surface[0], vec![FLAT_SURFACE; 4]);
         assert_eq!(atlas.surface[1][0], [128, 0, 128, 128]);
-        assert_eq!(atlas.gpu_materials()[1], [0.0; 4], "roughness is the texture; the material stays a dielectric");
+        assert_eq!(
+            atlas.gpu_materials()[1],
+            [0.0; 4],
+            "roughness is the texture; the material stays a dielectric"
+        );
         let down = atlas.add_layer(&grey, Some((&up, false))).unwrap();
         assert_eq!(atlas.surface[down as usize][0], [128, 255, 128, 128]);
         assert!(atlas.validate().is_ok());
         // A source the atlas's size is stored byte for byte.
-        let mut same = DecalAtlas { size: 4, colour: Vec::new(), surface: Vec::new(), materials: Vec::new() };
+        let mut same = DecalAtlas {
+            size: 4,
+            colour: Vec::new(),
+            surface: Vec::new(),
+            materials: Vec::new(),
+        };
         let texels: Vec<[u8; 4]> = (0..16u8).map(|i| [i * 9, 255 - i, i, 200]).collect();
-        let img = Image { width: 4, height: 4, texels: texels.clone() };
+        let img = Image {
+            width: 4,
+            height: 4,
+            texels: texels.clone(),
+        };
         same.add_layer(&img, Some((&img, false))).unwrap();
         assert_eq!((&same.colour[0], &same.surface[0]), (&texels, &texels));
         // Bilinear when growing: a ramp stays monotonic.
         let ramp: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
         let big = resample(&ramp, 2, 4);
         assert!(big[0][0] <= big[1][0] && big[1][0] <= big[2][0] && big[2][0] <= big[3][0] && big[3][0] > big[0][0]);
-        assert!(DecalAtlas { size: 2, colour: vec![vec![[0; 4]; 4]], surface: Vec::new(), materials: Vec::new() }.add_layer(&Image { width: 4, height: 2, texels: vec![[0; 4]; 8] }, None).is_err());
+        assert!(
+            DecalAtlas {
+                size: 2,
+                colour: vec![vec![[0; 4]; 4]],
+                surface: Vec::new(),
+                materials: Vec::new()
+            }
+            .add_layer(
+                &Image {
+                    width: 4,
+                    height: 2,
+                    texels: vec![[0; 4]; 8]
+                },
+                None
+            )
+            .is_err()
+        );
         // Any square resamples; only the atlas itself needs power-of-two
         // mips. (A 6x6 source shrinks into a 4x4 atlas here.)
-        let mut odd = DecalAtlas { size: 4, colour: vec![vec![[0; 4]; 16]], surface: Vec::new(), materials: Vec::new() };
-        assert!(odd.add_layer(&Image { width: 6, height: 6, texels: vec![[128, 128, 128, 255]; 36] }, None).is_ok());
+        let mut odd = DecalAtlas {
+            size: 4,
+            colour: vec![vec![[0; 4]; 16]],
+            surface: Vec::new(),
+            materials: Vec::new(),
+        };
+        assert!(
+            odd.add_layer(
+                &Image {
+                    width: 6,
+                    height: 6,
+                    texels: vec![[128, 128, 128, 255]; 36]
+                },
+                None
+            )
+            .is_ok()
+        );
         assert!(odd.validate().is_ok());
         let mut bad = odd;
         bad.surface = vec![vec![FLAT_SURFACE; 3]];
@@ -1044,7 +1339,11 @@ mod tests {
     #[test]
     fn normal_maps_report_their_green_handedness() {
         let size = 8u32;
-        let colour = Image { width: size, height: size, texels: vec![[0, 0, 0, 255]; (size * size) as usize] };
+        let colour = Image {
+            width: size,
+            height: size,
+            texels: vec![[0, 0, 0, 255]; (size * size) as usize],
+        };
         let map = |up: bool| -> Image {
             let texels = (0..size * size)
                 .map(|i| {
@@ -1055,11 +1354,19 @@ mod tests {
                     [enc(nx), enc(ny), 128, 255]
                 })
                 .collect();
-            Image { width: size, height: size, texels }
+            Image {
+                width: size,
+                height: size,
+                texels,
+            }
         };
         assert!(!normal_green_up(&colour, &map(false)), "green down is DirectX style");
         assert!(normal_green_up(&colour, &map(true)), "green up is OpenGL style");
-        let flat = Image { width: size, height: size, texels: vec![[128, 128, 255, 255]; (size * size) as usize] };
+        let flat = Image {
+            width: size,
+            height: size,
+            texels: vec![[128, 128, 255, 255]; (size * size) as usize],
+        };
         assert!(normal_green_up(&colour, &flat), "a flat map defaults to green up");
     }
 
@@ -1079,11 +1386,23 @@ mod tests {
         for name in names {
             let stem = name.strip_suffix(".tga").unwrap();
             let (colour, normal) = (read(&name), read(&format!("{stem}_normal.tga")));
-            assert_eq!((colour.width, colour.height), (normal.width, normal.height), "{name}: colour and normal differ in size");
+            assert_eq!(
+                (colour.width, colour.height),
+                (normal.width, normal.height),
+                "{name}: colour and normal differ in size"
+            );
             let up = normal_green_up(&colour, &normal);
             let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap() as usize;
-            assert_eq!(atlas.materials[layer], LayerMaterial::default(), "{name}: roughness is the texture; the material stays a dielectric");
-            assert_eq!(atlas.surface[layer].len(), (atlas.size * atlas.size) as usize, "{name}: a surface from the normal map");
+            assert_eq!(
+                atlas.materials[layer],
+                LayerMaterial::default(),
+                "{name}: roughness is the texture; the material stays a dielectric"
+            );
+            assert_eq!(
+                atlas.surface[layer].len(),
+                (atlas.size * atlas.size) as usize,
+                "{name}: a surface from the normal map"
+            );
             let size = atlas.size as usize;
             let sign = curl_sign(&atlas.surface[layer], size, &atlas.colour[layer]);
             println!("{name}: green up {up}, curl {sign:.2}");
@@ -1102,7 +1421,14 @@ mod tests {
     fn decal_encode_time() {
         let mut set = DecalSet::new(1024);
         for i in 0..1024 {
-            set.insert(Decal::scorch([5000.0 + (i % 37) as f32 * 16.0, 5000.0 + (i / 37) as f32 * 16.0], 5.0, i), 0.0);
+            set.insert(
+                Decal::scorch(
+                    [5000.0 + (i % 37) as f32 * 16.0, 5000.0 + (i / 37) as f32 * 16.0],
+                    5.0,
+                    i,
+                ),
+                0.0,
+            );
         }
         let t = std::time::Instant::now();
         for _ in 0..100 {

@@ -37,7 +37,11 @@ pub type ColumnFree = unsafe extern "C-unwind" fn(*mut c_void);
 /// Process-wide; must run before [`init`].
 pub unsafe fn install_column_allocator(malloc: ColumnMalloc, realloc: ColumnRealloc, free: ColumnFree) {
     unsafe { ecs_os_set_api_defaults() };
-    let allocator = ecs_column_allocator_t { malloc_: Some(malloc), realloc_: Some(realloc), free_: Some(free) };
+    let allocator = ecs_column_allocator_t {
+        malloc_: Some(malloc),
+        realloc_: Some(realloc),
+        free_: Some(free),
+    };
     unsafe { ecs_column_allocator_set(&allocator) };
 }
 
@@ -185,8 +189,11 @@ pub unsafe fn for_each_chunk(
         if iter.count <= 0 {
             continue;
         }
-        let mut view =
-            ChunkView { entities: iter.entities, count: iter.count as usize, fields: [ptr::null_mut(); MAX_QUERY_TERMS] };
+        let mut view = ChunkView {
+            entities: iter.entities,
+            count: iter.count as usize,
+            fields: [ptr::null_mut(); MAX_QUERY_TERMS],
+        };
         for (index, term) in terms.iter().enumerate() {
             let column = unsafe { ecs_table_get_id(world, iter.table, term.component.0, 0) };
             if column.is_null() {

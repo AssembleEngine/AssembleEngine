@@ -21,7 +21,10 @@ fn check(threads: usize) {
     let actual = golden(threads);
     for ((stage, got), (expected_stage, want)) in actual.iter().zip(EXPECTED) {
         assert_eq!(stage, expected_stage);
-        assert_eq!(*got, *want, "stage `{stage}` differs at {threads} thread(s): got {got:#018x}, want {want:#018x}");
+        assert_eq!(
+            *got, *want,
+            "stage `{stage}` differs at {threads} thread(s): got {got:#018x}, want {want:#018x}"
+        );
     }
     assert_eq!(actual.len(), EXPECTED.len());
 }

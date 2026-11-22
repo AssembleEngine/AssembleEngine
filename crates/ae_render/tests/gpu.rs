@@ -4,15 +4,14 @@
 //! Every test runs with validation (including synchronization validation)
 //! and fails on any validation error or warning.
 
-
-use ash::vk;
+use ae_framegraph::{BakeOptions, BufferDesc, ImageDesc, ResourceClass};
 use ae_render::demo::{DemoOutput, DemoRenderer, build_demo_graph};
 use ae_render::device::{GpuDevice, GpuInstance};
 use ae_render::executor::{Binding, BufferBinding, Executor, ExecutorConfig, ImageBinding};
-use ae_framegraph::{BakeOptions, BufferDesc, ImageDesc, ResourceClass};
 use ae_render::memory::{OwnedBuffer, OwnedImage};
-use gpu_allocator::MemoryLocation;
 use ae_render::units::ATTRIBUTE_COUNT;
+use ash::vk;
+use gpu_allocator::MemoryLocation;
 use std::sync::Arc;
 
 fn gpu() -> Arc<GpuDevice> {
@@ -51,7 +50,13 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// Render the demo graph offscreen for `frames` frames and return the
 /// readback bytes of the last one.
-fn run_demo(gpu: &Arc<GpuDevice>, extent: vk::Extent2D, bake: BakeOptions, frames: usize, profile: bool) -> (Vec<u8>, usize) {
+fn run_demo(
+    gpu: &Arc<GpuDevice>,
+    extent: vk::Extent2D,
+    bake: BakeOptions,
+    frames: usize,
+    profile: bool,
+) -> (Vec<u8>, usize) {
     let config = ExecutorConfig {
         frames_in_flight: 2,
         profile,
@@ -144,7 +149,10 @@ fn run_demo(gpu: &Arc<GpuDevice>, extent: vk::Extent2D, bake: BakeOptions, frame
     assert_eq!(stats.frames, frames as u64);
     if profile {
         assert_eq!(stats.pass_gpu_ms.len(), 9, "one timing per baked pass");
-        assert!(stats.pass_gpu_ms.iter().any(|ms| *ms > 0.0), "timestamps were read back");
+        assert!(
+            stats.pass_gpu_ms.iter().any(|ms| *ms > 0.0),
+            "timestamps were read back"
+        );
     }
     drop(renderer);
     drop(executor);
@@ -160,13 +168,19 @@ fn run_demo(gpu: &Arc<GpuDevice>, extent: vk::Extent2D, bake: BakeOptions, frame
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn demo_graph_renders_validation_clean_and_aliasing_is_invisible() {
     let gpu = gpu();
-    let extent = vk::Extent2D { width: 256, height: 128 };
+    let extent = vk::Extent2D {
+        width: 256,
+        height: 128,
+    };
     let (aliased, aliased_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, true);
     let (plain, plain_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: false }, 5, true);
     // R5: profiling changes no rendering behaviour.
     let (unprofiled, _) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, false);
     assert_eq!(fnv(&unprofiled), fnv(&aliased), "profiling must not change the image");
-    assert!(aliased_physical < plain_physical, "{aliased_physical} vs {plain_physical}");
+    assert!(
+        aliased_physical < plain_physical,
+        "{aliased_physical} vs {plain_physical}"
+    );
     assert_eq!(fnv(&aliased), fnv(&plain), "aliasing must not change the image");
     // The image is not blank: the left (blurred) and right (inverted, tinted)
     // halves differ, and the triangle shows up against the background.
@@ -214,7 +228,10 @@ fn sync_validation_catches_hazards() {
     .unwrap();
     unsafe {
         let pool = device
-            .create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(gpu.queue_family), None)
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default().queue_family_index(gpu.queue_family),
+                None,
+            )
             .unwrap();
         let cmd = device
             .allocate_command_buffers(
@@ -223,7 +240,9 @@ fn sync_validation_catches_hazards() {
                     .command_buffer_count(1),
             )
             .unwrap()[0];
-        device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
+        device
+            .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())
+            .unwrap();
         device.cmd_fill_buffer(cmd, buffer.buffer, 0, 256, 1);
         device.cmd_fill_buffer(cmd, buffer.buffer, 0, 256, 2);
         device.end_command_buffer(cmd).unwrap();
@@ -247,8 +266,8 @@ fn sync_validation_catches_hazards() {
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn first_use_load_becomes_a_clear() {
-    use ae_render::executor::{PassContext, Recorder};
     use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder};
 
     const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
     struct Paint {
@@ -285,13 +304,20 @@ fn first_use_load_becomes_a_clear() {
     let readback = graph.buffer("readback", buffer_desc, ResourceClass::External);
     // The paint pass draws nothing: whatever the attachment holds afterwards
     // comes from its load op.
-    graph.pass("paint", PassKind::Graphics, 0).color(canvas, LoadOp::Load).id();
+    graph
+        .pass("paint", PassKind::Graphics, 0)
+        .color(canvas, LoadOp::Load)
+        .id();
     graph
         .pass("copy", PassKind::Transfer, 1)
         .access(canvas, Role::TransferSrc)
         .access(readback, Role::TransferDst)
         .id();
-    graph.pass("host read", PassKind::Transfer, 2).access(readback, Role::HostRead).root().id();
+    graph
+        .pass("host read", PassKind::Transfer, 2)
+        .access(readback, Role::HostRead)
+        .root()
+        .id();
 
     let mut image = OwnedImage::new(&gpu, desc, "canvas").unwrap();
     let mut buffer = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
@@ -318,7 +344,13 @@ fn first_use_load_becomes_a_clear() {
     for frame in 0..3 {
         let token = executor.begin_frame().unwrap();
         executor
-            .execute(token, &mut recorder, &|resource| bindings.get(resource.index()).copied(), &[], &[])
+            .execute(
+                token,
+                &mut recorder,
+                &|resource| bindings.get(resource.index()).copied(),
+                &[],
+                &[],
+            )
             .unwrap();
         executor.wait(token).unwrap();
         let bytes = buffer.mapped().unwrap();
@@ -332,7 +364,6 @@ fn first_use_load_becomes_a_clear() {
     buffer.destroy(&gpu);
     assert_clean(&gpu);
 }
-
 
 /// Depth and multiple render targets through the graph. Three passes share
 /// one transient depth buffer: `near` clears it and draws red on the left
@@ -373,7 +404,11 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
         color: [f32; 4],
         depth: [f32; 4],
     }
-    let rect = |rect: [f32; 4], color: [f32; 3], depth: f32| Rect { rect, color: [color[0], color[1], color[2], 1.0], depth: [depth, 0.0, 0.0, 0.0] };
+    let rect = |rect: [f32; 4], color: [f32; 3], depth: f32| Rect {
+        rect,
+        color: [color[0], color[1], color[2], 1.0],
+        depth: [depth, 0.0, 0.0, 0.0],
+    };
     let red = rect([-1.0, -1.0, 0.0, 1.0], [1.0, 0.0, 0.0], 0.3);
     let green = rect([-1.0, -1.0, 1.0, 1.0], [0.0, 1.0, 0.0], 0.6);
     let blue = rect([-0.75, -0.75, -0.25, -0.25], [0.0, 0.0, 1.0], 0.1);
@@ -409,7 +444,13 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
                     let pipeline = if *pass == 2 { self.decal } else { self.mrt };
                     d.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                     for r in &self.rects[*pass as usize] {
-                        d.cmd_push_constants(ctx.cmd, self.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pipeline::push_bytes(r));
+                        d.cmd_push_constants(
+                            ctx.cmd,
+                            self.layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            pipeline::push_bytes(r),
+                        );
                         d.cmd_draw(ctx.cmd, 6, 1, 0, 0);
                     }
                 },
@@ -419,9 +460,26 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
                         let image = ctx.image(*target)?;
                         let region = vk::BufferImageCopy::default()
                             .buffer_offset((index as u32 * SIZE * SIZE * 4) as u64)
-                            .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
-                            .image_extent(vk::Extent3D { width: SIZE, height: SIZE, depth: 1 });
-                        unsafe { d.cmd_copy_image_to_buffer(ctx.cmd, image.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, buffer.buffer, &[region]) };
+                            .image_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: SIZE,
+                                height: SIZE,
+                                depth: 1,
+                            });
+                        unsafe {
+                            d.cmd_copy_image_to_buffer(
+                                ctx.cmd,
+                                image.image,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                buffer.buffer,
+                                &[region],
+                            )
+                        };
                     }
                 }
                 _ => {}
@@ -431,47 +489,145 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
     }
 
     let gpu = gpu();
-    let extent = vk::Extent2D { width: SIZE, height: SIZE };
-    let color = ImageDesc::color_2d(FORMAT, SIZE, SIZE, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+    let extent = vk::Extent2D {
+        width: SIZE,
+        height: SIZE,
+    };
+    let color = ImageDesc::color_2d(
+        FORMAT,
+        SIZE,
+        SIZE,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
     let bytes = (SIZE * SIZE * 4) as u64;
-    let buffer_desc = BufferDesc { size: 2 * bytes, usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let buffer_desc = BufferDesc {
+        size: 2 * bytes,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
     let mut graph = FrameGraph::<u8>::new();
     let t0 = graph.image("target 0", color, ResourceClass::External);
     let t1 = graph.image("target 1", color, ResourceClass::External);
     let readback = graph.buffer("readback", buffer_desc, ResourceClass::External);
-    let depth = graph.image("depth", ImageDesc::depth_2d(depth_format, SIZE, SIZE, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT), ResourceClass::Transient);
-    graph.pass("near", PassKind::Graphics, 0).color(t0, LoadOp::Clear).color(t1, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
-    graph.pass("far", PassKind::Graphics, 1).color(t0, LoadOp::Load).color(t1, LoadOp::Load).depth(depth, LoadOp::Load).id();
-    graph.pass("decal", PassKind::Graphics, 2).color(t0, LoadOp::Load).depth_read(depth).id();
-    graph.pass("copy", PassKind::Transfer, 3).access(t0, Role::TransferSrc).access(t1, Role::TransferSrc).discard(readback, Role::TransferDst).id();
-    graph.pass("host read", PassKind::Transfer, 4).access(readback, Role::HostRead).root().id();
+    let depth = graph.image(
+        "depth",
+        ImageDesc::depth_2d(depth_format, SIZE, SIZE, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT),
+        ResourceClass::Transient,
+    );
+    graph
+        .pass("near", PassKind::Graphics, 0)
+        .color(t0, LoadOp::Clear)
+        .color(t1, LoadOp::Clear)
+        .depth(depth, LoadOp::Clear)
+        .id();
+    graph
+        .pass("far", PassKind::Graphics, 1)
+        .color(t0, LoadOp::Load)
+        .color(t1, LoadOp::Load)
+        .depth(depth, LoadOp::Load)
+        .id();
+    graph
+        .pass("decal", PassKind::Graphics, 2)
+        .color(t0, LoadOp::Load)
+        .depth_read(depth)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 3)
+        .access(t0, Role::TransferSrc)
+        .access(t1, Role::TransferSrc)
+        .discard(readback, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 4)
+        .access(readback, Role::HostRead)
+        .root()
+        .id();
 
     let device = &gpu.device;
     let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
     let layout = pipeline::pipeline_layout(device, &[], std::mem::size_of::<Rect>() as u32, stages).unwrap();
     let vertex = include_bytes!(concat!(env!("OUT_DIR"), "/test_rect.vert.spv"));
     let make = |fragment: &[u8], formats: &[vk::Format], write| {
-        let depth = Some(DepthState { format: depth_format, write, compare: vk::CompareOp::LESS });
-        let desc = GraphicsDesc { vertex, fragment, layout, color_formats: formats, depth, topology: vk::PrimitiveTopology::TRIANGLE_LIST, blend: Blend::Off, glow_blend: Blend::Off };
+        let depth = Some(DepthState {
+            format: depth_format,
+            write,
+            compare: vk::CompareOp::LESS,
+        });
+        let desc = GraphicsDesc {
+            vertex,
+            fragment,
+            layout,
+            color_formats: formats,
+            depth,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            blend: Blend::Off,
+            glow_blend: Blend::Off,
+        };
         pipeline::graphics_pipeline(device, &desc).unwrap()
     };
-    let mrt = make(include_bytes!(concat!(env!("OUT_DIR"), "/test_mrt.frag.spv")), &[FORMAT, FORMAT], true);
-    let decal = make(include_bytes!(concat!(env!("OUT_DIR"), "/test_flat.frag.spv")), &[FORMAT], false);
+    let mrt = make(
+        include_bytes!(concat!(env!("OUT_DIR"), "/test_mrt.frag.spv")),
+        &[FORMAT, FORMAT],
+        true,
+    );
+    let decal = make(
+        include_bytes!(concat!(env!("OUT_DIR"), "/test_flat.frag.spv")),
+        &[FORMAT],
+        false,
+    );
 
-    let mut images = [OwnedImage::new(&gpu, color, "target 0").unwrap(), OwnedImage::new(&gpu, color, "target 1").unwrap()];
+    let mut images = [
+        OwnedImage::new(&gpu, color, "target 0").unwrap(),
+        OwnedImage::new(&gpu, color, "target 1").unwrap(),
+    ];
     let mut buffer = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
-    let image_binding = |image: &OwnedImage, identity| Binding::Image(ImageBinding { image: image.image, view: image.view, format: FORMAT, extent, range: image.range(), identity });
+    let image_binding = |image: &OwnedImage, identity| {
+        Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format: FORMAT,
+            extent,
+            range: image.range(),
+            identity,
+        })
+    };
     let bindings = [
         image_binding(&images[0], 1 << 48),
         image_binding(&images[1], (1 << 48) + 1),
-        Binding::Buffer(BufferBinding { buffer: buffer.buffer, offset: 0, size: 2 * bytes, identity: (1 << 48) + 2 }),
+        Binding::Buffer(BufferBinding {
+            buffer: buffer.buffer,
+            offset: 0,
+            size: 2 * bytes,
+            identity: (1 << 48) + 2,
+        }),
     ];
-    let mut executor = Executor::new(gpu.clone(), ExecutorConfig { record_threads, ..ExecutorConfig::default() }).unwrap();
+    let mut executor = Executor::new(
+        gpu.clone(),
+        ExecutorConfig {
+            record_threads,
+            ..ExecutorConfig::default()
+        },
+    )
+    .unwrap();
     executor.set_graph(graph).unwrap();
-    let mut recorder = Draw { mrt, decal, layout, targets: [t0, t1], readback, rects: [vec![red], vec![green, blue], vec![white]] };
+    let mut recorder = Draw {
+        mrt,
+        decal,
+        layout,
+        targets: [t0, t1],
+        readback,
+        rects: [vec![red], vec![green, blue], vec![white]],
+    };
     for frame in 0..3 {
         let token = executor.begin_frame().unwrap();
-        executor.execute(token, &mut recorder, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+        executor
+            .execute(
+                token,
+                &mut recorder,
+                &|resource| bindings.get(resource.index()).copied(),
+                &[],
+                &[],
+            )
+            .unwrap();
         executor.wait(token).unwrap();
         let data = buffer.mapped().unwrap();
         let pixel = |target: u32, x: u32, y: u32| {
@@ -482,16 +638,40 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
         let (top, bottom, left, right) = (6, 24, 6, 24);
         assert_eq!(pixel(0, left, top), [0, 0, 255], "frame {frame}: blue in front of red");
         assert_eq!(pixel(0, 2, top), [255, 0, 0], "frame {frame}: red hides far green");
-        assert_eq!(pixel(0, right, top), [0, 255, 0], "frame {frame}: green where nothing is nearer");
-        assert_eq!(pixel(0, right, bottom), [255, 255, 255], "frame {frame}: decal over green");
+        assert_eq!(
+            pixel(0, right, top),
+            [0, 255, 0],
+            "frame {frame}: green where nothing is nearer"
+        );
+        assert_eq!(
+            pixel(0, right, bottom),
+            [255, 255, 255],
+            "frame {frame}: decal over green"
+        );
         assert_eq!(pixel(0, left, bottom), [255, 0, 0], "frame {frame}: decal behind red");
         // Half intensity: 127 or 128 depending on the device's rounding.
         let half = |p: [u8; 3], want: [u8; 3]| p.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 1);
-        assert!(half(pixel(1, left, top), [0, 0, 128]), "frame {frame}: second target {:?}", pixel(1, left, top));
-        assert!(half(pixel(1, 2, bottom), [128, 0, 0]), "frame {frame}: second target, no decal {:?}", pixel(1, 2, bottom));
-        assert!(half(pixel(1, right, bottom), [0, 128, 0]), "frame {frame}: second target, no decal {:?}", pixel(1, right, bottom));
+        assert!(
+            half(pixel(1, left, top), [0, 0, 128]),
+            "frame {frame}: second target {:?}",
+            pixel(1, left, top)
+        );
+        assert!(
+            half(pixel(1, 2, bottom), [128, 0, 0]),
+            "frame {frame}: second target, no decal {:?}",
+            pixel(1, 2, bottom)
+        );
+        assert!(
+            half(pixel(1, right, bottom), [0, 128, 0]),
+            "frame {frame}: second target, no decal {:?}",
+            pixel(1, right, bottom)
+        );
     }
-    assert_eq!(executor.stats().parallel_frames, if record_threads > 1 { 3 } else { 0 }, "recorded on the threads");
+    assert_eq!(
+        executor.stats().parallel_frames,
+        if record_threads > 1 { 3 } else { 0 },
+        "recorded on the threads"
+    );
     drop(executor);
     unsafe {
         device.destroy_pipeline(mrt, None);
@@ -521,7 +701,12 @@ fn terrain_renders_offscreen() {
     let heightmap = generate(513, 513, 7);
     let pyramid = build_pyramid(&heightmap, 400.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 400.0, 0.0, Some(30.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
     {
         // Low over the south edge, looking north: terrain below, sky above.
@@ -530,10 +715,22 @@ fn terrain_renders_offscreen() {
         view.camera.pitch = 0.25;
         view.camera.distance = 1500.0;
     }
-    let extent = vk::Extent2D { width: 320, height: 200 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 200,
+    };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     run_headless(&gpu, &mut app, target, 24, config).unwrap();
     let leaves = app.stats().lock().unwrap().leaves;
     let pixels = app.readback().unwrap();
@@ -544,7 +741,13 @@ fn terrain_renders_offscreen() {
         std::fs::write(&path, ppm).unwrap();
     }
     // The capture is sRGB-encoded, like the swapchain.
-    let encode = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let encode = |c: f32| {
+        if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    };
     // The clear colour: the sky's radiance at the default exposure, through
     // the default curve (none: the sRGB target saturates at 1).
     let exposure = ae_render::lighting::exposure(ae_render::lighting::DEFAULT_EV100);
@@ -557,10 +760,16 @@ fn terrain_renders_offscreen() {
     let sky_pixels = pixels.chunks(4).filter(|p| is_sky(p)).count();
     let total = (extent.width * extent.height) as usize;
     eprintln!("{leaves} leaves, sky {sky_pixels} of {total} pixels");
-    assert!(sky_pixels > total / 50 && sky_pixels < total * 9 / 10, "terrain and sky both visible: {sky_pixels} of {total}");
+    assert!(
+        sky_pixels > total / 50 && sky_pixels < total * 9 / 10,
+        "terrain and sky both visible: {sky_pixels} of {total}"
+    );
     let top = &pixels[..(extent.width * 4) as usize];
     let bottom = &pixels[pixels.len() - (extent.width * 4) as usize..];
-    assert!(top.chunks(4).filter(|p| is_sky(p)).count() > bottom.chunks(4).filter(|p| is_sky(p)).count(), "sky is at the top");
+    assert!(
+        top.chunks(4).filter(|p| is_sky(p)).count() > bottom.chunks(4).filter(|p| is_sky(p)).count(),
+        "sky is at the top"
+    );
     assert!(leaves > 64, "refined well beyond the two roots: {leaves}");
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
@@ -584,26 +793,82 @@ fn units_render_over_terrain() {
 
     let gpu = gpu();
     // Flat ground at 50 with water at 60 (class 1 floats on it).
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     let red = [1.0, 0.02, 0.02];
     let blue = [0.02, 0.02, 1.0];
     let magenta = [1.0, 0.02, 1.0];
-    let classes = vec![UnitClass { color: red, gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: blue, gamut: ae_render::colorspace::Gamut::Bt709, floats: true }, UnitClass { color: magenta, gamut: ae_render::colorspace::Gamut::Bt709, floats: false }];
+    let classes = vec![
+        UnitClass {
+            color: red,
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false,
+        },
+        UnitClass {
+            color: blue,
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: true,
+        },
+        UnitClass {
+            color: magenta,
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false,
+        },
+    ];
     // (x, y, prev_x, prev_y, class): the red unit moved from (420, 512).
-    let units = [(560.0f32, 512.0f32, 420.0f32, 512.0f32, 0u32), (512.0, 600.0, 512.0, 600.0, 1), (470.0, 440.0, 470.0, 440.0, 2), (512.0, -4000.0, 512.0, -4000.0, 0)];
+    let units = [
+        (560.0f32, 512.0f32, 420.0f32, 512.0f32, 0u32),
+        (512.0, 600.0, 512.0, 600.0, 1),
+        (470.0, 440.0, 470.0, 440.0, 2),
+        (512.0, -4000.0, 512.0, -4000.0, 0),
+    ];
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for &(x, y, px, py, class) in &units {
-        for (a, word) in [x.to_bits(), y.to_bits(), px.to_bits(), py.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 4.0f32.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            px.to_bits(),
+            py.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            4.0f32.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 7, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-    let setup = UnitsSetup { feed, capacity: 64, classes, min_pixels: 28.0, models: Vec::new(), rigs: Vec::new() };
+    feed.publish(Arc::new(InstanceStream {
+        tick: 7,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns: at_rest(columns),
+        anim: AnimWrites::default(),
+    }));
+    let setup = UnitsSetup {
+        feed,
+        capacity: 64,
+        classes,
+        min_pixels: 28.0,
+        models: Vec::new(),
+        rigs: Vec::new(),
+    };
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
     let camera = {
         let view = app.view();
@@ -614,10 +879,22 @@ fn units_render_over_terrain() {
         view.fog = false;
         view.camera
     };
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     run_headless(&gpu, &mut app, target, 12, config).unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
@@ -628,8 +905,14 @@ fn units_render_over_terrain() {
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let pixel = |x: f32, y: f32, h: f32| -> [u8; 3] {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "({x}, {y}) projects into the view");
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        assert!(
+            u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32,
+            "({x}, {y}) projects into the view"
+        );
         let i = (v as usize * extent.width as usize + u as usize) * 4;
         [pixels[i], pixels[i + 1], pixels[i + 2]]
     };
@@ -640,8 +923,15 @@ fn units_render_over_terrain() {
     let [r, g, b] = pixel(470.0, 440.0, 50.0).map(|c| c as i32);
     assert!(r > 2 * g && b > 2 * g, "magenta unit: {r} {g} {b}");
     let [r, g, b] = pixel(420.0, 512.0, 50.0).map(|c| c as i32);
-    assert!(!(r > 2 * g && r > 2 * b), "nothing red where the red unit was a tick ago: {r} {g} {b}");
-    assert_eq!(app.last_unit_counts(), Some((4, 3)), "four rows uploaded, three pass the cull");
+    assert!(
+        !(r > 2 * g && r > 2 * b),
+        "nothing red where the red unit was a tick ago: {r} {g} {b}"
+    );
+    assert_eq!(
+        app.last_unit_counts(),
+        Some((4, 3)),
+        "four rows uploaded, three pass the cull"
+    );
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
 }
@@ -671,19 +961,61 @@ fn terrain_edits_reach_the_heightfield() {
     let (heightmap, scale, offset) = Heightmap::from_cells(cells, |_, _| 50.0, Some((100.0, 0.0)));
     let pyramid = build_pyramid(&heightmap, scale, offset);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: Some(vec![0; cells.0 * cells.1]) });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: Some(vec![0; cells.0 * cells.1]),
+    });
 
     // A red unit in the middle of the square to raise, a blue one outside.
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for (x, y, class) in [(512.0f32, 512.0f32, 0u32), (360.0, 600.0, 1)] {
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            5.0f32.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 8, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+    feed.publish(Arc::new(InstanceStream {
+        tick: 1,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns: at_rest(columns),
+        anim: AnimWrites::default(),
+    }));
+    let classes = vec![
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [1.0, 0.02, 0.02],
+            floats: false,
+        },
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.02, 0.02, 1.0],
+            floats: false,
+        },
+    ];
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+        feed,
+        capacity: 8,
+        classes,
+        min_pixels: 6.0,
+        models: Vec::new(),
+        rigs: Vec::new(),
+    });
     let camera = {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -693,10 +1025,22 @@ fn terrain_edits_reach_the_heightfield() {
         view.fog = false;
         view.camera
     };
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let step = |run: &mut Headless<_>, app: &mut TerrainApp| {
         run.frames(app, 12).unwrap();
@@ -709,14 +1053,30 @@ fn terrain_edits_reach_the_heightfield() {
     let raised = (58usize, 58usize, 70usize, 70usize);
     let inside = |x: usize, y: usize| (raised.0..=raised.2).contains(&x) && (raised.1..=raised.3).contains(&y);
     let mut editor = TerrainEditor::new(&source);
-    let update = editor.edit(3, &[(58, 58, 70, 70)], |x, y| if inside(x, y) { 90.0 } else { 50.0 }, |_, _| 3).unwrap();
-    eprintln!("terrain update: {} bytes in {} pyramid and {} error regions", update.bytes(), update.pyramid.len(), update.errors.len());
+    let update = editor
+        .edit(
+            3,
+            &[(58, 58, 70, 70)],
+            |x, y| if inside(x, y) { 90.0 } else { 50.0 },
+            |_, _| 3,
+        )
+        .unwrap();
+    eprintln!(
+        "terrain update: {} bytes in {} pyramid and {} error regions",
+        update.bytes(),
+        update.pyramid.len(),
+        update.errors.len()
+    );
     let edits = app.terrain_edits();
     edits.lock().unwrap().pending.push(update);
     let after = step(&mut run, &mut app);
     {
         let e = edits.lock().unwrap();
-        assert_eq!((e.applied, e.version, e.pending.len()), (1, 3, 0), "applied at the next frame");
+        assert_eq!(
+            (e.applied, e.version, e.pending.len()),
+            (1, 3, 0),
+            "applied at the next frame"
+        );
     }
     if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
         for (name, pixels) in [("before", &before), ("after", &after)] {
@@ -729,7 +1089,10 @@ fn terrain_edits_reach_the_heightfield() {
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let project = |x: f32, y: f32, h: f32| -> (f32, f32) {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+        (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        )
     };
     let rgb = |pixels: &[u8], (u, v): (f32, f32)| -> [i32; 3] {
         let i = (v as usize * extent.width as usize + u as usize) * 4;
@@ -740,14 +1103,38 @@ fn terrain_edits_reach_the_heightfield() {
     let (low, high) = (project(512.0, 512.0, 50.0), project(512.0, 512.0, 90.0));
     eprintln!("red unit projects to {low:?} on the old ground, {high:?} on the new");
     assert!((low.1 - high.1).abs() > 8.0, "the camera sees the lift");
-    assert!(red(rgb(&before, low)), "before: the red unit on the old ground {:?}", rgb(&before, low));
-    assert!(red(rgb(&after, high)), "after: the red unit on the raised ground {:?}", rgb(&after, high));
-    assert!(!red(rgb(&after, low)), "after: nothing red at the old ground height {:?}", rgb(&after, low));
-    assert!(blue(rgb(&before, project(360.0, 600.0, 50.0))) && blue(rgb(&after, project(360.0, 600.0, 50.0))), "the blue unit stays");
+    assert!(
+        red(rgb(&before, low)),
+        "before: the red unit on the old ground {:?}",
+        rgb(&before, low)
+    );
+    assert!(
+        red(rgb(&after, high)),
+        "after: the red unit on the raised ground {:?}",
+        rgb(&after, high)
+    );
+    assert!(
+        !red(rgb(&after, low)),
+        "after: nothing red at the old ground height {:?}",
+        rgb(&after, low)
+    );
+    assert!(
+        blue(rgb(&before, project(360.0, 600.0, 50.0))) && blue(rgb(&after, project(360.0, 600.0, 50.0))),
+        "the blue unit stays"
+    );
     // The raised top looks different (rock, lit as the top of a block).
     let top = project(480.0, 540.0, 90.0);
-    let diff = rgb(&before, top).iter().zip(rgb(&after, top)).map(|(a, b)| (a - b).abs()).sum::<i32>();
-    assert!(diff > 30, "the raised square changed colour: {:?} -> {:?}", rgb(&before, top), rgb(&after, top));
+    let diff = rgb(&before, top)
+        .iter()
+        .zip(rgb(&after, top))
+        .map(|(a, b)| (a - b).abs())
+        .sum::<i32>();
+    assert!(
+        diff > 30,
+        "the raised square changed colour: {:?} -> {:?}",
+        rgb(&before, top),
+        rgb(&after, top)
+    );
 
     // Outside the raised block's screen box (with a margin), nothing moved.
     // The box is a cell wider than the changed corners (world 464..=568)
@@ -774,12 +1161,22 @@ fn terrain_edits_reach_the_heightfield() {
         }
     }
     eprintln!("raised block on screen {box_:?}; {moved} of {outside} pixels outside it changed");
-    assert!(outside > 40_000 && moved == 0, "{moved} of {outside} pixels outside the edit changed");
+    assert!(
+        outside > 40_000 && moved == 0,
+        "{moved} of {outside} pixels outside the edit changed"
+    );
 
     // Several small rectangles in one update, of sizes that leave the
     // regions after them unaligned unless the upload aligns them (a 2 x 1
     // cell rectangle is 3 x 2 corners, 24 bytes of heights).
-    let update = editor.edit(4, &[(20, 20, 21, 20), (100, 7, 100, 7), (3, 90, 5, 90)], |x, y| if inside(x, y) { 90.0 } else { 50.0 + (x % 3) as f32 }, |_, _| 2).unwrap();
+    let update = editor
+        .edit(
+            4,
+            &[(20, 20, 21, 20), (100, 7, 100, 7), (3, 90, 5, 90)],
+            |x, y| if inside(x, y) { 90.0 } else { 50.0 + (x % 3) as f32 },
+            |_, _| 2,
+        )
+        .unwrap();
     assert_eq!(update.heights[0].bytes.len(), 24);
     run.frames(&mut app, 6).unwrap();
     edits.lock().unwrap().pending.push(update);
@@ -808,18 +1205,36 @@ fn photometric_sun_exposure_and_inverse_square() {
     use glam::{Vec2, Vec3, Vec4};
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let target = Vec2::new(512.0, 512.0);
     let ground = 50.0;
     let camera = std::cell::Cell::new(None);
     let render = |sun: f32, ev100: f32, lights: Vec<Light>, unculled: bool| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_lights(lights)
-            .with_tone(ToneParams { ev100, sun_illuminance: sun, bloom: 0.0, auto: false, ..Default::default() });
+            .with_tone(ToneParams {
+                ev100,
+                sun_illuminance: sun,
+                bloom: 0.0,
+                auto: false,
+                ..Default::default()
+            });
         if unculled {
             app = app.with_unculled_lights();
         }
@@ -833,8 +1248,17 @@ fn photometric_sun_exposure_and_inverse_square() {
             camera.set(Some(view.camera));
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target_info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target_info = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target_info, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -847,10 +1271,17 @@ fn photometric_sun_exposure_and_inverse_square() {
     let sun50 = render(50_000.0, 14.0, Vec::new(), false);
     let sky13 = render(0.0, 13.0, Vec::new(), false);
     let dark = render(0.0, 14.0, Vec::new(), false);
-    let light = |h: f32| Light::point(Vec3::new(target.x, ground + h, target.y), Vec3::ONE, 100_000.0, 0.0, 0.05);
+    let light = |h: f32| {
+        Light::point(
+            Vec3::new(target.x, ground + h, target.y),
+            Vec3::ONE,
+            100_000.0,
+            0.0,
+            0.05,
+        )
+    };
     let at2 = render(0.0, 14.0, vec![light(2.0)], false);
     let at4 = render(0.0, 14.0, vec![light(4.0)], false);
-
 
     let view_proj = lod_view(&source, &camera.get().unwrap(), extent.width, extent.height).view_proj;
     let pixel = |x: f32, y: f32, h: f32| -> usize {
@@ -862,26 +1293,58 @@ fn photometric_sun_exposure_and_inverse_square() {
     let at = pixel(target.x, target.y, ground);
     let lin = |pixels: &[u8], c: usize| -> f32 {
         let v = pixels[at + c] as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
     let add = |a: &[u8], b: &[u8]| -> f32 { (0..3).map(|c| lin(a, c) - lin(b, c)).sum::<f32>() / 3.0 };
     let (d100, d50) = (add(&sun100, &sky14), add(&sun50, &sky14));
     assert!(d100 > 0.2 && d50 > 0.1, "the sun lights the ground: {d100} {d50}");
-    assert!((d100 / d50 - 2.0).abs() < 0.05, "sun illuminance scales: {:.4} vs {:.4}", d100 / d50, 2.0);
+    assert!(
+        (d100 / d50 - 2.0).abs() < 0.05,
+        "sun illuminance scales: {:.4} vs {:.4}",
+        d100 / d50,
+        2.0
+    );
     // The scene is stored exposed (the tonemap only curves): one EV more
     // doubles the stored sky, which stays below the clamp's ceiling.
     let (s14, s13) = (lin(&sky14, 1), lin(&sky13, 1));
     assert!(s14 > 0.1 && s13 < 0.98, "the sky is in range: {s14} {s13}");
-    assert!((s13 / s14 - 2.0).abs() < 0.08, "one EV doubles the stored light: {:.4}", s13 / s14);
+    assert!(
+        (s13 / s14 - 2.0).abs() < 0.08,
+        "one EV doubles the stored light: {:.4}",
+        s13 / s14
+    );
 
     // A point light with no range: 4 m adds a quarter of 2 m.
     let (a2, a4) = (add(&at2, &dark), add(&at4, &dark));
     assert!(a2 > 0.05 && a4 > 0.01, "the point light adds light: {a2} {a4}");
-    assert!((a2 / a4 - 4.0).abs() < 0.2, "inverse square: {:.3} (2 m vs 4 m)", a2 / a4);
+    assert!(
+        (a2 / a4 - 4.0).abs() < 0.2,
+        "inverse square: {:.3} (2 m vs 4 m)",
+        a2 / a4
+    );
     // A source radius larger than the authored range clamps the near field
     // without extinguishing the light: the range window still applies.
-    let big = render(0.0, 14.0, vec![Light::point(Vec3::new(target.x, ground + 1.0, target.y), Vec3::ONE, 1.0e9, 2.0, 100.0)], false);
-    assert!(add(&big, &dark) > 0.02, "the regularisation radius does not put the light out: {}", add(&big, &dark));
+    let big = render(
+        0.0,
+        14.0,
+        vec![Light::point(
+            Vec3::new(target.x, ground + 1.0, target.y),
+            Vec3::ONE,
+            1.0e9,
+            2.0,
+            100.0,
+        )],
+        false,
+    );
+    assert!(
+        add(&big, &dark) > 0.02,
+        "the regularisation radius does not put the light out: {}",
+        add(&big, &dark)
+    );
     assert_clean(&gpu);
 }
 
@@ -913,13 +1376,32 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
 
     let gpu = gpu();
     let n = 65;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.1; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     // Straight down, so the frame is ground only.
-    let camera = Camera { target: Vec2::new(128.0, 128.0), ground: 10.0, distance: 160.0, yaw: 0.0, pitch: 1.55, fov_y: 0.8 };
+    let camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground: 10.0,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 1.55,
+        fov_y: 0.8,
+    };
     let size = 16u32;
     let texels = (size * size) as usize;
     let atlas = Arc::new(DecalAtlas {
@@ -930,7 +1412,10 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
     });
     let screen = |x: f32, z: f32| {
         let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(x, 10.0, z, 1.0);
-        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+        (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        )
     };
     let render = |at: [f32; 2], bloom: f32| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
@@ -939,13 +1424,25 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
         let scars: Vec<Decal> = (0..25)
             .map(|k| {
                 let (i, j) = ((k % 5) as f32 - 2.0, (k / 5) as f32 - 2.0);
-                Decal { glow: 1.0, glow_life: 1000.0, ..Decal::permanent([at[0] + 12.0 * i, at[1] + 12.0 * j], [8.0, 8.0], 0.0, 0) }
+                Decal {
+                    glow: 1.0,
+                    glow_life: 1000.0,
+                    ..Decal::permanent([at[0] + 12.0 * i, at[1] + 12.0 * j], [8.0, 8.0], 0.0, 0)
+                }
             })
             .collect();
         feed.place_all(&scars);
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_decals(DecalsSetup { feed, capacity: 32, atlas: Some(atlas.clone()) })
-            .with_tone(ToneParams { bloom, auto: true, ..Default::default() });
+            .with_decals(DecalsSetup {
+                feed,
+                capacity: 32,
+                atlas: Some(atlas.clone()),
+            })
+            .with_tone(ToneParams {
+                bloom,
+                auto: true,
+                ..Default::default()
+            });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -953,8 +1450,17 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         // 10 s: the exposure settles.
         run_headless(&gpu, &mut app, target, 600, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -966,7 +1472,11 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
     let (eu, _) = screen(edge[0], edge[1]);
     // Plain ground on the far side from the edge spot, clear of both
     // scars' glow and bloom.
-    let (x0, x1) = if eu > extent.width as f32 / 2.0 { (8, 40) } else { (extent.width as usize - 40, extent.width as usize - 8) };
+    let (x0, x1) = if eu > extent.width as f32 / 2.0 {
+        (8, 40)
+    } else {
+        (extent.width as usize - 40, extent.width as usize - 8)
+    };
     let ground = |p: &[u8]| -> f32 {
         let mut sum = 0.0;
         let mut count = 0.0;
@@ -989,12 +1499,20 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
     let centre_bloom = ground(&shot);
     let centre_plain = ground(&render(centre, 0.0));
     let edge_plain = ground(&render(edge, 0.0));
-    eprintln!("edge scar at x {eu:.0}; ground luma: centre scar with bloom {centre_bloom:.1}, without {centre_plain:.1}; edge scar without bloom {edge_plain:.1}");
+    eprintln!(
+        "edge scar at x {eu:.0}; ground luma: centre scar with bloom {centre_bloom:.1}, without {centre_plain:.1}; edge scar without bloom {edge_plain:.1}"
+    );
     // The glow joins at the bloom's strength (0.3) on top of the same light
     // in the scene, so it moves the exposure a little; readback is
     // deterministic, so a small margin is a real difference.
-    assert!(centre_bloom < centre_plain - 0.15, "the bloom's glow is metered: {centre_bloom:.1} vs {centre_plain:.1}");
-    assert!(centre_plain < edge_plain - 1.0, "the centre weighs more: {centre_plain:.1} vs {edge_plain:.1}");
+    assert!(
+        centre_bloom < centre_plain - 0.15,
+        "the bloom's glow is metered: {centre_bloom:.1} vs {centre_plain:.1}"
+    );
+    assert!(
+        centre_plain < edge_plain - 1.0,
+        "the centre weighs more: {centre_plain:.1} vs {edge_plain:.1}"
+    );
     assert_clean(&gpu);
 }
 
@@ -1034,13 +1552,12 @@ fn auto_exposure_holds_the_key_across_sunlight() {
         cell_size: 32.0,
     };
     let render = |sun: f32, auto: bool, fog: bool| -> Vec<u8> {
-        let mut app =
-            TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ToneParams {
-                sun_illuminance: sun,
-                auto,
-                bloom: 0.0,
-                ..Default::default()
-            });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ToneParams {
+            sun_illuminance: sun,
+            auto,
+            bloom: 0.0,
+            ..Default::default()
+        });
         if fog {
             app = app.with_vision(Arc::new(ae_render::terrain::app::VisionFeed::new(grid)));
         }
@@ -1108,8 +1625,14 @@ fn auto_exposure_holds_the_key_across_sunlight() {
     // light reads a little under the meter's trimmed mean log (0.297 against
     // 0.32 measured).
     let key = ae_render::lighting::KEY_LUMINANCE;
-    assert!((bright_auto / key - 1.0).abs() < 0.1, "auto settles at the key: {bright_auto:.3} vs {key}");
-    assert!(bright_auto < bright_manual, "the key is below the reference's manual look: {bright_auto:.3} vs {bright_manual:.3}");
+    assert!(
+        (bright_auto / key - 1.0).abs() < 0.1,
+        "auto settles at the key: {bright_auto:.3} vs {key}"
+    );
+    assert!(
+        bright_auto < bright_manual,
+        "the key is below the reference's manual look: {bright_auto:.3} vs {bright_manual:.3}"
+    );
     assert!(
         (fog_auto_ratio / fog_manual_ratio - 1.0).abs() < 0.15,
         "the fog of war is not exposed away: auto keeps {fog_auto_ratio:.3} of the clear frame, manual {fog_manual_ratio:.3}"
@@ -1122,10 +1645,7 @@ fn auto_exposure_holds_the_key_across_sunlight() {
         (auto_ratio - 1.0).abs() < 0.15,
         "auto-exposure holds the key: {auto_ratio:.3}"
     );
-    assert!(
-        manual_ratio > 1.6,
-        "manual exposure follows the sun: {manual_ratio:.3}"
-    );
+    assert!(manual_ratio > 1.6, "manual exposure follows the sun: {manual_ratio:.3}");
     assert_clean(&gpu);
 }
 
@@ -1147,31 +1667,85 @@ fn model_lights_light_the_ground() {
     use glam::{Mat4, Vec2, Vec4};
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     let identity = Mat4::IDENTITY.to_cols_array();
-    let bone = |name: &str, parent: Option<u32>, y: f32| Bone { name: name.into(), parent, rest: Mat4::from_translation(glam::Vec3::new(0.0, y, 0.0)).to_cols_array(), translation: [0.0, y, 0.0], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] };
+    let bone = |name: &str, parent: Option<u32>, y: f32| Bone {
+        name: name.into(),
+        parent,
+        rest: Mat4::from_translation(glam::Vec3::new(0.0, y, 0.0)).to_cols_array(),
+        translation: [0.0, y, 0.0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0; 3],
+    };
     let model_with = |light: ModelLight| {
         let mut m = Model {
             bones: vec![bone("root", None, 0.0), bone("lamp", Some(0), 1.0)],
-            joints: vec![Joint { bone: 0, inverse_bind: identity }, Joint { bone: 1, inverse_bind: identity }],
+            joints: vec![
+                Joint {
+                    bone: 0,
+                    inverse_bind: identity,
+                },
+                Joint {
+                    bone: 1,
+                    inverse_bind: identity,
+                },
+            ],
             lights: vec![light],
-            materials: vec![Material { name: "m".into(), base_color: [0.5, 0.5, 0.5, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() }],
+            materials: vec![Material {
+                name: "m".into(),
+                base_color: [0.5, 0.5, 0.5, 1.0],
+                metallic: 0.0,
+                roughness: 0.8,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         model_box(&mut m, [-1.0, 0.0, -1.0], [1.0, 1.0, 1.0], 0);
-        m.bounds = ae_model::Bounds { min: [-1.0, 0.0, -1.0], max: [1.0, 1.0, 1.0] };
+        m.bounds = ae_model::Bounds {
+            min: [-1.0, 0.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        };
         m.merge_primitives();
         m.validate().unwrap();
         m
     };
-    let point = model_with(ModelLight { name: "lamp".into(), joint: 1, kind: LightKind::Point, color: [1.0, 0.4, 0.12], intensity: 6_000_000.0, range: 40.0, inner_angle: 0.0, outer_angle: 0.0, size: 4.0 });
+    let point = model_with(ModelLight {
+        name: "lamp".into(),
+        joint: 1,
+        kind: LightKind::Point,
+        color: [1.0, 0.4, 0.12],
+        intensity: 6_000_000.0,
+        range: 40.0,
+        inner_angle: 0.0,
+        outer_angle: 0.0,
+        size: 4.0,
+    });
     // A wide cone, so the ground in front of the unit (past its own model)
     // is inside it; model -z is world -z with the heading +x.
-    let spot = model_with(ModelLight { name: "headlight".into(), joint: 1, kind: LightKind::Spot, color: [0.2, 0.4, 1.0], intensity: 5_000_000.0, range: 40.0, inner_angle: 0.9, outer_angle: 1.2, size: 4.0 });
+    let spot = model_with(ModelLight {
+        name: "headlight".into(),
+        joint: 1,
+        kind: LightKind::Spot,
+        color: [0.2, 0.4, 1.0],
+        intensity: 5_000_000.0,
+        range: 40.0,
+        inner_angle: 0.9,
+        outer_angle: 1.2,
+        size: 4.0,
+    });
     let mut unlit = point.clone();
     unlit.lights.clear();
     unlit.validate().unwrap();
@@ -1181,51 +1755,108 @@ fn model_lights_light_the_ground() {
     let units = [(450.0f32, 512.0f32, 0u32), (574.0, 512.0, 1u32)];
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for &(x, y, class) in &units {
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            5.0f32.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = None;
-    let mut render = |point: Arc<Model>, spot: Arc<Model>, unculled: bool| -> (Vec<u8>, ae_render::lights::LightStats) {
-        let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }];
-        let setup = UnitsSetup { feed, capacity: 16, classes, min_pixels: 8.0, models: vec![Some(point), Some(spot)], rigs: Vec::new() };
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
-        if unculled {
-            app = app.with_unculled_lights();
-        }
-        let view = app.view();
-        {
-            let mut view = view.lock().unwrap();
-            view.camera.target = Vec2::new(512.0, 512.0);
-            view.camera.pitch = 1.45;
-            view.camera.distance = 260.0;
-            view.fog = false;
-            camera = Some(view.camera);
-        }
-        app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
-        run_headless(&gpu, &mut app, target, 8, config).unwrap();
-        let pixels = app.readback().unwrap();
-        let stats = *app.light_stats().lock().unwrap();
-        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
-        (pixels, stats)
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
     };
+    let mut camera = None;
+    let mut render =
+        |point: Arc<Model>, spot: Arc<Model>, unculled: bool| -> (Vec<u8>, ae_render::lights::LightStats) {
+            let feed = Arc::new(UnitFeed::default());
+            feed.publish(Arc::new(InstanceStream {
+                tick: 1,
+                published: std::time::Instant::now(),
+                tick_seconds: 0.0,
+                sim_seconds: 0.0,
+                columns: at_rest(columns.clone()),
+                anim: AnimWrites::default(),
+            }));
+            let classes = vec![
+                UnitClass {
+                    color: [0.5; 3],
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    floats: false,
+                },
+                UnitClass {
+                    color: [0.5; 3],
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    floats: false,
+                },
+            ];
+            let setup = UnitsSetup {
+                feed,
+                capacity: 16,
+                classes,
+                min_pixels: 8.0,
+                models: vec![Some(point), Some(spot)],
+                rigs: Vec::new(),
+            };
+            let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup);
+            if unculled {
+                app = app.with_unculled_lights();
+            }
+            let view = app.view();
+            {
+                let mut view = view.lock().unwrap();
+                view.camera.target = Vec2::new(512.0, 512.0);
+                view.camera.pitch = 1.45;
+                view.camera.distance = 260.0;
+                view.fog = false;
+                camera = Some(view.camera);
+            }
+            app.create_offscreen(&gpu, extent).unwrap();
+            let target = TargetInfo {
+                extent,
+                format: vk::Format::R8G8B8A8_SRGB,
+                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+            let config = ExecutorConfig {
+                frames_in_flight: 2,
+                profile: false,
+                bake: BakeOptions::default(),
+                record_threads: 1,
+            };
+            run_headless(&gpu, &mut app, target, 8, config).unwrap();
+            let pixels = app.readback().unwrap();
+            let stats = *app.light_stats().lock().unwrap();
+            ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+            (pixels, stats)
+        };
     let dark = render(Arc::new(unlit.clone()), Arc::new(unlit.clone()), false).0;
     let (lit, stats) = render(Arc::new(point.clone()), Arc::new(spot.clone()), false);
     let reference = render(Arc::new(point.clone()), Arc::new(spot.clone()), true).0;
     let again = render(Arc::new(point.clone()), Arc::new(spot.clone()), false).0;
     assert_eq!(lit, again, "the appended lights are deterministic");
     assert_eq!(lit, reference, "clustered equals every light at every pixel");
-    assert_eq!((stats.lights, stats.dropped), (2, 0), "one light per unit was appended: {stats:?}");
+    assert_eq!(
+        (stats.lights, stats.dropped),
+        (2, 0),
+        "one light per unit was appended: {stats:?}"
+    );
 
     let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
     let project = |x: f32, y: f32, h: f32| -> (f32, f32) {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+        (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        )
     };
     let rgb = |pixels: &[u8], (u, v): (f32, f32)| -> [i32; 3] {
         let i = (v as usize * extent.width as usize + u as usize) * 4;
@@ -1245,7 +1876,11 @@ fn model_lights_light_the_ground() {
     let (was, now) = (rgb(&dark, front), rgb(&lit, front));
     let gain = |c: usize| now[c] - was[c];
     assert!(gain(2) > 3 && gain(2) > 2 * gain(0), "spot front: {was:?} -> {now:?}");
-    assert_eq!(rgb(&lit, behind), rgb(&dark, behind), "the spot lights nothing behind its node");
+    assert_eq!(
+        rgb(&lit, behind),
+        rgb(&dark, behind),
+        "the spot lights nothing behind its node"
+    );
     assert_clean(&gpu);
 }
 
@@ -1271,8 +1906,16 @@ fn tileset_scene(
     let (heightmap, scale, offset) = Heightmap::from_cells(cells, &ground, None);
     let pyramid = build_pyramid(&heightmap, scale, offset);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, None);
-    let materials = (0..cells.1).flat_map(|y| (0..cells.0).map(move |x| (x, y))).map(|(x, y)| material(x, y)).collect();
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: Some(materials) });
+    let materials = (0..cells.1)
+        .flat_map(|y| (0..cells.0).map(move |x| (x, y)))
+        .map(|(x, y)| material(x, y))
+        .collect();
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: Some(materials),
+    });
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
     if let Some(t) = tileset {
         app = app.with_tileset(t);
@@ -1290,22 +1933,51 @@ fn tileset_scene(
         view.weights = weights;
         view.camera
     };
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    run_headless(gpu, &mut app, target, 16, ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 }).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    run_headless(
+        gpu,
+        &mut app,
+        target,
+        16,
+        ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        },
+    )
+    .unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(dir) = std::env::var("AE_TEST_CAPTURE") {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
         ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-        std::fs::write(format!("{dir}/tileset-{}.ppm", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)), ppm).unwrap();
+        std::fs::write(
+            format!(
+                "{dir}/tileset-{}.ppm",
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+            ppm,
+        )
+        .unwrap();
     }
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let project = move |x: f32, y: f32, h: f32| {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32)
+        (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        )
     };
     (pixels, project)
 }
@@ -1317,13 +1989,21 @@ fn nearest(p: &[u8], colors: &[[u8; 3]]) -> usize {
 }
 
 fn srgb_bytes(c: [f32; 3]) -> [u8; 3] {
-    c.map(|v| ((if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }) * 255.0).round() as u8)
+    c.map(|v| {
+        ((if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }) * 255.0)
+            .round() as u8
+    })
 }
 
 /// Per screen row in `rows`, the first column from `start` rightwards
 /// whose pixel is closer to `to` than to `from`.
 fn switch_columns(pixels: &[u8], rows: std::ops::Range<u32>, start: u32, from: [u8; 3], to: [u8; 3]) -> Vec<u32> {
-    rows.filter_map(|v| (start..320u32).find(|&u| nearest(&pixels[((v * 320 + u) * 4) as usize..], &[from, to]) == 1)).collect()
+    rows.filter_map(|v| (start..320u32).find(|&u| nearest(&pixels[((v * 320 + u) * 4) as usize..], &[from, to]) == 1))
+        .collect()
 }
 
 fn spread(columns: &[u32]) -> u32 {
@@ -1346,7 +2026,11 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     let gpu = gpu();
     let t = Arc::new(tileset::temperate(64));
     // LAYER_COLORS in terrain.frag: grass (layer 0), sand (2), rock (3).
-    let (grass, sand, rock) = (srgb_bytes([0.10, 0.75, 0.10]), srgb_bytes([0.95, 0.85, 0.25]), srgb_bytes([0.55, 0.55, 0.60]));
+    let (grass, sand, rock) = (
+        srgb_bytes([0.10, 0.75, 0.10]),
+        srgb_bytes([0.95, 0.85, 0.25]),
+        srgb_bytes([0.55, 0.55, 0.60]),
+    );
 
     let split = |x: usize, _: usize| if x < 32 { 0 } else { 2 };
     // Zoomed in on the boundary: about 14 px per cell.
@@ -1359,22 +2043,51 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     // allowed: the warp (2 cells) plus half a cell each side, plus a
     // pixel.
     let reach = 8.0 * (t.warp.0 + 0.5);
-    let (lo, hi) = (project(256.0 - reach, 256.0, 50.0).0 - 1.0, project(256.0 + reach, 256.0, 50.0).0 + 1.0);
+    let (lo, hi) = (
+        project(256.0 - reach, 256.0, 50.0).0 - 1.0,
+        project(256.0 + reach, 256.0, 50.0).0 + 1.0,
+    );
     let (lo, hi) = (lo.min(hi), lo.max(hi));
-    eprintln!("tileset boundary columns {}..={} over {} rows (band {lo:.0}..{hi:.0})", cols.iter().min().unwrap(), cols.iter().max().unwrap(), cols.len());
+    eprintln!(
+        "tileset boundary columns {}..={} over {} rows (band {lo:.0}..{hi:.0})",
+        cols.iter().min().unwrap(),
+        cols.iter().max().unwrap(),
+        cols.len()
+    );
     // Row to row it frays (the height blend), not only bends.
     let jumps = cols.windows(2).filter(|w| w[0].abs_diff(w[1]) >= 2).count();
     eprintln!("{jumps} rows jump 2+ px from the row above");
     assert!(jumps >= 4, "{jumps} rows jump 2+ px from the row above");
     let cell_px = project(264.0, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0;
-    assert!(spread(&cols) as f32 >= cell_px, "the boundary meanders over a cell ({cell_px:.1} px) or more: spread {}", spread(&cols));
-    assert!(cols.iter().all(|&c| (lo..=hi).contains(&(c as f32))), "and stays in its band");
+    assert!(
+        spread(&cols) as f32 >= cell_px,
+        "the boundary meanders over a cell ({cell_px:.1} px) or more: spread {}",
+        spread(&cols)
+    );
+    assert!(
+        cols.iter().all(|&c| (lo..=hi).contains(&(c as f32))),
+        "and stays in its band"
+    );
 
     // The palette: a straight boundary (grass and sand palette colours).
     let (pixels, _) = tileset_scene(&gpu, |_, _| 50.0, split, None, false, 200.0, None);
-    let cols = switch_columns(&pixels, rows.clone(), start, srgb_bytes([0.23, 0.33, 0.12]), srgb_bytes([0.60, 0.54, 0.38]));
-    eprintln!("palette boundary columns {}..={}", cols.iter().min().unwrap(), cols.iter().max().unwrap());
-    assert!(spread(&cols) <= 1, "the palette's boundary is straight: spread {}", spread(&cols));
+    let cols = switch_columns(
+        &pixels,
+        rows.clone(),
+        start,
+        srgb_bytes([0.23, 0.33, 0.12]),
+        srgb_bytes([0.60, 0.54, 0.38]),
+    );
+    eprintln!(
+        "palette boundary columns {}..={}",
+        cols.iter().min().unwrap(),
+        cols.iter().max().unwrap()
+    );
+    assert!(
+        spread(&cols) <= 1,
+        "the palette's boundary is straight: spread {}",
+        spread(&cols)
+    );
 
     // A ramp that steepens: flat at 0 for x < 16 cells, then h = (x −
     // 16)² / 4 m to x = 48 (slope 0 → 2), flat on top. The slope passes
@@ -1393,10 +2106,25 @@ fn tileset_boundaries_are_irregular_and_bounded() {
     }
     // Where the ramp turns to rock, the switch column varies along it.
     let (top, bottom) = (project(160.0, 96.0, 0.0).1 as u32, project(160.0, 416.0, 0.0).1 as u32);
-    let cols = switch_columns(&pixels, top.min(bottom)..top.max(bottom), project(64.0, 256.0, 0.0).0 as u32, grass, rock);
+    let cols = switch_columns(
+        &pixels,
+        top.min(bottom)..top.max(bottom),
+        project(64.0, 256.0, 0.0).0 as u32,
+        grass,
+        rock,
+    );
     let cell_px = project(264.0, 256.0, 100.0).0 - project(256.0, 256.0, 100.0).0;
-    eprintln!("cliff edge columns {}..={} over {} rows ({cell_px:.1} px per cell)", cols.iter().min().unwrap(), cols.iter().max().unwrap(), cols.len());
-    assert!(spread(&cols) as f32 >= cell_px, "the cliff edge is irregular over a cell or more: spread {}", spread(&cols));
+    eprintln!(
+        "cliff edge columns {}..={} over {} rows ({cell_px:.1} px per cell)",
+        cols.iter().min().unwrap(),
+        cols.iter().max().unwrap(),
+        cols.len()
+    );
+    assert!(
+        spread(&cols) as f32 >= cell_px,
+        "the cliff edge is irregular over a cell or more: spread {}",
+        spread(&cols)
+    );
     assert_clean(&gpu);
 }
 
@@ -1415,11 +2143,25 @@ fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
     let on = tileset::temperate(64);
     for (material, layer, repeat) in [(6u8, 6usize, 20.0f32), (0, 0, 24.0)] {
         let shot = |t: tileset::Tileset| {
-            let (pixels, project) = tileset_scene(&gpu, |_, _| 50.0, |_, _| material, Some(Arc::new(t)), false, 300.0, None);
+            let (pixels, project) = tileset_scene(
+                &gpu,
+                |_, _| 50.0,
+                |_, _| material,
+                Some(Arc::new(t)),
+                false,
+                300.0,
+                None,
+            );
             let (x0, y0) = project(0.0, 0.0, 50.0);
             let (x1, y1) = project(512.0, 512.0, 50.0);
-            assert!(x0.min(x1) < 0.0 && x0.max(x1) > 320.0 && y0.min(y1) < 0.0 && y0.max(y1) > 240.0, "the map fills the view");
-            let luma: Vec<f64> = pixels.chunks(4).map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64).collect();
+            assert!(
+                x0.min(x1) < 0.0 && x0.max(x1) > 320.0 && y0.min(y1) < 0.0 && y0.max(y1) > 240.0,
+                "the map fills the view"
+            );
+            let luma: Vec<f64> = pixels
+                .chunks(4)
+                .map(|p| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64)
+                .collect();
             let period = (project(256.0 + repeat, 256.0, 50.0).0 - project(256.0, 256.0, 50.0).0).abs();
             (luma, period)
         };
@@ -1435,15 +2177,27 @@ fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
         // A margin inside the map (it spans the view and more).
         let (w, h, m) = (320usize, 240usize, 8usize);
         let stats = |l: &[f64]| {
-            let px: Vec<f64> = (m..h - m).flat_map(|y| (m..w - m).map(move |x| (x, y))).map(|(x, y)| l[y * w + x]).collect();
+            let px: Vec<f64> = (m..h - m)
+                .flat_map(|y| (m..w - m).map(move |x| (x, y)))
+                .map(|(x, y)| l[y * w + x])
+                .collect();
             let mean = px.iter().sum::<f64>() / px.len() as f64;
-            (mean, (px.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / px.len() as f64).sqrt())
+            (
+                mean,
+                (px.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / px.len() as f64).sqrt(),
+            )
         };
         // Correlation of the image with itself shifted by `d` pixels (x, y).
         let corr = |l: &[f64], (dx, dy): (usize, usize)| {
-            let pairs: Vec<(f64, f64)> = (m..h - m - dy).flat_map(|y| (m..w - m - dx).map(move |x| (x, y))).map(|(x, y)| (l[y * w + x], l[(y + dy) * w + x + dx])).collect();
+            let pairs: Vec<(f64, f64)> = (m..h - m - dy)
+                .flat_map(|y| (m..w - m - dx).map(move |x| (x, y)))
+                .map(|(x, y)| (l[y * w + x], l[(y + dy) * w + x + dx]))
+                .collect();
             let n = pairs.len() as f64;
-            let (ma, mb) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+            let (ma, mb) = (
+                pairs.iter().map(|p| p.0).sum::<f64>() / n,
+                pairs.iter().map(|p| p.1).sum::<f64>() / n,
+            );
             let cov = pairs.iter().map(|p| (p.0 - ma) * (p.1 - mb)).sum::<f64>();
             let va = pairs.iter().map(|p| (p.0 - ma).powi(2)).sum::<f64>();
             let vb = pairs.iter().map(|p| (p.1 - mb).powi(2)).sum::<f64>();
@@ -1458,16 +2212,33 @@ fn anti_tiling_breaks_the_repeat_and_keeps_the_contrast() {
         let base = |l: &[f64]| (corr(l, (q, 0)) + corr(l, (0, q))) / 2.0;
         let (c_off, c_on) = (at(&luma_off) - base(&luma_off), at(&luma_on) - base(&luma_on));
         let c_soft = at(&luma_soft) - base(&luma_soft);
-        eprintln!("layer {layer}: period {period:.1} px; correlation at one repeat above the baseline {c_off:.3} off, {c_soft:.3} at degree 0.1, {c_on:.3} on (baselines {:.3}, {:.3}, {:.3});", base(&luma_off), base(&luma_soft), base(&luma_on));
+        eprintln!(
+            "layer {layer}: period {period:.1} px; correlation at one repeat above the baseline {c_off:.3} off, {c_soft:.3} at degree 0.1, {c_on:.3} on (baselines {:.3}, {:.3}, {:.3});",
+            base(&luma_off),
+            base(&luma_soft),
+            base(&luma_on)
+        );
         eprintln!("  mean {mean_off:.1} / {mean_on:.1}; sd {sd_off:.2} / {sd_on:.2}");
         // Measured above the baseline: mud 0.56 off, 0.21 at degree 0.1,
         // 0.02 on; grass 0.41 off, 0.25, 0.11 on (its low contrast leaves
         // the macro variation a baseline of 0.4-0.5).
         assert!(c_off > 0.3, "without anti-tiling the field repeats: {c_off:.3}");
-        assert!(c_soft < c_off * 0.7 && c_soft > c_on, "a tenth of the degree is partway: {c_soft:.3} against {c_off:.3} off and {c_on:.3} on");
-        assert!(c_on < c_off * 0.35, "anti-tiling breaks the repeat: {c_on:.3} against {c_off:.3}");
-        assert!((mean_on - mean_off).abs() < mean_off * 0.02, "the mean holds: {mean_on:.1} against {mean_off:.1}");
-        assert!((sd_on / sd_off - 1.0).abs() < 0.08, "the contrast holds: sd {sd_on:.2} against {sd_off:.2}");
+        assert!(
+            c_soft < c_off * 0.7 && c_soft > c_on,
+            "a tenth of the degree is partway: {c_soft:.3} against {c_off:.3} off and {c_on:.3} on"
+        );
+        assert!(
+            c_on < c_off * 0.35,
+            "anti-tiling breaks the repeat: {c_on:.3} against {c_off:.3}"
+        );
+        assert!(
+            (mean_on - mean_off).abs() < mean_off * 0.02,
+            "the mean holds: {mean_on:.1} against {mean_off:.1}"
+        );
+        assert!(
+            (sd_on / sd_off - 1.0).abs() < 0.08,
+            "the contrast holds: sd {sd_on:.2} against {sd_off:.2}"
+        );
     }
     assert_clean(&gpu);
 }
@@ -1482,38 +2253,93 @@ fn cull_on_gpu(
     capacity: u32,
     min_pixels: f32,
     camera: impl FnOnce(&mut ae_render::terrain::camera::Camera),
-) -> ((u32, u32), ae_render::units::InstanceStream, ae_render::units::UnitFrame) {
+) -> (
+    (u32, u32),
+    ae_render::units::InstanceStream,
+    ae_render::units::UnitFrame,
+) {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
     use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitFrame, UnitsSetup};
 
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for &(x, y, radius, class) in rows {
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            radius.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
-    let stream = InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() };
+    let stream = InstanceStream {
+        tick: 1,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns: at_rest(columns),
+        anim: AnimWrites::default(),
+    };
     let feed = Arc::new(UnitFeed::default());
     feed.publish(Arc::new(stream.clone()));
-    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.0, 0.0], floats: false }];
-    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity, classes, min_pixels, models: Vec::new(), rigs: Vec::new() });
+    let classes = vec![UnitClass {
+        gamut: ae_render::colorspace::Gamut::Bt709,
+        color: [1.0, 0.0, 0.0],
+        floats: false,
+    }];
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+        feed,
+        capacity,
+        classes,
+        min_pixels,
+        models: Vec::new(),
+        rigs: Vec::new(),
+    });
     let cam = {
         let view = app.view();
         let mut view = view.lock().unwrap();
         camera(&mut view.camera);
         view.camera
     };
-    let extent = vk::Extent2D { width: 320, height: 200 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 200,
+    };
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     run_headless(gpu, &mut app, target, 4, config).unwrap();
     let counts = app.last_unit_counts().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, gpu);
@@ -1566,8 +2392,24 @@ fn units_cull_matches_the_cpu_reference() {
     let ground = |_: f32, _: f32, _: u32| 50.0;
     // Candidates near the view, then far small ones along the view
     // direction; keep only those clear of every plane by half a unit.
-    let mut candidates: Vec<(f32, f32, f32, u32)> = (0..6000).map(|_| (-400.0 + 1800.0 * random(), -400.0 + 1800.0 * random(), 1.0 + 11.0 * random(), 0)).collect();
-    candidates.extend((0..1500).map(|_| (-6000.0 + 12000.0 * random(), -6000.0 + 12000.0 * random(), 0.3 + 0.7 * random(), 0)));
+    let mut candidates: Vec<(f32, f32, f32, u32)> = (0..6000)
+        .map(|_| {
+            (
+                -400.0 + 1800.0 * random(),
+                -400.0 + 1800.0 * random(),
+                1.0 + 11.0 * random(),
+                0,
+            )
+        })
+        .collect();
+    candidates.extend((0..1500).map(|_| {
+        (
+            -6000.0 + 12000.0 * random(),
+            -6000.0 + 12000.0 * random(),
+            0.3 + 0.7 * random(),
+            0,
+        )
+    }));
     // The frame does not depend on the units: probe it with one.
     let (_, _, frame) = cull_on_gpu(&gpu, &candidates[..1], 1, MIN_PIXELS, camera);
     let probe = ae_render::units::InstanceStream {
@@ -1575,11 +2417,34 @@ fn units_cull_matches_the_cpu_reference() {
         published: std::time::Instant::now(),
         tick_seconds: 0.0,
         sim_seconds: 0.0,
-        columns: std::array::from_fn(|a| candidates.iter().map(|&(x, y, r, c)| [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0, r.to_bits(), c, ae_render::units::NO_POSE][a]).collect()),
+        columns: std::array::from_fn(|a| {
+            candidates
+                .iter()
+                .map(|&(x, y, r, c)| {
+                    [
+                        x.to_bits(),
+                        y.to_bits(),
+                        x.to_bits(),
+                        y.to_bits(),
+                        1.0f32.to_bits(),
+                        0,
+                        r.to_bits(),
+                        c,
+                        ae_render::units::NO_POSE,
+                    ][a]
+                })
+                .collect()
+        }),
         anim: ae_render::units::AnimWrites::default(),
     };
     let margins = cull_margins(&probe, &frame, MIN_PIXELS, 1.0, ground);
-    let rows: Vec<(f32, f32, f32, u32)> = candidates.iter().zip(&margins).filter(|(_, m)| m.0.abs() > 0.5).map(|(c, _)| *c).take(3000).collect();
+    let rows: Vec<(f32, f32, f32, u32)> = candidates
+        .iter()
+        .zip(&margins)
+        .filter(|(_, m)| m.0.abs() > 0.5)
+        .map(|(c, _)| *c)
+        .take(3000)
+        .collect();
     assert_eq!(rows.len(), 3000);
 
     let ((uploaded, visible), stream, frame2) = cull_on_gpu(&gpu, &rows, 4096, MIN_PIXELS, camera);
@@ -1592,17 +2457,28 @@ fn units_cull_matches_the_cpu_reference() {
         culled_by[m.1] += 1;
     }
     let straddling = margins.iter().filter(|m| m.0 >= 0.0 && m.0 < m.2).count();
-    let by_min_size = margins.iter().zip(&unenlarged).filter(|(m, u)| m.0 >= 0.0 && u.0 < 0.0).count();
-    eprintln!("{uploaded} rows, GPU kept {visible}, CPU keeps {kept}; culled by plane {culled_by:?}; {straddling} kept with the centre outside; {by_min_size} kept only at the minimum size");
+    let by_min_size = margins
+        .iter()
+        .zip(&unenlarged)
+        .filter(|(m, u)| m.0 >= 0.0 && u.0 < 0.0)
+        .count();
+    eprintln!(
+        "{uploaded} rows, GPU kept {visible}, CPU keeps {kept}; culled by plane {culled_by:?}; {straddling} kept with the centre outside; {by_min_size} kept only at the minimum size"
+    );
     assert_eq!(uploaded, 3000);
     assert_eq!(visible, kept, "GPU and CPU cull agree");
     assert!(kept > 300 && kept < 2700, "a mix of kept and culled units: {kept}");
-    assert!(culled_by[..4].iter().all(|&n| n > 20), "every side plane culls some: {culled_by:?}");
+    assert!(
+        culled_by[..4].iter().all(|&n| n > 20),
+        "every side plane culls some: {culled_by:?}"
+    );
     assert!(straddling > 10, "units across the view's edge are kept: {straddling}");
     assert!(by_min_size > 5, "far units kept by the minimum size: {by_min_size}");
 
     // More rows than capacity: the first 64 are uploaded; all in view.
-    let crowd: Vec<(f32, f32, f32, u32)> = (0..100).map(|i| (500.0 + (i % 10) as f32 * 4.0, 500.0 + (i / 10) as f32 * 4.0, 1.0, 0)).collect();
+    let crowd: Vec<(f32, f32, f32, u32)> = (0..100)
+        .map(|i| (500.0 + (i % 10) as f32 * 4.0, 500.0 + (i / 10) as f32 * 4.0, 1.0, 0))
+        .collect();
     let ((uploaded, visible), _, _) = cull_on_gpu(&gpu, &crowd, 64, MIN_PIXELS, camera);
     assert_eq!((uploaded, visible), (64, 64), "capacity caps the rows");
     assert_clean(&gpu);
@@ -1636,7 +2512,10 @@ fn the_default_module_renders_like_the_native_graph_in_hdr10() {
     use ae_render::encode::{DisplayLevels, OutputEncoding};
 
     let gpu = gpu();
-    let levels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 361.0,
+    };
     let wasm = ae_render::module::build("default").expect("build render/default");
     let (native, native_counts) = scene_pixels_with(&gpu, None, 16, Some((OutputEncoding::Hdr10Pq, levels)));
     let (from_module, module_counts) = scene_pixels_with(&gpu, Some(wasm), 16, Some((OutputEncoding::Hdr10Pq, levels)));
@@ -1645,7 +2524,10 @@ fn the_default_module_renders_like_the_native_graph_in_hdr10() {
     let mut worst = 0i32;
     let mut differing = 0usize;
     for (a, b) in native.chunks(4).zip(from_module.chunks(4)) {
-        let (ua, ub) = (u32::from_le_bytes(a.try_into().unwrap()), u32::from_le_bytes(b.try_into().unwrap()));
+        let (ua, ub) = (
+            u32::from_le_bytes(a.try_into().unwrap()),
+            u32::from_le_bytes(b.try_into().unwrap()),
+        );
         let mut pixel = 0;
         for shift in [0u32, 10, 20] {
             let d = (((ua >> shift) & 0x3ff) as i32 - ((ub >> shift) & 0x3ff) as i32).abs();
@@ -1656,7 +2538,10 @@ fn the_default_module_renders_like_the_native_graph_in_hdr10() {
             differing += 1;
         }
     }
-    eprintln!("HDR10 native vs default module: worst channel {worst} PQ code(s), {differing} of {} pixels differ", native.len() / 4);
+    eprintln!(
+        "HDR10 native vs default module: worst channel {worst} PQ code(s), {differing} of {} pixels differ",
+        native.len() / 4
+    );
     assert!(worst <= 1, "the module's HDR10 frame differs by {worst} PQ codes");
     assert_clean(&gpu);
 }
@@ -1672,12 +2557,24 @@ fn render_modules_swap_graphs_in_hdr10() {
     use ae_render::thread::{Headless, TargetInfo};
 
     let gpu = gpu();
-    let levels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 361.0,
+    };
     let default = ae_render::module::build("default").expect("build render/default");
     let post = ae_render::module::build("post").expect("build render/post");
     let mut app = scene_app_with(&gpu, Some(default), Some((OutputEncoding::Hdr10Pq, levels)));
-    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent: SCENE_EXTENT,
+        format: vk::Format::A2B10G10R10_UNORM_PACK32,
+        color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let reload = app.module_reload();
     let mut step = |app: &mut ae_render::terrain::app::TerrainApp, frames: usize| -> (Vec<u8>, u64) {
@@ -1703,14 +2600,26 @@ fn render_modules_swap_graphs_in_hdr10() {
     let (graded, bakes) = step(&mut app, 12);
     assert_eq!(bakes, 2, "the post module's graph rebaked once");
     let changed = plain.iter().zip(&graded).filter(|(a, b)| a.abs_diff(**b) > 2).count();
-    assert!(changed > plain.len() / 10, "the grade changes the HDR frame: {changed} of {} bytes", plain.len());
+    assert!(
+        changed > plain.len() / 10,
+        "the grade changes the HDR frame: {changed} of {} bytes",
+        plain.len()
+    );
 
     // The vignette: the flag switches a uniform, not the graph.
     app.view().lock().unwrap().module_flags = 1;
     let (vignetted, bakes) = step(&mut app, 4);
     assert_eq!(bakes, 2, "switching the HDR vignette does not rebake");
-    eprintln!("HDR10 corners {:.1} -> {:.1} nits, centre {:?}", corner(&graded), corner(&vignetted), hdr10_nits(&graded, ((h / 2) * w + w / 2) as usize));
-    assert!(corner(&vignetted) < corner(&graded) * 0.8, "the vignette darkens the corners");
+    eprintln!(
+        "HDR10 corners {:.1} -> {:.1} nits, centre {:?}",
+        corner(&graded),
+        corner(&vignetted),
+        hdr10_nits(&graded, ((h / 2) * w + w / 2) as usize)
+    );
+    assert!(
+        corner(&vignetted) < corner(&graded) * 0.8,
+        "the vignette darkens the corners"
+    );
     drop(run);
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
@@ -1725,8 +2634,8 @@ fn render_modules_swap_graphs_in_hdr10() {
 #[ignore = "needs a Vulkan GPU"]
 fn the_post_grade_works_above_paper_white() {
     use ae_render::colorspace::{Gamut, WorkingSpace};
-    use ae_render_abi::module::{Program, ProgramTable};
     use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render_abi::module::{Program, ProgramTable};
 
     let gpu = gpu();
     let wasm = ae_render::module::build("post").expect("build render/post");
@@ -1738,7 +2647,9 @@ fn the_post_grade_works_above_paper_white() {
     let grade = programs
         .iter()
         .find_map(|p| match *p {
-            Program::Fullscreen { label: "grade", spirv, .. } => Some(spirv.to_vec()),
+            Program::Fullscreen {
+                label: "grade", spirv, ..
+            } => Some(spirv.to_vec()),
             _ => None,
         })
         .expect("the post module's grade program");
@@ -1751,10 +2662,26 @@ fn the_post_grade_works_above_paper_white() {
         let t: [f32; 3] = s.map(|v| (v - 0.18) * contrast + 0.18);
         [t[0] * tint[0], t[1] * tint[1], t[2] * tint[2]]
     };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
-    let values: [[f32; 4]; 4] = [[1.5, 1.5, 1.5, 1.0], [2.0, 2.0, 2.0, 1.0], [1.8, 1.2, 0.9, 1.0], [2.4, 1.6, 1.2, 1.0]];
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
+    let values: [[f32; 4]; 4] = [
+        [1.5, 1.5, 1.5, 1.0],
+        [2.0, 2.0, 2.0, 1.0],
+        [1.8, 1.2, 0.9, 1.0],
+        [2.4, 1.6, 1.2, 1.0],
+    ];
     let graded = grade_values(&gpu, &grade, &values);
-    let native = encode_values(&gpu, OutputEncoding::Hdr10Pq, vk::Extent2D { width: 4, height: 4 }, levels, WorkingSpace::Bt709, Gamut::P3, &values);
+    let native = encode_values(
+        &gpu,
+        OutputEncoding::Hdr10Pq,
+        vk::Extent2D { width: 4, height: 4 },
+        levels,
+        WorkingSpace::Bt709,
+        Gamut::P3,
+        &values,
+    );
     let display = |frame: &[u8]| -> [f32; 3] {
         // BT.2020 nits back to the working space's paper-white units (P3
         // contains BT.709, so the map is a pure re-expression).
@@ -1781,7 +2708,12 @@ fn the_post_grade_works_above_paper_white() {
         // Saturation keeps luminance before the contrast: the graded
         // luminance is the input's through contrast and the tint.
         let luma_expected = y709(expected);
-        assert!((y709(graded) - luma_expected).abs() < 0.01, "row {k}: luminance {} vs {}", y709(graded), luma_expected);
+        assert!(
+            (y709(graded) - luma_expected).abs() < 0.01,
+            "row {k}: luminance {} vs {}",
+            y709(graded),
+            luma_expected
+        );
     }
     assert!(worst < 0.01, "the decoded grade is {worst} off the maths");
     assert_clean(&gpu);
@@ -1791,11 +2723,11 @@ fn the_post_grade_works_above_paper_white() {
 /// read back as the display's values in the working space (paper-white
 /// units).
 fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<[f32; 3]> {
+    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
     use ae_render::colorspace::{Gamut, WorkingSpace};
     use ae_render::encode::{DISPLAY_FORMAT, DisplayLevels, Encode, OutputEncoding};
     use ae_render::executor::{Binding, BufferBinding, Executor, ExecutorConfig, ImageBinding, PassContext, Recorder};
     use ae_render::fullscreen::FullscreenProgram;
-    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
 
     struct Paint {
         display: ResourceId,
@@ -1820,7 +2752,13 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
                     self.program.record(ctx, &[ctx.image(self.display)?], self.sampler)?;
                 }
                 2 => {
-                    self.encode.write(ctx.slot, OutputEncoding::Hdr10Pq, self.levels, WorkingSpace::Bt709, Gamut::P3);
+                    self.encode.write(
+                        ctx.slot,
+                        OutputEncoding::Hdr10Pq,
+                        self.levels,
+                        WorkingSpace::Bt709,
+                        Gamut::P3,
+                    );
                     self.encode.record(ctx, ctx.image(self.graded)?, self.sampler)?;
                 }
                 4 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
@@ -1831,45 +2769,130 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
     }
 
     let extent = vk::Extent2D { width: 4, height: 4 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
     let format = OutputEncoding::Hdr10Pq.readback_format();
-    let display_desc = ImageDesc::color_2d(DISPLAY_FORMAT, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
-    let target_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
-    let buffer_desc = BufferDesc { size: extent.width as u64 * extent.height as u64 * 4, usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let display_desc = ImageDesc::color_2d(
+        DISPLAY_FORMAT,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+    );
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size: extent.width as u64 * extent.height as u64 * 4,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
     let mut graph = FrameGraph::<u32>::new();
     let display = graph.image("display", display_desc, ResourceClass::External);
     let graded = graph.image("graded", display_desc, ResourceClass::External);
     let target = graph.image("target", target_desc, ResourceClass::External);
     let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
-    graph.pass("fill", PassKind::Graphics, 0).color(display, LoadOp::Clear).id();
-    graph.pass("grade", PassKind::Graphics, 1).sampled(display, ShaderStage::Fragment).color(graded, LoadOp::DontCare).id();
-    graph.pass("encode", PassKind::Graphics, 2).sampled(graded, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
-    graph.pass("copy", PassKind::Transfer, 3).access(target, Role::TransferSrc).access(buffer, Role::TransferDst).id();
-    graph.pass("host read", PassKind::Transfer, 4).access(buffer, Role::HostRead).root().id();
+    graph
+        .pass("fill", PassKind::Graphics, 0)
+        .color(display, LoadOp::Clear)
+        .id();
+    graph
+        .pass("grade", PassKind::Graphics, 1)
+        .sampled(display, ShaderStage::Fragment)
+        .color(graded, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("encode", PassKind::Graphics, 2)
+        .sampled(graded, ShaderStage::Fragment)
+        .color(target, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 3)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 4)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
 
     let mut image = OwnedImage::new(gpu, display_desc, "display").unwrap();
     let mut graded_image = OwnedImage::new(gpu, display_desc, "graded").unwrap();
     let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
     let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
     let bindings = [
-        Binding::Image(ImageBinding { image: image.image, view: image.view, format: display_desc.format, extent, range: image.range(), identity: (0x6EA7E << 40) | 1 }),
-        Binding::Image(ImageBinding { image: graded_image.image, view: graded_image.view, format: display_desc.format, extent, range: graded_image.range(), identity: (0x6EA7E << 40) | 2 }),
-        Binding::Image(ImageBinding { image: out.image, view: out.view, format: target_desc.format, extent, range: out.range(), identity: (0x6EA7E << 40) | 3 }),
-        Binding::Buffer(BufferBinding { buffer: readback.buffer, offset: 0, size: buffer_desc.size, identity: (0x6EA7E << 40) | 4 }),
+        Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format: display_desc.format,
+            extent,
+            range: image.range(),
+            identity: (0x6EA7E << 40) | 1,
+        }),
+        Binding::Image(ImageBinding {
+            image: graded_image.image,
+            view: graded_image.view,
+            format: display_desc.format,
+            extent,
+            range: graded_image.range(),
+            identity: (0x6EA7E << 40) | 2,
+        }),
+        Binding::Image(ImageBinding {
+            image: out.image,
+            view: out.view,
+            format: target_desc.format,
+            extent,
+            range: out.range(),
+            identity: (0x6EA7E << 40) | 3,
+        }),
+        Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            offset: 0,
+            size: buffer_desc.size,
+            identity: (0x6EA7E << 40) | 4,
+        }),
     ];
-    let sampler_info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST);
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST);
     let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
     let program = FullscreenProgram::new(gpu, "grade", grade, 32, 1, &[DISPLAY_FORMAT], 2).unwrap();
     let encode = Encode::new(gpu, OutputEncoding::Hdr10Pq, format, 2).unwrap();
-    let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut paint = Paint { display, graded, target, buffer, program, encode, sampler, uniforms: uniforms.try_into().unwrap(), value: [0.0; 4], levels };
+    let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut paint = Paint {
+        display,
+        graded,
+        target,
+        buffer,
+        program,
+        encode,
+        sampler,
+        uniforms: uniforms.try_into().unwrap(),
+        value: [0.0; 4],
+        levels,
+    };
     let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
     executor.set_graph(graph).unwrap();
     let mut frames = Vec::new();
     for value in values {
         paint.value = *value;
         let token = executor.begin_frame().unwrap();
-        executor.execute(token, &mut paint, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+        executor
+            .execute(
+                token,
+                &mut paint,
+                &|resource| bindings.get(resource.index()).copied(),
+                &[],
+                &[],
+            )
+            .unwrap();
         executor.wait(token).unwrap();
         frames.push(readback.mapped().unwrap().to_vec());
     }
@@ -1897,7 +2920,11 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
 
 /// [`scene_app`], with an HDR display spec (M13: the readback path can
 /// encode HDR10 or scRGB too).
-fn scene_app_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>) -> ae_render::terrain::app::TerrainApp {
+fn scene_app_with(
+    gpu: &Arc<GpuDevice>,
+    module: Option<Vec<u8>>,
+    display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>,
+) -> ae_render::terrain::app::TerrainApp {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
     use ae_render::terrain::heightmap::{build_pyramid, generate};
     use ae_render::terrain::renderer::TerrainInfo;
@@ -1906,18 +2933,65 @@ fn scene_app_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, display: Option
     let heightmap = generate(257, 257, 3);
     let pyramid = build_pyramid(&heightmap, 300.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 300.0, 0.0, Some(40.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for i in 0..400u32 {
         let (x, y) = (300.0 + (i % 20) as f32 * 70.0, 300.0 + (i / 20) as f32 * 70.0);
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.5f32.to_bits(), 6.0f32.to_bits(), i % 3].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            1.0f32.to_bits(),
+            0.5f32.to_bits(),
+            6.0f32.to_bits(),
+            i % 3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-    let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.8, 0.1], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.9, 0.9, 0.95], floats: true }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.8, 0.1, 0.1], floats: false }];
-    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new(), rigs: Vec::new() });
+    feed.publish(Arc::new(InstanceStream {
+        tick: 1,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns: at_rest(columns),
+        anim: AnimWrites::default(),
+    }));
+    let classes = vec![
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [1.0, 0.8, 0.1],
+            floats: false,
+        },
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.9, 0.9, 0.95],
+            floats: true,
+        },
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.8, 0.1, 0.1],
+            floats: false,
+        },
+    ];
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup {
+        feed,
+        capacity: 512,
+        classes,
+        min_pixels: 5.0,
+        models: Vec::new(),
+        rigs: Vec::new(),
+    });
     if let Some((encoding, levels)) = display {
         app = app.with_display(encoding, levels);
     }
@@ -1934,7 +3008,10 @@ fn scene_app_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, display: Option
     app
 }
 
-const SCENE_EXTENT: vk::Extent2D = vk::Extent2D { width: 320, height: 200 };
+const SCENE_EXTENT: vk::Extent2D = vk::Extent2D {
+    width: 320,
+    height: 200,
+};
 
 /// The scene of [`scene_app`] rendered for `frames` frames: the pixels and
 /// the unit counts (rows, visible).
@@ -1944,17 +3021,37 @@ fn scene_pixels(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize) ->
 
 /// [`scene_pixels`] for an output encoding (the target's format and colour
 /// space follow it; the readback image uses [`ae_render::encode::OutputEncoding::readback_format`]).
-fn scene_pixels_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize, display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>) -> (Vec<u8>, (u32, u32)) {
+fn scene_pixels_with(
+    gpu: &Arc<GpuDevice>,
+    module: Option<Vec<u8>>,
+    frames: usize,
+    display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>,
+) -> (Vec<u8>, (u32, u32)) {
     use ae_render::encode::OutputEncoding;
     use ae_render::thread::{TargetInfo, run_headless};
     let mut app = scene_app_with(gpu, module, display);
     let (format, color_space) = match display.map(|(e, _)| e).unwrap_or_default() {
         OutputEncoding::Sdr => (vk::Format::R8G8B8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
-        OutputEncoding::Hdr10Pq => (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
-        OutputEncoding::ScRgb => (vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
+        OutputEncoding::Hdr10Pq => (
+            vk::Format::A2B10G10R10_UNORM_PACK32,
+            vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+        ),
+        OutputEncoding::ScRgb => (
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+        ),
     };
-    let target = TargetInfo { extent: SCENE_EXTENT, format, color_space };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent: SCENE_EXTENT,
+        format,
+        color_space,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     run_headless(gpu, &mut app, target, frames, config).unwrap();
     let status = app.module_status().lock().unwrap().clone();
     assert!(status.errors.is_empty(), "{:?}", status.errors);
@@ -1980,7 +3077,16 @@ fn mean_rgb(pixels: &[u8], x: u32, y: u32, w: u32, h: u32) -> f64 {
 /// An SDR declaration target for the reload tests.
 fn declare_sdr(width: u32, height: u32, format: vk::Format, flags: u32) -> ae_render::module::DeclareTarget {
     use ae_render::encode::{DisplayLevels, OutputEncoding};
-    ae_render::module::DeclareTarget { width, height, color_format: format, flags, encoding: OutputEncoding::Sdr, levels: DisplayLevels::default(), working: Default::default(), gamut: Default::default() }
+    ae_render::module::DeclareTarget {
+        width,
+        height,
+        color_format: format,
+        flags,
+        encoding: OutputEncoding::Sdr,
+        levels: DisplayLevels::default(),
+        working: Default::default(),
+        gamut: Default::default(),
+    }
 }
 
 /// A WAT module that declares `graph` and `programs` (bytes for the test
@@ -1988,7 +3094,10 @@ fn declare_sdr(width: u32, height: u32, format: vk::Format, flags: u32) -> ae_re
 fn trapping_module(graph: &[u8], programs: &[u8]) -> Vec<u8> {
     let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("\\{b:02x}")).collect::<String>();
     let (g, p) = (4096u32, 4096 + graph.len() as u32);
-    let words: Vec<u8> = [g, graph.len() as u32, p, programs.len() as u32].iter().flat_map(|w| w.to_le_bytes()).collect();
+    let words: Vec<u8> = [g, graph.len() as u32, p, programs.len() as u32]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
     format!(
         r#"(module
             (memory (export "memory") 2)
@@ -2024,8 +3133,17 @@ fn render_modules_reload_while_running() {
     let default = ae_render::module::build("default").expect("build render/default");
     let post = ae_render::module::build("post").expect("build render/post");
     let mut app = scene_app(&gpu, Some(default.clone()));
-    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent: SCENE_EXTENT,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     let status = app.module_status();
     let reload = app.module_reload();
@@ -2035,7 +3153,13 @@ fn render_modules_reload_while_running() {
         (app.readback().unwrap(), run.stats().bakes)
     };
     let (w, h) = (SCENE_EXTENT.width, SCENE_EXTENT.height);
-    let corners = |p: &[u8]| (mean_rgb(p, 0, 0, 24, 24) + mean_rgb(p, w - 24, 0, 24, 24) + mean_rgb(p, 0, h - 24, 24, 24) + mean_rgb(p, w - 24, h - 24, 24, 24)) / 4.0;
+    let corners = |p: &[u8]| {
+        (mean_rgb(p, 0, 0, 24, 24)
+            + mean_rgb(p, w - 24, 0, 24, 24)
+            + mean_rgb(p, 0, h - 24, 24, 24)
+            + mean_rgb(p, w - 24, h - 24, 24, 24))
+            / 4.0
+    };
     let centre = |p: &[u8]| mean_rgb(p, w / 2 - 20, h / 2 - 20, 40, 40);
 
     let (plain, bakes) = step(&mut app, 12);
@@ -2043,17 +3167,40 @@ fn render_modules_reload_while_running() {
 
     *reload.lock().unwrap() = Some(post.clone());
     let (graded, bakes) = step(&mut app, 12);
-    assert_eq!((bakes, status.lock().unwrap().loads), (2, 2), "the post module's graph rebaked once");
+    assert_eq!(
+        (bakes, status.lock().unwrap().loads),
+        (2, 2),
+        "the post module's graph rebaked once"
+    );
     let changed = plain.iter().zip(&graded).filter(|(a, b)| a.abs_diff(**b) > 2).count();
-    assert!(changed > plain.len() / 4, "the grade changes the picture: {changed} of {} bytes", plain.len());
-    assert!((centre(&graded) - centre(&plain)).abs() < 40.0, "but keeps it recognisable");
+    assert!(
+        changed > plain.len() / 4,
+        "the grade changes the picture: {changed} of {} bytes",
+        plain.len()
+    );
+    assert!(
+        (centre(&graded) - centre(&plain)).abs() < 40.0,
+        "but keeps it recognisable"
+    );
 
     app.view().lock().unwrap().module_flags = 1;
     let (vignetted, bakes) = step(&mut app, 4);
     assert_eq!(bakes, 2, "switching a conditional pass does not rebake");
-    eprintln!("corners {:.1} -> {:.1}, centre {:.1} -> {:.1}", corners(&graded), corners(&vignetted), centre(&graded), centre(&vignetted));
-    assert!(corners(&vignetted) < corners(&graded) * 0.6, "the vignette darkens the corners");
-    assert!((centre(&vignetted) - centre(&graded)).abs() < 2.0, "and leaves the centre");
+    eprintln!(
+        "corners {:.1} -> {:.1}, centre {:.1} -> {:.1}",
+        corners(&graded),
+        corners(&vignetted),
+        centre(&graded),
+        centre(&vignetted)
+    );
+    assert!(
+        corners(&vignetted) < corners(&graded) * 0.6,
+        "the vignette darkens the corners"
+    );
+    assert!(
+        (centre(&vignetted) - centre(&graded)).abs() < 2.0,
+        "and leaves the centre"
+    );
 
     *reload.lock().unwrap() = Some(b"not a module".to_vec());
     let (kept, bakes) = step(&mut app, 4);
@@ -2064,7 +3211,10 @@ fn render_modules_reload_while_running() {
     }
     assert_eq!(bakes, 2);
     let drift = kept.iter().zip(&vignetted).filter(|(a, b)| a.abs_diff(**b) > 2).count();
-    assert!(drift < kept.len() / 100, "the post module keeps rendering: {drift} bytes moved");
+    assert!(
+        drift < kept.len() / 100,
+        "the post module keeps rendering: {drift} bytes moved"
+    );
 
     // A graph running one fullscreen program in two passes (the grade of
     // the post module, scene -> mid -> target): rejected by name, the post
@@ -2075,35 +3225,75 @@ fn render_modules_reload_while_running() {
         let engine = ae_render::module::engine();
         let mut m = ae_render::module::RenderModule::load(&engine, &post).unwrap();
         let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
-        let declared = m.declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags)).unwrap().unwrap();
+        let declared = m
+            .declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags))
+            .unwrap()
+            .unwrap();
         let tables = ProgramTable::decode(&declared.programs).unwrap();
         let grade = tables.iter().find_map(|p| match *p {
-            Program::Fullscreen { label: "grade", spirv, .. } => Some(spirv.to_vec()),
+            Program::Fullscreen {
+                label: "grade", spirv, ..
+            } => Some(spirv.to_vec()),
             _ => None,
         });
         let srgb = vk::Format::R8G8B8A8_SRGB.as_raw() as u32;
         let (mut g, mut p) = (GraphBuilder::new(), ProgramTable::new());
         let leaves = g.buffer("terrain.leaves", 0, 0, Class::External);
         let indirect = g.buffer("terrain.indirect", 0, 0, Class::External);
-        let depth = g.image("depth", ImageSpec::depth_2d(vk::Format::D32_SFLOAT.as_raw() as u32, w, h, 0x20), Class::Transient);
+        let depth = g.image(
+            "depth",
+            ImageSpec::depth_2d(vk::Format::D32_SFLOAT.as_raw() as u32, w, h, 0x20),
+            Class::Transient,
+        );
         let scene = g.image("scene", ae_render_abi::module::scene_spec(w, h), Class::Transient);
         let ldr = g.image("ldr", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
         let mid = g.image("mid", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x4), Class::Transient);
-        let target = g.image("readback.target", ImageSpec::color_2d(srgb, w, h, 0x10 | 0x1), Class::External);
+        let target = g.image(
+            "readback.target",
+            ImageSpec::color_2d(srgb, w, h, 0x10 | 0x1),
+            Class::External,
+        );
         let buffer = g.buffer("readback.buffer", 0, 0, Class::External);
         let lod = p.library("terrain.lod");
-        g.pass("terrain lod", PassKind::Compute, lod).access(leaves, Role::StorageBufferWrite(ShaderStage::Compute)).access(indirect, Role::StorageBufferWrite(ShaderStage::Compute)).id();
+        g.pass("terrain lod", PassKind::Compute, lod)
+            .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
+            .access(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
         let draw = p.library("terrain.draw");
-        g.pass("terrain", PassKind::Graphics, draw).access(leaves, Role::StorageBufferRead(ShaderStage::Vertex)).access(indirect, Role::IndirectBuffer).color(scene, LoadOp::Clear).depth(depth, LoadOp::Clear).id();
+        g.pass("terrain", PassKind::Graphics, draw)
+            .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(indirect, Role::IndirectBuffer)
+            .color(scene, LoadOp::Clear)
+            .depth(depth, LoadOp::Clear)
+            .id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
-        let program = p.push(Program::Fullscreen { label: "grade", spirv: &grade.unwrap(), uniform_bytes: 32 });
-        g.pass("grade once", PassKind::Graphics, program).sampled(ldr, ShaderStage::Fragment).color(mid, LoadOp::DontCare).id();
-        g.pass("grade twice", PassKind::Graphics, program).sampled(mid, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        g.pass("tonemap", PassKind::Graphics, tonemap)
+            .sampled(scene, ShaderStage::Fragment)
+            .color(ldr, LoadOp::DontCare)
+            .id();
+        let program = p.push(Program::Fullscreen {
+            label: "grade",
+            spirv: &grade.unwrap(),
+            uniform_bytes: 32,
+        });
+        g.pass("grade once", PassKind::Graphics, program)
+            .sampled(ldr, ShaderStage::Fragment)
+            .color(mid, LoadOp::DontCare)
+            .id();
+        g.pass("grade twice", PassKind::Graphics, program)
+            .sampled(mid, ShaderStage::Fragment)
+            .color(target, LoadOp::DontCare)
+            .id();
         let copy = p.library("readback.copy");
-        g.pass("copy", PassKind::Transfer, copy).access(target, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
+        g.pass("copy", PassKind::Transfer, copy)
+            .access(target, Role::TransferSrc)
+            .discard(buffer, Role::TransferDst)
+            .id();
         let read = p.library("host.read");
-        g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
+        g.pass("host read", PassKind::Transfer, read)
+            .access(buffer, Role::HostRead)
+            .root()
+            .id();
         trapping_module(&g.finish(), &p.finish())
     };
     *reload.lock().unwrap() = Some(shared);
@@ -2111,11 +3301,22 @@ fn render_modules_reload_while_running() {
     {
         let s = status.lock().unwrap();
         assert_eq!((s.loads, s.errors.len()), (2, 2), "{:?}", s.errors);
-        assert!(s.errors[1].contains("`grade once` and `grade twice`"), "{}", s.errors[1]);
+        assert!(
+            s.errors[1].contains("`grade once` and `grade twice`"),
+            "{}",
+            s.errors[1]
+        );
     }
     assert_eq!(bakes, 2);
-    let drift = still.iter().zip(&vignetted).filter(|(a, b)| a.abs_diff(**b) > 2).count();
-    assert!(drift < still.len() / 100, "the post module keeps rendering: {drift} bytes moved");
+    let drift = still
+        .iter()
+        .zip(&vignetted)
+        .filter(|(a, b)| a.abs_diff(**b) > 2)
+        .count();
+    assert!(
+        drift < still.len() / 100,
+        "the post module keeps rendering: {drift} bytes moved"
+    );
 
     // The default module's declaration for this target, served by a module
     // that traps every frame.
@@ -2123,7 +3324,9 @@ fn render_modules_reload_while_running() {
         let engine = ae_render::module::engine();
         let mut m = ae_render::module::RenderModule::load(&engine, &default).unwrap();
         let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
-        m.declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags)).unwrap().unwrap()
+        m.declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags))
+            .unwrap()
+            .unwrap()
     };
     *reload.lock().unwrap() = Some(trapping_module(&declared.graph, &declared.programs));
     let (trapped, bakes) = step(&mut app, 8);
@@ -2134,7 +3337,10 @@ fn render_modules_reload_while_running() {
     }
     assert_eq!(bakes, 3, "back to the default topology");
     let off = trapped.iter().zip(&plain).filter(|(a, b)| a.abs_diff(**b) > 2).count();
-    assert!(off < trapped.len() / 100, "its graph renders like the default module's: {off} bytes differ");
+    assert!(
+        off < trapped.len() / 100,
+        "its graph renders like the default module's: {off} bytes differ"
+    );
 
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     drop(run);
@@ -2193,16 +3399,39 @@ fn parallel_recording_matches_serial() {
                 unsafe {
                     d.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
                     for r in rects {
-                        d.cmd_push_constants(ctx.cmd, self.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, pipeline::push_bytes(r));
+                        d.cmd_push_constants(
+                            ctx.cmd,
+                            self.layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                            0,
+                            pipeline::push_bytes(r),
+                        );
                         d.cmd_draw(ctx.cmd, 6, 1, 0, 0);
                     }
                 }
             } else if *pass == PASSES {
                 let (image, buffer) = (ctx.image(self.target)?, ctx.buffer(self.readback)?);
                 let region = vk::BufferImageCopy::default()
-                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
-                    .image_extent(vk::Extent3D { width: SIZE, height: SIZE, depth: 1 });
-                unsafe { d.cmd_copy_image_to_buffer(ctx.cmd, image.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, buffer.buffer, &[region]) };
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: SIZE,
+                        height: SIZE,
+                        depth: 1,
+                    });
+                unsafe {
+                    d.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        image.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        buffer.buffer,
+                        &[region],
+                    )
+                };
             }
             Ok(())
         }
@@ -2221,7 +3450,11 @@ fn parallel_recording_matches_serial() {
             (0..DRAWS)
                 .map(|_| {
                     let (x, y, w) = (next() * 2.0 - 1.0, next() * 2.0 - 1.0, 0.02 + next() * 0.2);
-                    Rect { rect: [x, y, x + w, y + w], color: [next(), next(), next(), 1.0], depth: [0.5, 0.0, 0.0, 0.0] }
+                    Rect {
+                        rect: [x, y, x + w, y + w],
+                        color: [next(), next(), next(), 1.0],
+                        depth: [0.5, 0.0, 0.0, 0.0],
+                    }
                 })
                 .collect()
         })
@@ -2243,36 +3476,95 @@ fn parallel_recording_matches_serial() {
             glow_blend: Blend::Off,
         };
         let pipe = pipeline::graphics_pipeline(device, &desc).unwrap();
-        let color = ImageDesc::color_2d(FORMAT, SIZE, SIZE, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+        let color = ImageDesc::color_2d(
+            FORMAT,
+            SIZE,
+            SIZE,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+        );
         let bytes = (SIZE * SIZE * 4) as u64;
-        let buffer_desc = BufferDesc { size: bytes, usage: vk::BufferUsageFlags::TRANSFER_DST };
+        let buffer_desc = BufferDesc {
+            size: bytes,
+            usage: vk::BufferUsageFlags::TRANSFER_DST,
+        };
         let mut image = OwnedImage::new(gpu, color, "stress target").unwrap();
         let mut buffer = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "stress readback").unwrap();
-        let extent = vk::Extent2D { width: SIZE, height: SIZE };
+        let extent = vk::Extent2D {
+            width: SIZE,
+            height: SIZE,
+        };
         let bindings = [
-            Binding::Image(ImageBinding { image: image.image, view: image.view, format: FORMAT, extent, range: image.range(), identity: 1 << 48 }),
-            Binding::Buffer(BufferBinding { buffer: buffer.buffer, offset: 0, size: bytes, identity: (1 << 48) + 1 }),
+            Binding::Image(ImageBinding {
+                image: image.image,
+                view: image.view,
+                format: FORMAT,
+                extent,
+                range: image.range(),
+                identity: 1 << 48,
+            }),
+            Binding::Buffer(BufferBinding {
+                buffer: buffer.buffer,
+                offset: 0,
+                size: bytes,
+                identity: (1 << 48) + 1,
+            }),
         ];
         let mut graph = FrameGraph::<u16>::new();
         let target = graph.image("target", color, ResourceClass::External);
         let readback = graph.buffer("readback", buffer_desc, ResourceClass::External);
         for p in 0..PASSES {
-            graph.pass(&format!("draw {p}"), PassKind::Graphics, p).color(target, if p == 0 { LoadOp::Clear } else { LoadOp::Load }).id();
+            graph
+                .pass(&format!("draw {p}"), PassKind::Graphics, p)
+                .color(target, if p == 0 { LoadOp::Clear } else { LoadOp::Load })
+                .id();
         }
-        graph.pass("copy", PassKind::Transfer, PASSES).access(target, Role::TransferSrc).discard(readback, Role::TransferDst).id();
-        graph.pass("host read", PassKind::Transfer, PASSES + 1).access(readback, Role::HostRead).root().id();
-        let mut executor = Executor::new(gpu.clone(), ExecutorConfig { record_threads: threads, ..ExecutorConfig::default() }).unwrap();
+        graph
+            .pass("copy", PassKind::Transfer, PASSES)
+            .access(target, Role::TransferSrc)
+            .discard(readback, Role::TransferDst)
+            .id();
+        graph
+            .pass("host read", PassKind::Transfer, PASSES + 1)
+            .access(readback, Role::HostRead)
+            .root()
+            .id();
+        let mut executor = Executor::new(
+            gpu.clone(),
+            ExecutorConfig {
+                record_threads: threads,
+                ..ExecutorConfig::default()
+            },
+        )
+        .unwrap();
         executor.set_graph(graph).unwrap();
-        let mut recorder = Stress { pipeline: pipe, layout, rects: rects.clone(), target, readback };
+        let mut recorder = Stress {
+            pipeline: pipe,
+            layout,
+            rects: rects.clone(),
+            target,
+            readback,
+        };
         let mut record_ms = Vec::new();
         for _ in 0..FRAMES {
             let token = executor.begin_frame().unwrap();
-            executor.execute(token, &mut recorder, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+            executor
+                .execute(
+                    token,
+                    &mut recorder,
+                    &|resource| bindings.get(resource.index()).copied(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
             executor.wait(token).unwrap();
             record_ms.push(executor.stats().record_ms);
         }
         let pixels = buffer.mapped().unwrap().to_vec();
-        assert_eq!(executor.stats().parallel_frames, if threads > 1 { FRAMES as u64 } else { 0 }, "{threads} threads");
+        assert_eq!(
+            executor.stats().parallel_frames,
+            if threads > 1 { FRAMES as u64 } else { 0 },
+            "{threads} threads"
+        );
         drop(executor);
         unsafe {
             device.destroy_pipeline(pipe, None);
@@ -2290,7 +3582,11 @@ fn parallel_recording_matches_serial() {
     let (parallel, _) = run(&gpu, 4);
     let distinct = serial.chunks(4).collect::<std::collections::BTreeSet<_>>().len();
     assert!(distinct > 50, "the passes drew something ({distinct} colours)");
-    assert!(serial == parallel, "parallel recording changed {} bytes", serial.iter().zip(&parallel).filter(|(a, b)| a != b).count());
+    assert!(
+        serial == parallel,
+        "parallel recording changed {} bytes",
+        serial.iter().zip(&parallel).filter(|(a, b)| a != b).count()
+    );
     assert_clean(&gpu);
     drop(gpu);
 
@@ -2300,7 +3596,9 @@ fn parallel_recording_matches_serial() {
     for threads in [1, 2, 4, 8] {
         let (pixels, ms) = run(&plain, threads);
         assert!(pixels == serial, "{threads} threads without validation: other pixels");
-        println!("{threads} recording thread(s): {PASSES} passes x {DRAWS} draws recorded in {ms:.2} ms (median of {FRAMES} frames, no validation)");
+        println!(
+            "{threads} recording thread(s): {PASSES} passes x {DRAWS} draws recorded in {ms:.2} ms (median of {FRAMES} frames, no validation)"
+        );
     }
 }
 
@@ -2317,7 +3615,11 @@ fn vision_shades_the_terrain() {
     use ae_render::terrain::app::{VisionFeed, VisionFrame};
     use ae_render::terrain::renderer::VisionGrid;
     let gpu = gpu();
-    let grid = VisionGrid { width: 16, height: 16, cell_size: 32.0 };
+    let grid = VisionGrid {
+        width: 16,
+        height: 16,
+        cell_size: 32.0,
+    };
     let plane = |f: &dyn Fn(u32, u32) -> bool| -> Vec<u64> {
         let mut words = vec![0u64; grid.words()];
         for y in 0..grid.height {
@@ -2332,12 +3634,20 @@ fn vision_shades_the_terrain() {
     let scene = |feed: Option<Arc<VisionFeed>>| tileset_scene(&gpu, |_, _| 50.0, |_, _| 0, None, false, 900.0, feed).0;
     let feed = |los: &dyn Fn(u32, u32) -> bool, explored: &dyn Fn(u32, u32) -> bool| {
         let f = Arc::new(VisionFeed::new(grid));
-        f.publish(Arc::new(VisionFrame { tick: 1, los: plane(los), explored: plane(explored) }));
+        f.publish(Arc::new(VisionFrame {
+            tick: 1,
+            los: plane(los),
+            explored: plane(explored),
+        }));
         Some(f)
     };
     let plain = scene(None);
     let all = scene(feed(&|_, _| true, &|_, _| true));
-    assert!(plain == all, "full line of sight changed {} bytes", plain.iter().zip(&all).filter(|(a, b)| a != b).count());
+    assert!(
+        plain == all,
+        "full line of sight changed {} bytes",
+        plain.iter().zip(&all).filter(|(a, b)| a != b).count()
+    );
 
     // Left half seen, right half: top explored, bottom never.
     let half = scene(feed(&|x, _| x < 8, &|x, y| x < 8 || y < 8));
@@ -2354,11 +3664,18 @@ fn vision_shades_the_terrain() {
     // The map spans the middle of the frame from above; sample well inside
     // each quarter (screen y grows downwards, world y with it here or not:
     // both right quarters are compared to the left).
-    let (left, right_a, right_b) = (luma(&half, 70, 140, 40, 200), luma(&half, 190, 250, 40, 100), luma(&half, 190, 250, 140, 200));
+    let (left, right_a, right_b) = (
+        luma(&half, 70, 140, 40, 200),
+        luma(&half, 190, 250, 40, 100),
+        luma(&half, 190, 250, 140, 200),
+    );
     let (lit_left, plain_left) = (left, luma(&plain, 70, 140, 40, 200));
     let (dim, dark) = (right_a.max(right_b), right_a.min(right_b));
     println!("luma: left {left:.1} (no vision {plain_left:.1}), right explored {dim:.1}, never seen {dark:.1}");
-    assert!((lit_left - plain_left).abs() < 1.0, "line of sight draws as without vision");
+    assert!(
+        (lit_left - plain_left).abs() < 1.0,
+        "line of sight draws as without vision"
+    );
     // sRGB bytes: the shader's 0.2 and 0.5 factors (plus desaturation)
     // read as about 0.5 and 0.75 of the brightness.
     assert!(lit_left > 1.5 * dark, "never-seen ground is much darker");
@@ -2367,8 +3684,14 @@ fn vision_shades_the_terrain() {
     // A feed with no frame yet: all unexplored.
     let empty = scene(Some(Arc::new(VisionFeed::new(grid))));
     let unseen = luma(&empty, 190, 250, 40, 100).min(luma(&empty, 190, 250, 140, 200));
-    assert!((unseen - dark).abs() < 1.0, "before any vision frame, ground reads as never seen ({unseen:.1} vs {dark:.1})");
-    assert!(luma(&empty, 70, 140, 40, 200) < 0.7 * lit_left, "and the left is not lit");
+    assert!(
+        (unseen - dark).abs() < 1.0,
+        "before any vision frame, ground reads as never seen ({unseen:.1} vs {dark:.1})"
+    );
+    assert!(
+        luma(&empty, 70, 140, 40, 200) < 0.7 * lit_left,
+        "and the left is not lit"
+    );
     assert_clean(&gpu);
 }
 
@@ -2402,12 +3725,38 @@ fn water_covers_the_low_ground_only() {
     let gpu = gpu();
     let n = 129;
     let island = |cx: usize, cz: usize| (88..=100).contains(&cx) && (88..=100).contains(&cz);
-    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| if i % n < 64 { 0.8 } else if island(i % n, i / n) { 0.95 } else { 0.4 }).collect() };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: (0..n * n)
+            .map(|i| {
+                if i % n < 64 {
+                    0.8
+                } else if island(i % n, i / n) {
+                    0.95
+                } else {
+                    0.4
+                }
+            })
+            .collect(),
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let grid = VisionGrid { width: 32, height: 32, cell_size: 32.0 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let grid = VisionGrid {
+        width: 32,
+        height: 32,
+        cell_size: 32.0,
+    };
     let land_unit = (250.0f32, 512.0f32);
     let ship = (760.0f32, 512.0f32);
 
@@ -2422,14 +3771,51 @@ fn water_covers_the_low_ground_only() {
     let mut render = |r: Run| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         for (&(x, y), class) in [land_unit, ship].iter().zip(0u32..) {
-            for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 8.0f32.to_bits(), class].into_iter().enumerate() {
+            for (a, word) in [
+                x.to_bits(),
+                y.to_bits(),
+                x.to_bits(),
+                y.to_bits(),
+                1.0f32.to_bits(),
+                0.0f32.to_bits(),
+                8.0f32.to_bits(),
+                class,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 columns[a].push(word);
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 0.02], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.02, 0.02, 1.0], floats: true }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns),
+            anim: AnimWrites::default(),
+        }));
+        let classes = vec![
+            UnitClass {
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                color: [1.0, 0.02, 0.02],
+                floats: false,
+            },
+            UnitClass {
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                color: [0.02, 0.02, 1.0],
+                floats: true,
+            },
+        ];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes,
+            min_pixels: 6.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
         if r.water {
             app = app.with_water();
         }
@@ -2440,7 +3826,11 @@ fn water_covers_the_low_ground_only() {
                 los[y * grid.stride()] = (1u64 << 16) - 1;
             }
             let feed = Arc::new(VisionFeed::new(grid));
-            feed.publish(Arc::new(VisionFrame { tick: 1, los, explored: vec![0; grid.words()] }));
+            feed.publish(Arc::new(VisionFrame {
+                tick: 1,
+                los,
+                explored: vec![0; grid.words()],
+            }));
             app = app.with_vision(feed);
         }
         {
@@ -2454,37 +3844,75 @@ fn water_covers_the_low_ground_only() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, r.frames, config).unwrap();
         let pixels = app.readback().unwrap();
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            let name = format!("water-{}{}{}-{}.ppm", r.water as u8, r.view_water as u8, r.vision as u8, r.frames);
+            let name = format!(
+                "water-{}{}{}-{}.ppm",
+                r.water as u8, r.view_water as u8, r.vision as u8, r.frames
+            );
             std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let base = Run { water: false, view_water: true, vision: false, frames: 12 };
+    let base = Run {
+        water: false,
+        view_water: true,
+        vision: false,
+        frames: 12,
+    };
     let plain = render(base);
-    let switched_off = render(Run { water: true, view_water: false, ..base });
+    let switched_off = render(Run {
+        water: true,
+        view_water: false,
+        ..base
+    });
     let on = render(Run { water: true, ..base });
-    let later = render(Run { water: true, frames: 42, ..base });
+    let later = render(Run {
+        water: true,
+        frames: 42,
+        ..base
+    });
     let fogged_plain = render(Run { vision: true, ..base });
-    let fogged = render(Run { water: true, vision: true, ..base });
+    let fogged = render(Run {
+        water: true,
+        vision: true,
+        ..base
+    });
 
     let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
     let at = |x: f32, y: f32, h: f32| -> Option<usize> {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
     // Points on the land (clear of the cliff and the land unit) and on the
     // water (clear of the cliff's foot and the ship).
     let near = |x: f32, y: f32, (ux, uy): (f32, f32)| (x - ux).abs() < 40.0 && (y - uy).abs() < 40.0;
-    let points = |xs: std::ops::RangeInclusive<u32>, ys: std::ops::RangeInclusive<u32>, step: usize, h: f32, unit: (f32, f32)| -> Vec<usize> {
+    let points = |xs: std::ops::RangeInclusive<u32>,
+                  ys: std::ops::RangeInclusive<u32>,
+                  step: usize,
+                  h: f32,
+                  unit: (f32, f32)|
+     -> Vec<usize> {
         let mut out = Vec::new();
         for x in xs.step_by(step) {
             for y in ys.clone().step_by(step) {
@@ -2507,38 +3935,77 @@ fn water_covers_the_low_ground_only() {
     assert!(top.len() > 60, "{} island points in view", top.len());
     land.extend(top);
     let water = points(560..=1008, 16..=1008, 16, 60.0, ship);
-    assert!(land.len() > 300 && water.len() > 300, "{} land and {} water points in view", land.len(), water.len());
+    assert!(
+        land.len() > 300 && water.len() > 300,
+        "{} land and {} water points in view",
+        land.len(),
+        water.len()
+    );
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let changed = |a: &[u8], b: &[u8], at: &[usize]| at.iter().filter(|&&i| rgb(a, i) != rgb(b, i)).count();
-    let mean_diff = |a: &[u8], b: &[u8], at: &[usize]| at.iter().map(|&i| (0..3).map(|c| (a[i + c] as f64 - b[i + c] as f64).abs()).sum::<f64>()).sum::<f64>() / at.len() as f64;
+    let mean_diff = |a: &[u8], b: &[u8], at: &[usize]| {
+        at.iter()
+            .map(|&i| (0..3).map(|c| (a[i + c] as f64 - b[i + c] as f64).abs()).sum::<f64>())
+            .sum::<f64>()
+            / at.len() as f64
+    };
 
     let off_bytes = plain.iter().zip(&switched_off).filter(|(a, b)| a != b).count();
     assert_eq!(off_bytes, 0, "water switched off draws as no water");
     assert_eq!(changed(&plain, &on, &land), 0, "land points under the water surface");
     let wet = changed(&plain, &on, &water);
-    println!("water: {wet} of {} water points changed; mean difference {:.1}", water.len(), mean_diff(&plain, &on, &water));
-    assert!(wet * 10 >= water.len() * 9, "the surface covers the water: {wet} of {}", water.len());
+    println!(
+        "water: {wet} of {} water points changed; mean difference {:.1}",
+        water.len(),
+        mean_diff(&plain, &on, &water)
+    );
+    assert!(
+        wet * 10 >= water.len() * 9,
+        "the surface covers the water: {wet} of {}",
+        water.len()
+    );
 
     let ship_at = at(ship.0, ship.1, 61.0).expect("the ship is in view");
     let [r, g, b] = rgb(&on, ship_at).map(|c| c as i32);
-    assert!(b > 2 * r && b > 2 * g, "the ship keeps its colour over the water: {r} {g} {b}");
+    assert!(
+        b > 2 * r && b > 2 * g,
+        "the ship keeps its colour over the water: {r} {g} {b}"
+    );
 
-    assert_eq!(changed(&fogged_plain, &fogged, &land), 0, "land in sight: unchanged by the water");
+    assert_eq!(
+        changed(&fogged_plain, &fogged, &land),
+        0,
+        "land in sight: unchanged by the water"
+    );
     let luma_at = |pixels: &[u8], at: &[usize]| -> f64 {
-        at.iter().map(|&i| 0.3 * pixels[i] as f64 + 0.59 * pixels[i + 1] as f64 + 0.11 * pixels[i + 2] as f64).sum::<f64>() / at.len() as f64
+        at.iter()
+            .map(|&i| 0.3 * pixels[i] as f64 + 0.59 * pixels[i + 1] as f64 + 0.11 * pixels[i + 2] as f64)
+            .sum::<f64>()
+            / at.len() as f64
     };
     let (seen, unseen) = (luma_at(&on, &water), luma_at(&fogged, &water));
     println!("water in sight {seen:.1} luma, never seen {unseen:.1}");
-    assert!(unseen < 0.8 * seen, "out of sight the water is dimmed: {unseen:.1} vs {seen:.1}");
+    assert!(
+        unseen < 0.8 * seen,
+        "out of sight the water is dimmed: {unseen:.1} vs {seen:.1}"
+    );
 
-    assert_eq!(changed(&on, &later, &land), 0, "half a second later the land is the same");
+    assert_eq!(
+        changed(&on, &later, &land),
+        0,
+        "half a second later the land is the same"
+    );
     let moved = changed(&on, &later, &water);
     // At this distance the waves move the water by under one code: every
     // change is a single code (none saturates), so the count is how many
     // pixels cross a rounding step. 34 of 1678 measured (2.0%) with no tone
     // curve; it was 105 under Lottes' curve and over a fifteenth under
     // ACES's, whose slopes here differed.
-    assert!(moved * 60 >= water.len(), "half a second later the waves have moved: {moved} of {}", water.len());
+    assert!(
+        moved * 60 >= water.len(),
+        "half a second later the waves have moved: {moved} of {}",
+        water.len()
+    );
     assert_clean(&gpu);
 }
 
@@ -2558,13 +4025,34 @@ fn pause_holds_the_water_clock() {
 
     let gpu = gpu();
     let (n, cell, scale, water) = (65usize, 16.0f32, 100.0f32, 60.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.4; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.4; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, Some(water));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
 
     let render = |pause_at: Option<usize>, frames: usize| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water();
@@ -2629,14 +4117,33 @@ fn hills_shade_away_from_the_sun() {
     let gpu = gpu();
     let (n, cell, scale) = (129usize, 8.0f32, 100.0f32);
     // Corner rectangles of the towers (90 m over ground at 10 m).
-    let towers = [(60usize, 60usize, 67usize, 67usize), (TOWER_B.0, TOWER_B.1, TOWER_B.2, TOWER_B.3)];
-    let tall = |x: usize, y: usize| towers.iter().any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
-    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| if tall(i % n, i / n) { 1.0 } else { 0.1 }).collect() };
+    let towers = [
+        (60usize, 60usize, 67usize, 67usize),
+        (TOWER_B.0, TOWER_B.1, TOWER_B.2, TOWER_B.3),
+    ];
+    let tall = |x: usize, y: usize| {
+        towers
+            .iter()
+            .any(|&(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
+    };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: (0..n * n).map(|i| if tall(i % n, i / n) { 1.0 } else { 0.1 }).collect(),
+    };
     let shadow = sun::shadow_heights(&heightmap, cell, scale, 0.0, sun::direction());
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     // A unit in the first tower's shadow, one in the sun.
     let shaded_unit = (590.0f32, 450.0f32);
     let sunny_unit = (430.0f32, 600.0f32);
@@ -2652,14 +4159,44 @@ fn hills_shade_away_from_the_sun() {
     let mut render = |r: Run| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         for &(x, y) in &[shaded_unit, sunny_unit] {
-            for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 6.0f32.to_bits(), 0].into_iter().enumerate() {
+            for (a, word) in [
+                x.to_bits(),
+                y.to_bits(),
+                x.to_bits(),
+                y.to_bits(),
+                1.0f32.to_bits(),
+                0.0f32.to_bits(),
+                6.0f32.to_bits(),
+                0,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 columns[a].push(word);
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns),
+            anim: AnimWrites::default(),
+        }));
+        let classes = vec![UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.45, 0.45, 0.45],
+            floats: false,
+        }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes,
+            min_pixels: 6.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
         if r.shadows {
             app = app.with_shadows();
         }
@@ -2674,14 +4211,36 @@ fn hills_shade_away_from_the_sun() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 12).unwrap();
         if r.level_a {
             // Cells 60..=66 hold tower A's corners (60..=67) only.
             let mut editor = TerrainEditor::new(&source);
-            let update = editor.edit(2, &[(59, 59, 67, 67)], |x, y| if (TOWER_B.0..TOWER_B.2).contains(&x) && (TOWER_B.1..TOWER_B.3).contains(&y) { 100.0 } else { 10.0 }, |_, _| 0).unwrap();
+            let update = editor
+                .edit(
+                    2,
+                    &[(59, 59, 67, 67)],
+                    |x, y| {
+                        if (TOWER_B.0..TOWER_B.2).contains(&x) && (TOWER_B.1..TOWER_B.3).contains(&y) {
+                            100.0
+                        } else {
+                            10.0
+                        }
+                    },
+                    |_, _| 0,
+                )
+                .unwrap();
             assert!(!update.shadows.is_empty(), "the edit rewrites shadow heights");
             app.terrain_edits().lock().unwrap().pending.push(update);
             run.frames(&mut app, 12).unwrap();
@@ -2692,30 +4251,60 @@ fn hills_shade_away_from_the_sun() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            let name = format!("shadows-{}{}{}.ppm", r.shadows as u8, r.view_shadows as u8, r.level_a as u8);
+            let name = format!(
+                "shadows-{}{}{}.ppm",
+                r.shadows as u8, r.view_shadows as u8, r.level_a as u8
+            );
             std::fs::write(std::path::Path::new(&dir).join(name), ppm).unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let plain = render(Run { shadows: false, view_shadows: true, level_a: false });
-    let switched_off = render(Run { shadows: true, view_shadows: false, level_a: false });
-    let on = render(Run { shadows: true, view_shadows: true, level_a: false });
-    let leveled_plain = render(Run { shadows: false, view_shadows: true, level_a: true });
-    let leveled = render(Run { shadows: true, view_shadows: true, level_a: true });
+    let plain = render(Run {
+        shadows: false,
+        view_shadows: true,
+        level_a: false,
+    });
+    let switched_off = render(Run {
+        shadows: true,
+        view_shadows: false,
+        level_a: false,
+    });
+    let on = render(Run {
+        shadows: true,
+        view_shadows: true,
+        level_a: false,
+    });
+    let leveled_plain = render(Run {
+        shadows: false,
+        view_shadows: true,
+        level_a: true,
+    });
+    let leveled = render(Run {
+        shadows: true,
+        view_shadows: true,
+        level_a: true,
+    });
 
     let view_proj = lod_view(&source, &camera.unwrap(), extent.width, extent.height).view_proj;
     let at = |x: f32, y: f32, h: f32| -> Option<usize> {
         let clip = view_proj * Vec4::new(x, h, y, 1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
     // The off-screen tower: none of it in view.
     let (bx0, by0, bx1, by1) = towers[1];
     for x in bx0..=bx1 + 1 {
         for y in by0..=by1 + 1 {
             for h in [10.0, 100.0] {
-                assert!(at(x as f32 * cell - 4.0, y as f32 * cell - 4.0, h).is_none(), "tower B at corner {x},{y} height {h} is in view");
+                assert!(
+                    at(x as f32 * cell - 4.0, y as f32 * cell - 4.0, h).is_none(),
+                    "tower B at corner {x},{y} height {h} is in view"
+                );
             }
         }
     }
@@ -2724,8 +4313,16 @@ fn hills_shade_away_from_the_sun() {
     // corners of the cell at least 8 m under the shadow height), clear of
     // the towers and the units.
     let s = |x: usize, y: usize| shadow[y * n + x] - 10.0;
-    let near_unit = |x: f32, y: f32| [shaded_unit, sunny_unit].iter().any(|&(ux, uy)| (x - ux).abs() < 24.0 && (y - uy).abs() < 24.0);
-    let near_tower = |x: usize, y: usize| towers.iter().any(|&(x0, y0, x1, y1)| x + 3 >= x0 && x <= x1 + 3 && y + 3 >= y0 && y <= y1 + 3);
+    let near_unit = |x: f32, y: f32| {
+        [shaded_unit, sunny_unit]
+            .iter()
+            .any(|&(ux, uy)| (x - ux).abs() < 24.0 && (y - uy).abs() < 24.0)
+    };
+    let near_tower = |x: usize, y: usize| {
+        towers
+            .iter()
+            .any(|&(x0, y0, x1, y1)| x + 3 >= x0 && x <= x1 + 3 && y + 3 >= y0 && y <= y1 + 3)
+    };
     let (mut lit, mut shaded, mut shaded_b) = (Vec::new(), Vec::new(), Vec::new());
     for y in 3..n - 4 {
         for x in 3..n - 4 {
@@ -2736,14 +4333,28 @@ fn hills_shade_away_from_the_sun() {
             let Some(i) = at(wx, wy, 10.0) else { continue };
             if (x - 2..=x + 3).all(|cx| (y - 2..=y + 3).all(|cy| s(cx, cy) == 0.0)) {
                 lit.push(i);
-            } else if [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().all(|&(cx, cy)| s(cx, cy) > 8.0) {
+            } else if [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
+                .iter()
+                .all(|&(cx, cy)| s(cx, cy) > 8.0)
+            {
                 // Whose shadow: B's lies at smaller x than A's footprint.
                 if x < 60 { shaded_b.push(i) } else { shaded.push(i) }
             }
         }
     }
-    println!("{} lit, {} shaded by tower A, {} by tower B (off screen)", lit.len(), shaded.len(), shaded_b.len());
-    assert!(lit.len() > 300 && shaded.len() > 20 && shaded_b.len() > 20, "{} lit, {} shaded, {} shaded by B", lit.len(), shaded.len(), shaded_b.len());
+    println!(
+        "{} lit, {} shaded by tower A, {} by tower B (off screen)",
+        lit.len(),
+        shaded.len(),
+        shaded_b.len()
+    );
+    assert!(
+        lit.len() > 300 && shaded.len() > 20 && shaded_b.len() > 20,
+        "{} lit, {} shaded, {} shaded by B",
+        lit.len(),
+        shaded.len(),
+        shaded_b.len()
+    );
 
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
@@ -2752,9 +4363,19 @@ fn hills_shade_away_from_the_sun() {
     let changed = lit.iter().filter(|&&i| rgb(&plain, i) != rgb(&on, i)).count();
     assert_eq!(changed, 0, "sunlit ground changes");
     for (name, points) in [("tower A", &shaded), ("tower B (off screen)", &shaded_b)] {
-        let darker = points.iter().filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i)).count();
-        println!("{name}: {darker} of {} shaded points a quarter darker or more", points.len());
-        assert!(darker * 10 >= points.len() * 9, "{name}'s shadow: {darker} of {}", points.len());
+        let darker = points
+            .iter()
+            .filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i))
+            .count();
+        println!(
+            "{name}: {darker} of {} shaded points a quarter darker or more",
+            points.len()
+        );
+        assert!(
+            darker * 10 >= points.len() * 9,
+            "{name}'s shadow: {darker} of {}",
+            points.len()
+        );
     }
     // The units: their sunlit faces (the top of the dart, 3 m up).
     let unit_luma = |p: &[u8], (x, y): (f32, f32)| {
@@ -2768,11 +4389,25 @@ fn hills_shade_away_from_the_sun() {
     assert!(shade_on < 0.8 * shade_plain, "the unit in the shadow darkens");
 
     // Tower A levelled by an edit: its shadow (and the unit's) goes, B's stays.
-    let gone = shaded.iter().filter(|&&i| rgb(&leveled_plain, i) != rgb(&leveled, i)).count();
+    let gone = shaded
+        .iter()
+        .filter(|&&i| rgb(&leveled_plain, i) != rgb(&leveled, i))
+        .count();
     assert_eq!(gone, 0, "tower A's shadow after levelling it");
-    assert_eq!(unit_luma(&leveled_plain, shaded_unit), unit_luma(&leveled, shaded_unit), "the unit after tower A is levelled");
-    let still = shaded_b.iter().filter(|&&i| luma(&leveled, i) < 0.75 * luma(&leveled_plain, i)).count();
-    assert!(still * 10 >= shaded_b.len() * 9, "tower B's shadow after the edit: {still} of {}", shaded_b.len());
+    assert_eq!(
+        unit_luma(&leveled_plain, shaded_unit),
+        unit_luma(&leveled, shaded_unit),
+        "the unit after tower A is levelled"
+    );
+    let still = shaded_b
+        .iter()
+        .filter(|&&i| luma(&leveled, i) < 0.75 * luma(&leveled_plain, i))
+        .count();
+    assert!(
+        still * 10 >= shaded_b.len() * 9,
+        "tower B's shadow after the edit: {still} of {}",
+        shaded_b.len()
+    );
     assert_clean(&gpu);
 }
 
@@ -2808,12 +4443,31 @@ fn units_cast_shadows() {
 
     let gpu = gpu();
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 1.3, fov_y: 0.8 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 1.3,
+        fov_y: 0.8,
+    };
     {
         // As the app sets it up (the ground under the target).
         let defaults = TerrainApp::new(source.clone(), TerrainOutput::Readback);
@@ -2823,12 +4477,20 @@ fn units_cast_shadows() {
     let eye = camera.eye(|_| ground);
     let project = |p: Vec3| -> Option<(f32, f32)> {
         let clip = view_proj * p.extend(1.0);
-        (clip.w > 0.0).then(|| ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32))
+        (clip.w > 0.0).then(|| {
+            (
+                (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+                (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+            )
+        })
     };
-    let on_screen = |p: Vec3| project(p).is_some_and(|(u, v)| u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32);
+    let on_screen = |p: Vec3| {
+        project(p).is_some_and(|(u, v)| u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32)
+    };
     let pixel = |p: Vec3| -> Option<usize> {
         let (u, v) = project(p)?;
-        (u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        (u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
 
     // The darts as units.vert builds them: (x, z, heading x, heading z, radius).
@@ -2877,14 +4539,37 @@ fn units_cast_shadows() {
     let render = |shadows: bool, view_shadows: bool| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         for &(x, z, hx, hz, r) in &units {
-            for (k, word) in [x, z, x, z, hx, hz, r].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+            for (k, word) in [x, z, x, z, hx, hz, r]
+                .map(f32::to_bits)
+                .into_iter()
+                .chain([0])
+                .enumerate()
+            {
                 columns[k].push(word);
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns),
+            anim: AnimWrites::default(),
+        }));
+        let classes = vec![UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.45, 0.45, 0.45],
+            floats: false,
+        }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes,
+            min_pixels: 6.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
         if shadows {
             app = app.with_shadows();
         }
@@ -2896,8 +4581,17 @@ fn units_cast_shadows() {
             view.shadows = view_shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
         run.wait().unwrap();
@@ -2906,7 +4600,11 @@ fn units_cast_shadows() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("unit-shadows-{}{}.ppm", shadows as u8, view_shadows as u8)), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("unit-shadows-{}{}.ppm", shadows as u8, view_shadows as u8)),
+                ppm,
+            )
+            .unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
@@ -2919,8 +4617,13 @@ fn units_cast_shadows() {
     // neighbours 0.75 m away), or lit with no shadow within 2 m; visible
     // (no dart between it and the camera, 0.5 m around).
     let at = |x: f32, z: f32| Vec3::new(x, ground + 0.01, z);
-    let ring = |x: f32, z: f32, d: f32| [(-d, -d), (d, -d), (-d, d), (d, d), (0.0, 0.0)].map(|(dx, dz)| at(x + dx, z + dz));
-    let (mut deep_a, mut deep_b, mut lit) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+    let ring =
+        |x: f32, z: f32, d: f32| [(-d, -d), (d, -d), (-d, d), (d, d), (0.0, 0.0)].map(|(dx, dz)| at(x + dx, z + dz));
+    let (mut deep_a, mut deep_b, mut lit) = (
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    );
     for iz in 0..=480 {
         for ix in 0..=480 {
             let (x, z) = (8.0 + ix as f32 * 0.5, 8.0 + iz as f32 * 0.5);
@@ -2929,31 +4632,67 @@ fn units_cast_shadows() {
                 continue;
             }
             if ring(x, z, 0.75).iter().all(|&p| shaded(p)) {
-                if x < 64.0 { deep_b.insert(i) } else { deep_a.insert(i) };
-            } else if !ring(x, z, 2.0).iter().chain(&ring(x, z, 1.0)).any(|&p| shaded(p)) && (x - c.0).hypot(z - c.1) > 2.5 * c.4 {
+                if x < 64.0 {
+                    deep_b.insert(i)
+                } else {
+                    deep_a.insert(i)
+                };
+            } else if !ring(x, z, 2.0).iter().chain(&ring(x, z, 1.0)).any(|&p| shaded(p))
+                && (x - c.0).hypot(z - c.1) > 2.5 * c.4
+            {
                 lit.insert(i);
             }
         }
     }
-    println!("B at x {:.2}; {} lit points, {} deep in A's shadow, {} in B's (B off screen)", b.0, lit.len(), deep_a.len(), deep_b.len());
-    assert!(lit.len() > 5000 && deep_a.len() > 50 && deep_b.len() > 15, "{} lit, {} A, {} B", lit.len(), deep_a.len(), deep_b.len());
+    println!(
+        "B at x {:.2}; {} lit points, {} deep in A's shadow, {} in B's (B off screen)",
+        b.0,
+        lit.len(),
+        deep_a.len(),
+        deep_b.len()
+    );
+    assert!(
+        lit.len() > 5000 && deep_a.len() > 50 && deep_b.len() > 15,
+        "{} lit, {} A, {} B",
+        lit.len(),
+        deep_a.len(),
+        deep_b.len()
+    );
 
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
-    assert_eq!(plain.iter().zip(&switched_off).filter(|(x, y)| x != y).count(), 0, "shadows switched off draw as none");
+    assert_eq!(
+        plain.iter().zip(&switched_off).filter(|(x, y)| x != y).count(),
+        0,
+        "shadows switched off draw as none"
+    );
     let changed = lit.iter().filter(|&&i| rgb(&plain, i) != rgb(&on, i)).count();
     assert_eq!(changed, 0, "lit ground changes");
     for (name, points) in [("A", &deep_a), ("B (off screen)", &deep_b)] {
-        let darker = points.iter().filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i)).count();
-        println!("{name}: {darker} of {} shaded points a quarter darker or more", points.len());
-        assert!(darker * 10 >= points.len() * 9, "{name}'s shadow: {darker} of {}", points.len());
+        let darker = points
+            .iter()
+            .filter(|&&i| luma(&on, i) < 0.75 * luma(&plain, i))
+            .count();
+        println!(
+            "{name}: {darker} of {} shaded points a quarter darker or more",
+            points.len()
+        );
+        assert!(
+            darker * 10 >= points.len() * 9,
+            "{name}'s shadow: {darker} of {}",
+            points.len()
+        );
     }
     // C's faces turned to the sun, at their centres (pulled a little in).
     let mut faces = 0;
     for t in triangles(c) {
         let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize();
         let centre = (t[0] + t[1] + t[2]) / 3.0;
-        let outward = if normal.dot(centre - Vec3::new(c.0, ground + 0.3 * c.4, c.1)) < 0.0 { -normal } else { normal };
+        let outward = if normal.dot(centre - Vec3::new(c.0, ground + 0.3 * c.4, c.1)) < 0.0 {
+            -normal
+        } else {
+            normal
+        };
         if outward.dot(sun_dir) <= 0.1 || outward.dot(eye - centre) <= 0.0 {
             continue;
         }
@@ -2997,19 +4736,46 @@ fn particles_cast_coloured_shadows() {
 
     let gpu = gpu();
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 1.3, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 1.3,
+        ..camera
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let eye = camera.eye(|_| ground);
     let pixel = |p: Vec3| -> Option<usize> {
         let clip = view_proj * p.extend(1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
     let sun_dir = sun::direction();
     // Distance from sphere centre `c` to the ray from `o` along `d`
@@ -3017,7 +4783,11 @@ fn particles_cast_coloured_shadows() {
     let ray_gap = |o: Vec3, d: Vec3, c: Vec3| {
         let d = d.normalize();
         let t = (c - o).dot(d);
-        if t <= 0.0 { f32::INFINITY } else { (c - o - d * t).length() }
+        if t <= 0.0 {
+            f32::INFINITY
+        } else {
+            (c - o - d * t).length()
+        }
     };
 
     // The unit at the target; the smoke's shadow centred 30 m from it.
@@ -3027,27 +4797,70 @@ fn particles_cast_coloured_shadows() {
     let smoke_at = shadow_at + sun_dir * (25.0 / sun_dir.y);
     // Buried under the unit: its sunward surface 0.5 m under the ground.
     let buried_at = Vec3::new(unit.0, ground - radius - 0.5, unit.1);
-    let effects = vec![still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, false), still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, true)];
-    let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: 3 };
+    let effects = vec![
+        still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, false),
+        still_effect([1.0, 0.45, 0.1, 0.9], 2.0 * radius, true),
+    ];
+    let one = |pos: Vec3, effect: u32| Burst {
+        pos: pos.to_array(),
+        ground: false,
+        effect,
+        count: 1,
+        scale: 1.0,
+        seed: 3,
+    };
 
     let render = |bursts: Option<&[Burst]>, shadows: bool, view_shadows: bool, name: &str| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         let (x, z, hx, hz, r) = unit;
-        for (k, word) in [x, z, x, z, hx, hz, r].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+        for (k, word) in [x, z, x, z, hx, hz, r]
+            .map(f32::to_bits)
+            .into_iter()
+            .chain([0])
+            .enumerate()
+        {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() })
-            .with_tone(ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns),
+            anim: AnimWrites::default(),
+        }));
+        let classes = vec![UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.45, 0.45, 0.45],
+            floats: false,
+        }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_units(UnitsSetup {
+                feed,
+                capacity: 16,
+                classes,
+                min_pixels: 6.0,
+                models: Vec::new(),
+                rigs: Vec::new(),
+            })
+            .with_tone(ae_render::tonemap::ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            });
         if shadows {
             app = app.with_shadows();
         }
         if let Some(bursts) = bursts {
             let feed = Arc::new(ParticleFeed::default());
             feed.emit_all(bursts);
-            app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects: effects.clone(), downscale: 2, blend: ParticleBlend::Sorted });
+            app = app.with_particles(ParticlesSetup {
+                feed,
+                capacity: 1024,
+                effects: effects.clone(),
+                downscale: 2,
+                blend: ParticleBlend::Sorted,
+            });
         }
         {
             let view = app.view();
@@ -3057,8 +4870,17 @@ fn particles_cast_coloured_shadows() {
             view.shadows = view_shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
         run.wait().unwrap();
@@ -3067,7 +4889,11 @@ fn particles_cast_coloured_shadows() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("particle-shadows-{name}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("particle-shadows-{name}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
@@ -3081,7 +4907,12 @@ fn particles_cast_coloured_shadows() {
     // (clear of the simulation's frustum test, which keeps a sphere
     // touching the view).
     let up_sun = Vec3::new(sun_dir.x, 0.0, sun_dir.z).normalize();
-    let sphere: Vec<Vec3> = (0..27).filter(|&k| k != 13).map(|k| Vec3::new((k % 3) as f32 - 1.0, (k / 3 % 3) as f32 - 1.0, (k / 9) as f32 - 1.0).normalize() * 1.6 * radius).collect();
+    let sphere: Vec<Vec3> = (0..27)
+        .filter(|&k| k != 13)
+        .map(|k| {
+            Vec3::new((k % 3) as f32 - 1.0, (k / 3 % 3) as f32 - 1.0, (k / 9) as f32 - 1.0).normalize() * 1.6 * radius
+        })
+        .collect();
     let unseen_at = (0..400)
         .map(|t| Vec3::new(camera.target.x, ground, camera.target.y) + up_sun * t as f32 + sun_dir * (25.0 / sun_dir.y))
         .find(|&c| sphere.iter().all(|&d| pixel(c + d).is_none()))
@@ -3126,24 +4957,72 @@ fn particles_cast_coloured_shadows() {
         clear.len(),
         deep_unseen.len()
     );
-    assert!(deep.len() > 200 && clear.len() > 20000 && under > 300 && deep_unseen.len() > 100, "{} deep, {} clear, {under} under, {} unseen", deep.len(), clear.len(), deep_unseen.len());
+    assert!(
+        deep.len() > 200 && clear.len() > 20000 && under > 300 && deep_unseen.len() > 100,
+        "{} deep, {} clear, {under} under, {} unseen",
+        deep.len(),
+        clear.len(),
+        deep_unseen.len()
+    );
 
     let ratio = |on: &[u8], i: usize, c: usize| on[i + c] as f32 / plain[i + c].max(1) as f32;
     // Orange smoke: red passes, blue least (green between); in sRGB bytes,
     // with the sky's light untinted.
-    let tinted = deep.iter().filter(|&&i| ratio(&smoke, i, 2) < 0.9 * ratio(&smoke, i, 0) && ratio(&smoke, i, 2) < ratio(&smoke, i, 1) && ratio(&smoke, i, 1) < ratio(&smoke, i, 0)).count();
+    let tinted = deep
+        .iter()
+        .filter(|&&i| {
+            ratio(&smoke, i, 2) < 0.9 * ratio(&smoke, i, 0)
+                && ratio(&smoke, i, 2) < ratio(&smoke, i, 1)
+                && ratio(&smoke, i, 1) < ratio(&smoke, i, 0)
+        })
+        .count();
     let mean = |c: usize| deep.iter().map(|&i| ratio(&smoke, i, c)).sum::<f32>() / deep.len() as f32;
-    println!("smoke's shadow: mean ratio to no particles r {:.2} g {:.2} b {:.2}; {tinted} of {} tinted", mean(0), mean(1), mean(2), deep.len());
-    assert!(tinted * 10 >= deep.len() * 9, "the smoke's shadow is not tinted: {tinted} of {}", deep.len());
-    assert!(mean(0) > 0.95 && mean(2) < 0.85, "the smoke lets red through and stops blue: r {:.2} b {:.2}", mean(0), mean(2));
-    let bluer = deep_unseen.iter().filter(|&&i| ratio(&unseen, i, 2) < 0.9 * ratio(&unseen, i, 0)).count();
+    println!(
+        "smoke's shadow: mean ratio to no particles r {:.2} g {:.2} b {:.2}; {tinted} of {} tinted",
+        mean(0),
+        mean(1),
+        mean(2),
+        deep.len()
+    );
+    assert!(
+        tinted * 10 >= deep.len() * 9,
+        "the smoke's shadow is not tinted: {tinted} of {}",
+        deep.len()
+    );
+    assert!(
+        mean(0) > 0.95 && mean(2) < 0.85,
+        "the smoke lets red through and stops blue: r {:.2} b {:.2}",
+        mean(0),
+        mean(2)
+    );
+    let bluer = deep_unseen
+        .iter()
+        .filter(|&&i| ratio(&unseen, i, 2) < 0.9 * ratio(&unseen, i, 0))
+        .count();
     println!("off-screen smoke: {bluer} of {} tinted", deep_unseen.len());
-    assert!(bluer * 10 >= deep_unseen.len() * 9, "smoke off screen does not shade the view: {bluer} of {}", deep_unseen.len());
-    let changed = |frame: &[u8], points: &[usize]| points.iter().filter(|&&i| frame[i..i + 3] != plain[i..i + 3]).count();
-    assert_eq!(changed(&smoke, &clear), 0, "the ground clear of the smoke's shadow changes");
-    assert_eq!(changed(&sparks, &deep) + changed(&sparks, &clear), 0, "an emissive puff casts a shadow");
+    assert!(
+        bluer * 10 >= deep_unseen.len() * 9,
+        "smoke off screen does not shade the view: {bluer} of {}",
+        deep_unseen.len()
+    );
+    let changed =
+        |frame: &[u8], points: &[usize]| points.iter().filter(|&&i| frame[i..i + 3] != plain[i..i + 3]).count();
+    assert_eq!(
+        changed(&smoke, &clear),
+        0,
+        "the ground clear of the smoke's shadow changes"
+    );
+    assert_eq!(
+        changed(&sparks, &deep) + changed(&sparks, &clear),
+        0,
+        "an emissive puff casts a shadow"
+    );
     let differing = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
-    assert_eq!(differing(&plain, &buried), 0, "a puff under the ground tints what is above it");
+    assert_eq!(
+        differing(&plain, &buried),
+        0,
+        "a puff under the ground tints what is above it"
+    );
     assert_eq!(differing(&off, &never), 0, "shadows switched off draw as no shadows");
     assert_clean(&gpu);
 }
@@ -3180,18 +5059,44 @@ fn particles_sort_blend_and_soften() {
 
     let gpu = gpu();
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 0.6,
+        ..camera
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let eye = camera.eye(|_| ground);
     let pixel = |p: Vec3| -> (u32, u32) {
         let clip = view_proj * p.extend(1.0);
-        (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as u32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as u32)
+        (
+            ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as u32,
+            ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as u32,
+        )
     };
     let index = |(x, y): (u32, u32)| (y * extent.width + x) as usize * 4;
 
@@ -3214,11 +5119,29 @@ fn particles_sort_blend_and_soften() {
         light: None,
     };
     // 0 red, 1 blue, 2 a big grey puff, 3 red that dies at once.
-    let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false, 100.0), still([0.05, 0.05, 0.9, 1.0], 12.0, false, 100.0), still([0.6, 0.6, 0.6, 0.9], 40.0, false, 100.0), still([0.9, 0.05, 0.05, 1.0], 12.0, false, 0.02)];
-    let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: effect };
+    let effects = vec![
+        still([0.9, 0.05, 0.05, 1.0], 12.0, false, 100.0),
+        still([0.05, 0.05, 0.9, 1.0], 12.0, false, 100.0),
+        still([0.6, 0.6, 0.6, 0.9], 40.0, false, 100.0),
+        still([0.9, 0.05, 0.05, 1.0], 12.0, false, 0.02),
+    ];
+    let one = |pos: Vec3, effect: u32| Burst {
+        pos: pos.to_array(),
+        ground: false,
+        effect,
+        count: 1,
+        scale: 1.0,
+        seed: effect,
+    };
 
     let render_on = |source: &Arc<TerrainSource>, bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| -> Vec<u8> {
-        render_particles(&gpu, source, camera, extent, bursts.map(|(b, e, downscale)| (b, e, downscale, ParticleBlend::Sorted)))
+        render_particles(
+            &gpu,
+            source,
+            camera,
+            extent,
+            bursts.map(|(b, e, downscale)| (b, e, downscale, ParticleBlend::Sorted)),
+        )
     };
     let render = |bursts: Option<(&[Burst], Vec<EffectDef>, u32)>| render_on(&source, bursts);
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
@@ -3227,7 +5150,11 @@ fn particles_sort_blend_and_soften() {
     for downscale in [1, 2] {
         println!("downscale {downscale}:");
         let empty = render(Some((&[], effects.clone(), downscale)));
-        assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "an empty pool draws nothing");
+        assert_eq!(
+            none.iter().zip(&empty).filter(|(a, b)| a != b).count(),
+            0,
+            "an empty pool draws nothing"
+        );
 
         // Two puffs 30 m apart on one line of sight, 30 m above the ground.
         let centre = Vec3::new(128.0, 40.0, 128.0);
@@ -3240,24 +5167,41 @@ fn particles_sort_blend_and_soften() {
         let differing = blue_front_a.iter().zip(&blue_front_b).filter(|(a, b)| a != b).count();
         assert_eq!(differing, 0, "the emission order changes {differing} bytes");
         let (b, r) = (&blue_front_a[at..at + 3], &red_front[at..at + 3]);
-        println!("  blue in front: {b:?}, red in front: {r:?}, ground: {:?}", &none[at..at + 3]);
+        println!(
+            "  blue in front: {b:?}, red in front: {r:?}, ground: {:?}",
+            &none[at..at + 3]
+        );
         // Under ACES the half-resolution composite's bilinear mixes some
         // ground into the pixel; the puff still dominates.
         assert!(b[2] as f32 > 1.5 * b[0] as f32, "blue in front shows blue: {b:?}");
         assert!(r[0] as f32 > 1.5 * r[2] as f32, "red in front shows red: {r:?}");
 
         // Under the ground: nothing; dead: nothing.
-        let buried = render(Some((&[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)], effects.clone(), downscale)));
-        assert_eq!(none.iter().zip(&buried).filter(|(a, b)| a != b).count(), 0, "a buried puff draws");
+        let buried = render(Some((
+            &[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)],
+            effects.clone(),
+            downscale,
+        )));
+        assert_eq!(
+            none.iter().zip(&buried).filter(|(a, b)| a != b).count(),
+            0,
+            "a buried puff draws"
+        );
         let dead = render(Some((&[one(centre, 3)], effects.clone(), downscale)));
-        assert_eq!(none.iter().zip(&dead).filter(|(a, b)| a != b).count(), 0, "a dead puff draws");
+        assert_eq!(
+            none.iter().zip(&dead).filter(|(a, b)| a != b).count(),
+            0,
+            "a dead puff draws"
+        );
 
         // A big puff half in the ground: its contribution along the screen
         // column through it changes smoothly.
         let low = Vec3::new(128.0, ground, 128.0);
         let soft = render(Some((&[one(low, 2)], effects.clone(), downscale)));
         let (cx, cy) = pixel(low);
-        let column: Vec<f32> = (cy.saturating_sub(60)..(cy + 60).min(extent.height)).map(|y| (luma(&soft, index((cx, y))) - luma(&none, index((cx, y)))).abs()).collect();
+        let column: Vec<f32> = (cy.saturating_sub(60)..(cy + 60).min(extent.height))
+            .map(|y| (luma(&soft, index((cx, y))) - luma(&none, index((cx, y)))).abs())
+            .collect();
         let strongest = column.iter().cloned().fold(0.0, f32::max);
         let step = column.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
         println!("  ground-cut puff: strongest {strongest:.1}, largest step {step:.1}");
@@ -3265,13 +5209,21 @@ fn particles_sort_blend_and_soften() {
         assert!(step < 0.25 * strongest, "a hard edge: step {step} of {strongest}");
 
         // The default effects.
-        let boom = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects(), downscale)));
+        let boom = render(Some((
+            &explosion([128.0, 2.0, 128.0], true, 1.0, 7),
+            default_effects(),
+            downscale,
+        )));
         let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
         println!("  explosion: {changed} bytes changed");
         assert!(changed > 1000, "an explosion shows: {changed} bytes");
         // About 90 particles at clustered depths, appended by the simulation
         // in whatever order its invocations run: the same frame every time.
-        let again = render(Some((&explosion([128.0, 2.0, 128.0], true, 1.0, 7), default_effects(), downscale)));
+        let again = render(Some((
+            &explosion([128.0, 2.0, 128.0], true, 1.0, 7),
+            default_effects(),
+            downscale,
+        )));
         let differing = boom.iter().zip(&again).filter(|(a, b)| a != b).count();
         assert_eq!(differing, 0, "the same explosion twice differs in {differing} bytes");
     }
@@ -3291,10 +5243,19 @@ fn particles_sort_blend_and_soften() {
             *h = plateau / scale;
         }
     }
-    let heightmap = Heightmap { width: n, height: n, data };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data,
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let cliff = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let cliff = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
     let rim = (camera.target + toward_eye * 10.0).extend(plateau);
     let rim = Vec3::new(rim.x, plateau, rim.y);
     let behind = rim + (rim - eye).normalize() * 40.0;
@@ -3303,7 +5264,10 @@ fn particles_sort_blend_and_soften() {
     let half = render_on(&cliff, Some((&[one(behind, 2)], effects.clone(), 2)));
     let (mut shown, mut bled, mut worst, mut halo, mut lost) = (0, 0, 0.0f32, 0, 0.0f32);
     for i in (0..bare.len()).step_by(4) {
-        let (f, h) = ((luma(&full, i) - luma(&bare, i)).abs(), (luma(&half, i) - luma(&bare, i)).abs());
+        let (f, h) = (
+            (luma(&full, i) - luma(&bare, i)).abs(),
+            (luma(&half, i) - luma(&bare, i)).abs(),
+        );
         if f > 20.0 {
             shown += 1;
             // Smoke over the ground right above the rim, lost at half
@@ -3319,10 +5283,19 @@ fn particles_sort_blend_and_soften() {
             worst = worst.max(h);
         }
     }
-    println!("depth edge: {shown} pixels show the puff at full resolution; at half, {bled} untouched pixels changed (worst {worst:.1}), {halo} lost more than half of it, lost {:.0} luma in all", lost);
+    println!(
+        "depth edge: {shown} pixels show the puff at full resolution; at half, {bled} untouched pixels changed (worst {worst:.1}), {halo} lost more than half of it, lost {:.0} luma in all",
+        lost
+    );
     assert!(shown > 200, "the puff shows above the rim: {shown}");
-    assert!(bled <= 4, "smoke bleeds onto the plateau at half resolution: {bled} pixels (worst {worst:.1})");
-    assert!(halo <= 4, "smoke leaves a halo above the rim at half resolution: {halo} pixels");
+    assert!(
+        bled <= 4,
+        "smoke bleeds onto the plateau at half resolution: {bled} pixels (worst {worst:.1})"
+    );
+    assert!(
+        halo <= 4,
+        "smoke leaves a halo above the rim at half resolution: {halo} pixels"
+    );
     assert_clean(&gpu);
 }
 
@@ -3348,18 +5321,43 @@ fn particles_packets_both_resolutions() {
 
     let gpu = gpu();
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 0.6,
+        ..camera
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let eye = camera.eye(|_| ground);
     let index = |p: Vec3| {
         let clip = view_proj * p.extend(1.0);
-        (((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as usize * extent.width as usize + ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as usize) * 4
+        (((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as usize * extent.width as usize
+            + ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as usize)
+            * 4
     };
     let still = |color: [f32; 4], size: f32, emissive: bool| -> ae_render::particles::EffectDef {
         ae_render::particles::EffectDef {
@@ -3380,8 +5378,18 @@ fn particles_packets_both_resolutions() {
             light: None,
         }
     };
-    let effects = vec![still([0.9, 0.05, 0.05, 1.0], 12.0, false), still([0.05, 0.05, 0.9, 1.0], 12.0, false)];
-    let one = |pos: Vec3, effect: u32| Burst { pos: pos.to_array(), ground: false, effect, count: 1, scale: 1.0, seed: effect };
+    let effects = vec![
+        still([0.9, 0.05, 0.05, 1.0], 12.0, false),
+        still([0.05, 0.05, 0.9, 1.0], 12.0, false),
+    ];
+    let one = |pos: Vec3, effect: u32| Burst {
+        pos: pos.to_array(),
+        ground: false,
+        effect,
+        count: 1,
+        scale: 1.0,
+        seed: effect,
+    };
     let centre = Vec3::new(128.0, 40.0, 128.0);
     let dir = (centre - eye).normalize();
     let (near, far) = (centre - dir * 30.0, centre + dir * 30.0);
@@ -3389,7 +5397,15 @@ fn particles_packets_both_resolutions() {
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
 
     for downscale in [1, 2] {
-        let render = |blend, bursts: &[Burst]| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.clone(), downscale, blend)));
+        let render = |blend, bursts: &[Burst]| {
+            render_particles(
+                &gpu,
+                &source,
+                camera,
+                extent,
+                Some((bursts, effects.clone(), downscale, blend)),
+            )
+        };
         let packets = render(ParticleBlend::Packets, &[one(far, 0), one(near, 1)]);
         let sorted = render(ParticleBlend::Sorted, &[one(far, 0), one(near, 1)]);
         let at = index(centre);
@@ -3398,19 +5414,43 @@ fn particles_packets_both_resolutions() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(packets.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("particles-packets-{downscale}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("particles-packets-{downscale}.ppm")),
+                ppm,
+            )
+            .unwrap();
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(sorted.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("particles-sorted-{downscale}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("particles-sorted-{downscale}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
-        assert!(p[2] as f32 > 1.5 * p[0] as f32, "packets show blue in front at {downscale}: {p:?}");
-        assert!(s[2] as f32 > 1.5 * s[0] as f32, "sorted show blue in front at {downscale}: {s:?}");
+        assert!(
+            p[2] as f32 > 1.5 * p[0] as f32,
+            "packets show blue in front at {downscale}: {p:?}"
+        );
+        assert!(
+            s[2] as f32 > 1.5 * s[0] as f32,
+            "sorted show blue in front at {downscale}: {s:?}"
+        );
 
-        let buried = render(ParticleBlend::Packets, &[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)]);
-        assert_eq!(none.iter().zip(&buried).filter(|(a, b)| a != b).count(), 0, "a buried puff draws with the packets at {downscale}");
+        let buried = render(
+            ParticleBlend::Packets,
+            &[one(Vec3::new(128.0, ground - 20.0, 128.0), 0)],
+        );
+        assert_eq!(
+            none.iter().zip(&buried).filter(|(a, b)| a != b).count(),
+            0,
+            "a buried puff draws with the packets at {downscale}"
+        );
         let boom = render(ParticleBlend::Packets, &explosion([128.0, 2.0, 128.0], true, 1.0, 7));
         let changed = none.iter().zip(&boom).filter(|(a, b)| a != b).count();
-        assert!(changed > 500, "an explosion shows with the packets at {downscale}: {changed} bytes");
+        assert!(
+            changed > 500,
+            "an explosion shows with the packets at {downscale}: {changed} bytes"
+        );
     }
 
     // The fire in front of the smoke, as the half-resolution glow test.
@@ -3421,11 +5461,28 @@ fn particles_packets_both_resolutions() {
     let back = (fire - eye).normalize();
     let smoke = Vec3::new(fire.x + back.x * 3.0, ground + 3.0, fire.z + back.z * 3.0);
     let bursts = [
-        Burst { pos: fire.to_array(), ground: true, effect: 0, count: 1, scale: 1.0, seed: 1 },
-        Burst { pos: smoke.to_array(), ground: true, effect: 1, count: 1, scale: 1.0, seed: 2 },
+        Burst {
+            pos: fire.to_array(),
+            ground: true,
+            effect: 0,
+            count: 1,
+            scale: 1.0,
+            seed: 1,
+        },
+        Burst {
+            pos: smoke.to_array(),
+            ground: true,
+            effect: 1,
+            count: 1,
+            scale: 1.0,
+            seed: 2,
+        },
     ];
     let clip = view_proj * Vec4::new(fire.x, fire.y, fire.z, 1.0);
-    let (cu, cv) = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32);
+    let (cu, cv) = (
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32,
+        ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32,
+    );
     let ring = |on: &[u8], off: &[u8]| -> f32 {
         let luma_at = |p: &[u8], x: i32, y: i32| {
             let i = ((y * extent.width as i32 + x) * 4) as usize;
@@ -3451,13 +5508,19 @@ fn particles_packets_both_resolutions() {
                 extent,
                 Some((&bursts, glow_effects.clone(), downscale, ParticleBlend::Packets)),
                 &[],
-                ToneParams { bloom, ..Default::default() },
+                ToneParams {
+                    bloom,
+                    ..Default::default()
+                },
             )
         };
         let (off, on) = (render(0.0), render(BLOOM_STRENGTH));
         let glow = ring(&on, &off);
         println!("packets downscale {downscale}: fire glow spread {glow:.1} luma");
-        assert!(glow > 2.0, "the packets' fire glow is missing at {downscale}: {glow:.1}");
+        assert!(
+            glow > 2.0,
+            "the packets' fire glow is missing at {downscale}: {glow:.1}"
+        );
     }
     assert_clean(&gpu);
 }
@@ -3480,24 +5543,63 @@ fn particles_light_by_illuminance() {
 
     let gpu = gpu();
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 0.6,
+        ..camera
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let puff = Vec3::new(128.0, 40.0, 128.0);
     let clip = view_proj * puff.extend(1.0);
-    let at = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as u32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as u32);
+    let at = (
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as u32,
+        ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as u32,
+    );
     let index = (at.1 * extent.width + at.0) as usize * 4;
 
     // Opaque smoke, so the pixel is the puff's radiance alone; the sun is
     // off and Clamp decodes the stored values linearly.
     let effect = still_effect([0.2, 0.2, 0.2, 1.0], 12.0, false);
-    let burst = Burst { pos: puff.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 7 };
-    let tone = ToneParams { ev100: 14.0, sun_illuminance: 0.0, bloom: 0.0, auto: false, ..Default::default() };
+    let burst = Burst {
+        pos: puff.to_array(),
+        ground: false,
+        effect: 0,
+        count: 1,
+        scale: 1.0,
+        seed: 7,
+    };
+    let tone = ToneParams {
+        ev100: 14.0,
+        sun_illuminance: 0.0,
+        bloom: 0.0,
+        auto: false,
+        ..Default::default()
+    };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
     let render = |lights: &[Light]| {
@@ -3516,13 +5618,23 @@ fn particles_light_by_illuminance() {
     let bright = render(&[light(4.0e6)]);
     let decode = |p: &[u8], c: usize| {
         let v = p[index + c] as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
     let add = |p: &[u8]| (0..3).map(|c| decode(p, c) - decode(&dark, c)).sum::<f32>() / 3.0;
     let (dim, bright) = (add(&dim), add(&bright));
-    println!("clustered light on a puff: {dim:.4}, 4x: {bright:.4} (ratio {:.2})", bright / dim);
+    println!(
+        "clustered light on a puff: {dim:.4}, 4x: {bright:.4} (ratio {:.2})",
+        bright / dim
+    );
     assert!(dim > 0.02, "the light lights the puff: {dim}");
-    assert!((bright / dim - 4.0).abs() < 0.2, "the puff sees illuminance, not a clipped coefficient: {bright:.4} / {dim:.4}");
+    assert!(
+        (bright / dim - 4.0).abs() < 0.2,
+        "the puff sees illuminance, not a clipped coefficient: {bright:.4} / {dim:.4}"
+    );
     assert_clean(&gpu);
 }
 
@@ -3534,9 +5646,25 @@ fn render_particles(
     source: &Arc<ae_render::terrain::app::TerrainSource>,
     camera: ae_render::terrain::camera::Camera,
     extent: vk::Extent2D,
-    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+    particles: Option<(
+        &[ae_render::particles::Burst],
+        Vec<ae_render::particles::EffectDef>,
+        u32,
+        ae_render::particles::ParticleBlend,
+    )>,
 ) -> Vec<u8> {
-    render_particles_lit(gpu, source, camera, extent, particles, &[], ae_render::tonemap::ToneParams { bloom: 0.0, ..Default::default() })
+    render_particles_lit(
+        gpu,
+        source,
+        camera,
+        extent,
+        particles,
+        &[],
+        ae_render::tonemap::ToneParams {
+            bloom: 0.0,
+            ..Default::default()
+        },
+    )
 }
 
 /// [`render_particles`] with the host's lights and a tone setting (for the
@@ -3546,7 +5674,12 @@ fn render_particles_lit(
     source: &Arc<ae_render::terrain::app::TerrainSource>,
     camera: ae_render::terrain::camera::Camera,
     extent: vk::Extent2D,
-    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+    particles: Option<(
+        &[ae_render::particles::Burst],
+        Vec<ae_render::particles::EffectDef>,
+        u32,
+        ae_render::particles::ParticleBlend,
+    )>,
     lights: &[ae_render::lights::Light],
     tone: ae_render::tonemap::ToneParams,
 ) -> Vec<u8> {
@@ -3561,7 +5694,12 @@ fn render_particles_frames(
     source: &Arc<ae_render::terrain::app::TerrainSource>,
     camera: ae_render::terrain::camera::Camera,
     extent: vk::Extent2D,
-    particles: Option<(&[ae_render::particles::Burst], Vec<ae_render::particles::EffectDef>, u32, ae_render::particles::ParticleBlend)>,
+    particles: Option<(
+        &[ae_render::particles::Burst],
+        Vec<ae_render::particles::EffectDef>,
+        u32,
+        ae_render::particles::ParticleBlend,
+    )>,
     lights: &[ae_render::lights::Light],
     tone: ae_render::tonemap::ToneParams,
     frames: usize,
@@ -3575,7 +5713,13 @@ fn render_particles_frames(
     if let Some((bursts, effects, downscale, blend)) = particles {
         let feed = Arc::new(ParticleFeed::default());
         feed.emit_all(bursts);
-        app = app.with_particles(ParticlesSetup { feed, capacity: 1024, effects, downscale, blend });
+        app = app.with_particles(ParticlesSetup {
+            feed,
+            capacity: 1024,
+            effects,
+            downscale,
+            blend,
+        });
     }
     {
         let view = app.view();
@@ -3584,8 +5728,17 @@ fn render_particles_frames(
         view.fog = false;
     }
     app.create_offscreen(gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     let mut run = Headless::new(gpu, &mut app, target, config).unwrap();
     run.frames(&mut app, frames).unwrap();
     run.wait().unwrap();
@@ -3650,16 +5803,55 @@ fn particles_order_independence() {
         return;
     }
     let (n, cell, scale, ground) = (65usize, 4.0f32, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 160.0, yaw: 0.0, pitch: 0.6, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 160.0,
+        yaw: 0.0,
+        pitch: 0.6,
+        ..camera
+    };
     let eye = camera.eye(|_| ground);
-    let modes = [ParticleBlend::Sorted, ParticleBlend::Moments, ParticleBlend::Reference, ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels, ParticleBlend::Packets];
-    let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| render_particles(&gpu, &source, camera, extent, Some((bursts, effects.to_vec(), 2, blend)));
+    let modes = [
+        ParticleBlend::Sorted,
+        ParticleBlend::Moments,
+        ParticleBlend::Reference,
+        ParticleBlend::Volume,
+        ParticleBlend::Slices,
+        ParticleBlend::Froxels,
+        ParticleBlend::Packets,
+    ];
+    let render = |bursts: &[Burst], effects: &[ae_render::particles::EffectDef], blend| {
+        render_particles(
+            &gpu,
+            &source,
+            camera,
+            extent,
+            Some((bursts, effects.to_vec(), 2, blend)),
+        )
+    };
     let none = render_particles(&gpu, &source, camera, extent, None);
     // Per pixel the reference changes: mean and largest channel error.
     let error = |image: &[u8], reference: &[u8]| -> (f32, u8) {
@@ -3731,13 +5923,28 @@ fn particles_order_independence() {
     for k in 0..58u32 {
         let offset = Vec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5) * 40.0;
         let effect = if k < 48 { k % 4 } else { 4 };
-        let size = if k < 48 { 8.0 + 22.0 * rand() } else { 6.0 + 6.0 * rand() };
-        cluster.push(Burst { pos: (centre + offset).to_array(), ground: false, effect, count: 1, scale: size, seed: k });
+        let size = if k < 48 {
+            8.0 + 22.0 * rand()
+        } else {
+            6.0 + 6.0 * rand()
+        };
+        cluster.push(Burst {
+            pos: (centre + offset).to_array(),
+            ground: false,
+            effect,
+            count: 1,
+            scale: size,
+            seed: k,
+        });
     }
     let images: Vec<Vec<u8>> = modes.iter().map(|&m| render(&cluster, &effects, m)).collect();
     let reference = &images[2];
     assert_eq!(magenta(reference), 0, "the reference overflows its lists");
-    let covered = reference.chunks(4).zip(none.chunks(4)).filter(|(a, b)| a[..3] != b[..3]).count();
+    let covered = reference
+        .chunks(4)
+        .zip(none.chunks(4))
+        .filter(|(a, b)| a[..3] != b[..3])
+        .count();
     let (sorted_mean, sorted_worst) = error(&images[0], reference);
     let (moments_mean, moments_worst) = error(&images[1], reference);
     let (volume_mean, volume_worst) = error(&images[3], reference);
@@ -3747,21 +5954,35 @@ fn particles_order_independence() {
         for (m, image) in modes.iter().zip(&images) {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(image.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("particles-cluster-{m:?}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("particles-cluster-{m:?}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
     }
     for (k, m) in modes.iter().enumerate() {
         let (mean, max) = error(&images[k], &images[3]);
         let (bmean, bmax) = block_error(&images[k], &images[3]);
-        println!("cluster, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
+        println!(
+            "cluster, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}"
+        );
     }
     // Measured: the slices 0.57 (max 10) from the volume; the layers 1.6.
     let (slices_mean, slices_max) = error(&images[4], &images[3]);
-    assert!(slices_mean < 1.2 && slices_max < 30, "cluster, the slices against the volume: mean {slices_mean} max {slices_max}");
+    assert!(
+        slices_mean < 1.2 && slices_max < 30,
+        "cluster, the slices against the volume: mean {slices_mean} max {slices_max}"
+    );
     // Measured: the froxels 6.4 (max 55); 4.5 over 8x8 blocks.
     let (froxels_mean, _) = error(&images[5], &images[3]);
-    assert!(froxels_mean < 9.0, "cluster, the froxels against the volume: {froxels_mean}");
-    println!("cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}; packets mean {packets_mean:.2} max {packets_worst}");
+    assert!(
+        froxels_mean < 9.0,
+        "cluster, the froxels against the volume: {froxels_mean}"
+    );
+    println!(
+        "cluster ({covered} pixels): sorted mean {sorted_mean:.2} max {sorted_worst}; moments mean {moments_mean:.2} max {moments_worst}; volume (against the layers) mean {volume_mean:.2} max {volume_worst}; packets mean {packets_mean:.2} max {packets_worst}"
+    );
     // Emitted in reverse: the order-independent methods give the same frame.
     let reversed: Vec<Burst> = cluster.iter().rev().cloned().collect();
     for (m, image) in modes.iter().zip(&images) {
@@ -3780,7 +6001,10 @@ fn particles_order_independence() {
     // Crossing: a red puff of 16 m and a blue one of 26 m, 3 m apart
     // sideways, the blue one moving from 14 m in front of the red to 14 m
     // behind it along the line of sight.
-    let effects = vec![still_effect([0.9, 0.08, 0.05, 0.85], 16.0, false), still_effect([0.08, 0.15, 0.9, 0.85], 26.0, false)];
+    let effects = vec![
+        still_effect([0.9, 0.08, 0.05, 0.85], 16.0, false),
+        still_effect([0.08, 0.15, 0.9, 0.85], 26.0, false),
+    ];
     let red = centre;
     let dir = (red - eye).normalize();
     let side = dir.cross(Vec3::Y).normalize() * 3.0;
@@ -3788,7 +6012,24 @@ fn particles_order_independence() {
     let mut frames: Vec<Vec<Vec<u8>>> = vec![Vec::new(); modes.len()];
     for &t in &steps {
         let blue = red + side + dir * t;
-        let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: blue.to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
+        let bursts = [
+            Burst {
+                pos: red.to_array(),
+                ground: false,
+                effect: 0,
+                count: 1,
+                scale: 1.0,
+                seed: 1,
+            },
+            Burst {
+                pos: blue.to_array(),
+                ground: false,
+                effect: 1,
+                count: 1,
+                scale: 1.0,
+                seed: 2,
+            },
+        ];
         for (k, &m) in modes.iter().enumerate() {
             frames[k].push(render(&bursts, &effects, m));
         }
@@ -3815,16 +6056,44 @@ fn particles_order_independence() {
     let apart: Vec<[Vec<u8>; 2]> = [-25.0f32, 25.0]
         .iter()
         .map(|&t| {
-            let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
-            [render(&bursts, &effects, ParticleBlend::Reference), render(&bursts, &effects, ParticleBlend::Volume)]
+            let bursts = [
+                Burst {
+                    pos: red.to_array(),
+                    ground: false,
+                    effect: 0,
+                    count: 1,
+                    scale: 1.0,
+                    seed: 1,
+                },
+                Burst {
+                    pos: (red + side + dir * t).to_array(),
+                    ground: false,
+                    effect: 1,
+                    count: 1,
+                    scale: 1.0,
+                    seed: 2,
+                },
+            ];
+            [
+                render(&bursts, &effects, ParticleBlend::Reference),
+                render(&bursts, &effects, ParticleBlend::Volume),
+            ]
         })
         .collect();
     for (t, [layers, volume]) in [-25, 25].iter().zip(&apart) {
         let (mean, max) = error(volume, layers);
         println!("apart ({t} m): volume against the layers mean {mean:.2} max {max}");
-        assert!(mean < 1.0 && max <= 8, "apart, the volume is not the layers' over: mean {mean} max {max}");
+        assert!(
+            mean < 1.0 && max <= 8,
+            "apart, the volume is not the layers' over: mean {mean} max {max}"
+        );
     }
-    let swap = apart[0][1].iter().zip(&apart[1][1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    let swap = apart[0][1]
+        .iter()
+        .zip(&apart[1][1])
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
     println!("apart: the volume's largest change between blue in front and behind {swap}");
     assert!(swap > 60, "the volume loses the order: {swap}");
 
@@ -3839,10 +6108,16 @@ fn particles_order_independence() {
         let vmean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
         let vmax = errors.iter().map(|e| e.1).max().unwrap_or(0);
         against_volume.push((vmean, vmax));
-        let blocks: Vec<(f32, f32)> = frames[k].iter().zip(&frames[3]).map(|(a, r)| block_error(a, r)).collect();
+        let blocks: Vec<(f32, f32)> = frames[k]
+            .iter()
+            .zip(&frames[3])
+            .map(|(a, r)| block_error(a, r))
+            .collect();
         let bmean = blocks.iter().map(|e| e.0).sum::<f32>() / blocks.len() as f32;
         let bmax = blocks.iter().map(|e| e.1).fold(0.0f32, f32::max);
-        println!("crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the layers mean {mean:.2} max {max}, against the volume mean {vmean:.2} max {vmax}, in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
+        println!(
+            "crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); error against the layers mean {mean:.2} max {max}, against the volume mean {vmean:.2} max {vmax}, in 8x8 blocks mean {bmean:.2} max {bmax:.1}"
+        );
         pops.push((worst, jumps));
     }
     for k in 0..modes.len() {
@@ -3850,37 +6125,61 @@ fn particles_order_independence() {
     }
     // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
     // exact order, and the moments about as close.
-    assert!(sorted_mean < 2.5 && moments_mean < 2.5, "cluster error: sorted {sorted_mean}, moments {moments_mean}");
+    assert!(
+        sorted_mean < 2.5 && moments_mean < 2.5,
+        "cluster error: sorted {sorted_mean}, moments {moments_mean}"
+    );
     // The packets shade the centre sort's order per pixel (like the sorted
     // draw), with the same puff and soft fade, so they are about as close
     // to the exact order as the sorted draw. Measured: 0.75 against the
     // sorted 0.74 (a candidate skipped by a packet, as when a saturated
     // lane stopped classifying its rank, showed as 0.84).
-    assert!(packets_mean < 3.0 && (packets_mean - sorted_mean).abs() < 0.05, "cluster error, the packets against the reference: {packets_mean} (max {packets_worst}; sorted {sorted_mean})");
+    assert!(
+        packets_mean < 3.0 && (packets_mean - sorted_mean).abs() < 0.05,
+        "cluster error, the packets against the reference: {packets_mean} (max {packets_worst}; sorted {sorted_mean})"
+    );
     // Measured: the exact per-pixel order pops about as much as the centre
     // sort (77 against 106 pixel-frames over 40; both 73 at worst under the
     // ACES curve): the jump comes from blending particles as flat layers,
     // whatever the order.
     let (sorted_pop, reference_pop) = (pops[0], pops[2]);
-    assert!(reference_pop.0 > 60.0 && reference_pop.1 * 2 > sorted_pop.1, "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}");
+    assert!(
+        reference_pop.0 > 60.0 && reference_pop.1 * 2 > sorted_pop.1,
+        "the reference pops much less than the sort: {reference_pop:?} against {sorted_pop:?}"
+    );
     // Measured: the volume (puffs mixed by how much of their thickness
     // overlaps) changes by 7 at most between frames, no pixel by over 40.
     let volume_pop = pops[3];
-    assert!(volume_pop.0 < 20.0 && volume_pop.1 == 0, "the volume pops: {volume_pop:?}");
-    assert!(volume_mean < 3.0, "a volume of separate puffs differs from their layers: {volume_mean}");
+    assert!(
+        volume_pop.0 < 20.0 && volume_pop.1 == 0,
+        "the volume pops: {volume_pop:?}"
+    );
+    assert!(
+        volume_mean < 3.0,
+        "a volume of separate puffs differs from their layers: {volume_mean}"
+    );
     // Measured: the slices pop by 6, and stay within 0.19 (max 7) of the
     // volume.
     let (slices_pop, slices_error) = (pops[4], against_volume[4]);
-    assert!(slices_pop.0 < 20.0 && slices_pop.1 == 0 && slices_error.0 < 1.0 && slices_error.1 < 30, "crossing, the slices: pop {slices_pop:?}, against the volume {slices_error:?}");
+    assert!(
+        slices_pop.0 < 20.0 && slices_pop.1 == 0 && slices_error.0 < 1.0 && slices_error.1 < 30,
+        "crossing, the slices: pop {slices_pop:?}, against the volume {slices_error:?}"
+    );
     // Measured: the froxels pop by 10, and are 5.6 (max 42) from the volume:
     // blurred to their columns (8 pixels here), small puffs missed or caught
     // by a column's centre ray.
     let (froxels_pop, froxels_error) = (pops[5], against_volume[5]);
-    assert!(froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0, "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}");
+    assert!(
+        froxels_pop.0 < 20.0 && froxels_pop.1 == 0 && froxels_error.0 < 8.0,
+        "crossing, the froxels: pop {froxels_pop:?}, against the volume {froxels_error:?}"
+    );
     // The packets are flat layers in the centre sort's order (like the
     // sorted draw), so they pop with the sort rather than with the volumes.
     let (packets_pop, packets_error) = (pops[6], against_volume[6]);
-    assert!(packets_pop.0 > 40.0 && packets_error.0 < 6.0, "crossing, the packets: pop {packets_pop:?}, against the volume {packets_error:?}");
+    assert!(
+        packets_pop.0 > 40.0 && packets_error.0 < 6.0,
+        "crossing, the packets: pop {packets_pop:?}, against the volume {packets_error:?}"
+    );
 
     // Stretched: the same with a dim near puff (at a third of the pair's
     // distance: a depth range about three to one, as the battle bench's), so
@@ -3890,12 +6189,45 @@ fn particles_order_independence() {
     stretched_effects.push(still_effect([0.5, 0.5, 0.5, 0.2], 30.0, false));
     stretched_effects.push(still_effect([0.6, 0.5, 0.4, 0.7], 20.0, false));
     let horizontal = Vec3::new(dir.x, 0.0, dir.z).normalize();
-    let near = Burst { pos: (eye + (Vec3::new(128.0, ground, 128.0) - eye) * 0.35).to_array(), ground: false, effect: 2, count: 1, scale: 0.4, seed: 3 };
-    let buried = Burst { pos: (red - side * 8.0 - horizontal * 30.0 + Vec3::Y * (ground - red.y)).to_array(), ground: false, effect: 3, count: 1, scale: 1.0, seed: 4 };
+    let near = Burst {
+        pos: (eye + (Vec3::new(128.0, ground, 128.0) - eye) * 0.35).to_array(),
+        ground: false,
+        effect: 2,
+        count: 1,
+        scale: 0.4,
+        seed: 3,
+    };
+    let buried = Burst {
+        pos: (red - side * 8.0 - horizontal * 30.0 + Vec3::Y * (ground - red.y)).to_array(),
+        ground: false,
+        effect: 3,
+        count: 1,
+        scale: 1.0,
+        seed: 4,
+    };
     let stretched_modes = [ParticleBlend::Volume, ParticleBlend::Slices, ParticleBlend::Froxels];
     let mut stretched: Vec<Vec<Vec<u8>>> = vec![Vec::new(); stretched_modes.len()];
     for &t in &steps {
-        let bursts = [Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }, near, buried];
+        let bursts = [
+            Burst {
+                pos: red.to_array(),
+                ground: false,
+                effect: 0,
+                count: 1,
+                scale: 1.0,
+                seed: 1,
+            },
+            Burst {
+                pos: (red + side + dir * t).to_array(),
+                ground: false,
+                effect: 1,
+                count: 1,
+                scale: 1.0,
+                seed: 2,
+            },
+            near,
+            buried,
+        ];
         for (k, &m) in stretched_modes.iter().enumerate() {
             stretched[k].push(render(&bursts, &stretched_effects, m));
         }
@@ -3904,28 +6236,50 @@ fn particles_order_independence() {
         for (m, frames) in stretched_modes.iter().zip(&stretched) {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(frames[14].chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("particles-stretched-{m:?}.ppm")), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("particles-stretched-{m:?}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
     }
     for (k, m) in stretched_modes.iter().enumerate() {
         let (worst, jumps) = pop(&stretched[k]);
-        let errors: Vec<(f32, u8)> = stretched[k].iter().zip(&stretched[0]).map(|(a, r)| error(a, r)).collect();
+        let errors: Vec<(f32, u8)> = stretched[k]
+            .iter()
+            .zip(&stretched[0])
+            .map(|(a, r)| error(a, r))
+            .collect();
         let mean = errors.iter().map(|e| e.0).sum::<f32>() / errors.len() as f32;
         let max = errors.iter().map(|e| e.1).max().unwrap_or(0);
-        let blocks: Vec<(f32, f32)> = stretched[k].iter().zip(&stretched[0]).map(|(a, r)| block_error(a, r)).collect();
+        let blocks: Vec<(f32, f32)> = stretched[k]
+            .iter()
+            .zip(&stretched[0])
+            .map(|(a, r)| block_error(a, r))
+            .collect();
         let bmean = blocks.iter().map(|e| e.0).sum::<f32>() / blocks.len() as f32;
-        println!("stretched crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); against the volume mean {mean:.2} max {max}, in 8x8 blocks mean {bmean:.2}");
+        println!(
+            "stretched crossing, {m:?}: largest frame-to-frame change {worst:.1} ({jumps} pixel-frames over 40); against the volume mean {mean:.2} max {max}, in 8x8 blocks mean {bmean:.2}"
+        );
         // Measured: the froxels pop by 10, 3.0 from the volume (as many
         // slices or twice as many).
-        assert!(worst < 20.0 && jumps == 0 && mean < 6.0, "stretched crossing, {m:?}: pop {worst} ({jumps}), against the volume {mean}");
+        assert!(
+            worst < 20.0 && jumps == 0 && mean < 6.0,
+            "stretched crossing, {m:?}: pop {worst} ({jumps}), against the volume {mean}"
+        );
     }
     // The buried puff alone (no pair), against the volume, which caps it at
     // the ground exactly.
-    let alone: Vec<Vec<u8>> = stretched_modes.iter().map(|&m| render(&[near, buried], &stretched_effects, m)).collect();
+    let alone: Vec<Vec<u8>> = stretched_modes
+        .iter()
+        .map(|&m| render(&[near, buried], &stretched_effects, m))
+        .collect();
     for (k, m) in stretched_modes.iter().enumerate() {
         let (mean, max) = error(&alone[k], &alone[0]);
         let (bmean, bmax) = block_error(&alone[k], &alone[0]);
-        println!("buried puff, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}");
+        println!(
+            "buried puff, {m:?} against the volume: mean {mean:.2} max {max}; in 8x8 blocks mean {bmean:.2} max {bmax:.1}"
+        );
         // Measured: the froxels 1.4 (max 16).
         assert!(mean < 3.0, "buried puff, {m:?} against the volume: {mean}");
     }
@@ -3937,15 +6291,40 @@ fn particles_order_independence() {
                 let apart: Vec<Vec<u8>> = [-25.0f32, 25.0]
                     .iter()
                     .map(|&t| {
-                        let mut bursts = vec![Burst { pos: red.to_array(), ground: false, effect: 0, count: 1, scale: 1.0, seed: 1 }, Burst { pos: (red + side + dir * t).to_array(), ground: false, effect: 1, count: 1, scale: 1.0, seed: 2 }];
+                        let mut bursts = vec![
+                            Burst {
+                                pos: red.to_array(),
+                                ground: false,
+                                effect: 0,
+                                count: 1,
+                                scale: 1.0,
+                                seed: 1,
+                            },
+                            Burst {
+                                pos: (red + side + dir * t).to_array(),
+                                ground: false,
+                                effect: 1,
+                                count: 1,
+                                scale: 1.0,
+                                seed: 2,
+                            },
+                        ];
                         bursts.extend(extra);
                         render(&bursts, &stretched_effects, m)
                     })
                     .collect();
-                apart[0].iter().zip(&apart[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0)
+                apart[0]
+                    .iter()
+                    .zip(&apart[1])
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0)
             })
             .collect();
-        println!("apart{what}: the largest change between blue in front and behind, volume {}, froxels {}", swaps[0], swaps[1]);
+        println!(
+            "apart{what}: the largest change between blue in front and behind, volume {}, froxels {}",
+            swaps[0], swaps[1]
+        );
         // Measured under ACES: 49 (the columns' blur lowers the peak).
         assert!(swaps[1] > 40, "apart{what}, the froxels lose the order: {}", swaps[1]);
     }
@@ -3985,8 +6364,20 @@ fn decals_wrap_over_cliffs() {
 
     let gpu = gpu();
     let (n, cell, scale) = (65usize, 2.0f32, 100.0f32);
-    let column = |x: usize| if x <= 12 { 36.0 } else if x <= 32 { 30.0 } else { 10.0 };
-    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| column(i % n) / scale).collect() };
+    let column = |x: usize| {
+        if x <= 12 {
+            36.0
+        } else if x <= 32 {
+            30.0
+        } else {
+            10.0
+        }
+    };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: (0..n * n).map(|i| column(i % n) / scale).collect(),
+    };
     // The surface at world x (linear across a step's cell).
     let height = |x: f32| {
         let c = (x / cell).clamp(0.0, (n - 1) as f32);
@@ -3995,22 +6386,58 @@ fn decals_wrap_over_cliffs() {
     };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, cell, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 480, height: 360 };
-    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
-    camera = Camera { target: Vec2::new(56.0, 64.0), ground: 30.0, distance: 95.0, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.42, ..camera };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 480,
+        height: 360,
+    };
+    let mut camera = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
+    camera = Camera {
+        target: Vec2::new(56.0, 64.0),
+        ground: 30.0,
+        distance: 95.0,
+        yaw: std::f32::consts::FRAC_PI_2,
+        pitch: 0.42,
+        ..camera
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let pixel = |p: Vec3| -> Option<usize> {
         let clip = view_proj * p.extend(1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
 
     // Eight stripes across the atlas's x, black and white, opaque.
     const STRIPES: f32 = 8.0;
     let size = 64u32;
-    let stripes = (0..size * size).map(|i| colour_texel(if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 { [0.9, 0.9, 0.9, 1.0] } else { [0.02, 0.02, 0.02, 1.0] })).collect();
-    let atlas = Arc::new(DecalAtlas { size, colour: vec![stripes], surface: Vec::new(), materials: Vec::new() });
+    let stripes = (0..size * size)
+        .map(|i| {
+            colour_texel(if ((i % size) as f32 / size as f32 * STRIPES) as u32 % 2 == 1 {
+                [0.9, 0.9, 0.9, 1.0]
+            } else {
+                [0.02, 0.02, 0.02, 1.0]
+            })
+        })
+        .collect();
+    let atlas = Arc::new(DecalAtlas {
+        size,
+        colour: vec![stripes],
+        surface: Vec::new(),
+        materials: Vec::new(),
+    });
     let half = 12.0f32;
     let decal = |x: f32, z: f32| Decal::permanent([x, z], [half, half], 0.0, 0);
     // Centres on corner samples: E (32, 16), F (33, 48), L (12, 32); G
@@ -4037,13 +6464,36 @@ fn decals_wrap_over_cliffs() {
     }
     let render = |decals: Decals| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
-        for (k, word) in [unit.0, unit.1, unit.0, unit.1, 1.0, 0.0, 4.0].map(f32::to_bits).into_iter().chain([0]).enumerate() {
+        for (k, word) in [unit.0, unit.1, unit.0, unit.1, 1.0, 0.0, 4.0]
+            .map(f32::to_bits)
+            .into_iter()
+            .chain([0])
+            .enumerate()
+        {
             columns[k].push(word);
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
-        let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.45, 0.45, 0.45], floats: false }];
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes, min_pixels: 6.0, models: Vec::new(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns),
+            anim: AnimWrites::default(),
+        }));
+        let classes = vec![UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [0.45, 0.45, 0.45],
+            floats: false,
+        }];
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes,
+            min_pixels: 6.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
         if decals != Decals::None {
             let feed = Arc::new(DecalFeed::default());
             let life = match decals {
@@ -4055,11 +6505,19 @@ fn decals_wrap_over_cliffs() {
                 feed.place_all(&[Decal::permanent([rotated.0, rotated.1], [half, half], ROTATION, 0)]);
             } else if decals != Decals::Empty {
                 feed.place_all(&centres.map(|(x, z)| match life {
-                    Some((life, fade_out)) => Decal { life, fade_out, ..decal(x, z) },
+                    Some((life, fade_out)) => Decal {
+                        life,
+                        fade_out,
+                        ..decal(x, z)
+                    },
                     None => decal(x, z),
                 }));
             }
-            app = app.with_decals(DecalsSetup { feed, capacity: 64, atlas: Some(atlas.clone()) });
+            app = app.with_decals(DecalsSetup {
+                feed,
+                capacity: 64,
+                atlas: Some(atlas.clone()),
+            });
         }
         {
             let view = app.view();
@@ -4068,8 +6526,17 @@ fn decals_wrap_over_cliffs() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
         run.wait().unwrap();
@@ -4078,7 +6545,11 @@ fn decals_wrap_over_cliffs() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("decals-{}.ppm", decals as u8)), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("decals-{}.ppm", decals as u8)),
+                ppm,
+            )
+            .unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
@@ -4091,8 +6562,16 @@ fn decals_wrap_over_cliffs() {
     let turned = render(Decals::Rotated);
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
-    assert_eq!(none.iter().zip(&empty).filter(|(a, b)| a != b).count(), 0, "decals made but none placed draw as none");
-    assert_eq!(none.iter().zip(&expired).filter(|(a, b)| a != b).count(), 0, "decals past their life draw as none");
+    assert_eq!(
+        none.iter().zip(&empty).filter(|(a, b)| a != b).count(),
+        0,
+        "decals made but none placed draw as none"
+    );
+    assert_eq!(
+        none.iter().zip(&expired).filter(|(a, b)| a != b).count(),
+        0,
+        "decals past their life draw as none"
+    );
 
     // A point's distance from decal k's centre, as the shader fades it:
     // the square in unfolded metres (the length along the ground from the
@@ -4101,7 +6580,9 @@ fn decals_wrap_over_cliffs() {
         let (cx, cz) = centres[k];
         let steps = ((p.x - cx).abs() / 0.01).ceil().max(1.0) as usize;
         let dx = (p.x - cx) / steps as f32;
-        let arc: f32 = (0..steps).map(|i| dx.hypot(height(cx + dx * (i + 1) as f32) - height(cx + dx * i as f32))).sum();
+        let arc: f32 = (0..steps)
+            .map(|i| dx.hypot(height(cx + dx * (i + 1) as f32) - height(cx + dx * i as f32)))
+            .sum();
         arc.max((p.z - cz).abs()) / half
     };
     // The old extent (square in plan, rounded in the vertical), which let L
@@ -4161,16 +6642,37 @@ fn decals_wrap_over_cliffs() {
     segments.push(("G top", flat));
     segments.push(("G face", face));
     for (name, points) in &segments {
-        let samples: Vec<(f32, bool)> = points.iter().filter(|(p, s)| !near_boundary(*s) && (p.x - unit.0).hypot(p.z - unit.1) > 6.0 && (0..centres.len()).any(|k| extent3(*p, k) < 0.85)).filter_map(|&(p, s)| pixel(p).map(|i| (luma(&on, i), expected(s)))).collect();
-        let (lo, hi) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
+        let samples: Vec<(f32, bool)> = points
+            .iter()
+            .filter(|(p, s)| {
+                !near_boundary(*s)
+                    && (p.x - unit.0).hypot(p.z - unit.1) > 6.0
+                    && (0..centres.len()).any(|k| extent3(*p, k) < 0.85)
+            })
+            .filter_map(|&(p, s)| pixel(p).map(|i| (luma(&on, i), expected(s))))
+            .collect();
+        let (lo, hi) = samples
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
         let mid = (lo + hi) * 0.5;
         let matching = samples.iter().filter(|&&(l, e)| (l > mid) == e).count();
         // Both stripes show, far apart.
         let lights = samples.iter().filter(|&&(_, e)| e).count();
-        println!("{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)", samples.len());
-        assert!(samples.len() > 120 && lights > 30 && lights < samples.len() - 30, "{name}: {} samples, {lights} light", samples.len());
+        println!(
+            "{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)",
+            samples.len()
+        );
+        assert!(
+            samples.len() > 120 && lights > 30 && lights < samples.len() - 30,
+            "{name}: {} samples, {lights} light",
+            samples.len()
+        );
         assert!(hi > 2.0 * lo.max(1.0), "{name}: no stripes (luma {lo:.0}..{hi:.0})");
-        assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
+        assert!(
+            matching * 100 >= samples.len() * 95,
+            "{name}: {matching} of {} match",
+            samples.len()
+        );
     }
 
     // R, turned across the cliff: the ground unfolded in world (x by its
@@ -4182,7 +6684,10 @@ fn decals_wrap_over_cliffs() {
         let arc = |x: f32| {
             let steps = ((x - rx).abs() / 0.01).ceil().max(1.0) as usize;
             let dx = (x - rx) / steps as f32;
-            (0..steps).map(|i| dx.hypot(height(rx + dx * (i + 1) as f32) - height(rx + dx * i as f32))).sum::<f32>().copysign(x - rx)
+            (0..steps)
+                .map(|i| dx.hypot(height(rx + dx * (i + 1) as f32) - height(rx + dx * i as f32)))
+                .sum::<f32>()
+                .copysign(x - rx)
         };
         for (name, on_face) in [("R top", false), ("R face", true)] {
             let mut samples = Vec::new();
@@ -4205,13 +6710,26 @@ fn decals_wrap_over_cliffs() {
                     }
                 }
             }
-            let (lo, hi) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
+            let (lo, hi) = samples
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), &(l, _)| (lo.min(l), hi.max(l)));
             let mid = (lo + hi) * 0.5;
             let matching = samples.iter().filter(|&&(l, e)| (l > mid) == e).count();
             let lights = samples.iter().filter(|&&(_, e)| e).count();
-            println!("{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)", samples.len());
-            assert!(samples.len() > 120 && lights > 30 && lights < samples.len() - 30, "{name}: {} samples, {lights} light", samples.len());
-            assert!(matching * 100 >= samples.len() * 95, "{name}: {matching} of {} match", samples.len());
+            println!(
+                "{name}: {matching} of {} samples match the unfolded stripes (luma {lo:.0}..{hi:.0}, {lights} light)",
+                samples.len()
+            );
+            assert!(
+                samples.len() > 120 && lights > 30 && lights < samples.len() - 30,
+                "{name}: {} samples, {lights} light",
+                samples.len()
+            );
+            assert!(
+                matching * 100 >= samples.len() * 95,
+                "{name}: {matching} of {} match",
+                samples.len()
+            );
         }
     }
 
@@ -4227,10 +6745,23 @@ fn decals_wrap_over_cliffs() {
         .collect();
     between.sort_by(f32::total_cmp);
     let median = between[between.len() / 2];
-    println!("fading: {} samples, {:.2}..{:.2} of the way, median {median:.2}", between.len(), between[0], between[between.len() - 1]);
-    assert!(between.len() > 300 && (0.25..0.75).contains(&median), "{} samples, median {median}", between.len());
+    println!(
+        "fading: {} samples, {:.2}..{:.2} of the way, median {median:.2}",
+        between.len(),
+        between[0],
+        between[between.len() - 1]
+    );
+    assert!(
+        between.len() > 300 && (0.25..0.75).contains(&median),
+        "{} samples, median {median}",
+        between.len()
+    );
     let inside = between.iter().filter(|&&f| f > 0.05 && f < 0.95).count();
-    assert!(inside * 10 >= between.len() * 9, "{inside} of {} samples between none and full", between.len());
+    assert!(
+        inside * 10 >= between.len() * 9,
+        "{inside} of {} samples between none and full",
+        between.len()
+    );
 
     // The ground on a 0.5 m grid: outside every decal's 3D extent (with a
     // margin of a few pixels) it is unchanged.
@@ -4256,13 +6787,20 @@ fn decals_wrap_over_cliffs() {
             // cell), within its 3D extent, past its unfolded footprint
             // (6 m down the face, then along the ground).
             let lz = centres[2].1;
-            if x > 28.0 && p.y == 30.0 && rounded(p, 2) < 0.94 && (x - 26.0) + 6.0 > half + 0.5 && (z - lz).abs() < half - 1.0 {
+            if x > 28.0
+                && p.y == 30.0
+                && rounded(p, 2) < 0.94
+                && (x - 26.0) + 6.0 > half + 0.5
+                && (z - lz).abs() < half - 1.0
+            {
                 copy += 1;
                 copy_changed += (rgb(&none, i) != rgb(&on, i)) as usize;
             }
         }
     }
-    println!("{changed} of {outside} points outside the decals changed; L's copy past its unfolded footprint: {copy_changed} of {copy} points");
+    println!(
+        "{changed} of {outside} points outside the decals changed; L's copy past its unfolded footprint: {copy_changed} of {copy} points"
+    );
     assert!(outside > 30_000, "{outside} points outside");
     assert_eq!(changed, 0, "ground outside the decals changes by more than a code");
     assert!(copy > 50, "{copy} points past L's unfolded footprint");
@@ -4272,8 +6810,13 @@ fn decals_wrap_over_cliffs() {
     // painted.
     let top = pixel(Vec3::new(unit.0, 10.0 + 3.0, unit.1)).expect("unit in view");
     assert_eq!(rgb(&none, top), rgb(&on, top), "the unit is painted");
-    let beside: Vec<usize> = (0..40).filter_map(|k| pixel(Vec3::new(unit.0 - 6.0 + k as f32 * 0.1, 10.0, unit.1 - 6.0))).collect();
-    assert!(beside.iter().any(|&i| rgb(&none, i) != rgb(&on, i)), "the ground by the unit is not painted");
+    let beside: Vec<usize> = (0..40)
+        .filter_map(|k| pixel(Vec3::new(unit.0 - 6.0 + k as f32 * 0.1, 10.0, unit.1 - 6.0)))
+        .collect();
+    assert!(
+        beside.iter().any(|&i| rgb(&none, i) != rgb(&on, i)),
+        "the ground by the unit is not painted"
+    );
     assert_clean(&gpu);
 }
 
@@ -4308,20 +6851,54 @@ fn decals_relit_modulated_and_glowing() {
     let gpu = gpu();
     let (n, scale) = (65usize, 100.0f32);
     let column = |x: usize| if (21..=40).contains(&x) { 30.0 } else { 10.0 };
-    let heightmap = Heightmap { width: n, height: n, data: (0..n * n).map(|i| column(i % n) / scale).collect() };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: (0..n * n).map(|i| column(i % n) / scale).collect(),
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 2.0, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 480, height: 360 };
-    let base = TerrainApp::new(source.clone(), TerrainOutput::Readback).view().lock().unwrap().camera;
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 480,
+        height: 360,
+    };
+    let base = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .view()
+        .lock()
+        .unwrap()
+        .camera;
     // From the west for the cliff, from the east for the shadowed ground.
-    let west = Camera { target: Vec2::new(44.0, 64.0), ground: 25.0, distance: 70.0, yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.42, ..base };
-    let east = Camera { target: Vec2::new(88.0, 64.0), ground: 10.0, distance: 60.0, yaw: std::f32::consts::FRAC_PI_2, pitch: 0.7, ..base };
+    let west = Camera {
+        target: Vec2::new(44.0, 64.0),
+        ground: 25.0,
+        distance: 70.0,
+        yaw: -std::f32::consts::FRAC_PI_2,
+        pitch: 0.42,
+        ..base
+    };
+    let east = Camera {
+        target: Vec2::new(88.0, 64.0),
+        ground: 10.0,
+        distance: 60.0,
+        yaw: std::f32::consts::FRAC_PI_2,
+        pitch: 0.7,
+        ..base
+    };
     let pixel = |camera: &Camera, p: Vec3| -> Option<usize> {
         let view_proj = lod_view(&source, camera, extent.width, extent.height).view_proj;
         let clip = view_proj * p.extend(1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (clip.w > 0.0 && u >= 2.0 && v >= 2.0 && u < extent.width as f32 - 2.0 && v < extent.height as f32 - 2.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
 
     // Layers: 0 grey leaning toward +u; 1 grey, flat, glow mask 0.6 (Recoil's
@@ -4335,19 +6912,38 @@ fn decals_relit_modulated_and_glowing() {
     let colour = vec![grey(0.3), grey(0.3), grey(linear(0.5)), grey(linear(0.25)), grey(0.3)];
     let surface = |n: [f32; 3], glow: f32| vec![surface_texel(n, 1.0, glow); texels];
     let flat = surface([0.0, 0.0, 1.0], 0.0);
-    let surface = vec![surface([lean.sin(), 0.0, lean.cos()], 0.0), surface([0.0, 0.0, 1.0], 0.6), flat.clone(), flat, surface([0.0, lean.sin(), lean.cos()], 0.0)];
-    let atlas = Arc::new(DecalAtlas { size, colour, surface, materials: Vec::new() });
+    let surface = vec![
+        surface([lean.sin(), 0.0, lean.cos()], 0.0),
+        surface([0.0, 0.0, 1.0], 0.6),
+        flat.clone(),
+        flat,
+        surface([0.0, lean.sin(), lean.cos()], 0.0),
+    ];
+    let atlas = Arc::new(DecalAtlas {
+        size,
+        colour,
+        surface,
+        materials: Vec::new(),
+    });
     let half = 12.0f32;
     let edge = (42.0f32, 64.0f32);
     let at_edge = |layer: u32, angle: f32| Decal::permanent([edge.0, edge.1], [half, half], angle, layer);
     let glow_at = (88.0f32, 64.0f32);
-    let glowing = |glow: f32, glow_life: f32| Decal { glow, glow_life, ..Decal::permanent([glow_at.0, glow_at.1], [6.0, 6.0], 0.0, 1) };
+    let glowing = |glow: f32, glow_life: f32| Decal {
+        glow,
+        glow_life,
+        ..Decal::permanent([glow_at.0, glow_at.1], [6.0, 6.0], 0.0, 1)
+    };
 
     let render = |decals: &[Decal], camera: Camera| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_shadows();
         let feed = Arc::new(DecalFeed::default());
         feed.place_all(decals);
-        app = app.with_decals(DecalsSetup { feed, capacity: 16, atlas: Some(atlas.clone()) });
+        app = app.with_decals(DecalsSetup {
+            feed,
+            capacity: 16,
+            atlas: Some(atlas.clone()),
+        });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -4355,8 +6951,17 @@ fn decals_relit_modulated_and_glowing() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
         run.frames(&mut app, 8).unwrap();
         run.wait().unwrap();
@@ -4365,8 +6970,14 @@ fn decals_relit_modulated_and_glowing() {
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            let name = decals.first().map_or("none".to_string(), |d| format!("{}-{}-{:.1}-{}", d.layer, d.angle, d.glow, d.glow_life));
-            std::fs::write(std::path::Path::new(&dir).join(format!("decal-shading-{name}.ppm")), ppm).unwrap();
+            let name = decals.first().map_or("none".to_string(), |d| {
+                format!("{}-{}-{:.1}-{}", d.layer, d.angle, d.glow, d.glow_life)
+            });
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("decal-shading-{name}.ppm")),
+                ppm,
+            )
+            .unwrap();
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
@@ -4387,7 +6998,13 @@ fn decals_relit_modulated_and_glowing() {
             face.push(Vec3::new(40.0 + 2.0 * (1.0 - drop / 20.0), 30.0 - drop, edge.1 + dz));
         }
     }
-    let lumas = |frame: &[u8], points: &[Vec3]| -> Vec<f32> { points.iter().filter_map(|&p| pixel(&west, p)).map(|i| luma(frame, i)).collect() };
+    let lumas = |frame: &[u8], points: &[Vec3]| -> Vec<f32> {
+        points
+            .iter()
+            .filter_map(|&p| pixel(&west, p))
+            .map(|i| luma(frame, i))
+            .collect()
+    };
     let flat = render(&[at_edge(1, 0.0)], west);
     let lean0 = render(&[at_edge(0, 0.0)], west);
     let lean_pi = render(&[at_edge(0, std::f32::consts::PI)], west);
@@ -4396,22 +7013,53 @@ fn decals_relit_modulated_and_glowing() {
     let lean_v = render(&[at_edge(4, std::f32::consts::FRAC_PI_2)], west);
     let none = render(&[], west);
     for (name, points, sign) in [("plateau", &top, -1.0f32), ("face", &face, 1.0)] {
-        let (f, a, b, v) = (median(lumas(&flat, points)), median(lumas(&lean0, points)), median(lumas(&lean_pi, points)), median(lumas(&lean_v, points)));
-        println!("relit {name}: flat {f:.0}, leaning +x {a:.0}, turned by pi {b:.0}, leaning +v turned by pi/2 {v:.0} ({} samples)", lumas(&flat, points).len());
+        let (f, a, b, v) = (
+            median(lumas(&flat, points)),
+            median(lumas(&lean0, points)),
+            median(lumas(&lean_pi, points)),
+            median(lumas(&lean_v, points)),
+        );
+        println!(
+            "relit {name}: flat {f:.0}, leaning +x {a:.0}, turned by pi {b:.0}, leaning +v turned by pi/2 {v:.0} ({} samples)",
+            lumas(&flat, points).len()
+        );
         assert!(lumas(&flat, points).len() > 80, "{name} out of view");
-        assert!(sign * (a - f) > 8.0 && sign * (f - b) > 8.0, "{name}: flat {f}, angle 0 {a}, angle pi {b}");
-        assert!((v - b).abs() < 6.0, "{name}: leaning +v at pi / 2 {v}, leaning +x at pi {b}");
+        assert!(
+            sign * (a - f) > 8.0 && sign * (f - b) > 8.0,
+            "{name}: flat {f}, angle 0 {a}, angle pi {b}"
+        );
+        assert!(
+            (v - b).abs() < 6.0,
+            "{name}: leaning +v at pi / 2 {v}, leaning +x at pi {b}"
+        );
     }
 
     // Modulate on the plateau and the face.
     let points: Vec<Vec3> = top.iter().chain(&face).copied().collect();
-    let modulated = |layer| render(&[Decal { blend: Blend::Modulate, ..at_edge(layer, 0.0) }], west);
+    let modulated = |layer| {
+        render(
+            &[Decal {
+                blend: Blend::Modulate,
+                ..at_edge(layer, 0.0)
+            }],
+            west,
+        )
+    };
     let (mid, quarter) = (modulated(2), modulated(3));
     let ground = lumas(&none, &points);
     let mid_ratio = median(lumas(&mid, &points).iter().zip(&ground).map(|(m, g)| m / g).collect());
-    let quarter_ratio = median(lumas(&quarter, &points).iter().zip(&ground).map(|(m, g)| m / g).collect());
+    let quarter_ratio = median(
+        lumas(&quarter, &points)
+            .iter()
+            .zip(&ground)
+            .map(|(m, g)| m / g)
+            .collect(),
+    );
     println!("modulate: sRGB 0.5 leaves {mid_ratio:.3} of the ground, 0.25 leaves {quarter_ratio:.3}");
-    assert!((mid_ratio - 1.0).abs() < 0.04, "mid grey changes the ground: {mid_ratio}");
+    assert!(
+        (mid_ratio - 1.0).abs() < 0.04,
+        "mid grey changes the ground: {mid_ratio}"
+    );
     // The specular's ambient floor does not scale with the albedo (M12
     // step 3): the quarter grey ground lands higher than the diffuse-only
     // 0.51 the first version pinned.
@@ -4423,20 +7071,41 @@ fn decals_relit_modulated_and_glowing() {
     let ended = render(&[glowing(1.0, 0.05)], east);
     // Fading in over 0.4 s (as the client's scars), read at 0.12 s: the
     // glow is not dimmed by it.
-    let fading_in = render(&[Decal { fade_in: 0.4, ..glowing(1.0, 100.0) }], east);
+    let fading_in = render(
+        &[Decal {
+            fade_in: 0.4,
+            ..glowing(1.0, 100.0)
+        }],
+        east,
+    );
     let centre = pixel(&east, Vec3::new(glow_at.0, 10.0, glow_at.1)).expect("glow in view");
     let sunny = pixel(&east, Vec3::new(112.0, 10.0, glow_at.1)).expect("sunlit ground in view");
     let (d, l) = (luma(&dark, centre), luma(&lit, centre));
-    println!("glow: centre {d:.0} without, {l:.0} with (rgb {:?}); sunlit ground {:.0}", &lit[centre..centre + 3], luma(&dark, sunny));
+    println!(
+        "glow: centre {d:.0} without, {l:.0} with (rgb {:?}); sunlit ground {:.0}",
+        &lit[centre..centre + 3],
+        luma(&dark, sunny)
+    );
     assert!(luma(&dark, sunny) > d + 20.0, "the glowing decal is not in shadow");
     // 25 codes, from 60: Lottes' curve compresses the glow's added light
     // (the test measured 60+ codes under Narkowicz's ACES fit at 0.596
     // ground; now 95 -> 129, a doubling in linear terms).
-    assert!(l > d + 25.0 && lit[centre] > lit[centre + 2] + 30, "no glow: {d} -> {l}, {:?}", &lit[centre..centre + 3]);
+    assert!(
+        l > d + 25.0 && lit[centre] > lit[centre + 2] + 30,
+        "no glow: {d} -> {l}, {:?}",
+        &lit[centre..centre + 3]
+    );
     // Away from the centre the glow is held back.
     let rim = pixel(&east, Vec3::new(glow_at.0 + 5.0, 10.0, glow_at.1)).unwrap();
-    assert!(luma(&lit, rim) - luma(&dark, rim) < (l - d) * 0.25, "glow not held to the centre");
-    assert_eq!(dark.iter().zip(&ended).filter(|(a, b)| a != b).count(), 0, "a glow past its life still shows");
+    assert!(
+        luma(&lit, rim) - luma(&dark, rim) < (l - d) * 0.25,
+        "glow not held to the centre"
+    );
+    assert_eq!(
+        dark.iter().zip(&ended).filter(|(a, b)| a != b).count(),
+        0,
+        "a glow past its life still shows"
+    );
     let f = luma(&fading_in, centre);
     println!("glow while fading in: centre {f:.0}");
     assert!(f > l - 12.0, "the fade-in dims the glow: {f} against {l}");
@@ -4466,10 +7135,19 @@ fn decals_carry_their_roughness_and_metallic() {
 
     let gpu = gpu();
     let n = 129;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.5; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     // Three layers of the same mid grey: a smooth dielectric, a rough
     // dielectric, and a smooth metal. Roughness is the texture, with no
@@ -4489,8 +7167,18 @@ fn decals_carry_their_roughness_and_metallic() {
         ],
     });
 
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 50.0, distance: 150.0, yaw: 0.0, pitch: 0.6, fov_y: 0.8 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(512.0, 512.0),
+        ground: 50.0,
+        distance: 150.0,
+        yaw: 0.0,
+        pitch: 0.6,
+        fov_y: 0.8,
+    };
     let ground = Vec3::new(512.0, 50.0, 512.0);
     let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
     let v = (eye - ground).normalize();
@@ -4503,8 +7191,15 @@ fn decals_carry_their_roughness_and_metallic() {
         // The sun off: the frames differ only in the light's specular (the
         // decal's albedo and normal are the same layer texture).
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_decals(DecalsSetup { feed, capacity: 8, atlas: Some(atlas.clone()) })
-            .with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() })
+            .with_decals(DecalsSetup {
+                feed,
+                capacity: 8,
+                atlas: Some(atlas.clone()),
+            })
+            .with_tone(ae_render::tonemap::ToneParams {
+                sun_illuminance: 0.0,
+                ..Default::default()
+            })
             .with_lights(vec![light]);
         {
             let view = app.view();
@@ -4513,8 +7208,17 @@ fn decals_carry_their_roughness_and_metallic() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -4524,9 +7228,16 @@ fn decals_carry_their_roughness_and_metallic() {
     let rough = render(1);
     let metal = render(2);
 
-    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(ground.x, ground.y, ground.z, 1.0);
-    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-    assert!(cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0, "the decal projects into the view at ({cu}, {cv})");
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj
+        * Vec4::new(ground.x, ground.y, ground.z, 1.0);
+    let (cu, cv) = (
+        (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+        (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+    );
+    assert!(
+        cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0,
+        "the decal projects into the view at ({cu}, {cv})"
+    );
     let (cu, cv) = (cu as i32, cv as i32);
     let peak = |p: &[u8]| -> f32 {
         let mut best = 0.0f32;
@@ -4538,9 +7249,24 @@ fn decals_carry_their_roughness_and_metallic() {
         }
         best
     };
-    println!("decal material peak: smooth dielectric {:.1}, rough dielectric {:.1}, smooth metal {:.1}", peak(&smooth), peak(&rough), peak(&metal));
-    assert!(peak(&smooth) > peak(&rough) + 20.0, "a rough decal keeps the ground glossy: {:.1} vs {:.1}", peak(&smooth), peak(&rough));
-    assert!(peak(&metal) > peak(&smooth) + 10.0, "the metallic decal's F0 does not reach the BRDF: {:.1} vs {:.1}", peak(&metal), peak(&smooth));
+    println!(
+        "decal material peak: smooth dielectric {:.1}, rough dielectric {:.1}, smooth metal {:.1}",
+        peak(&smooth),
+        peak(&rough),
+        peak(&metal)
+    );
+    assert!(
+        peak(&smooth) > peak(&rough) + 20.0,
+        "a rough decal keeps the ground glossy: {:.1} vs {:.1}",
+        peak(&smooth),
+        peak(&rough)
+    );
+    assert!(
+        peak(&metal) > peak(&smooth) + 10.0,
+        "the metallic decal's F0 does not reach the BRDF: {:.1} vs {:.1}",
+        peak(&metal),
+        peak(&smooth)
+    );
     assert_clean(&gpu);
 }
 
@@ -4564,12 +7290,31 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
 
     let gpu = gpu();
     let n = 65;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.1; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(128.0, 128.0), ground: 10.0, distance: 120.0, yaw: 0.0, pitch: 0.7, fov_y: 0.8 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground: 10.0,
+        distance: 120.0,
+        yaw: 0.0,
+        pitch: 0.7,
+        fov_y: 0.8,
+    };
 
     // One grey layer whose normal's alpha is a full glow mask.
     let size = 16u32;
@@ -4580,14 +7325,25 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
         surface: vec![vec![surface_texel([0.0, 0.0, 1.0], 1.0, 0.9); texels]],
         materials: Vec::new(),
     });
-    let decal = Decal { glow: 1.0, glow_life: 100.0, ..Decal::permanent([128.0, 128.0], [4.0, 4.0], 0.0, 0) };
+    let decal = Decal {
+        glow: 1.0,
+        glow_life: 100.0,
+        ..Decal::permanent([128.0, 128.0], [4.0, 4.0], 0.0, 0)
+    };
 
     let render = |bloom: f32, view_bloom: bool| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
         feed.place_all(&[decal]);
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_decals(DecalsSetup { feed, capacity: 4, atlas: Some(atlas.clone()) })
-            .with_tone(ToneParams { bloom, ..Default::default() });
+            .with_decals(DecalsSetup {
+                feed,
+                capacity: 4,
+                atlas: Some(atlas.clone()),
+            })
+            .with_tone(ToneParams {
+                bloom,
+                ..Default::default()
+            });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -4596,8 +7352,17 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
             view.bloom = view_bloom;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -4609,7 +7374,10 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
     assert_eq!(hotkey_off, off, "the view's bloom switch does not match strength 0");
 
     let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(128.0, 10.0, 128.0, 1.0);
-    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+    let (cu, cv) = (
+        (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+        (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+    );
     let (cu, cv) = (cu as i32, cv as i32);
     let luma = |p: &[u8], x: i32, y: i32| -> f32 {
         let i = ((y * extent.width as i32 + x) * 4) as usize;
@@ -4649,12 +7417,31 @@ fn half_resolution_fire_in_front_of_smoke_blooms() {
 
     let gpu = gpu();
     let (n, scale, ground) = (65usize, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 120.0, yaw: 0.0, pitch: 0.7, fov_y: 0.8 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 120.0,
+        yaw: 0.0,
+        pitch: 0.7,
+        fov_y: 0.8,
+    };
 
     // The fire in front of the smoke, and the smoke in front of it (the
     // offset along the view ray flips the sort order). Both hold still:
@@ -4667,10 +7454,28 @@ fn half_resolution_fire_in_front_of_smoke_blooms() {
     let smoke_effect = still_effect([0.09, 0.085, 0.08, 0.8], 16.0, false);
     let effects = vec![fire_effect, smoke_effect];
     let bursts = |toward_eye: f32| -> [Burst; 2] {
-        let smoke = Vec3::new(fire.x + back.x * 3.0 * toward_eye, ground + 3.0, fire.z + back.z * 3.0 * toward_eye);
+        let smoke = Vec3::new(
+            fire.x + back.x * 3.0 * toward_eye,
+            ground + 3.0,
+            fire.z + back.z * 3.0 * toward_eye,
+        );
         [
-            Burst { pos: fire.to_array(), ground: true, effect: 0, count: 1, scale: 1.0, seed: 1 },
-            Burst { pos: smoke.to_array(), ground: true, effect: 1, count: 1, scale: 1.0, seed: 2 },
+            Burst {
+                pos: fire.to_array(),
+                ground: true,
+                effect: 0,
+                count: 1,
+                scale: 1.0,
+                seed: 1,
+            },
+            Burst {
+                pos: smoke.to_array(),
+                ground: true,
+                effect: 1,
+                count: 1,
+                scale: 1.0,
+                seed: 2,
+            },
         ]
     };
     let behind = bursts(1.0);
@@ -4684,12 +7489,19 @@ fn half_resolution_fire_in_front_of_smoke_blooms() {
             extent,
             Some((bursts, effects.clone(), downscale, ParticleBlend::Sorted)),
             &[],
-            ToneParams { bloom, ..Default::default() },
+            ToneParams {
+                bloom,
+                ..Default::default()
+            },
         )
     };
     let ring = |on: &[u8], off: &[u8]| -> f32 {
-        let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(fire.x, fire.y, fire.z, 1.0);
-        let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
+        let clip =
+            lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(fire.x, fire.y, fire.z, 1.0);
+        let (cu, cv) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
         let (cu, cv) = (cu as i32, cv as i32);
         let luma = |p: &[u8], x: i32, y: i32| -> f32 {
             let i = ((y * extent.width as i32 + x) * 4) as usize;
@@ -4715,11 +7527,22 @@ fn half_resolution_fire_in_front_of_smoke_blooms() {
     let half = ring(&half_on, &half_off);
     let full = ring(&full_on, &full_off);
     let occluded = ring(&front_on, &front_off);
-    println!("particle glow: half-resolution spread {half:.1} luma; full-resolution {full:.1}; smoke in front {occluded:.1}");
-    assert!(half > 2.0, "the fire's glow is lost behind the smoke at half resolution: {half:.1}");
+    println!(
+        "particle glow: half-resolution spread {half:.1} luma; full-resolution {full:.1}; smoke in front {occluded:.1}"
+    );
+    assert!(
+        half > 2.0,
+        "the fire's glow is lost behind the smoke at half resolution: {half:.1}"
+    );
     assert!(full > 2.0, "the full-resolution fire's glow is missing: {full:.1}");
-    assert!(occluded > 0.5, "smoke in front removed all of the fire's glow: {occluded:.1}");
-    assert!(occluded < half * 0.9, "smoke in front did not take its share: {occluded:.1} of {half:.1}");
+    assert!(
+        occluded > 0.5,
+        "smoke in front removed all of the fire's glow: {occluded:.1}"
+    );
+    assert!(
+        occluded < half * 0.9,
+        "smoke in front did not take its share: {occluded:.1} of {half:.1}"
+    );
     assert_clean(&gpu);
 }
 
@@ -4741,12 +7564,31 @@ fn explosion_fire_covers_the_ground() {
 
     let gpu = gpu();
     let (n, scale, ground) = (65usize, 100.0f32, 10.0f32);
-    let heightmap = Heightmap { width: n, height: n, data: vec![ground / scale; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![ground / scale; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, scale, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(128.0, 128.0), ground, distance: 80.0, yaw: 0.0, pitch: 0.9, fov_y: 0.8 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(128.0, 128.0),
+        ground,
+        distance: 80.0,
+        yaw: 0.0,
+        pitch: 0.9,
+        fov_y: 0.8,
+    };
     let at = Vec3::new(128.0, 1.0, 128.0);
     // Flash and fire only (the smoke covers by its own opacity), giving no
     // light and lighting nothing: what is left of the ground is what they
@@ -4756,13 +7598,31 @@ fn explosion_fire_covers_the_ground() {
         effects[e as usize].emission = [0.0; 2];
         effects[e as usize].light = None;
     }
-    let bursts = [effect::FLASH, effect::FIRE].map(|effect| Burst { pos: at.to_array(), ground: true, effect, count: if effect == effect::FLASH { 2 } else { 24 }, scale: 1.0, seed: 7 });
-    let tone = ToneParams { bloom: 0.0, ..Default::default() };
-    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(at.x, ground + 2.0, at.z, 1.0);
-    let (cu, cv) = (((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32, ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32);
+    let bursts = [effect::FLASH, effect::FIRE].map(|effect| Burst {
+        pos: at.to_array(),
+        ground: true,
+        effect,
+        count: if effect == effect::FLASH { 2 } else { 24 },
+        scale: 1.0,
+        seed: 7,
+    });
+    let tone = ToneParams {
+        bloom: 0.0,
+        ..Default::default()
+    };
+    let clip =
+        lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(at.x, ground + 2.0, at.z, 1.0);
+    let (cu, cv) = (
+        ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as i32,
+        ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as i32,
+    );
     let linear = |c: u8| -> f32 {
         let c = c as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     let luma = |p: &[u8], x: i32, y: i32| -> f32 {
         let i = ((y * extent.width as i32 + x) * 4) as usize;
@@ -4785,11 +7645,23 @@ fn explosion_fire_covers_the_ground() {
     // falls to 0 over its life): the scorch mark's fade-in takes over.
     for (frames, most) in [(7usize, 0.1f32), (19, 0.2), (37, 0.9)] {
         let bare = render_particles_frames(&gpu, &source, camera, extent, None, &[], tone, frames);
-        let shot = render_particles_frames(&gpu, &source, camera, extent, Some((&bursts, effects.clone(), 2, ParticleBlend::Sorted)), &[], tone, frames);
+        let shot = render_particles_frames(
+            &gpu,
+            &source,
+            camera,
+            extent,
+            Some((&bursts, effects.clone(), 2, ParticleBlend::Sorted)),
+            &[],
+            tone,
+            frames,
+        );
         let (core, wide) = (through(&shot, &bare, 6), through(&shot, &bare, 20));
         let age = (frames - 1) as f32 / 60.0;
         println!("fire cover at {age:.2} s: ground through the core {core:.3}, within 20 px {wide:.3}");
-        assert!(core <= most, "the fire lets {core:.3} of the ground through its core at {age:.2} s");
+        assert!(
+            core <= most,
+            "the fire lets {core:.3} of the ground through its core at {age:.2} s"
+        );
     }
     assert_clean(&gpu);
 }
@@ -4813,13 +7685,28 @@ fn model_box(m: &mut ae_model::Model, min: [f32; 3], max: [f32; 3], material: u3
                 p[axis] = if side == 1 { max[axis] } else { min[axis] };
                 p[a] = if ua == 1 { max[a] } else { min[a] };
                 p[b] = if ub == 1 { max[b] } else { min[b] };
-                m.vertices.push(Vertex { position: p, normal, tangent: [1.0, 0.0, 0.0, 1.0], color: [65535; 4], joints: [0; 4], weights: [65535, 0, 0, 0], ..Default::default() });
+                m.vertices.push(Vertex {
+                    position: p,
+                    normal,
+                    tangent: [1.0, 0.0, 0.0, 1.0],
+                    color: [65535; 4],
+                    joints: [0; 4],
+                    weights: [65535, 0, 0, 0],
+                    ..Default::default()
+                });
             }
             m.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
     let vertex_count = m.vertices.len() as u32 - first_vertex;
-    m.primitives.push(Primitive { material, layout: Layout::Skinned, first_vertex, vertex_count, first_index, index_count: 36 });
+    m.primitives.push(Primitive {
+        material,
+        layout: Layout::Skinned,
+        first_vertex,
+        vertex_count,
+        first_index,
+        index_count: 36,
+    });
 }
 
 /// Units drawn with models (M11 step 2), validation clean: a piece model
@@ -4843,18 +7730,44 @@ fn units_draw_models() {
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     let identity = Mat4::IDENTITY.to_cols_array();
     let mut blocks = Model {
-        bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
-        joints: vec![Joint { bone: 0, inverse_bind: identity }],
+        bones: vec![Bone {
+            name: "root".into(),
+            parent: None,
+            rest: identity,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }],
+        joints: vec![Joint {
+            bone: 0,
+            inverse_bind: identity,
+        }],
         ..Default::default()
     };
-    let material = |name: &str, base_color: [f32; 4], alpha: AlphaMode| Material { name: name.into(), base_color, alpha, metallic: 0.0, roughness: 0.8, ..Default::default() };
+    let material = |name: &str, base_color: [f32; 4], alpha: AlphaMode| Material {
+        name: name.into(),
+        base_color,
+        alpha,
+        metallic: 0.0,
+        roughness: 0.8,
+        ..Default::default()
+    };
     blocks.materials = vec![
         material("red", [1.0, 0.02, 0.02, 1.0], AlphaMode::Opaque),
         material("blue", [0.02, 0.02, 1.0, 1.0], AlphaMode::Mask { cutoff: 0.5 }),
@@ -4863,30 +7776,87 @@ fn units_draw_models() {
     model_box(&mut blocks, [0.55, 0.0, -0.3], [1.0, 0.6, 0.3], 0);
     model_box(&mut blocks, [-0.3, 0.0, 0.55], [0.3, 0.6, 1.0], 1);
     model_box(&mut blocks, [-0.4, 0.0, -0.4], [0.4, 1.2, 0.4], 2);
-    blocks.bounds = ae_model::Bounds { min: [-0.4, 0.0, -0.4], max: [1.0, 1.2, 1.0] };
+    blocks.bounds = ae_model::Bounds {
+        min: [-0.4, 0.0, -0.4],
+        max: [1.0, 1.2, 1.0],
+    };
     blocks.merge_primitives();
     blocks.validate().unwrap();
-    let fox = ae_gltf::convert_file(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb")).unwrap().model;
+    let fox = ae_gltf::convert_file(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos/Fox/Fox.glb"),
+    )
+    .unwrap()
+    .model;
 
     // (x, y, heading, radius, class): blocks facing world +z, the Fox
     // facing +x, a dart.
-    let units = [(440.0f32, 512.0f32, (0.0f32, 1.0f32), 40.0f32, 0u32), (590.0, 470.0, (1.0, 0.0), 40.0, 1), (560.0, 580.0, (1.0, 0.0), 6.0, 2), (560.0, 600.0, (0.0, -1.0), 40.0, 0)];
+    let units = [
+        (440.0f32, 512.0f32, (0.0f32, 1.0f32), 40.0f32, 0u32),
+        (590.0, 470.0, (1.0, 0.0), 40.0, 1),
+        (560.0, 580.0, (1.0, 0.0), 6.0, 2),
+        (560.0, 600.0, (0.0, -1.0), 40.0, 0),
+    ];
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for &(x, y, (hx, hy), radius, class) in &units {
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), hx.to_bits(), hy.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            hx.to_bits(),
+            hy.to_bits(),
+            radius.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.02, 1.0], floats: false }];
+    let classes = vec![
+        UnitClass {
+            color: [0.5; 3],
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false,
+        },
+        UnitClass {
+            color: [0.5; 3],
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false,
+        },
+        UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color: [1.0, 0.02, 1.0],
+            floats: false,
+        },
+    ];
     let models = vec![Some(Arc::new(blocks)), Some(Arc::new(fox))];
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let mut camera = None;
     // The frame and the (rows, visible) counts, with or without the units'
     // shadow map (the models' caster).
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 6.0, models: models.clone(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns.clone()),
+            anim: AnimWrites::default(),
+        }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes: classes.clone(),
+            min_pixels: 6.0,
+            models: models.clone(),
+            rigs: Vec::new(),
+        });
         if shadows {
             app = app.with_shadows();
         }
@@ -4901,14 +7871,27 @@ fn units_draw_models() {
             camera = Some(view.camera);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("models-{}.ppm", shadows as u8)), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("models-{}.ppm", shadows as u8)),
+                ppm,
+            )
+            .unwrap();
         }
         let counts = app.last_unit_counts();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -4920,8 +7903,14 @@ fn units_draw_models() {
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let index = |p: Vec3| -> usize {
         let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "{p} projects into the view");
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        assert!(
+            u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32,
+            "{p} projects into the view"
+        );
         (v as usize * extent.width as usize + u as usize) * 4
     };
     let pixel = |p: Vec3| -> [i32; 3] {
@@ -4936,14 +7925,26 @@ fn units_draw_models() {
     };
     for &(x, y, h, r, class) in units.iter().filter(|u| u.4 == 0) {
         let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.8, 0.6, 0.0)));
-        assert!(cr > 2 * cg && cr > 2 * cb, "class {class} at ({x}, {y}): red at its front: {cr} {cg} {cb}");
+        assert!(
+            cr > 2 * cg && cr > 2 * cb,
+            "class {class} at ({x}, {y}): red at its front: {cr} {cg} {cb}"
+        );
         let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.6, 0.8)));
-        assert!(cb > 2 * cr && cb > 2 * cg, "class {class} at ({x}, {y}): blue (masked, kept) at its right: {cr} {cg} {cb}");
+        assert!(
+            cb > 2 * cr && cb > 2 * cg,
+            "class {class} at ({x}, {y}): blue (masked, kept) at its right: {cr} {cg} {cb}"
+        );
         let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.0, 0.0)));
-        assert!(!(cg > 2 * cr && cg > 2 * cb), "class {class} at ({x}, {y}): the green block is masked away: {cr} {cg} {cb}");
+        assert!(
+            !(cg > 2 * cr && cg > 2 * cb),
+            "class {class} at ({x}, {y}): the green block is masked away: {cr} {cg} {cb}"
+        );
         // Mirrored, blue would be at the left.
         let [cr, cg, cb] = pixel(at(x, y, h, r, Vec3::new(0.0, 0.3, -0.8)));
-        assert!(!(cb > 2 * cr && cb > 2 * cg), "class {class} at ({x}, {y}): nothing blue at its left: {cr} {cg} {cb}");
+        assert!(
+            !(cb > 2 * cr && cb > 2 * cg),
+            "class {class} at ({x}, {y}): nothing blue at its left: {cr} {cg} {cb}"
+        );
     }
     // The Fox's fur (orange-brown) over its middle.
     let (fx, fy, fh, fr, _) = units[1];
@@ -4965,15 +7966,24 @@ fn units_draw_models() {
         px[i] as i32 + px[i + 1] as i32 + px[i + 2] as i32
     };
     let (lit, dark) = (luma(&pixels, ground), luma(&shaded, ground));
-    assert!(dark * 10 < lit * 8, "the red block's shadow at {ground}: {lit} without the map, {dark} with it");
+    assert!(
+        dark * 10 < lit * 8,
+        "the red block's shadow at {ground}: {lit} without the map, {dark} with it"
+    );
     // The green block, masked away, casts none (the masked caster tests
     // alpha as the camera does).
     let green = at(x, y, h, r, Vec3::new(0.0, 1.15, 0.0));
     let ground = green - sun * ((green.y - 50.0) / sun.y);
     let (lit, dark) = (luma(&pixels, ground), luma(&shaded, ground));
-    assert!((lit - dark).abs() <= 6, "no shadow of the masked-away block at {ground}: {lit} without the map, {dark} with it");
+    assert!(
+        (lit - dark).abs() <= 6,
+        "no shadow of the masked-away block at {ground}: {lit} without the map, {dark} with it"
+    );
     let open = Vec3::new(512.0, 50.0, 400.0);
-    assert!((luma(&pixels, open) - luma(&shaded, open)).abs() <= 6, "open ground unchanged");
+    assert!(
+        (luma(&pixels, open) - luma(&shaded, open)).abs() <= 6,
+        "open ground unchanged"
+    );
     assert_clean(&gpu);
 }
 
@@ -4994,27 +8004,58 @@ fn units_model_shadows_culled() {
     use glam::{Mat4, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     // A pillar eight times as tall as its footprint (0.2), which is drawn
     // at the unit's radius: radius 50 makes it 400 m tall.
     let identity = Mat4::IDENTITY.to_cols_array();
     let mut pillar = Model {
-        bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
-        joints: vec![Joint { bone: 0, inverse_bind: identity }],
-        materials: vec![Material { name: "grey".into(), base_color: [0.5, 0.5, 0.5, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() }],
+        bones: vec![Bone {
+            name: "root".into(),
+            parent: None,
+            rest: identity,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }],
+        joints: vec![Joint {
+            bone: 0,
+            inverse_bind: identity,
+        }],
+        materials: vec![Material {
+            name: "grey".into(),
+            base_color: [0.5, 0.5, 0.5, 1.0],
+            metallic: 0.0,
+            roughness: 0.8,
+            ..Default::default()
+        }],
         ..Default::default()
     };
     model_box(&mut pillar, [-0.2, 0.0, -0.2], [0.2, 1.6, 0.2], 0);
-    pillar.bounds = ae_model::Bounds { min: [-0.2, 0.0, -0.2], max: [0.2, 1.6, 0.2] };
+    pillar.bounds = ae_model::Bounds {
+        min: [-0.2, 0.0, -0.2],
+        max: [0.2, 1.6, 0.2],
+    };
     pillar.validate().unwrap();
     let pillar = Arc::new(pillar);
     let (radius, height) = (50.0f32, 400.0f32);
 
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let (target, pitch, distance) = (Vec2::new(512.0, 512.0), 1.4f32, 700.0f32);
     let camera = {
         let app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
@@ -5028,12 +8069,25 @@ fn units_model_shadows_culled() {
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     // Whether a sphere is inside the camera's side planes.
     let rows = view_proj.transpose();
-    let sides = [rows.w_axis + rows.x_axis, rows.w_axis - rows.x_axis, rows.w_axis + rows.y_axis, rows.w_axis - rows.y_axis];
-    let touches = |c: Vec3, r: f32| sides.iter().all(|p| p.truncate().dot(c) + p.w >= -r * p.truncate().length());
+    let sides = [
+        rows.w_axis + rows.x_axis,
+        rows.w_axis - rows.x_axis,
+        rows.w_axis + rows.y_axis,
+        rows.w_axis - rows.y_axis,
+    ];
+    let touches = |c: Vec3, r: f32| {
+        sides
+            .iter()
+            .all(|p| p.truncate().dot(c) + p.w >= -r * p.truncate().length())
+    };
     let in_view = |p: Vec3| -> Option<usize> {
         let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
-        let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-        (u >= 8.0 && v >= 8.0 && u < extent.width as f32 - 8.0 && v < extent.height as f32 - 8.0).then(|| (v as usize * extent.width as usize + u as usize) * 4)
+        let (u, v) = (
+            (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+            (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+        );
+        (u >= 8.0 && v >= 8.0 && u < extent.width as f32 - 8.0 && v < extent.height as f32 - 8.0)
+            .then(|| (v as usize * extent.width as usize + u as usize) * 4)
     };
     // The pillar's upper part's shadow on the ground (height 50), and the
     // pillar's foot toward the sun from it: the nearest foot whose whole
@@ -5047,7 +8101,9 @@ fn units_model_shadows_culled() {
     };
     let foot = (0..400)
         .map(|k| target + toward_sun * (5.0 * k as f32))
-        .find(|&f| !touches(Vec3::new(f.x, ground_y + 0.5 * height, f.y), 0.6 * height) && in_view(shadow_of(f)).is_some())
+        .find(|&f| {
+            !touches(Vec3::new(f.x, ground_y + 0.5 * height, f.y), 0.6 * height) && in_view(shadow_of(f)).is_some()
+        })
         .expect("a foot off screen whose shadow is in view");
     let far = Vec2::new(20_000.0, 512.0);
 
@@ -5055,16 +8111,49 @@ fn units_model_shadows_culled() {
     let units = [(foot, 0u32), (far, 1)];
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for &(p, class) in &units {
-        for (a, word) in [p.x.to_bits(), p.y.to_bits(), p.x.to_bits(), p.y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), radius.to_bits(), class].into_iter().enumerate() {
+        for (a, word) in [
+            p.x.to_bits(),
+            p.y.to_bits(),
+            p.x.to_bits(),
+            p.y.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            radius.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }; 2];
+    let classes = vec![
+        UnitClass {
+            color: [0.5; 3],
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false
+        };
+        2
+    ];
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
     let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 16, classes: classes.clone(), min_pixels: 1.0, models: models.clone(), rigs: Vec::new() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns.clone()),
+            anim: AnimWrites::default(),
+        }));
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 16,
+            classes: classes.clone(),
+            min_pixels: 1.0,
+            models: models.clone(),
+            rigs: Vec::new(),
+        });
         if shadows {
             app = app.with_shadows();
         }
@@ -5076,14 +8165,27 @@ fn units_model_shadows_culled() {
             view.shadows = shadows;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let info = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let info = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, info, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("model-shadows-{}.ppm", shadows as u8)), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("model-shadows-{}.ppm", shadows as u8)),
+                ppm,
+            )
+            .unwrap();
         }
         let counts = app.last_unit_counts();
         let cascades = app.last_unit_cascade_counts();
@@ -5096,10 +8198,20 @@ fn units_model_shadows_culled() {
     assert_eq!(counts, Some((2, 0)));
     assert_eq!(lit_cascades, vec![[0; 3]; 2], "no shadow map: no cascade lists");
     assert_eq!(cascades[1], [0, 0, 0], "the far pillar is in no cascade");
-    assert!(cascades[0].iter().any(|&n| n == 1) && cascades[0].iter().all(|&n| n <= 1), "the pillar toward the sun is in a cascade: {:?}", cascades[0]);
+    assert!(
+        cascades[0].iter().any(|&n| n == 1) && cascades[0].iter().all(|&n| n <= 1),
+        "the pillar toward the sun is in a cascade: {:?}",
+        cascades[0]
+    );
     let i = in_view(shadow_of(foot)).unwrap();
     let luma = |px: &[u8]| px[i] as i32 + px[i + 1] as i32 + px[i + 2] as i32;
-    assert!(luma(&shaded) * 10 < luma(&lit) * 8, "the off-screen pillar's shadow at {}: {} without the map, {} with it", shadow_of(foot), luma(&lit), luma(&shaded));
+    assert!(
+        luma(&shaded) * 10 < luma(&lit) * 8,
+        "the off-screen pillar's shadow at {}: {} without the map, {} with it",
+        shadow_of(foot),
+        luma(&lit),
+        luma(&shaded)
+    );
     assert_clean(&gpu);
 }
 
@@ -5128,26 +8240,65 @@ fn units_pose_models() {
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::{TerrainInfo, frustum_planes};
     use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{AnimWrites, Cell, InstanceStream, NO_POSE, POSE_MANUAL, RECORD_CELLS, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{
+        AnimWrites, Cell, InstanceStream, NO_POSE, POSE_MANUAL, RECORD_CELLS, UnitClass, UnitFeed, UnitsSetup,
+    };
     use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     // A red base (bone 1) carrying a blue arm (bone 2). Clip "reach" moves
     // the arm 6 to the right (+z) and turns it a quarter about +y over 1 s;
     // "hop" lifts the base (and so the arm) by 1 over 2 s.
     let identity = Mat4::IDENTITY.to_cols_array();
-    let bone = |name: &str, parent: Option<u32>| Bone { name: name.into(), parent, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] };
+    let bone = |name: &str, parent: Option<u32>| Bone {
+        name: name.into(),
+        parent,
+        rest: identity,
+        translation: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0; 3],
+    };
     let mut arm = Model {
         bones: vec![bone("root", None), bone("base", Some(0)), bone("arm", Some(1))],
-        joints: vec![Joint { bone: 1, inverse_bind: identity }, Joint { bone: 2, inverse_bind: identity }],
+        joints: vec![
+            Joint {
+                bone: 1,
+                inverse_bind: identity,
+            },
+            Joint {
+                bone: 2,
+                inverse_bind: identity,
+            },
+        ],
         materials: vec![
-            Material { name: "red".into(), base_color: [1.0, 0.02, 0.02, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() },
-            Material { name: "blue".into(), base_color: [0.02, 0.02, 1.0, 1.0], metallic: 0.0, roughness: 0.8, ..Default::default() },
+            Material {
+                name: "red".into(),
+                base_color: [1.0, 0.02, 0.02, 1.0],
+                metallic: 0.0,
+                roughness: 0.8,
+                ..Default::default()
+            },
+            Material {
+                name: "blue".into(),
+                base_color: [0.02, 0.02, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.8,
+                ..Default::default()
+            },
         ],
         ..Default::default()
     };
@@ -5157,23 +8308,57 @@ fn units_pose_models() {
     for v in &mut arm.vertices[first_arm_vertex..] {
         v.joints = [1, 0, 0, 0];
     }
-    arm.bounds = ae_model::Bounds { min: [-1.0, 0.0, -1.0], max: [1.0, 1.4, 1.0] };
+    arm.bounds = ae_model::Bounds {
+        min: [-1.0, 0.0, -1.0],
+        max: [1.0, 1.4, 1.0],
+    };
     let quarter = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
-    arm.clip_data = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 1.0, quarter.x, quarter.y, quarter.z, quarter.w, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-    let channel = |bone, path, times: (u64, u64), values: (u64, u64)| Channel { bone, path, interpolation: Interpolation::Linear, times: Range { offset: times.0, len: times.1 }, values: Range { offset: values.0, len: values.1 } };
+    arm.clip_data = vec![
+        0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 1.0, quarter.x, quarter.y, quarter.z, quarter.w, 0.0,
+        2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+    let channel = |bone, path, times: (u64, u64), values: (u64, u64)| Channel {
+        bone,
+        path,
+        interpolation: Interpolation::Linear,
+        times: Range {
+            offset: times.0,
+            len: times.1,
+        },
+        values: Range {
+            offset: values.0,
+            len: values.1,
+        },
+    };
     arm.clips = vec![
-        Clip { name: "reach".into(), duration: 1.0, channels: vec![channel(2, Path::Translation, (0, 2), (2, 6)), channel(2, Path::Rotation, (0, 2), (8, 8))] },
-        Clip { name: "hop".into(), duration: 2.0, channels: vec![channel(1, Path::Translation, (16, 2), (18, 6))] },
+        Clip {
+            name: "reach".into(),
+            duration: 1.0,
+            channels: vec![
+                channel(2, Path::Translation, (0, 2), (2, 6)),
+                channel(2, Path::Rotation, (0, 2), (8, 8)),
+            ],
+        },
+        Clip {
+            name: "hop".into(),
+            duration: 2.0,
+            channels: vec![channel(1, Path::Translation, (16, 2), (18, 6))],
+        },
     ];
     arm.merge_primitives();
     arm.validate().unwrap();
     let khronos = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/khronos");
     let fox = ae_gltf::convert_file(&khronos.join("Fox/Fox.glb")).unwrap().model;
-    let boxes = ae_gltf::convert_file(&khronos.join("BoxAnimated/BoxAnimated.glb")).unwrap().model;
+    let boxes = ae_gltf::convert_file(&khronos.join("BoxAnimated/BoxAnimated.glb"))
+        .unwrap()
+        .model;
     assert!(fox.clips.len() >= 2 && !boxes.clips.is_empty());
     let models = [arm, fox, boxes];
 
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let set_view = |app: &TerrainApp| {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -5204,17 +8389,40 @@ fn units_pose_models() {
         Records(Channels, Channels, bool),
     }
     let (looped, once, pingpong) = (PlayMode::Loop, PlayMode::Once, PlayMode::PingPong);
-    let layer = |clip: u16, mode: PlayMode, phase: f32| Layer { clip, mode: mode as u8, weight: 1.0, target: 1.0, phase, ..Default::default() };
+    let layer = |clip: u16, mode: PlayMode, phase: f32| Layer {
+        clip,
+        mode: mode as u8,
+        weight: 1.0,
+        target: 1.0,
+        phase,
+        ..Default::default()
+    };
     let with = |layers: &[Layer], manual: &[Manual]| {
         let mut ch = Channels::default();
         ch.layers[..layers.len()].copy_from_slice(layers);
         ch.manual[..manual.len()].copy_from_slice(manual);
         ch
     };
-    let one = |clip: u16, mode: PlayMode, ta: f32, tb: f32| Spec::Records(with(&[layer(clip, mode, ta)], &[]), with(&[layer(clip, mode, tb)], &[]), false);
-    let entry = |bone: u16, kind: u8, value: [f32; 4]| Manual { bone, kind, value, ..Default::default() };
+    let one = |clip: u16, mode: PlayMode, ta: f32, tb: f32| {
+        Spec::Records(
+            with(&[layer(clip, mode, ta)], &[]),
+            with(&[layer(clip, mode, tb)], &[]),
+            false,
+        )
+    };
+    let entry = |bone: u16, kind: u8, value: [f32; 4]| Manual {
+        bone,
+        kind,
+        value,
+        ..Default::default()
+    };
     let about_y = |deg: f32| Quat::from_rotation_y(deg.to_radians()).to_array();
-    let additive = |l: Layer, mask: u16, weight: f32| Layer { kind: kind::ADDITIVE, mask, weight, ..l };
+    let additive = |l: Layer, mask: u16, weight: f32| Layer {
+        kind: kind::ADDITIVE,
+        mask,
+        weight,
+        ..l
+    };
     let weighted = |l: Layer, weight: f32| Layer { weight, ..l };
     let mut units: Vec<((f32, f32), (f32, f32), f32, u32, Spec)> = vec![
         ((420.0, 440.0), (1.0, 0.0), 20.0, 0, Spec::Rest),
@@ -5227,7 +8435,11 @@ fn units_pose_models() {
             (1.0, 0.0),
             40.0,
             1,
-            Spec::Records(with(&[layer(2, looped, 0.3), weighted(layer(1, looped, 0.1), 0.5)], &[]), with(&[layer(2, looped, 0.4), weighted(layer(1, looped, 0.2), 0.5)], &[]), true),
+            Spec::Records(
+                with(&[layer(2, looped, 0.3), weighted(layer(1, looped, 0.1), 0.5)], &[]),
+                with(&[layer(2, looped, 0.4), weighted(layer(1, looped, 0.2), 0.5)], &[]),
+                true,
+            ),
         ),
         ((530.0, 640.0), (1.0, 0.0), 30.0, 2, one(1, looped, 0.1, 0.2)),
         ((620.0, 650.0), (1.0, 0.0), 6.0, 3, one(1, looped, 0.0, 0.0)),
@@ -5242,7 +8454,11 @@ fn units_pose_models() {
             (1.0, 0.0),
             20.0,
             0,
-            Spec::Records(with(&[layer(2, looped, 0.5), additive(layer(1, looped, 0.4), 1, 0.7)], &[]), with(&[layer(2, looped, 1.0), additive(layer(1, looped, 0.6), 1, 0.7)], &[]), true),
+            Spec::Records(
+                with(&[layer(2, looped, 0.5), additive(layer(1, looped, 0.4), 1, 0.7)], &[]),
+                with(&[layer(2, looped, 1.0), additive(layer(1, looped, 0.6), 1, 0.7)], &[]),
+                true,
+            ),
         ),
         // Manual: the arm turned (out of its clip), the base moved then
         // scaled; a move not shown yet.
@@ -5252,8 +8468,24 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(&[layer(1, looped, 0.5)], &[entry(2, manual_kind::TURN, about_y(30.0)), entry(1, manual_kind::MOVE, [0.0, 0.5, 0.0, 0.0])]),
-                with(&[layer(1, looped, 0.5)], &[entry(2, manual_kind::TURN, about_y(60.0)), entry(1, manual_kind::SCALE, [1.5, 1.0, 1.0, 0.0]), Manual { flags: manual_flags::FRESH, ..entry(1, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0]) }]),
+                with(
+                    &[layer(1, looped, 0.5)],
+                    &[
+                        entry(2, manual_kind::TURN, about_y(30.0)),
+                        entry(1, manual_kind::MOVE, [0.0, 0.5, 0.0, 0.0]),
+                    ],
+                ),
+                with(
+                    &[layer(1, looped, 0.5)],
+                    &[
+                        entry(2, manual_kind::TURN, about_y(60.0)),
+                        entry(1, manual_kind::SCALE, [1.5, 1.0, 1.0, 0.0]),
+                        Manual {
+                            flags: manual_flags::FRESH,
+                            ..entry(1, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0])
+                        },
+                    ],
+                ),
                 false,
             ),
         ),
@@ -5263,7 +8495,11 @@ fn units_pose_models() {
             (1.0, 0.0),
             20.0,
             0,
-            Spec::Records(with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))]), with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))]), true),
+            Spec::Records(
+                with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))]),
+                with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))]),
+                true,
+            ),
         ),
         // Half a blend over the rest, a layer at weight 0, a clip and a
         // mask the model lacks (skipped; the whole model).
@@ -5273,8 +8509,30 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(&[weighted(layer(1, looped, 0.5), 0.5), weighted(layer(2, looped, 0.5), 0.0), layer(9, looped, 0.1), Layer { mask: 5, ..layer(2, looped, 0.25) }], &[]),
-                with(&[weighted(layer(1, looped, 0.7), 0.5), weighted(layer(2, looped, 0.5), 0.0), layer(9, looped, 0.1), Layer { mask: 5, ..layer(2, looped, 0.75) }], &[]),
+                with(
+                    &[
+                        weighted(layer(1, looped, 0.5), 0.5),
+                        weighted(layer(2, looped, 0.5), 0.0),
+                        layer(9, looped, 0.1),
+                        Layer {
+                            mask: 5,
+                            ..layer(2, looped, 0.25)
+                        },
+                    ],
+                    &[],
+                ),
+                with(
+                    &[
+                        weighted(layer(1, looped, 0.7), 0.5),
+                        weighted(layer(2, looped, 0.5), 0.0),
+                        layer(9, looped, 0.1),
+                        Layer {
+                            mask: 5,
+                            ..layer(2, looped, 0.75)
+                        },
+                    ],
+                    &[],
+                ),
                 false,
             ),
         ),
@@ -5285,27 +8543,56 @@ fn units_pose_models() {
     let (_, rest_sphere) = ae_render::models::fit(&models[0]);
     let heading = (0.0, 1.0);
     let mut x = 512.0;
-    while !outside(at(x, 512.0, heading, 20.0, Vec3::new(rest_sphere[0], rest_sphere[1], rest_sphere[2])), rest_sphere[3] * 20.0) {
+    while !outside(
+        at(
+            x,
+            512.0,
+            heading,
+            20.0,
+            Vec3::new(rest_sphere[0], rest_sphere[1], rest_sphere[2]),
+        ),
+        rest_sphere[3] * 20.0,
+    ) {
         x += 2.0;
     }
     units.push(((x + 4.0, 512.0), heading, 20.0, 0, one(1, looped, 0.99, 0.99)));
     let reach_tip = at(x + 4.0, 512.0, heading, 20.0, Vec3::new(0.0, 1.39, 5.94));
-    assert!(!outside(reach_tip, 0.0), "the off-screen unit's arm reaches into the view");
+    assert!(
+        !outside(reach_tip, 0.0),
+        "the off-screen unit's arm reaches into the view"
+    );
     // A unit with a manual joint shown is culled with the sphere covering
     // any turn (models.rs turned_sphere): off the right edge where its
     // clips' sphere is out of view and that one is not, it is drawn.
     let cull_sphere = ae_render::models::fit(&models[0]).1;
-    let clip_r = cull_sphere[3].max(ae_model::pose::animated_radius(&models[0], Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2])) * 1.05);
-    let [turned_r, along] = ae_render::models::turned_sphere([cull_sphere[0], cull_sphere[1], cull_sphere[2], clip_r], ae_model::pose::turned_reach(&models[0]));
+    let clip_r = cull_sphere[3].max(
+        ae_model::pose::animated_radius(&models[0], Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2])) * 1.05,
+    );
+    let [turned_r, along] = ae_render::models::turned_sphere(
+        [cull_sphere[0], cull_sphere[1], cull_sphere[2], clip_r],
+        ae_model::pose::turned_reach(&models[0]),
+    );
     let centre = Vec3::new(cull_sphere[0], cull_sphere[1], cull_sphere[2]);
     let mut turned_x = 512.0;
     while !outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre), clip_r * 20.0) {
         turned_x += 2.0;
     }
     turned_x += 2.0;
-    assert!(!outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre * along), turned_r * 20.0), "the turned unit's sphere is in view");
-    let half_round = with(&[layer(1, looped, 0.99)], &[entry(1, manual_kind::TURN, about_y(180.0))]);
-    units.push(((turned_x, 512.0), (1.0, 0.0), 20.0, 0, Spec::Records(half_round, half_round, false)));
+    assert!(
+        !outside(at(turned_x, 512.0, (1.0, 0.0), 20.0, centre * along), turned_r * 20.0),
+        "the turned unit's sphere is in view"
+    );
+    let half_round = with(
+        &[layer(1, looped, 0.99)],
+        &[entry(1, manual_kind::TURN, about_y(180.0))],
+    );
+    units.push((
+        (turned_x, 512.0),
+        (1.0, 0.0),
+        20.0,
+        0,
+        Spec::Records(half_round, half_round, false),
+    ));
 
     // The sim's rigs; the arm's has a mask (its arm only), which the
     // renderer gets with the rig.
@@ -5317,10 +8604,19 @@ fn units_pose_models() {
     let record = |ch: &Channels, tick: u32| -> [Cell; RECORD_CELLS] {
         let mut r = [[0; 4]; RECORD_CELLS];
         for (i, l) in ch.layers.iter().enumerate().filter(|(_, l)| l.clip != 0) {
-            r[1 + i] = [l.clip as u32 | (l.mask as u32) << 16, l.mode as u32 | (l.kind as u32) << 8, l.weight.to_bits(), l.phase.to_bits()];
+            r[1 + i] = [
+                l.clip as u32 | (l.mask as u32) << 16,
+                l.mode as u32 | (l.kind as u32) << 8,
+                l.weight.to_bits(),
+                l.phase.to_bits(),
+            ];
         }
         let mut n = 0;
-        for m in ch.manual.iter().filter(|m| m.kind != manual_kind::NONE && m.flags & manual_flags::FRESH == 0) {
+        for m in ch
+            .manual
+            .iter()
+            .filter(|m| m.kind != manual_kind::NONE && m.flags & manual_flags::FRESH == 0)
+        {
             r[5 + n / 4][n % 4] = m.bone as u32 | (m.kind as u32) << 16;
             r[7 + n] = m.value.map(f32::to_bits);
             n += 1;
@@ -5349,11 +8645,31 @@ fn units_pose_models() {
             Spec::Records(..) | Spec::Missing => 1 << 20,
             Spec::Rest => NO_POSE,
         };
-        for (a, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), hx.to_bits(), hy.to_bits(), radius.to_bits(), *class, pose].into_iter().enumerate() {
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            hx.to_bits(),
+            hy.to_bits(),
+            radius.to_bits(),
+            *class,
+            pose,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[a].push(word);
         }
     }
-    let classes = vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }; 4];
+    let classes = vec![
+        UnitClass {
+            color: [0.5; 3],
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            floats: false
+        };
+        4
+    ];
     let setup_models: Vec<_> = models.iter().map(|m| Some(Arc::new(m.clone()))).collect();
     let setup_rigs: Vec<_> = rigs.iter().map(|r| Some(Arc::new(r.clone()))).collect();
     // Frame, counts and poses; `behind`: drawn a tick behind the stream
@@ -5368,25 +8684,62 @@ fn units_pose_models() {
         // A whole table of stale records (empty, ticks 1 and 2), then the
         // records as writes over it: the renderer gets the feed's table,
         // both streams' writes coalesced.
-        let stale: Vec<Cell> = (0..table.len()).map(|c| if c % RECORD_CELLS == 0 { [1 + (c / RECORD_CELLS % 2) as u32, 0, 0, 0] } else { [0; 4] }).collect();
-        let stream = |anim: AnimWrites| Arc::new(InstanceStream { tick: newer as u64, published, tick_seconds, sim_seconds: tick_seconds, columns: columns.clone(), anim });
+        let stale: Vec<Cell> = (0..table.len())
+            .map(|c| {
+                if c % RECORD_CELLS == 0 {
+                    [1 + (c / RECORD_CELLS % 2) as u32, 0, 0, 0]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect();
+        let stream = |anim: AnimWrites| {
+            Arc::new(InstanceStream {
+                tick: newer as u64,
+                published,
+                tick_seconds,
+                sim_seconds: tick_seconds,
+                columns: columns.clone(),
+                anim,
+            })
+        };
         feed.publish(stream(AnimWrites::whole(&stale)));
         let mut writes = AnimWrites::default();
         for (i, c) in table.iter().enumerate().filter(|(i, c)| stale[*i] != **c) {
             writes.push(i as u32, *c);
         }
         feed.publish(stream(writes));
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 32, classes: classes.clone(), min_pixels: 6.0, models: setup_models.clone(), rigs: setup_rigs.clone() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
+            feed,
+            capacity: 32,
+            classes: classes.clone(),
+            min_pixels: 6.0,
+            models: setup_models.clone(),
+            rigs: setup_rigs.clone(),
+        });
         set_view(&app);
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 6, config).unwrap();
         let pixels = app.readback().unwrap();
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
             ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(std::path::Path::new(&dir).join(format!("poses-{}.ppm", behind as u8)), ppm).unwrap();
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("poses-{}.ppm", behind as u8)),
+                ppm,
+            )
+            .unwrap();
         }
         let counts = app.last_unit_counts();
         let poses = app.last_unit_poses(&gpu).unwrap();
@@ -5400,14 +8753,22 @@ fn units_pose_models() {
         p
     };
     let nlerp = |a: [f32; 4], b: [f32; 4], s: f32| {
-        let b = if Vec4::from(a).dot(Vec4::from(b)) < 0.0 { b.map(|v| -v) } else { b };
+        let b = if Vec4::from(a).dot(Vec4::from(b)) < 0.0 {
+            b.map(|v| -v)
+        } else {
+            b
+        };
         Vec4::from(a).lerp(Vec4::from(b), s).normalize().to_array()
     };
     let lerp3 = |a: [f32; 3], b: [f32; 3], s: f32| Vec3::from(a).lerp(Vec3::from(b), s).to_array();
 
     for behind in [false, true] {
         let (pixels, counts, poses) = render(behind);
-        assert_eq!(counts, Some((units.len() as u32, units.len() as u32)), "every unit drawn (behind: {behind})");
+        assert_eq!(
+            counts,
+            Some((units.len() as u32, units.len() as u32)),
+            "every unit drawn (behind: {behind})"
+        );
         assert_eq!(poses.len(), units.len());
         // Drawn at tick 6 (half way) or 7 (the newer).
         let s = if behind { 0.5 } else { 1.0 };
@@ -5420,8 +8781,20 @@ fn units_pose_models() {
             let want: Vec<[f32; 12]> = match spec {
                 Spec::Records(a, b, _) => {
                     let (pa, pb) = (pose_of(rig, a), pose_of(rig, b));
-                    let local = pa.local.iter().zip(&pb.local).map(|(a, b)| Trs { t: lerp3(a.t, b.t, s), r: nlerp(a.r, b.r, s), s: lerp3(a.s, b.s, s) }).collect();
-                    let pose = Pose { local, posed: pa.posed.iter().zip(&pb.posed).map(|(a, b)| *a || *b).collect() };
+                    let local = pa
+                        .local
+                        .iter()
+                        .zip(&pb.local)
+                        .map(|(a, b)| Trs {
+                            t: lerp3(a.t, b.t, s),
+                            r: nlerp(a.r, b.r, s),
+                            s: lerp3(a.s, b.s, s),
+                        })
+                        .collect();
+                    let pose = Pose {
+                        local,
+                        posed: pa.posed.iter().zip(&pb.posed).map(|(a, b)| *a || *b).collect(),
+                    };
                     let mut globals = vec![[0.0; 12]; rig.bones()];
                     rig.globals(&pose, &mut globals);
                     let mut palette = vec![[0.0; 12]; rig.joints()];
@@ -5433,7 +8806,10 @@ fn units_pose_models() {
             assert_eq!(poses[r].len(), want.len(), "row {r}: one entry per joint");
             for (j, (got, want)) in poses[r].iter().zip(&want).enumerate() {
                 for i in 0..12 {
-                    assert!((got[i] - want[i]).abs() <= 1e-3 * want[i].abs().max(1.0), "row {r} (class {class}, behind {behind}) joint {j}: {got:?} vs {want:?}");
+                    assert!(
+                        (got[i] - want[i]).abs() <= 1e-3 * want[i].abs().max(1.0),
+                        "row {r} (class {class}, behind {behind}) joint {j}: {got:?} vs {want:?}"
+                    );
                 }
             }
         }
@@ -5442,8 +8818,14 @@ fn units_pose_models() {
         }
         let index = |p: Vec3| -> usize {
             let clip = view_proj * Vec4::new(p.x, p.y, p.z, 1.0);
-            let (u, v) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-            assert!(u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32, "{p} projects into the view");
+            let (u, v) = (
+                (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+                (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+            );
+            assert!(
+                u >= 0.0 && v >= 0.0 && u < extent.width as f32 && v < extent.height as f32,
+                "{p} projects into the view"
+            );
             (v as usize * extent.width as usize + u as usize) * 4
         };
         let blue = |p: Vec3| {
@@ -5453,15 +8835,27 @@ fn units_pose_models() {
         };
         let unit = |k: usize| (units[k].0.0, units[k].0.1, units[k].1, units[k].2);
         let (x, y, h, r) = unit(0);
-        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "at rest, the arm on the base");
+        assert!(
+            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
+            "at rest, the arm on the base"
+        );
         let (x, y, h, r) = unit(1);
-        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "half way through the reach, the arm 3 to the right");
+        assert!(
+            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))),
+            "half way through the reach, the arm 3 to the right"
+        );
         assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "and not on the base");
         let (x, y, h, r) = unit(4);
-        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))), "records not in the table: at rest");
+        assert!(
+            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 0.0))),
+            "records not in the table: at rest"
+        );
         assert!(blue(reach_tip), "the off-screen unit's arm is drawn");
         let (x, y, h, r) = unit(9);
-        assert!(blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))), "played once, held at full reach (looping it would be half way)");
+        assert!(
+            blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 5.9))),
+            "played once, held at full reach (looping it would be half way)"
+        );
         assert!(!blue(at(x, y, h, r, Vec3::new(0.0, 1.39, 3.0))), "and not half way");
     }
     assert_clean(&gpu);
@@ -5491,21 +8885,49 @@ fn speculars_follow_material_and_lights() {
 
     let gpu = gpu();
     let n = 129;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.5; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     let identity = Mat4::IDENTITY.to_cols_array();
     let model = |metallic: f32, roughness: f32| -> Arc<Model> {
         let mut m = Model {
-            bones: vec![Bone { name: "root".into(), parent: None, rest: identity, translation: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] }],
-            joints: vec![Joint { bone: 0, inverse_bind: identity }],
-            materials: vec![Material { name: "m".into(), base_color: [0.8, 0.8, 0.8, 1.0], metallic, roughness, ..Default::default() }],
+            bones: vec![Bone {
+                name: "root".into(),
+                parent: None,
+                rest: identity,
+                translation: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+            }],
+            joints: vec![Joint {
+                bone: 0,
+                inverse_bind: identity,
+            }],
+            materials: vec![Material {
+                name: "m".into(),
+                base_color: [0.8, 0.8, 0.8, 1.0],
+                metallic,
+                roughness,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         model_box(&mut m, [-1.0, 0.0, -1.0], [1.0, 1.0, 1.0], 0);
-        m.bounds = ae_model::Bounds { min: [-1.0, 0.0, -1.0], max: [1.0, 1.0, 1.0] };
+        m.bounds = ae_model::Bounds {
+            min: [-1.0, 0.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        };
         m.merge_primitives();
         m.validate().unwrap();
         Arc::new(m)
@@ -5516,8 +8938,18 @@ fn speculars_follow_material_and_lights() {
     // up, the sun's elevation, on the opposite side), so the mirror point
     // is the top's centre.
     let top = Vec3::new(512.0, 90.0, 512.0);
-    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 400.0, yaw: 2.183, pitch: 0.835, fov_y: 0.8 };
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let camera = Camera {
+        target: Vec2::new(512.0, 512.0),
+        ground: 0.0,
+        distance: 400.0,
+        yaw: 2.183,
+        pitch: 0.835,
+        fov_y: 0.8,
+    };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
     let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
     let v = (eye - top).normalize();
@@ -5526,14 +8958,49 @@ fn speculars_follow_material_and_lights() {
     let light = |dir: Vec3| Light::point(top + dir * 60.0, Vec3::ONE, 500_000.0, 120.0, 2.0);
 
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
-    for (a, word) in [512.0f32.to_bits(), 512.0f32.to_bits(), 512.0f32.to_bits(), 512.0f32.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 40.0f32.to_bits(), 0u32].into_iter().enumerate() {
+    for (a, word) in [
+        512.0f32.to_bits(),
+        512.0f32.to_bits(),
+        512.0f32.to_bits(),
+        512.0f32.to_bits(),
+        1.0f32.to_bits(),
+        0.0f32.to_bits(),
+        40.0f32.to_bits(),
+        0u32,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         columns[a].push(word);
     }
     let render = |model: Arc<Model>, light: Option<Light>, sun: f32| -> Vec<u8> {
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let setup = UnitsSetup { feed, capacity: 4, classes: vec![UnitClass { color: [0.5; 3], gamut: ae_render::colorspace::Gamut::Bt709, floats: false }], min_pixels: 8.0, models: vec![Some(model)], rigs: Vec::new() };
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(setup).with_tone(ToneParams { sun_illuminance: sun, ..Default::default() });
+        feed.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns.clone()),
+            anim: AnimWrites::default(),
+        }));
+        let setup = UnitsSetup {
+            feed,
+            capacity: 4,
+            classes: vec![UnitClass {
+                color: [0.5; 3],
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                floats: false,
+            }],
+            min_pixels: 8.0,
+            models: vec![Some(model)],
+            rigs: Vec::new(),
+        };
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_units(setup)
+            .with_tone(ToneParams {
+                sun_illuminance: sun,
+                ..Default::default()
+            });
         if let Some(l) = light {
             app = app.with_lights(vec![l]);
         }
@@ -5544,8 +9011,17 @@ fn speculars_follow_material_and_lights() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -5553,8 +9029,14 @@ fn speculars_follow_material_and_lights() {
     };
 
     let clip = view_proj * Vec4::new(top.x, top.y, top.z, 1.0);
-    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-    assert!(cu > 30.0 && cv > 30.0 && cu < extent.width as f32 - 30.0 && cv < extent.height as f32 - 30.0, "the box top projects into the view at ({cu}, {cv})");
+    let (cu, cv) = (
+        (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+        (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+    );
+    assert!(
+        cu > 30.0 && cv > 30.0 && cu < extent.width as f32 - 30.0 && cv < extent.height as f32 - 30.0,
+        "the box top projects into the view at ({cu}, {cv})"
+    );
     let (cu, cv) = (cu as i32, cv as i32);
     let luma = |p: &[u8], x: i32, y: i32| -> f32 {
         let i = ((y * extent.width as i32 + x) * 4) as usize;
@@ -5578,11 +9060,20 @@ fn speculars_follow_material_and_lights() {
     let dielectric = render(model(0.0, 0.15), None, sun);
     let at = |p: &[u8], dx: i32, dy: i32| -> f32 { luma(p, cu + dx, cv + dy) };
     let (m, r, d) = (at(&smooth_metal, 0, 0), at(&rough_metal, 0, 0), at(&dielectric, 0, 0));
-    let (m2, r2, d2) = (at(&smooth_metal, 0, 24), at(&rough_metal, 0, 24), at(&dielectric, 0, 24));
-    println!("sun specular luma at the mirror: metal {m:.0}, rough {r:.0}, dielectric {d:.0}; 24 px up: {m2:.0}, {r2:.0}, {d2:.0}");
+    let (m2, r2, d2) = (
+        at(&smooth_metal, 0, 24),
+        at(&rough_metal, 0, 24),
+        at(&dielectric, 0, 24),
+    );
+    println!(
+        "sun specular luma at the mirror: metal {m:.0}, rough {r:.0}, dielectric {d:.0}; 24 px up: {m2:.0}, {r2:.0}, {d2:.0}"
+    );
     assert!(m > r + 30.0, "a metal's F0 beats a rough metal's: {m:.1} vs {r:.1}");
     assert!(m > d + 30.0, "and a dielectric's F0 0.04 (20x lower): {m:.1} vs {d:.1}");
-    assert!(m2 > r2 + 10.0 && m2 > d2 + 10.0, "the highlight reaches past its centre: {m2:.1} vs {r2:.1}, {d2:.1}");
+    assert!(
+        m2 > r2 + 10.0 && m2 > d2 + 10.0,
+        "the highlight reaches past its centre: {m2:.1} vs {r2:.1}, {d2:.1}"
+    );
 
     // With the sun off, the ambient sky keeps all three visible; a light at
     // the view's mirror adds a highlight, and the same light at the
@@ -5592,10 +9083,29 @@ fn speculars_follow_material_and_lights() {
     let off = render(model(1.0, 0.15), Some(light(opposite)), 0.0);
     let rough_on = render(model(1.0, 0.90), Some(light(mirror)), 0.0);
     let diel_on = render(model(0.0, 0.15), Some(light(mirror)), 0.0);
-    println!("clustered light peak: metal {:.0}, off {:.0}, rough {:.0}, dielectric {:.0}", peak(&on), peak(&off), peak(&rough_on), peak(&diel_on));
-    assert!(peak(&on) > peak(&off) + 60.0, "the mirror light's highlight: {:.1} vs {:.1}", peak(&on), peak(&off));
-    assert!(peak(&rough_on) < peak(&on) - 40.0, "a rough metal has no highlight: {:.1}", peak(&rough_on));
-    assert!(peak(&diel_on) < peak(&on) - 40.0, "a dielectric's F0 is 20x lower: {:.1}", peak(&diel_on));
+    println!(
+        "clustered light peak: metal {:.0}, off {:.0}, rough {:.0}, dielectric {:.0}",
+        peak(&on),
+        peak(&off),
+        peak(&rough_on),
+        peak(&diel_on)
+    );
+    assert!(
+        peak(&on) > peak(&off) + 60.0,
+        "the mirror light's highlight: {:.1} vs {:.1}",
+        peak(&on),
+        peak(&off)
+    );
+    assert!(
+        peak(&rough_on) < peak(&on) - 40.0,
+        "a rough metal has no highlight: {:.1}",
+        peak(&rough_on)
+    );
+    assert!(
+        peak(&diel_on) < peak(&on) - 40.0,
+        "a dielectric's F0 is 20x lower: {:.1}",
+        peak(&diel_on)
+    );
     assert_clean(&gpu);
 }
 
@@ -5618,13 +9128,32 @@ fn lights_glint_on_water() {
     let gpu = gpu();
     let n = 129;
     // All water: 40 m under a surface at 60.
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.2; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.2; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, Some(60.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 700.0, yaw: 0.0, pitch: 0.4, fov_y: 0.8 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(512.0, 512.0),
+        ground: 0.0,
+        distance: 700.0,
+        yaw: 0.0,
+        pitch: 0.4,
+        fov_y: 0.8,
+    };
     let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
     let water = Vec3::new(512.0, 60.0, 512.0);
     let v = (eye - water).normalize();
@@ -5633,7 +9162,12 @@ fn lights_glint_on_water() {
 
     let render = |light: Option<Light>| -> Vec<u8> {
         // The sun off: the sky's reflection and the light are all there is.
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water().with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_water()
+            .with_tone(ae_render::tonemap::ToneParams {
+                sun_illuminance: 0.0,
+                ..Default::default()
+            });
         if let Some(l) = light {
             app = app.with_lights(vec![l]);
         }
@@ -5646,8 +9180,17 @@ fn lights_glint_on_water() {
             view.time = Some(1.0);
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -5659,9 +9202,16 @@ fn lights_glint_on_water() {
     // mirror geometry is pinned by the models' flat top (the test above).
     let none = render(None);
 
-    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(water.x, water.y, water.z, 1.0);
-    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-    assert!(cu > 70.0 && cv > 70.0 && cu < extent.width as f32 - 70.0 && cv < extent.height as f32 - 70.0, "the water point projects into the view at ({cu}, {cv})");
+    let clip =
+        lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(water.x, water.y, water.z, 1.0);
+    let (cu, cv) = (
+        (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+        (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+    );
+    assert!(
+        cu > 70.0 && cv > 70.0 && cu < extent.width as f32 - 70.0 && cv < extent.height as f32 - 70.0,
+        "the water point projects into the view at ({cu}, {cv})"
+    );
     let (cu, cv) = (cu as i32, cv as i32);
     // The waves tilt the normal, so the glint can sit tens of pixels from
     // the flat mirror point.
@@ -5676,7 +9226,12 @@ fn lights_glint_on_water() {
         best
     };
     println!("water glint peak: light {:.1}, none {:.1}", peak(&on), peak(&none));
-    assert!(peak(&on) > peak(&none) + 40.0, "the light's glint: {:.1} vs {:.1}", peak(&on), peak(&none));
+    assert!(
+        peak(&on) > peak(&none) + 40.0,
+        "the light's glint: {:.1} vs {:.1}",
+        peak(&on),
+        peak(&none)
+    );
     assert!(peak(&on) > 230.0, "a bright glint: {:.1}", peak(&on));
     assert_clean(&gpu);
 }
@@ -5699,13 +9254,32 @@ fn lights_specular_on_the_ground() {
 
     let gpu = gpu();
     let n = 129;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.8; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.8; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let camera = Camera { target: Vec2::new(512.0, 512.0), ground: 0.0, distance: 200.0, yaw: 0.0, pitch: 0.15, fov_y: 0.8 };
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let camera = Camera {
+        target: Vec2::new(512.0, 512.0),
+        ground: 0.0,
+        distance: 200.0,
+        yaw: 0.0,
+        pitch: 0.15,
+        fov_y: 0.8,
+    };
     let eye = lod_view(&source, &camera, extent.width, extent.height).pos;
     let ground = Vec3::new(512.0, 80.0, 512.0);
     let v = (eye - ground).normalize();
@@ -5716,7 +9290,12 @@ fn lights_specular_on_the_ground() {
         // curve (the diffuse alone at 2e9 filled the range), so the
         // specular has room above it.
         let l = Light::point(ground + dir * 60.0, Vec3::ONE, 125_000_000.0, 100.0, 3.0);
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_tone(ae_render::tonemap::ToneParams { sun_illuminance: 0.0, ..Default::default() }).with_lights(vec![l]);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_tone(ae_render::tonemap::ToneParams {
+                sun_illuminance: 0.0,
+                ..Default::default()
+            })
+            .with_lights(vec![l]);
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -5724,8 +9303,17 @@ fn lights_specular_on_the_ground() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -5734,15 +9322,27 @@ fn lights_specular_on_the_ground() {
     let on = render(mirror);
     let off = render(Vec3::new(-mirror.x, mirror.y, -mirror.z));
 
-    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj * Vec4::new(ground.x, ground.y, ground.z, 1.0);
-    let (cu, cv) = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32, (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32);
-    assert!(cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0, "the ground point projects into the view at ({cu}, {cv})");
+    let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj
+        * Vec4::new(ground.x, ground.y, ground.z, 1.0);
+    let (cu, cv) = (
+        (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32,
+        (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32,
+    );
+    assert!(
+        cu > 10.0 && cv > 10.0 && cu < extent.width as f32 - 10.0 && cv < extent.height as f32 - 10.0,
+        "the ground point projects into the view at ({cu}, {cv})"
+    );
     let luma = |p: &[u8]| -> f32 {
         let i = ((cv as i32 * extent.width as i32 + cu as i32) * 4) as usize;
         0.3 * p[i] as f32 + 0.59 * p[i + 1] as f32 + 0.11 * p[i + 2] as f32
     };
     println!("ground specular: mirror {:.1}, opposite {:.1}", luma(&on), luma(&off));
-    assert!(luma(&on) > luma(&off) + 10.0, "the mirror light's ground specular: {:.1} vs {:.1}", luma(&on), luma(&off));
+    assert!(
+        luma(&on) > luma(&off) + 10.0,
+        "the mirror light's ground specular: {:.1} vs {:.1}",
+        luma(&on),
+        luma(&off)
+    );
     assert_clean(&gpu);
 }
 
@@ -5768,7 +9368,12 @@ fn lights_clusters_match_the_unculled_reference() {
     let heightmap = generate(257, 257, 11);
     let pyramid = build_pyramid(&heightmap, 200.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 200.0, 0.0, Some(40.0));
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
     let centre = Vec2::new(512.0, 512.0);
     let height = |p: Vec2| source.height_at(p);
     let mut lights = scatter(600, centre, 450.0, 3.0, 5, &height);
@@ -5805,24 +9410,67 @@ fn lights_clusters_match_the_unculled_reference() {
     for k in 0..48 {
         let a = k as f32 * std::f32::consts::TAU / 48.0;
         let (x, y) = (centre.x + 150.0 * a.cos(), centre.y + 150.0 * a.sin());
-        for (attr, word) in [x.to_bits(), y.to_bits(), x.to_bits(), y.to_bits(), 1.0f32.to_bits(), 0.0f32.to_bits(), 5.0f32.to_bits(), 0].into_iter().enumerate() {
+        for (attr, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            5.0f32.to_bits(),
+            0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             columns[attr].push(word);
         }
     }
     let render = |lights: Vec<Light>, unculled: bool, pitch: f32| -> Vec<u8> {
         let listed = lights.len();
         let units = Arc::new(UnitFeed::default());
-        units.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns.clone()), anim: AnimWrites::default() }));
-        let setup = UnitsSetup { feed: units, capacity: 64, classes: vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.7, 0.7, 0.7], floats: false }], min_pixels: 8.0, models: Vec::new(), rigs: Vec::new() };
+        units.publish(Arc::new(InstanceStream {
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns: at_rest(columns.clone()),
+            anim: AnimWrites::default(),
+        }));
+        let setup = UnitsSetup {
+            feed: units,
+            capacity: 64,
+            classes: vec![UnitClass {
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                color: [0.7, 0.7, 0.7],
+                floats: false,
+            }],
+            min_pixels: 8.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        };
         let particles = Arc::new(ParticleFeed::default());
         let effects = vec![still_effect([0.4, 0.4, 0.4, 0.6], 30.0, false)];
         for k in 0..12 {
-            particles.emit(Burst { pos: [centre.x + 20.0 * k as f32 - 120.0, 30.0, centre.y], ground: true, effect: 0, count: 1, scale: 1.0, seed: k });
+            particles.emit(Burst {
+                pos: [centre.x + 20.0 * k as f32 - 120.0, 30.0, centre.y],
+                ground: true,
+                effect: 0,
+                count: 1,
+                scale: 1.0,
+                seed: k,
+            });
         }
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_water()
             .with_units(setup)
-            .with_particles(ParticlesSetup { feed: particles, capacity: 64, effects, downscale: 2, blend: ParticleBlend::Sorted })
+            .with_particles(ParticlesSetup {
+                feed: particles,
+                capacity: 64,
+                effects,
+                downscale: 2,
+                blend: ParticleBlend::Sorted,
+            })
             .with_lights(lights);
         if unculled {
             app = app.with_unculled_lights();
@@ -5834,17 +9482,32 @@ fn lights_clusters_match_the_unculled_reference() {
             view.camera.pitch = pitch;
             view.camera.distance = 700.0;
         }
-        let extent = vk::Extent2D { width: 320, height: 200 };
+        let extent = vk::Extent2D {
+            width: 320,
+            height: 200,
+        };
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         let stats = *app.light_stats().lock().unwrap();
         if !unculled && listed > 0 {
             // The culls listed some lights in the clusters (far fewer than
             // every light in every cluster) and cut none.
-            assert!(stats.indices > 0 && (stats.indices as usize) < listed * 1000, "{stats:?}");
+            assert!(
+                stats.indices > 0 && (stats.indices as usize) < listed * 1000,
+                "{stats:?}"
+            );
             assert_eq!((stats.overflow, stats.dropped), (0, 0), "no list cut: {stats:?}");
         }
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -5858,11 +9521,27 @@ fn lights_clusters_match_the_unculled_reference() {
         let lit = render(lights.clone(), false, pitch);
         let differ = lit.chunks(4).zip(reference.chunks(4)).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "pitch {pitch}: the clustered frame equals the unculled one");
-        let brighter = |frame: &[u8]| frame.chunks(4).zip(dark.chunks(4)).filter(|(a, b)| a[..3].iter().zip(&b[..3]).map(|(x, y)| *x as i32 - *y as i32).sum::<i32>() > 12).count();
+        let brighter = |frame: &[u8]| {
+            frame
+                .chunks(4)
+                .zip(dark.chunks(4))
+                .filter(|(a, b)| {
+                    a[..3]
+                        .iter()
+                        .zip(&b[..3])
+                        .map(|(x, y)| *x as i32 - *y as i32)
+                        .sum::<i32>()
+                        > 12
+                })
+                .count()
+        };
         let total = lit.len() / 4;
         for (name, frame) in [("reference", &reference), ("clustered", &lit)] {
             let n = brighter(frame);
-            assert!(n > total / 50, "pitch {pitch}: the {name} lights light the ground ({n} of {total} pixels brighter)");
+            assert!(
+                n > total / 50,
+                "pitch {pitch}: the {name} lights light the ground ({n} of {total} pixels brighter)"
+            );
         }
     }
     assert_clean(&gpu);
@@ -5888,10 +9567,19 @@ fn scar_normal_maps_relight_the_ground() {
 
     let gpu = gpu();
     let n = 129;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.5; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.5; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
 
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
     let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
@@ -5905,14 +9593,24 @@ fn scar_normal_maps_relight_the_ground() {
     }
     let (atlas, flat) = (Arc::new(atlas), Arc::new(flat));
 
-    let extent = vk::Extent2D { width: 640, height: 480 };
+    let extent = vk::Extent2D {
+        width: 640,
+        height: 480,
+    };
     let centre = [512.0f32, 512.0];
     let render = |atlas: &Arc<ae_render::decals::DecalAtlas>, camera: Camera, decal: bool| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
         if decal {
-            feed.place_all(&[Decal { blend: Blend::Modulate, ..Decal::permanent(centre, [16.0, 16.0], 0.6, layer) }]);
+            feed.place_all(&[Decal {
+                blend: Blend::Modulate,
+                ..Decal::permanent(centre, [16.0, 16.0], 0.6, layer)
+            }]);
         }
-        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_decals(DecalsSetup { feed, capacity: 8, atlas: Some(atlas.clone()) });
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_decals(DecalsSetup {
+            feed,
+            capacity: 8,
+            atlas: Some(atlas.clone()),
+        });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -5920,8 +9618,17 @@ fn scar_normal_maps_relight_the_ground() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 8, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -5932,7 +9639,14 @@ fn scar_normal_maps_relight_the_ground() {
     // compressed midtones shrink it (3.0 was under ACES at 0.596 ground,
     // 2.93 now), so "close" asks for 2.5.
     for (name, distance, min_mean) in [("close", 50.0f32, 2.5f32), ("gameplay", 250.0, 1.0)] {
-        let camera = Camera { target: Vec2::from(centre), ground: 50.0, distance, yaw: 0.4, pitch: 0.9, fov_y: 0.8 };
+        let camera = Camera {
+            target: Vec2::from(centre),
+            ground: 50.0,
+            distance,
+            yaw: 0.4,
+            pitch: 0.9,
+            fov_y: 0.8,
+        };
         let none = render(&atlas, camera, false);
         let mapped = render(&atlas, camera, true);
         let flattened = render(&flat, camera, true);
@@ -5940,18 +9654,37 @@ fn scar_normal_maps_relight_the_ground() {
             for (tag, pixels) in [("mapped", &mapped), ("flat", &flattened)] {
                 let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
                 ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
-                std::fs::write(std::path::Path::new(&dir).join(format!("scar-normals-{name}-{tag}.ppm")), ppm).unwrap();
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!("scar-normals-{name}-{tag}.ppm")),
+                    ppm,
+                )
+                .unwrap();
             }
         }
         // The footprint: where the scar (either version) changed the ground.
-        let footprint: Vec<usize> = (0..none.len() / 4).map(|i| i * 4).filter(|&i| (luma(&none, i) - luma(&mapped, i)).abs() > 1.0 || (luma(&none, i) - luma(&flattened, i)).abs() > 1.0).collect();
-        let deltas: Vec<f32> = footprint.iter().map(|&i| (luma(&mapped, i) - luma(&flattened, i)).abs()).collect();
+        let footprint: Vec<usize> = (0..none.len() / 4)
+            .map(|i| i * 4)
+            .filter(|&i| {
+                (luma(&none, i) - luma(&mapped, i)).abs() > 1.0 || (luma(&none, i) - luma(&flattened, i)).abs() > 1.0
+            })
+            .collect();
+        let deltas: Vec<f32> = footprint
+            .iter()
+            .map(|&i| (luma(&mapped, i) - luma(&flattened, i)).abs())
+            .collect();
         let mean = deltas.iter().sum::<f32>() / deltas.len().max(1) as f32;
         let over2 = deltas.iter().filter(|&&d| d > 2.0).count() as f32 / deltas.len().max(1) as f32;
         let scar = footprint.iter().map(|&i| luma(&flattened, i)).sum::<f32>() / footprint.len().max(1) as f32;
-        println!("scar normals {name}: footprint {} px, mean |dluma| {mean:.2}, {:.0} % over 2, scar luma {scar:.0} (green up: {up})", footprint.len(), over2 * 100.0);
+        println!(
+            "scar normals {name}: footprint {} px, mean |dluma| {mean:.2}, {:.0} % over 2, scar luma {scar:.0} (green up: {up})",
+            footprint.len(),
+            over2 * 100.0
+        );
         assert!(footprint.len() > 200, "{name}: scar out of view");
-        assert!(mean > min_mean, "{name}: the normal map barely changes the frame (mean |dluma| {mean})");
+        assert!(
+            mean > min_mean,
+            "{name}: the normal map barely changes the frame (mean |dluma| {mean})"
+        );
     }
     assert_clean(&gpu);
 }
@@ -5979,14 +9712,28 @@ fn mips_are_made_on_the_gpu() {
     // Two layers, 2x2: opaque red with one transparent blue texel; white
     // and black, opaque.
     let red: Vec<u8> = [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [0, 0, 255, 0]].concat();
-    let grey: Vec<u8> = [[255, 255, 255, 255], [0, 0, 0, 255], [255, 255, 255, 255], [0, 0, 0, 255]].concat();
+    let grey: Vec<u8> = [
+        [255, 255, 255, 255],
+        [0, 0, 0, 255],
+        [255, 255, 255, 255],
+        [0, 0, 0, 255],
+    ]
+    .concat();
     let levels = make(vk::Format::R8G8B8A8_SRGB, 2, &[&red, &grey], MipFilter::Coverage, 4);
     assert_eq!(levels.len(), 2);
     assert_eq!(&levels[0][..16], &red[..], "mip 0 is the upload");
     println!("coverage: {:?}", levels[1]);
-    assert_eq!(&levels[1][..4], &[255, 0, 0, 191], "the transparent blue leaves no colour");
+    assert_eq!(
+        &levels[1][..4],
+        &[255, 0, 0, 191],
+        "the transparent blue leaves no colour"
+    );
     let g = levels[1][4];
-    assert!((187..=189).contains(&g) && levels[1][7] == 255, "black and white average in linear light: {:?}", &levels[1][4..]);
+    assert!(
+        (187..=189).contains(&g) && levels[1][7] == 255,
+        "black and white average in linear light: {:?}",
+        &levels[1][4..]
+    );
 
     // Normals: two texels leaning +x (x 0.8, z 0.6), two flat; roughness
     // 0.2 / 0.6, glow 0 / 1.
@@ -6006,7 +9753,11 @@ fn mips_are_made_on_the_gpu() {
     println!("normal: {:?}, want x {want}", levels[1]);
     assert!((got - want).abs() <= 1, "renormalised x: {got}, want {want}");
     assert!((got - 179).abs() > 3, "not the plain average of x");
-    assert!((levels[1][2] as i32 - 102).abs() <= 1 && (levels[1][3] as i32 - 128).abs() <= 1, "roughness and glow averaged: {:?}", levels[1]);
+    assert!(
+        (levels[1][2] as i32 - 102).abs() <= 1 && (levels[1][3] as i32 - 128).abs() <= 1,
+        "roughness and glow averaged: {:?}",
+        levels[1]
+    );
     let rg: Vec<u8> = surface.chunks(4).flat_map(|t| [t[0], t[1]]).collect();
     let levels = make(vk::Format::R8G8_UNORM, 2, &[&rg], MipFilter::Normal, 2);
     assert!((levels[1][0] as i32 - want).abs() <= 1, "RG8 normals: {:?}", levels[1]);
@@ -6057,16 +9808,28 @@ fn y2020(c: [f32; 3]) -> f32 {
 
 fn srgb_linear(v: u8) -> f32 {
     let v = v as f32 / 255.0;
-    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Run `post.encode` over a constant display image and return the target's
 /// bytes for each value: a hand-built graph (no scene), so the values the
 /// shader encodes are exact.
-fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncoding, extent: vk::Extent2D, levels: ae_render::encode::DisplayLevels, working: ae_render::colorspace::WorkingSpace, gamut: ae_render::colorspace::Gamut, values: &[[f32; 4]]) -> Vec<Vec<u8>> {
+fn encode_values(
+    gpu: &Arc<GpuDevice>,
+    encoding: ae_render::encode::OutputEncoding,
+    extent: vk::Extent2D,
+    levels: ae_render::encode::DisplayLevels,
+    working: ae_render::colorspace::WorkingSpace,
+    gamut: ae_render::colorspace::Gamut,
+    values: &[[f32; 4]],
+) -> Vec<Vec<u8>> {
+    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
     use ae_render::encode::{DISPLAY_FORMAT, Encode};
     use ae_render::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder};
-    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
 
     struct Paint {
         display: ResourceId,
@@ -6089,7 +9852,8 @@ fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncodi
                 // The fill pass draws nothing: the clear is the display's
                 // value.
                 1 => {
-                    self.encode.write(ctx.slot, self.encoding, self.levels, self.working, self.gamut);
+                    self.encode
+                        .write(ctx.slot, self.encoding, self.levels, self.working, self.gamut);
                     self.encode.record(ctx, ctx.image(self.display)?, self.sampler)?;
                 }
                 3 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
@@ -6101,37 +9865,105 @@ fn encode_values(gpu: &Arc<GpuDevice>, encoding: ae_render::encode::OutputEncodi
 
     let format = encoding.readback_format();
     let size = extent.width as u64 * extent.height as u64 * encoding.bytes_per_pixel();
-    let display_desc = ImageDesc::color_2d(DISPLAY_FORMAT, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
-    let target_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
-    let buffer_desc = BufferDesc { size, usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let display_desc = ImageDesc::color_2d(
+        DISPLAY_FORMAT,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+    );
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
     let mut graph = FrameGraph::<u8>::new();
     let display = graph.image("display", display_desc, ResourceClass::External);
     let target = graph.image("target", target_desc, ResourceClass::External);
     let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
-    graph.pass("fill", PassKind::Graphics, 0).color(display, LoadOp::Clear).id();
-    graph.pass("encode", PassKind::Graphics, 1).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
-    graph.pass("copy", PassKind::Transfer, 2).access(target, Role::TransferSrc).access(buffer, Role::TransferDst).id();
-    graph.pass("host read", PassKind::Transfer, 3).access(buffer, Role::HostRead).root().id();
+    graph
+        .pass("fill", PassKind::Graphics, 0)
+        .color(display, LoadOp::Clear)
+        .id();
+    graph
+        .pass("encode", PassKind::Graphics, 1)
+        .sampled(display, ShaderStage::Fragment)
+        .color(target, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 2)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 3)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
 
     let mut image = OwnedImage::new(gpu, display_desc, "display").unwrap();
     let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
     let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
     let bindings = [
-        Binding::Image(ImageBinding { image: image.image, view: image.view, format: display_desc.format, extent, range: image.range(), identity: (0xBEEF << 40) | 1 }),
-        Binding::Image(ImageBinding { image: out.image, view: out.view, format: target_desc.format, extent, range: out.range(), identity: (0xBEEF << 40) | 2 }),
-        Binding::Buffer(BufferBinding { buffer: readback.buffer, offset: 0, size, identity: (0xBEEF << 40) | 3 }),
+        Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format: display_desc.format,
+            extent,
+            range: image.range(),
+            identity: (0xBEEF << 40) | 1,
+        }),
+        Binding::Image(ImageBinding {
+            image: out.image,
+            view: out.view,
+            format: target_desc.format,
+            extent,
+            range: out.range(),
+            identity: (0xBEEF << 40) | 2,
+        }),
+        Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            offset: 0,
+            size,
+            identity: (0xBEEF << 40) | 3,
+        }),
     ];
-    let sampler_info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST);
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST);
     let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
     let encode = Encode::new(gpu, encoding, format, 2).unwrap();
-    let mut paint = Paint { display, target, buffer, encode, sampler, encoding, levels, working, gamut, value: [0.0; 4] };
+    let mut paint = Paint {
+        display,
+        target,
+        buffer,
+        encode,
+        sampler,
+        encoding,
+        levels,
+        working,
+        gamut,
+        value: [0.0; 4],
+    };
     let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
     executor.set_graph(graph).unwrap();
     let mut frames = Vec::new();
     for value in values {
         paint.value = *value;
         let token = executor.begin_frame().unwrap();
-        executor.execute(token, &mut paint, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+        executor
+            .execute(
+                token,
+                &mut paint,
+                &|resource| bindings.get(resource.index()).copied(),
+                &[],
+                &[],
+            )
+            .unwrap();
         executor.wait(token).unwrap();
         frames.push(readback.mapped().unwrap().to_vec());
     }
@@ -6154,12 +9986,28 @@ fn post_encode_writes_st_2084_codes() {
 
     let gpu = gpu();
     let extent = vk::Extent2D { width: 4, height: 4 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
     // Display-linear values: 100, 203 and 1000 nits over the paper white,
     // then one past the peak (8.0 = 1624 nits).
-    let values: [[f32; 4]; 4] = [[100.0 / 203.0, 100.0 / 203.0, 100.0 / 203.0, 1.0], [1.0; 4], [1000.0 / 203.0; 4], [8.0; 4]];
+    let values: [[f32; 4]; 4] = [
+        [100.0 / 203.0, 100.0 / 203.0, 100.0 / 203.0, 1.0],
+        [1.0; 4],
+        [1000.0 / 203.0; 4],
+        [8.0; 4],
+    ];
     let nits = [100.0f32, 203.0, 1000.0, 1000.0];
-    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::Hdr10Pq.default_gamut(), &values);
+    let frames = encode_values(
+        &gpu,
+        OutputEncoding::Hdr10Pq,
+        extent,
+        levels,
+        ae_render::colorspace::WorkingSpace::Bt709,
+        OutputEncoding::Hdr10Pq.default_gamut(),
+        &values,
+    );
     for (frame, want) in frames.iter().zip(nits) {
         let code = pq_code(want);
         let mut worst = 0i32;
@@ -6187,15 +10035,39 @@ fn post_encode_writes_scrgb_relative_to_80_nits() {
     let gpu = gpu();
     let extent = vk::Extent2D { width: 4, height: 4 };
     let value: [f32; 4] = [0.4, 0.2, -0.1, 1.0];
-    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels { paper_white: 203.0, peak: 1000.0 }, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::ScRgb.default_gamut(), &[value]);
+    let frames = encode_values(
+        &gpu,
+        OutputEncoding::ScRgb,
+        extent,
+        DisplayLevels {
+            paper_white: 203.0,
+            peak: 1000.0,
+        },
+        ae_render::colorspace::WorkingSpace::Bt709,
+        OutputEncoding::ScRgb.default_gamut(),
+        &[value],
+    );
     let p = scrgb_pixel(&frames[0], 0);
     let scale = 203.0 / 80.0;
     eprintln!("scRGB: {p:?} for display {value:?}, scale {scale}");
     for k in 0..3 {
-        assert!((p[k] - value[k] * scale).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k] * scale);
+        assert!(
+            (p[k] - value[k] * scale).abs() < 1e-3,
+            "channel {k}: {} vs {}",
+            p[k],
+            value[k] * scale
+        );
     }
     // Paper white at 80 nits: no scale.
-    let frames = encode_values(&gpu, OutputEncoding::ScRgb, extent, DisplayLevels::FLAT, ae_render::colorspace::WorkingSpace::Bt709, OutputEncoding::ScRgb.default_gamut(), &[value]);
+    let frames = encode_values(
+        &gpu,
+        OutputEncoding::ScRgb,
+        extent,
+        DisplayLevels::FLAT,
+        ae_render::colorspace::WorkingSpace::Bt709,
+        OutputEncoding::ScRgb.default_gamut(),
+        &[value],
+    );
     let p = scrgb_pixel(&frames[0], 0);
     for k in 0..3 {
         assert!((p[k] - value[k]).abs() < 1e-3, "channel {k}: {} vs {}", p[k], value[k]);
@@ -6220,16 +10092,31 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let render = |encoding: OutputEncoding, levels: DisplayLevels| -> Vec<u8> {
         // Straight down at flat, untextured ground under the full sun, as
         // the curve's gate: one sunlit surface and the sky above it.
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            })
             .with_display(encoding, levels);
         {
             let view = app.view();
@@ -6240,19 +10127,35 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
     let sdr = render(OutputEncoding::Sdr, DisplayLevels::default());
-    let levels = DisplayLevels { paper_white: 203.0, peak: 203.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 203.0,
+    };
     let hdr = render(OutputEncoding::Hdr10Pq, levels);
     let mut diffs = Vec::new();
     for p in 0..(extent.width * extent.height) as usize {
-        let s = [srgb_linear(sdr[p * 4]), srgb_linear(sdr[p * 4 + 1]), srgb_linear(sdr[p * 4 + 2])];
+        let s = [
+            srgb_linear(sdr[p * 4]),
+            srgb_linear(sdr[p * 4 + 1]),
+            srgb_linear(sdr[p * 4 + 2]),
+        ];
         let h = hdr10_nits(&hdr, p * 4).map(|c| c / levels.paper_white);
         diffs.push((y709(s) - y2020(h)).abs());
     }
@@ -6261,7 +10164,10 @@ fn hdr10_readback_matches_the_sdr_frame_at_paper_white_peak() {
     let p99 = diffs[diffs.len() * 99 / 100];
     let max = diffs[diffs.len() - 1];
     eprintln!("HDR10 at peak = paper white: luminance diff mean {mean:.5}, p99 {p99:.5}, max {max:.5}");
-    assert!(mean < 0.0025, "the HDR frame carries the SDR frame's light: mean {mean}");
+    assert!(
+        mean < 0.0025,
+        "the HDR frame carries the SDR frame's light: mean {mean}"
+    );
     assert!(max < 0.01, "no pixel strays: max {max}");
     assert_clean(&gpu);
 }
@@ -6284,16 +10190,34 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 65, height: 65, data: vec![0.5; 65 * 65] };
+    let heightmap = Heightmap {
+        width: 65,
+        height: 65,
+        data: vec![0.5; 65 * 65],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 160, height: 120 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 160,
+        height: 120,
+    };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            })
             .with_display(OutputEncoding::Hdr10Pq, levels);
         {
             let view = app.view();
@@ -6305,8 +10229,17 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -6323,8 +10256,14 @@ fn hdr10_bt2020_working_space_maps_to_the_output_once() {
             worst = worst.max((a[k] - b[k]).abs() / a[k].max(1.0));
         }
     }
-    eprintln!("HDR10 sky, BT.2020 against BT.709 working space: worst channel {:.2}%", 100.0 * worst);
-    assert!(worst < 0.03, "the wide working space maps to the output once: worst {worst}");
+    eprintln!(
+        "HDR10 sky, BT.2020 against BT.709 working space: worst channel {:.2}%",
+        100.0 * worst
+    );
+    assert!(
+        worst < 0.03,
+        "the wide working space maps to the output once: worst {worst}"
+    );
     assert_clean(&gpu);
 }
 
@@ -6344,14 +10283,29 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 160, height: 120 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 160,
+        height: 120,
+    };
     let render = |encoding: OutputEncoding, levels: DisplayLevels| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
-            .with_tone(ToneParams { bloom: 0.0, ..Default::default() })
+            .with_tone(ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            })
             .with_display(encoding, levels);
         {
             let view = app.view();
@@ -6362,8 +10316,17 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -6374,7 +10337,11 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
     let scale = |sdr: &[u8], hdr: &[u8], factor: f32| -> (f32, f32) {
         let (mut sum, mut worst) = (0.0, 0.0f32);
         for p in 0..(extent.width * extent.height) as usize {
-            let s = [srgb_linear(sdr[p * 4]), srgb_linear(sdr[p * 4 + 1]), srgb_linear(sdr[p * 4 + 2])];
+            let s = [
+                srgb_linear(sdr[p * 4]),
+                srgb_linear(sdr[p * 4 + 1]),
+                srgb_linear(sdr[p * 4 + 2]),
+            ];
             let h = scrgb_pixel(hdr, p * 8);
             for k in 0..3 {
                 let d = (s[k] - h[k] / factor).abs();
@@ -6386,12 +10353,21 @@ fn scrgb_readback_scales_the_display_by_paper_white() {
     };
     let (mean, max) = scale(&sdr, &flat, 1.0);
     eprintln!("scRGB at 80 nits: channel diff mean {mean:.5}, max {max:.5}");
-    assert!(mean < 0.002 && max < 0.01, "80-nit scRGB is the SDR frame: mean {mean}, max {max}");
-    let levels = DisplayLevels { paper_white: 203.0, peak: 203.0 };
+    assert!(
+        mean < 0.002 && max < 0.01,
+        "80-nit scRGB is the SDR frame: mean {mean}, max {max}"
+    );
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 203.0,
+    };
     let scaled = render(OutputEncoding::ScRgb, levels);
     let (mean, max) = scale(&sdr, &scaled, 203.0 / 80.0);
     eprintln!("scRGB at 203 nits (/ 2.5375): channel diff mean {mean:.5}, max {max:.5}");
-    assert!(mean < 0.002 && max < 0.01, "203-nit scRGB over 2.5375 is the SDR frame: mean {mean}, max {max}");
+    assert!(
+        mean < 0.002 && max < 0.01,
+        "203-nit scRGB over 2.5375 is the SDR frame: mean {mean}, max {max}"
+    );
     assert_clean(&gpu);
 }
 
@@ -6415,27 +10391,67 @@ fn hdr_emitters_reach_above_paper_white_and_stop_at_peak() {
 
     let gpu = gpu();
     let n = 65;
-    let heightmap = Heightmap { width: n, height: n, data: vec![0.1; n * n] };
+    let heightmap = Heightmap {
+        width: n,
+        height: n,
+        data: vec![0.1; n * n],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 441.0 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 441.0,
+    };
     let feed = Arc::new(ParticleFeed::default());
     feed.emit_all(&explosion([128.0, 2.0, 128.0], true, 3.0, 7));
     let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
         .with_display(OutputEncoding::Hdr10Pq, levels)
-        .with_particles(ParticlesSetup { feed, capacity: 1024, effects: default_effects(), downscale: 1, blend: ParticleBlend::Sorted })
-        .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
+        .with_particles(ParticlesSetup {
+            feed,
+            capacity: 1024,
+            effects: default_effects(),
+            downscale: 1,
+            blend: ParticleBlend::Sorted,
+        })
+        .with_tone(ToneParams {
+            bloom: 0.0,
+            ..Default::default()
+        });
     {
         let view = app.view();
         let mut view = view.lock().unwrap();
-        view.camera = Camera { target: Vec2::new(128.0, 128.0), ground: 0.0, distance: 40.0, yaw: 0.0, pitch: 0.5, fov_y: 0.8 };
+        view.camera = Camera {
+            target: Vec2::new(128.0, 128.0),
+            ground: 0.0,
+            distance: 40.0,
+            yaw: 0.0,
+            pitch: 0.5,
+            fov_y: 0.8,
+        };
         view.fog = false;
     }
     app.create_offscreen(&gpu, extent).unwrap();
-    let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
     let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
     // The flash lives about 0.2 s: watch the first ten frames. The brightest
     // pixel is its core; across every frame, no channel is above the peak.
@@ -6464,8 +10480,14 @@ fn hdr_emitters_reach_above_paper_white_and_stop_at_peak() {
         band, levels.paper_white, levels.peak
     );
     assert!(y > levels.paper_white, "the emitter is above paper white: {y}");
-    assert!(band, "some pixel is between paper white and the peak (a gradient, not only a clamp)");
-    assert!(worst_channel <= levels.peak * 1.01, "nothing is above the peak: {worst_channel}");
+    assert!(
+        band,
+        "some pixel is between paper white and the peak (a gradient, not only a clamp)"
+    );
+    assert!(
+        worst_channel <= levels.peak * 1.01,
+        "nothing is above the peak: {worst_channel}"
+    );
     assert_clean(&gpu);
 }
 
@@ -6486,15 +10508,30 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 65, height: 65, data: vec![0.5; 65 * 65] };
+    let heightmap = Heightmap {
+        width: 65,
+        height: 65,
+        data: vec![0.5; 65 * 65],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 160, height: 120 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 160,
+        height: 120,
+    };
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
+            .with_tone(ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -6505,8 +10542,17 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -6522,7 +10568,10 @@ fn bt2020_unlit_content_reaches_sdr_within_one_code() {
             differing += (d > 0) as usize;
         }
     }
-    eprintln!("unlit BT.2020 against BT.709: worst {worst} codes, {differing} of {} channels differ", 3 * (extent.width * extent.height) as usize);
+    eprintln!(
+        "unlit BT.2020 against BT.709: worst {worst} codes, {differing} of {} channels differ",
+        3 * (extent.width * extent.height) as usize
+    );
     assert!(worst <= 1, "unlit content reaches SDR within 1 code: worst {worst}");
     assert_clean(&gpu);
 }
@@ -6544,15 +10593,30 @@ fn bt2020_lit_content_differs_from_bt709_by_measured_numbers() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 320, height: 240 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { bloom: 0.0, ..Default::default() });
+            .with_tone(ToneParams {
+                bloom: 0.0,
+                ..Default::default()
+            });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -6562,8 +10626,17 @@ fn bt2020_lit_content_differs_from_bt709_by_measured_numbers() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         run_headless(&gpu, &mut app, target, 4, config).unwrap();
         let pixels = app.readback().unwrap();
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
@@ -6607,7 +10680,10 @@ fn post_encode_compresses_wide_content_into_the_output_gamut() {
 
     let gpu = gpu();
     let extent = vk::Extent2D { width: 4, height: 4 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
     // Display values are in the working space (BT.2020): P3 green expressed
     // there, a P3-inside patch (70% P3 white + 30% P3 green), and BT.2020
     // green, which is outside P3.
@@ -6635,28 +10711,71 @@ fn post_encode_compresses_wide_content_into_the_output_gamut() {
     };
     let decoded: Vec<[f32; 3]> = frames.iter().map(|f| decode(f)).collect();
     let to709 = |c: [f32; 3]| colorspace::convert(Gamut::P3, Gamut::Bt709, c);
-    eprintln!("P3 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}", values[0], decoded[0], to709(decoded[0]));
+    eprintln!(
+        "P3 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}",
+        values[0],
+        decoded[0],
+        to709(decoded[0])
+    );
     eprintln!("P3 patch: {:.4?} -> P3 {:.4?}", values[1], decoded[1]);
-    eprintln!("BT.2020 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}", values[2], decoded[2], to709(decoded[2]));
+    eprintln!(
+        "BT.2020 green: {:.4?} -> P3 {:.4?}, 709 {:.4?}",
+        values[2],
+        decoded[2],
+        to709(decoded[2])
+    );
     // A P3 patch decodes inside P3 (all channels non-negative) and outside
     // BT.709 (a negative channel there).
-    assert!(decoded[0].iter().all(|v| *v >= -1e-3), "P3 green inside P3: {:?}", decoded[0]);
-    assert!(to709(decoded[0]).iter().any(|v| *v < -0.01), "P3 green outside BT.709: {:?}", to709(decoded[0]));
+    assert!(
+        decoded[0].iter().all(|v| *v >= -1e-3),
+        "P3 green inside P3: {:?}",
+        decoded[0]
+    );
+    assert!(
+        to709(decoded[0]).iter().any(|v| *v < -0.01),
+        "P3 green outside BT.709: {:?}",
+        to709(decoded[0])
+    );
     // In gamut: untouched, within the 10-bit quantization (about 1.5% here).
     for k in 0..3 {
-        assert!((decoded[0][k] - p3_green[k]).abs() < 0.02, "P3 green unchanged: {:?}", decoded[0]);
-        assert!((decoded[1][k] - p3_in[k]).abs() < 0.02, "P3 patch unchanged: {:?}", decoded[1]);
+        assert!(
+            (decoded[0][k] - p3_green[k]).abs() < 0.02,
+            "P3 green unchanged: {:?}",
+            decoded[0]
+        );
+        assert!(
+            (decoded[1][k] - p3_in[k]).abs() < 0.02,
+            "P3 patch unchanged: {:?}",
+            decoded[1]
+        );
     }
     // BT.2020 green: compressed into P3 (no negative channel), still outside
     // BT.709, with its luminance and hue kept.
     let wide = colorspace::convert(Gamut::Bt2020, Gamut::P3, values[2]);
     let want = colorspace::compress(Gamut::P3, wide);
-    assert!(decoded[2].iter().all(|v| *v >= -1e-3), "BT.2020 green compresses into P3: {:?}", decoded[2]);
-    assert!(to709(decoded[2]).iter().any(|v| *v < -0.01), "still outside BT.709: {:?}", to709(decoded[2]));
+    assert!(
+        decoded[2].iter().all(|v| *v >= -1e-3),
+        "BT.2020 green compresses into P3: {:?}",
+        decoded[2]
+    );
+    assert!(
+        to709(decoded[2]).iter().any(|v| *v < -0.01),
+        "still outside BT.709: {:?}",
+        to709(decoded[2])
+    );
     let y = |c: [f32; 3]| Gamut::P3.luminance(c);
-    assert!((y(decoded[2]) - y(want)).abs() < 0.01, "luminance kept: {} vs {}", y(decoded[2]), y(want));
+    assert!(
+        (y(decoded[2]) - y(want)).abs() < 0.01,
+        "luminance kept: {} vs {}",
+        y(decoded[2]),
+        y(want)
+    );
     for k in 0..3 {
-        assert!((decoded[2][k] - want[k]).abs() < 0.02, "channel {k}: {:?} vs {want:?}", decoded[2]);
+        assert!(
+            (decoded[2][k] - want[k]).abs() < 0.02,
+            "channel {k}: {:?} vs {want:?}",
+            decoded[2]
+        );
     }
     assert_clean(&gpu);
 }
@@ -6678,15 +10797,31 @@ fn auto_exposure_meters_bt2020_in_its_own_space() {
     use glam::Vec2;
 
     let gpu = gpu();
-    let heightmap = Heightmap { width: 129, height: 129, data: vec![0.5; 129 * 129] };
+    let heightmap = Heightmap {
+        width: 129,
+        height: 129,
+        data: vec![0.5; 129 * 129],
+    };
     let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
     let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, 100.0, 0.0, None);
-    let source = Arc::new(TerrainSource { heightmap, pyramid, info, materials: None });
-    let extent = vk::Extent2D { width: 160, height: 120 };
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let extent = vk::Extent2D {
+        width: 160,
+        height: 120,
+    };
     let render = |working: WorkingSpace| -> Vec<u8> {
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_working_space(working)
-            .with_tone(ToneParams { auto: true, bloom: 0.0, ..Default::default() });
+            .with_tone(ToneParams {
+                auto: true,
+                bloom: 0.0,
+                ..Default::default()
+            });
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -6696,8 +10831,17 @@ fn auto_exposure_meters_bt2020_in_its_own_space() {
             view.fog = false;
         }
         app.create_offscreen(&gpu, extent).unwrap();
-        let target = TargetInfo { extent, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
         // 10 s at the readback clock: adaptation has settled.
         run_headless(&gpu, &mut app, target, 600, config).unwrap();
         let pixels = app.readback().unwrap();
@@ -6706,16 +10850,32 @@ fn auto_exposure_meters_bt2020_in_its_own_space() {
     };
     let linear = |v: u8| -> f32 {
         let v = v as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
     let mean = |pixels: &[u8]| -> f32 {
         let total = (extent.width * extent.height) as f32;
-        pixels.chunks(4).map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0).sum::<f32>() / total
+        pixels
+            .chunks(4)
+            .map(|p| (linear(p[0]) + linear(p[1]) + linear(p[2])) / 3.0)
+            .sum::<f32>()
+            / total
     };
     let narrow = mean(&render(WorkingSpace::Bt709));
     let wide = mean(&render(WorkingSpace::Bt2020));
-    eprintln!("auto-exposed ground: BT.709 {narrow:.4}, BT.2020 {wide:.4}, ratio {:.4}", wide / narrow);
-    assert!((wide / narrow - 1.0).abs() < 0.05, "the meter settles the wide scene at the same key: {:.4} against {:.4}", wide, narrow);
+    eprintln!(
+        "auto-exposed ground: BT.709 {narrow:.4}, BT.2020 {wide:.4}, ratio {:.4}",
+        wide / narrow
+    );
+    assert!(
+        (wide / narrow - 1.0).abs() < 0.05,
+        "the meter settles the wide scene at the same key: {:.4} against {:.4}",
+        wide,
+        narrow
+    );
     assert_clean(&gpu);
 }
 
@@ -6734,22 +10894,40 @@ fn p3_authored_effect_survives_post_encode() {
 
     let gpu = gpu();
     let extent = vk::Extent2D { width: 4, height: 4 };
-    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let levels = DisplayLevels {
+        paper_white: 203.0,
+        peak: 1000.0,
+    };
     let fire = default_effects()[effect::FIRE as usize];
     let authored = [fire.color_end[0], fire.color_end[1], fire.color_end[2]];
     // The upload (ParticleRenderer::new): from the effect's gamut into the
     // working space.
     let display = colorspace::convert(Gamut::P3, Gamut::Bt709, authored);
     assert!(display[2] < -0.01, "the display value is outside BT.709: {display:?}");
-    let frames = encode_values(&gpu, OutputEncoding::Hdr10Pq, extent, levels, WorkingSpace::Bt709, Gamut::P3, &[[display[0], display[1], display[2], 1.0]]);
+    let frames = encode_values(
+        &gpu,
+        OutputEncoding::Hdr10Pq,
+        extent,
+        levels,
+        WorkingSpace::Bt709,
+        Gamut::P3,
+        &[[display[0], display[1], display[2], 1.0]],
+    );
     let nits = hdr10_nits(&frames[0], 0);
     let p3 = colorspace::convert(Gamut::Bt2020, Gamut::P3, nits.map(|n| n / levels.paper_white));
     let back = colorspace::convert(Gamut::P3, Gamut::Bt709, p3);
-    eprintln!("P3 fire end: authored {authored:.4?} -> display (709) {display:.4?} -> decoded P3 {p3:.4?} (709 {back:.4?})");
+    eprintln!(
+        "P3 fire end: authored {authored:.4?} -> display (709) {display:.4?} -> decoded P3 {p3:.4?} (709 {back:.4?})"
+    );
     // The decoded P3 colour is the authored one within the 10-bit PQ's
     // quantization, and it is still outside BT.709.
     for k in 0..3 {
-        assert!((p3[k] - authored[k]).abs() < 0.02, "P3 channel {k}: {} vs {}", p3[k], authored[k]);
+        assert!(
+            (p3[k] - authored[k]).abs() < 0.02,
+            "P3 channel {k}: {} vs {}",
+            p3[k],
+            authored[k]
+        );
     }
     assert!(back.iter().any(|v| *v < -0.01), "still outside BT.709: {back:?}");
     assert_clean(&gpu);

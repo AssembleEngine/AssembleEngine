@@ -256,7 +256,12 @@ pub const PARTICLE_SHADOW_HEIGHT: u32 = SHADOW_MAP_HEIGHT / 4;
 pub const PARTICLE_SHADOW_NAME: &str = "shadows.color";
 pub fn particle_shadow_spec() -> crate::ImageSpec {
     // Usage: sampled (0x4) | colour attachment (0x10).
-    crate::ImageSpec::color_2d(PARTICLE_SHADOW_FORMAT, PARTICLE_SHADOW_WIDTH, PARTICLE_SHADOW_HEIGHT, 0x4 | 0x10)
+    crate::ImageSpec::color_2d(
+        PARTICLE_SHADOW_FORMAT,
+        PARTICLE_SHADOW_WIDTH,
+        PARTICLE_SHADOW_HEIGHT,
+        0x4 | 0x10,
+    )
 }
 
 /// The scene's colour image (HDR): what `terrain.draw`, `units.draw`,
@@ -311,7 +316,10 @@ pub const BLOOM_SCRATCH_NAME: &str = "bloom.1";
 /// The bloom images' size for a target `width` × `height` (a quarter, at
 /// least 1).
 pub fn bloom_size(width: u32, height: u32) -> (u32, u32) {
-    (((width as f32 * 0.25).round() as u32).max(1), ((height as f32 * 0.25).round() as u32).max(1))
+    (
+        ((width as f32 * 0.25).round() as u32).max(1),
+        ((height as f32 * 0.25).round() as u32).max(1),
+    )
 }
 pub fn bloom_spec(width: u32, height: u32) -> crate::ImageSpec {
     let (w, h) = bloom_size(width, height);
@@ -409,7 +417,11 @@ pub enum Program<'a> {
     Library(&'a str),
     /// A fullscreen triangle with this fragment shader into the pass's
     /// colour attachments.
-    Fullscreen { label: &'a str, spirv: &'a [u8], uniform_bytes: u32 },
+    Fullscreen {
+        label: &'a str,
+        spirv: &'a [u8],
+        uniform_bytes: u32,
+    },
 }
 
 /// Writes a program table; each `push` returns the payload to give passes.
@@ -440,7 +452,11 @@ impl ProgramTable {
                 let (no, nl) = self.put(name.as_bytes());
                 [PROGRAM_LIBRARY, no, nl, 0, 0, 0]
             }
-            Program::Fullscreen { label, spirv, uniform_bytes } => {
+            Program::Fullscreen {
+                label,
+                spirv,
+                uniform_bytes,
+            } => {
                 let (no, nl) = self.put(label.as_bytes());
                 let (d, dl) = self.put(spirv);
                 [PROGRAM_FULLSCREEN, no, nl, d, dl, uniform_bytes]
@@ -457,7 +473,12 @@ impl ProgramTable {
     pub fn finish(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut put = |w: u32| out.extend_from_slice(&w.to_le_bytes());
-        for w in [PROGRAM_MAGIC, PROGRAM_VERSION, self.entries.len() as u32, self.blob.len() as u32] {
+        for w in [
+            PROGRAM_MAGIC,
+            PROGRAM_VERSION,
+            self.entries.len() as u32,
+            self.blob.len() as u32,
+        ] {
             put(w);
         }
         for w in self.entries.iter().flatten() {
@@ -470,33 +491,51 @@ impl ProgramTable {
     /// Decode a table: its programs in payload order.
     pub fn decode(bytes: &[u8]) -> Result<Vec<Program<'_>>, String> {
         let word = |i: usize| -> Result<u32, String> {
-            bytes.get(i * 4..i * 4 + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(|| format!("program table truncated at word {i}"))
+            bytes
+                .get(i * 4..i * 4 + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .ok_or_else(|| format!("program table truncated at word {i}"))
         };
         if word(0)? != PROGRAM_MAGIC {
             return Err("not a program table (bad magic)".into());
         }
         if word(1)? != PROGRAM_VERSION {
-            return Err(format!("program table version {} (this host reads {PROGRAM_VERSION})", word(1)?));
+            return Err(format!(
+                "program table version {} (this host reads {PROGRAM_VERSION})",
+                word(1)?
+            ));
         }
         let (count, blob_len) = (word(2)? as usize, word(3)? as usize);
         if count > MAX_PROGRAMS || blob_len > MAX_PROGRAM_BLOB {
-            return Err(format!("program table too large: {count} programs, {blob_len} blob bytes"));
+            return Err(format!(
+                "program table too large: {count} programs, {blob_len} blob bytes"
+            ));
         }
         let blob_start = (PROGRAM_HEADER_WORDS + count * PROGRAM_WORDS) * 4;
         if bytes.len() != blob_start + blob_len {
-            return Err(format!("program table is {} bytes; its header says {}", bytes.len(), blob_start + blob_len));
+            return Err(format!(
+                "program table is {} bytes; its header says {}",
+                bytes.len(),
+                blob_start + blob_len
+            ));
         }
         let blob = &bytes[blob_start..];
         let slice = |offset: u32, len: u32, what: &str, index: usize| -> Result<&[u8], String> {
-            blob.get(offset as usize..offset as usize + len as usize).ok_or_else(|| format!("program {index}: {what} out of bounds"))
+            blob.get(offset as usize..offset as usize + len as usize)
+                .ok_or_else(|| format!("program {index}: {what} out of bounds"))
         };
         (0..count)
             .map(|index| {
                 let w = |k: usize| word(PROGRAM_HEADER_WORDS + index * PROGRAM_WORDS + k);
-                let name = core::str::from_utf8(slice(w(1)?, w(2)?, "name", index)?).map_err(|_| format!("program {index}: name is not UTF-8"))?;
+                let name = core::str::from_utf8(slice(w(1)?, w(2)?, "name", index)?)
+                    .map_err(|_| format!("program {index}: name is not UTF-8"))?;
                 match w(0)? {
                     PROGRAM_LIBRARY => Ok(Program::Library(name)),
-                    PROGRAM_FULLSCREEN => Ok(Program::Fullscreen { label: name, spirv: slice(w(3)?, w(4)?, "shader", index)?, uniform_bytes: w(5)? }),
+                    PROGRAM_FULLSCREEN => Ok(Program::Fullscreen {
+                        label: name,
+                        spirv: slice(w(3)?, w(4)?, "shader", index)?,
+                        uniform_bytes: w(5)?,
+                    }),
                     kind => Err(format!("program {index}: unknown kind {kind}")),
                 }
             })
@@ -513,10 +552,27 @@ mod tests {
         let mut t = ProgramTable::new();
         assert_eq!(t.library("terrain.draw"), 0);
         let spirv = [0x0723_0203u32.to_le_bytes(), [1, 2, 3, 4]].concat();
-        assert_eq!(t.push(Program::Fullscreen { label: "post", spirv: &spirv, uniform_bytes: 32 }), 1);
+        assert_eq!(
+            t.push(Program::Fullscreen {
+                label: "post",
+                spirv: &spirv,
+                uniform_bytes: 32
+            }),
+            1
+        );
         let bytes = t.finish();
         let programs = ProgramTable::decode(&bytes).unwrap();
-        assert_eq!(programs, [Program::Library("terrain.draw"), Program::Fullscreen { label: "post", spirv: &spirv, uniform_bytes: 32 }]);
+        assert_eq!(
+            programs,
+            [
+                Program::Library("terrain.draw"),
+                Program::Fullscreen {
+                    label: "post",
+                    spirv: &spirv,
+                    uniform_bytes: 32
+                }
+            ]
+        );
         assert!(ProgramTable::decode(&bytes[..bytes.len() - 1]).is_err());
         let mut bad = bytes.clone();
         bad[0] ^= 1;
@@ -536,7 +592,12 @@ mod tests {
 
     #[test]
     fn frame_input_round_trips() {
-        let mut input = FrameInput { width: 3, height: 4, time: 1.5, ..FrameInput::default() };
+        let mut input = FrameInput {
+            width: 3,
+            height: 4,
+            time: 1.5,
+            ..FrameInput::default()
+        };
         input.view_proj[5] = -2.0;
         assert_eq!(FrameInput::from_bytes(&input.to_bytes()), input);
     }
@@ -562,7 +623,11 @@ mod tests {
         assert_eq!(back.gamut(), Some(Gamut::P3));
         assert_eq!(Gamut::P3.primaries(), [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
         // The display rule: only SDR has no display intermediate.
-        assert!(!OutputEncoding::Sdr.uses_display() && OutputEncoding::Hdr10Pq.uses_display() && OutputEncoding::ScRgb.uses_display());
+        assert!(
+            !OutputEncoding::Sdr.uses_display()
+                && OutputEncoding::Hdr10Pq.uses_display()
+                && OutputEncoding::ScRgb.uses_display()
+        );
         // Unknown wire values are refusable rather than guessed.
         assert_eq!(OutputEncoding::from_wire(9), None);
         assert_eq!(WorkingSpace::from_wire(2), None);

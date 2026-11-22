@@ -258,7 +258,7 @@ pub struct RunDesc {
     pub events: [EventSpan; MAX_EVENT_READS],
 }
 
-pub const RUN_DESC_BYTES: usize = 56 +4 * MAX_TERMS + 8 * MAX_TERMS + 16 * MAX_EVENT_READS;
+pub const RUN_DESC_BYTES: usize = 56 + 4 * MAX_TERMS + 8 * MAX_TERMS + 16 * MAX_EVENT_READS;
 const _: () = assert!(core::mem::size_of::<RunDesc>() == RUN_DESC_BYTES);
 const _: () = assert!(core::mem::align_of::<RunDesc>() == 8);
 
@@ -279,7 +279,11 @@ impl RunDesc {
             reserved: 0,
             columns: [0; MAX_TERMS],
             term_ids: [0; MAX_TERMS],
-            events: [EventSpan { stream: 0, ptr: 0, count: 0 }; MAX_EVENT_READS],
+            events: [EventSpan {
+                stream: 0,
+                ptr: 0,
+                count: 0,
+            }; MAX_EVENT_READS],
         }
     }
 }

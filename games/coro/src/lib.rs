@@ -68,7 +68,15 @@ fn start(run: &Run) {
         _ => return,
     };
     for _ in 0..count {
-        Spawn::new().with(&Script::default()).with(&Counter { sum: 0, hist: [0; 8], rounds: 0, bad: 0 }).submit();
+        Spawn::new()
+            .with(&Script::default())
+            .with(&Counter {
+                sum: 0,
+                hist: [0; 8],
+                rounds: 0,
+                bad: 0,
+            })
+            .submit();
     }
 }
 
@@ -100,7 +108,13 @@ async fn unit(u: Unit) {
         };
         pulse(u, folded, 1 + acc % 3).await;
         if k % 2 == 0 {
-            Spawn::new().with(&Spark { from: me, born: u.tick(), value: acc }).submit();
+            Spawn::new()
+                .with(&Spark {
+                    from: me,
+                    born: u.tick(),
+                    value: acc,
+                })
+                .submit();
         }
         u.update(|c: &mut Counter| {
             c.rounds += 1;

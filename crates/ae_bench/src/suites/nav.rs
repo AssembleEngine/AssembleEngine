@@ -22,7 +22,16 @@ pub fn crowd(count: usize) -> Vec<Agent> {
         .map(|k| {
             let (x, y) = ((k % side) as f32 * 11.0 + 100.0, (k / side) as f32 * 11.0 + 100.0);
             let heading = WorldPos::new(((k * 7) % 5) as f32 * 40.0 - 80.0, ((k * 3) % 7) as f32 * 30.0 - 90.0);
-            Agent { pos: WorldPos::new(x, y), vel: heading.scaled(0.8), radius: 5.0, max_speed: 112.0, pref: heading, avoids: true, moving: k % 5 != 0, horizon: 0.0 }
+            Agent {
+                pos: WorldPos::new(x, y),
+                vel: heading.scaled(0.8),
+                radius: 5.0,
+                max_speed: 112.0,
+                pref: heading,
+                avoids: true,
+                moving: k % 5 != 0,
+                horizon: 0.0,
+            }
         })
         .collect()
 }
@@ -33,16 +42,31 @@ pub fn run(options: &Options) -> Result<Report> {
     let tag = format!("map{cells}");
     let config = TerrainConfig::new(SEED, cells, CELL_SIZE, SECTOR_CELLS);
 
-    report.time(&format!("{tag}/terrain_generate"), time(options.budget, || Terrain::generate(&config)));
+    report.time(
+        &format!("{tag}/terrain_generate"),
+        time(options.budget, || Terrain::generate(&config)),
+    );
     let terrain = Arc::new(Terrain::generate(&config));
-    report.info(&format!("{tag}/terrain_digest_low32"), terrain.digest() & 0xFFFF_FFFF, "");
+    report.info(
+        &format!("{tag}/terrain_digest_low32"),
+        terrain.digest() & 0xFFFF_FFFF,
+        "",
+    );
 
     let profiles = default_profiles(CELL_SIZE);
     let profile = profiles[0].id;
-    report.time(&format!("{tag}/hierarchy_build_1t"), time(options.budget, || NavHierarchy::build(terrain.clone(), &profiles)));
+    report.time(
+        &format!("{tag}/hierarchy_build_1t"),
+        time(options.budget, || NavHierarchy::build(terrain.clone(), &profiles)),
+    );
     if options.threads > 1 {
         let metric = format!("{tag}/hierarchy_build_{}t", options.threads);
-        report.time(&metric, time(options.budget, || NavHierarchy::build_parallel(terrain.clone(), &profiles, options.threads)));
+        report.time(
+            &metric,
+            time(options.budget, || {
+                NavHierarchy::build_parallel(terrain.clone(), &profiles, options.threads)
+            }),
+        );
     }
     let hierarchy = NavHierarchy::build_parallel(terrain.clone(), &profiles, options.threads);
     let stats = hierarchy.stats();
@@ -58,25 +82,46 @@ pub fn run(options: &Options) -> Result<Report> {
     let key = context_key(&hierarchy, profile, goal).context("goal lost its context key")?;
     let context = build_context(&hierarchy, &key, None).context("context build failed")?;
     report.counter(&format!("{tag}/context_expansions"), context.expansions as u64, "");
-    report.time(&format!("{tag}/context_build"), time(options.budget, || build_context(&hierarchy, &key, None)));
+    report.time(
+        &format!("{tag}/context_build"),
+        time(options.budget, || build_context(&hierarchy, &key, None)),
+    );
 
     // The goal sector's own field: a full-sector Dijkstra.
-    let recipe = field_recipe(&hierarchy, &context, key.goal_sector, key.goal_region, goal).context("no field recipe")?;
+    let recipe =
+        field_recipe(&hierarchy, &context, key.goal_sector, key.goal_region, goal).context("no field recipe")?;
     let grid = hierarchy.grid(profile);
     let field = build_flow_field(&terrain, grid, recipe.key.clone()).context("flow field build failed")?;
     report.counter(&format!("{tag}/field_expansions"), field.expansions as u64, "");
-    report.info(&format!("{tag}/field_reachable_cells"), field.reachable_count() as u64, "");
-    report.time(&format!("{tag}/flow_field_build"), time(options.budget, || build_flow_field(&terrain, grid, recipe.key.clone())));
+    report.info(
+        &format!("{tag}/field_reachable_cells"),
+        field.reachable_count() as u64,
+        "",
+    );
+    report.time(
+        &format!("{tag}/flow_field_build"),
+        time(options.budget, || build_flow_field(&terrain, grid, recipe.key.clone())),
+    );
 
     let agents = crowd(if options.small { 2_000 } else { 10_000 });
     let avoidance = AvoidanceConfig::default();
     let agents_tag = format!("orca{}", agents.len());
     let serial = Par::new(1);
-    report.time(&format!("{agents_tag}/step_1t"), time(options.budget, || compute_velocities(&agents, &avoidance, 1.0 / 30.0, &serial)));
+    report.time(
+        &format!("{agents_tag}/step_1t"),
+        time(options.budget, || {
+            compute_velocities(&agents, &avoidance, 1.0 / 30.0, &serial)
+        }),
+    );
     if options.threads > 1 {
         let pool = Par::new(options.threads);
         let metric = format!("{agents_tag}/step_{}t", options.threads);
-        report.time(&metric, time(options.budget, || compute_velocities(&agents, &avoidance, 1.0 / 30.0, &pool)));
+        report.time(
+            &metric,
+            time(options.budget, || {
+                compute_velocities(&agents, &avoidance, 1.0 / 30.0, &pool)
+            }),
+        );
     }
     Ok(report)
 }

@@ -17,7 +17,8 @@ impl Builder {
         while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
         }
-        self.views.push(json!({"buffer": 0, "byteOffset": self.bin.len(), "byteLength": bytes.len()}));
+        self.views
+            .push(json!({"buffer": 0, "byteOffset": self.bin.len(), "byteLength": bytes.len()}));
         self.bin.extend_from_slice(bytes);
         self.views.len() - 1
     }
@@ -52,14 +53,18 @@ impl Builder {
     fn u16s(&mut self, data: &[u16], ty: &str, count: usize) -> usize {
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let v = self.view(&bytes);
-        self.accessors.push(json!({"bufferView": v, "componentType": 5123, "count": count, "type": ty}));
+        self.accessors
+            .push(json!({"bufferView": v, "componentType": 5123, "count": count, "type": ty}));
         self.accessors.len() - 1
     }
 
     /// The document with `rest` merged in; the buffer as a data URI.
     fn finish(self, mut rest: Value) -> Vec<u8> {
         use base64::Engine as _;
-        let uri = format!("data:application/octet-stream;base64,{}", base64::engine::general_purpose::STANDARD.encode(&self.bin));
+        let uri = format!(
+            "data:application/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&self.bin)
+        );
         rest["asset"] = json!({"version": "2.0"});
         rest["buffers"] = json!([{"byteLength": self.bin.len(), "uri": uri}]);
         rest["bufferViews"] = Value::Array(self.views);
@@ -78,7 +83,8 @@ fn rest_positions(m: &Model) -> Vec<Vec3> {
         .map(|v| {
             let mut q = Vec3::ZERO;
             for k in 0..4 {
-                q += pal[v.joints[k] as usize].transform_point3(Vec3::from(v.position)) * (v.weights[k] as f32 / 65535.0);
+                q += pal[v.joints[k] as usize].transform_point3(Vec3::from(v.position))
+                    * (v.weights[k] as f32 / 65535.0);
             }
             q
         })
@@ -116,12 +122,22 @@ fn punctual_lights_ride_their_nodes() {
     let c = convert(&gltf, None).unwrap();
     let m = &c.model;
     assert_eq!(m.lights.len(), 2, "the directional light is not a model light");
-    assert!(c.warnings.iter().any(|w| w.contains("sun") && w.contains("directional")), "{:?}", c.warnings);
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("sun") && w.contains("directional")),
+        "{:?}",
+        c.warnings
+    );
 
     let point = &m.lights[0];
     assert_eq!(point.kind, LightKind::Point);
     assert_eq!(point.name, "light (unnamed) on node lamp");
-    assert!(Vec3::from(point.color).abs_diff_eq(Vec3::new(0.5, 0.4, 0.3), 1e-6), "{:?}", point.color);
+    assert!(
+        Vec3::from(point.color).abs_diff_eq(Vec3::new(0.5, 0.4, 0.3), 1e-6),
+        "{:?}",
+        point.color
+    );
     assert_eq!(point.intensity, 40.0);
     assert_eq!((point.range, point.inner_angle, point.outer_angle), (25.0, 0.0, 0.0));
     assert_eq!(point.size, 25.0 / 8.0);
@@ -131,7 +147,11 @@ fn punctual_lights_ride_their_nodes() {
     let palette = pose::rest_palette(m);
     let m4 = palette[point.joint as usize];
     let want = GLTF_TO_ENGINE * Vec3::new(1.0, 2.0, 3.0);
-    assert!(m4.transform_point3(Vec3::ZERO).abs_diff_eq(want, 1e-5), "{} vs {want}", m4.transform_point3(Vec3::ZERO));
+    assert!(
+        m4.transform_point3(Vec3::ZERO).abs_diff_eq(want, 1e-5),
+        "{} vs {want}",
+        m4.transform_point3(Vec3::ZERO)
+    );
     // The hull's joint stays at the origin (no translation crept in).
     assert!(palette[m.joints[0].bone as usize].transform_point3(Vec3::ZERO).length() < 1e-6);
 
@@ -173,13 +193,17 @@ fn pieces_and_axes() {
     }));
     let c = convert(&gltf, None).unwrap();
     let m = &c.model;
-    assert_eq!(m.bones.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["__gltf_root", "hull", "turret"]);
+    assert_eq!(
+        m.bones.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+        ["__gltf_root", "hull", "turret"]
+    );
     assert_eq!(m.bones[2].parent, Some(1));
     assert_eq!(m.joints.len(), 1);
     assert_eq!(m.joints[0].bone, 2);
     assert_eq!(m.materials.len(), 1, "the default material");
     // Expected: glTF world positions, then glTF -> engine.
-    let world = Mat4::from_translation(Vec3::new(0.0, 0.0, 2.0)) * Mat4::from_scale_rotation_translation(Vec3::new(1.0, 2.0, 1.0), q, Vec3::ZERO);
+    let world = Mat4::from_translation(Vec3::new(0.0, 0.0, 2.0))
+        * Mat4::from_scale_rotation_translation(Vec3::new(1.0, 2.0, 1.0), q, Vec3::ZERO);
     let got = rest_positions(m);
     for (i, p) in TRI.chunks(3).enumerate() {
         let want = GLTF_TO_ENGINE * world.transform_point3(Vec3::from_slice(p));
@@ -203,9 +227,28 @@ fn skin_reduced_to_four_influences() {
     let nrm = b.floats(&[0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0], "VEC3");
     // Vertex 0: six influences (joints 0..5), weights 6..1; the others on joint 1.
     let j0 = b.u16s(&[0, 1, 2, 3, 1, 0, 0, 0, 1, 0, 0, 0], "VEC4", 3);
-    let w0 = b.floats(&[6.0 / 21.0, 5.0 / 21.0, 4.0 / 21.0, 3.0 / 21.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], "VEC4");
+    let w0 = b.floats(
+        &[
+            6.0 / 21.0,
+            5.0 / 21.0,
+            4.0 / 21.0,
+            3.0 / 21.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        "VEC4",
+    );
     let j1 = b.u16s(&[4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "VEC4", 3);
-    let w1 = b.floats(&[2.0 / 21.0, 1.0 / 21.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "VEC4");
+    let w1 = b.floats(
+        &[2.0 / 21.0, 1.0 / 21.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "VEC4",
+    );
     let uv = b.floats(&[0.0; 6], "VEC2");
     let col = b.floats(&[1.0; 12], "VEC4");
     let mut ibm = Vec::new();
@@ -225,10 +268,18 @@ fn skin_reduced_to_four_influences() {
     let c = convert(&gltf, None).unwrap();
     let m = &c.model;
     let w = |s: &str| c.warnings.iter().any(|x| x.contains(s));
-    assert!(w("more than 4 influences") && w("TEXCOORD_2 dropped") && w("COLOR_1 dropped"), "{:?}", c.warnings);
+    assert!(
+        w("more than 4 influences") && w("TEXCOORD_2 dropped") && w("COLOR_1 dropped"),
+        "{:?}",
+        c.warnings
+    );
     let v0 = m.vertices[0];
     assert_eq!(v0.weights.iter().map(|&w| w as u32).sum::<u32>(), 65535);
-    let names: Vec<&str> = v0.joints.iter().map(|&j| m.bones[m.joints[j as usize].bone as usize].name.as_str()).collect();
+    let names: Vec<&str> = v0
+        .joints
+        .iter()
+        .map(|&j| m.bones[m.joints[j as usize].bone as usize].name.as_str())
+        .collect();
     assert_eq!(names, ["j0", "j1", "j2", "j3"]);
     // 6:5:4:3 renormalised over 18.
     assert!((v0.weights[0] as f32 / 65535.0 - 6.0 / 18.0).abs() < 1e-4);
@@ -254,13 +305,36 @@ fn extensions_required_and_used() {
     let bin = std::mem::take(&mut b.bin);
     let views = b.views.clone();
     let accessors = b.accessors.clone();
-    let make = |d: Value| Builder { bin: bin.clone(), views: views.clone(), accessors: accessors.clone() }.finish(d);
-    let err = convert(&make(doc(&["KHR_draco_mesh_compression"], &["KHR_draco_mesh_compression"])), None).err().unwrap().to_string();
+    let make = |d: Value| {
+        Builder {
+            bin: bin.clone(),
+            views: views.clone(),
+            accessors: accessors.clone(),
+        }
+        .finish(d)
+    };
+    let err = convert(
+        &make(doc(&["KHR_draco_mesh_compression"], &["KHR_draco_mesh_compression"])),
+        None,
+    )
+    .err()
+    .unwrap()
+    .to_string();
     assert!(err.contains("KHR_draco_mesh_compression"), "{err}");
-    let err = convert(&make(doc(&["EXT_meshopt_compression"], &["EXT_meshopt_compression"])), None).err().unwrap().to_string();
+    let err = convert(
+        &make(doc(&["EXT_meshopt_compression"], &["EXT_meshopt_compression"])),
+        None,
+    )
+    .err()
+    .unwrap()
+    .to_string();
     assert!(err.contains("EXT_meshopt_compression"), "{err}");
     let c = convert(&make(doc(&[], &["EXT_something_optional"])), None).unwrap();
-    assert!(c.warnings.iter().any(|w| w.contains("EXT_something_optional")), "{:?}", c.warnings);
+    assert!(
+        c.warnings.iter().any(|w| w.contains("EXT_something_optional")),
+        "{:?}",
+        c.warnings
+    );
 }
 
 fn png(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
@@ -312,18 +386,41 @@ fn material_textures_transform_and_tangents() {
     assert!(mat.double_sided && mat.normal_scale == 0.5 && mat.metallic == 0.2);
     let base = mat.base_color_texture.unwrap();
     assert_eq!(base.uv, 1, "texCoord override");
-    assert_eq!(base.transform, Some(UvTransform { offset: [0.5, 0.0], rotation: 0.25, scale: [2.0, 3.0] }));
-    assert_eq!(base.sampler, Sampler { mag: Filter::Nearest, min: Filter::Linear, mip: None, wrap_s: Wrap::ClampToEdge, wrap_t: Wrap::MirroredRepeat });
+    assert_eq!(
+        base.transform,
+        Some(UvTransform {
+            offset: [0.5, 0.0],
+            rotation: 0.25,
+            scale: [2.0, 3.0]
+        })
+    );
+    assert_eq!(
+        base.sampler,
+        Sampler {
+            mag: Filter::Nearest,
+            min: Filter::Linear,
+            mip: None,
+            wrap_s: Wrap::ClampToEdge,
+            wrap_t: Wrap::MirroredRepeat
+        }
+    );
     let base_img = ktx::read(&m.textures[base.texture as usize]).unwrap();
     // Level 0 only: the renderer makes the mips on the GPU.
-    assert_eq!((base_img.format, base_img.width, base_img.height, base_img.levels.len()), (ktx::Format::RGBA8_SRGB, 4, 2, 1));
+    assert_eq!(
+        (base_img.format, base_img.width, base_img.height, base_img.levels.len()),
+        (ktx::Format::RGBA8_SRGB, 4, 2, 1)
+    );
     assert_eq!(&base_img.levels[0][4..8], &[60, 0, 255, 255]);
     let n = mat.normal_texture.unwrap();
     let n_img = ktx::read(&m.textures[n.texture as usize]).unwrap();
     assert_eq!((n_img.format, n_img.levels.len()), (ktx::Format::RGBA8_UNORM, 1));
     // Tangents generated along +U (= +X here), handedness from the UVs.
     for v in &m.vertices {
-        assert!(Vec3::from_slice(&v.tangent[..3]).abs_diff_eq(Vec3::X, 1e-4), "{:?}", v.tangent);
+        assert!(
+            Vec3::from_slice(&v.tangent[..3]).abs_diff_eq(Vec3::X, 1e-4),
+            "{:?}",
+            v.tangent
+        );
         assert!(v.tangent[3].abs() == 1.0);
     }
     assert_eq!(m.vertices.len(), 4, "welded back");
@@ -338,7 +435,8 @@ fn sparse_strip_and_clip() {
     let idx = b.view(&[2u16.to_le_bytes(), [0, 0]].concat());
     let vals: Vec<u8> = [0.0f32, 0.0, 1.0].iter().flat_map(|f| f.to_le_bytes()).collect();
     let val = b.view(&vals);
-    b.accessors[base]["sparse"] = json!({"count": 1, "indices": {"bufferView": idx, "componentType": 5123}, "values": {"bufferView": val}});
+    b.accessors[base]["sparse"] =
+        json!({"count": 1, "indices": {"bufferView": idx, "componentType": 5123}, "values": {"bufferView": val}});
     b.accessors[base]["min"] = json!([0.0, 0.0, 0.0]);
     b.accessors[base]["max"] = json!([1.0, 0.0, 1.0]);
     let times = b.floats(&[0.0, 1.0], "SCALAR");
@@ -361,7 +459,11 @@ fn sparse_strip_and_clip() {
     }));
     let c = convert(&gltf, None).unwrap();
     let w = |s: &str| c.warnings.iter().any(|x| x.contains(s));
-    assert!(w("morph targets dropped") && w("morph target weights dropped"), "{:?}", c.warnings);
+    assert!(
+        w("morph targets dropped") && w("morph target weights dropped"),
+        "{:?}",
+        c.warnings
+    );
     // A strip of four: two triangles; the sparse value replaced (9, 9, 9).
     let m = Model::from_bytes(&c.model.to_bytes()).unwrap();
     assert_eq!(m.indices.len(), 6);
@@ -372,7 +474,10 @@ fn sparse_strip_and_clip() {
     assert!(ns.windows(2).all(|p| p[0].abs_diff_eq(p[1], 1e-6)), "{ns:?}");
     assert_eq!(m.clips.len(), 1);
     let clip = &m.clips[0];
-    assert_eq!((clip.name.as_str(), clip.duration, clip.channels.len()), ("spin", 1.0, 2));
+    assert_eq!(
+        (clip.name.as_str(), clip.duration, clip.channels.len()),
+        ("spin", 1.0, 2)
+    );
     let mut p = pose::Pose::rest(&m);
     p.sample(&m, 0, 0.5);
     assert!(p.rotation[1].abs_diff_eq(glam::Quat::from_rotation_y(0.5), 1e-5));
@@ -381,14 +486,28 @@ fn sparse_strip_and_clip() {
 
 #[test]
 fn basis_ktx2_transcoded_to_bc7() {
-    use basisu_c_sys::extra::{BasisuEncoder, BasisuEncoderParams, SourceImage, SourceImageFormat, basisu_encoder_init};
     use basisu_c_sys::BasisTextureFormat;
+    use basisu_c_sys::extra::{
+        BasisuEncoder, BasisuEncoderParams, SourceImage, SourceImageFormat, basisu_encoder_init,
+    };
     basisu_encoder_init();
     let (w, h) = (16u32, 8u32);
-    let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i * 3) as u8, (i * 5) as u8, 200, 255]).collect();
+    let rgba: Vec<u8> = (0..w * h)
+        .flat_map(|i| [(i * 3) as u8, (i * 5) as u8, 200, 255])
+        .collect();
     let mut enc = BasisuEncoder::new();
-    enc.set_image(SourceImage { data: &rgba, format: SourceImageFormat::Rgba8, size: basisu_c_sys::extra::types::Extent3d { width: w, height: h, depth_or_array_layers: 1 } }).unwrap();
-    let params = BasisuEncoderParams::new_with_srgb_defaults(BasisTextureFormat::UastcLdr4x4).with_flags(basisu_c_sys::common::BU_COMP_FLAGS_GEN_MIPS_CLAMP);
+    enc.set_image(SourceImage {
+        data: &rgba,
+        format: SourceImageFormat::Rgba8,
+        size: basisu_c_sys::extra::types::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    })
+    .unwrap();
+    let params = BasisuEncoderParams::new_with_srgb_defaults(BasisTextureFormat::UastcLdr4x4)
+        .with_flags(basisu_c_sys::common::BU_COMP_FLAGS_GEN_MIPS_CLAMP);
     let ktx2 = enc.compress(params).unwrap();
     let mut b = Builder::default();
     let pos = b.floats(&TRI, "VEC3");

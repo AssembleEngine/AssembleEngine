@@ -45,9 +45,14 @@ impl ViewPipeline {
         let mut names = Vec::new();
         let mut fields = Vec::new();
         for &c in &components {
-            let decl = schema.components.iter().find(|d| d.name == c).with_context(|| format!("the module declares no `{c}`"))?;
+            let decl = schema
+                .components
+                .iter()
+                .find(|d| d.name == c)
+                .with_context(|| format!("the module declares no `{c}`"))?;
             for f in &decl.fields {
-                let class = ViewClass::from_wire(f.view()).with_context(|| format!("`{c}.{}` has an unknown view class {}", f.name, f.view()))?;
+                let class = ViewClass::from_wire(f.view())
+                    .with_context(|| format!("`{c}.{}` has an unknown view class {}", f.name, f.view()))?;
                 if class == ViewClass::Never || f.size != 4 {
                     continue;
                 }
@@ -56,20 +61,56 @@ impl ViewPipeline {
             }
         }
         // Sensor inputs must be captured even if a game hid them.
-        for (c, f) in [("Body", "x"), ("Body", "y"), ("Team", "ally"), ("Sensor", "los"), ("Sensor", "radar")] {
+        for (c, f) in [
+            ("Body", "x"),
+            ("Body", "y"),
+            ("Team", "ally"),
+            ("Sensor", "los"),
+            ("Sensor", "radar"),
+        ] {
             if !names.iter().any(|(nc, nf)| nc == c && nf == f) {
                 names.push((c.to_string(), f.to_string()));
                 fields.push((format!("{c}.{f}"), ViewClass::Never));
             }
         }
         let at = |c: &str, f: &str| names.iter().position(|(nc, nf)| nc == c && nf == f).unwrap();
-        let (x, y, ally, los, radar) = (at("Body", "x"), at("Body", "y"), at("Team", "ally"), at("Sensor", "los"), at("Sensor", "radar"));
+        let (x, y, ally, los, radar) = (
+            at("Body", "x"),
+            at("Body", "y"),
+            at("Team", "ally"),
+            at("Sensor", "los"),
+            at("Sensor", "radar"),
+        );
         let refs: Vec<(&str, &str)> = names.iter().map(|(c, f)| (c.as_str(), f.as_str())).collect();
         let capture_spec = CaptureSpec::new(schema, &refs)?;
-        ensure!(fields.len() <= 32, "{} viewed fields; a view table takes 32", fields.len());
-        let spec = ViewSpec { fields, x, y, wobble: 3.0 * SENSOR_CELL, wobble_ticks: 30 };
+        ensure!(
+            fields.len() <= 32,
+            "{} viewed fields; a view table takes 32",
+            fields.len()
+        );
+        let spec = ViewSpec {
+            fields,
+            x,
+            y,
+            wobble: 3.0 * SENSOR_CELL,
+            wobble_ticks: 30,
+        };
         let grid = SensorGrid::new(extent, extent, SENSOR_CELL);
-        Ok(Self { spec, capture_spec, capture: Capture::default(), coverage: Coverage::new(grid, allies), names, ally, los, radar, xs: vec![], ys: vec![], ls: vec![], rs: vec![], allies: vec![] })
+        Ok(Self {
+            spec,
+            capture_spec,
+            capture: Capture::default(),
+            coverage: Coverage::new(grid, allies),
+            names,
+            ally,
+            los,
+            radar,
+            xs: vec![],
+            ys: vec![],
+            ls: vec![],
+            rs: vec![],
+            allies: vec![],
+        })
     }
 
     /// Capture the world's current tick and stamp coverage.
@@ -82,7 +123,16 @@ impl ViewPipeline {
         self.ls = f(self.los);
         self.rs = f(self.radar);
         self.allies.clone_from(&c.columns[self.ally]);
-        self.coverage.stamp(&Sensors { x: &self.xs, y: &self.ys, ally: &self.allies, los: &self.ls, radar: &self.rs }, true);
+        self.coverage.stamp(
+            &Sensors {
+                x: &self.xs,
+                y: &self.ys,
+                ally: &self.allies,
+                los: &self.ls,
+                radar: &self.rs,
+            },
+            true,
+        );
         Ok(())
     }
 
@@ -93,7 +143,10 @@ impl ViewPipeline {
 
     /// The frame of the last capture, for observers to build from.
     pub fn frame(&self) -> (u64, Vec<&[u32]>) {
-        (self.capture.tick, self.capture.columns.iter().map(Vec::as_slice).collect())
+        (
+            self.capture.tick,
+            self.capture.columns.iter().map(Vec::as_slice).collect(),
+        )
     }
 
     /// Build `observers`' tables from the last capture.

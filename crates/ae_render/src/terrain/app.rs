@@ -26,28 +26,35 @@
 
 use super::camera::Camera;
 use super::heightmap::{Heightmap, Pyramid};
+use super::renderer::{
+    FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, VisionGrid, Wireframe,
+};
 use super::sun;
 use super::tileset::Tileset;
-use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRenderer, TerrainUpdate, VisionGrid, Wireframe};
-use crate::device::GpuDevice;
-use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
-use crate::memory::{OwnedBuffer, OwnedImage};
-use crate::module::DeclareTarget;
-use crate::thread::{RenderApp, TargetInfo};
-use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
-use crate::fullscreen::FullscreenProgram;
-use crate::module::{ModuleFrame, RenderModule};
 use crate::bloom::{Bloom, BloomPass};
 use crate::colorspace::{Gamut, WorkingSpace};
 use crate::decals::{DecalAtlas, DecalSet, DecalsSetup};
-use crate::exposure::{Exposure, ExposureFrame};
-use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
-use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
-use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
-use crate::lights::{Light, LightFrame, LightRenderer, LightStats};
-use crate::tonemap::{ToneParams, Tonemap};
+use crate::device::GpuDevice;
 use crate::encode::{DisplayLevels, Encode, OutputEncoding};
-use ae_framegraph::{BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage};
+use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
+use crate::exposure::{Exposure, ExposureFrame};
+use crate::fullscreen::FullscreenProgram;
+use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
+use crate::lights::{Light, LightFrame, LightRenderer, LightStats};
+use crate::memory::{OwnedBuffer, OwnedImage};
+use crate::module::DeclareTarget;
+use crate::module::{ModuleFrame, RenderModule};
+use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
+use crate::thread::{RenderApp, TargetInfo};
+use crate::tonemap::{ToneParams, Tonemap};
+use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
+use ae_framegraph::{
+    BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage,
+};
+use ae_render_abi::module::{
+    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program,
+    ProgramTable,
+};
 use anyhow::{Context as _, Result};
 use ash::vk;
 use glam::Vec2;
@@ -79,7 +86,14 @@ impl TerrainSource {
     pub fn overview_camera(&self) -> Camera {
         let (w, h) = self.info.extent();
         let target = Vec2::new(w * 0.5, h * 0.5);
-        Camera { target, ground: self.height_at(target), distance: w.max(h) * 0.6, yaw: 0.0, pitch: 0.75, fov_y: 0.8 }
+        Camera {
+            target,
+            ground: self.height_at(target),
+            distance: w.max(h) * 0.6,
+            yaw: 0.0,
+            pitch: 0.75,
+            fov_y: 0.8,
+        }
     }
 }
 
@@ -151,7 +165,10 @@ pub struct VisionFeed {
 
 impl VisionFeed {
     pub fn new(grid: VisionGrid) -> Self {
-        Self { grid, latest: Mutex::new(None) }
+        Self {
+            grid,
+            latest: Mutex::new(None),
+        }
     }
 
     pub fn publish(&self, frame: Arc<VisionFrame>) {
@@ -178,27 +195,51 @@ pub const NATIVE: u32 = u32::MAX;
 pub enum PassWork {
     Library(LibraryPass),
     /// [`LibraryPass::ReadbackCopy`] with its source image and buffer.
-    Readback { image: ResourceId, buffer: ResourceId },
+    Readback {
+        image: ResourceId,
+        buffer: ResourceId,
+    },
     /// A module's fullscreen program (by payload), sampling `sampled` in
     /// order.
-    Fullscreen { sampled: Vec<ResourceId> },
+    Fullscreen {
+        sampled: Vec<ResourceId>,
+    },
     /// [`LibraryPass::ParticlesDraw`] with its colour attachment, the
     /// depth buffer it samples, and the glow target it writes.
-    Particles { color: ResourceId, depth: ResourceId, glow: ResourceId },
+    Particles {
+        color: ResourceId,
+        depth: ResourceId,
+        glow: ResourceId,
+    },
     /// [`LibraryPass::Tonemap`] with the scene image it samples, the bloom
     /// (the last `bloom.blur_y` output), if the graph has one, and the
     /// exposure image (the eased EV), if the graph has one.
-    Tonemap { scene: ResourceId, bloom: Option<ResourceId>, exposure: Option<ResourceId> },
+    Tonemap {
+        scene: ResourceId,
+        bloom: Option<ResourceId>,
+        exposure: Option<ResourceId>,
+    },
     /// A `post.bloom` pass: its sampled input and colour attachment, and
     /// the exposure image the downsample scales by.
-    Bloom { pass: BloomPass, input: ResourceId, output: ResourceId, exposure: Option<ResourceId> },
+    Bloom {
+        pass: BloomPass,
+        input: ResourceId,
+        output: ResourceId,
+        exposure: Option<ResourceId>,
+    },
     /// [`LibraryPass::ExposureMeter`] with the scene image it meters, the
     /// depth it rebuilds world positions from (to undo the fog of war's
     /// dimming), and the glow (the light the bloom shows), each if the graph
     /// has the meter sample it.
-    ExposureMeter { scene: ResourceId, depth: Option<ResourceId>, glow: Option<ResourceId> },
+    ExposureMeter {
+        scene: ResourceId,
+        depth: Option<ResourceId>,
+        glow: Option<ResourceId>,
+    },
     /// [`LibraryPass::PostEncode`] with the display image it encodes.
-    Encode { display: ResourceId },
+    Encode {
+        display: ResourceId,
+    },
 }
 
 /// What a module's declaration is for: the target's size and (format,
@@ -278,7 +319,12 @@ pub struct HdrSettings {
 
 impl Default for HdrSettings {
     fn default() -> Self {
-        Self { paper_white: None, peak: None, headroom: 1.0, display_peak: 0.0 }
+        Self {
+            paper_white: None,
+            peak: None,
+            headroom: 1.0,
+            display_peak: 0.0,
+        }
     }
 }
 
@@ -426,7 +472,23 @@ pub struct TerrainApp {
 
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
-        let view = TerrainView { camera: source.overview_camera(), tau: 2.0, wireframe: Wireframe::Off, lod_colors: false, fog: true, frozen: None, module_flags: 0, tileset: true, weights: false, vision: true, water: true, time: None, shadows: true, paused: false, bloom: true };
+        let view = TerrainView {
+            camera: source.overview_camera(),
+            tau: 2.0,
+            wireframe: Wireframe::Off,
+            lod_colors: false,
+            fog: true,
+            frozen: None,
+            module_flags: 0,
+            tileset: true,
+            weights: false,
+            vision: true,
+            water: true,
+            time: None,
+            shadows: true,
+            paused: false,
+            bloom: true,
+        };
         let tone = ToneParams::default();
         Self {
             source,
@@ -533,7 +595,12 @@ impl TerrainApp {
     /// encoding directly; a present-path app derives it from the swapchain's
     /// colour space and takes levels from [`Self::with_hdr`] (M13 stage 5).
     pub fn with_display(mut self, encoding: OutputEncoding, levels: DisplayLevels) -> Self {
-        assert!(levels.paper_white > 0.0 && levels.peak >= levels.paper_white, "display levels: paper white {:.3} nits, peak {:.3}", levels.paper_white, levels.peak);
+        assert!(
+            levels.paper_white > 0.0 && levels.peak >= levels.paper_white,
+            "display levels: paper white {:.3} nits, peak {:.3}",
+            levels.paper_white,
+            levels.peak
+        );
         self.encoding = encoding;
         self.levels = levels;
         self
@@ -589,7 +656,10 @@ impl TerrainApp {
 
     /// The window's HDR settings (defaults when the client gave none).
     fn hdr_settings(&self) -> HdrSettings {
-        self.hdr.as_ref().map(|h| *h.lock().unwrap_or_else(|p| p.into_inner())).unwrap_or_default()
+        self.hdr
+            .as_ref()
+            .map(|h| *h.lock().unwrap_or_else(|p| p.into_inner()))
+            .unwrap_or_default()
     }
 
     /// Shade by the sun's shadows: the hills' over the terrain, the units
@@ -706,7 +776,9 @@ impl TerrainApp {
     /// the last frame (after `run_headless`); for tests and tools.
     pub fn last_unit_cascade_counts(&mut self) -> Vec<[u32; crate::shadow::CASCADES]> {
         let slot = self.last_slot;
-        self.unit_renderer.as_mut().map_or(Vec::new(), |units| units.read_cascade_counts(slot))
+        self.unit_renderer
+            .as_mut()
+            .map_or(Vec::new(), |units| units.read_cascade_counts(slot))
     }
 
     /// Each row's skinning palette in the last frame (empty for a dart),
@@ -735,7 +807,8 @@ impl TerrainApp {
     /// scRGB ([`OutputEncoding::readback_format`]).
     pub fn readback(&mut self) -> Option<Vec<u8>> {
         let offscreen = self.offscreen.as_mut()?;
-        let bytes = (offscreen.extent.width as u64 * offscreen.extent.height as u64 * self.encoding.bytes_per_pixel()) as usize;
+        let bytes =
+            (offscreen.extent.width as u64 * offscreen.extent.height as u64 * self.encoding.bytes_per_pixel()) as usize;
         offscreen.buffer.mapped().map(|data| data[..bytes].to_vec())
     }
 
@@ -761,7 +834,11 @@ impl TerrainApp {
         camera.ground = self.source.height_at(camera.target);
         let eye = camera.eye(|p| self.source.height_at(p));
         let view_proj = camera.proj(aspect) * camera.view(eye);
-        let live = LodView { pos: eye, view_proj, proj_scale: camera.proj_scale(self.extent.height as f32) };
+        let live = LodView {
+            pos: eye,
+            view_proj,
+            proj_scale: camera.proj_scale(self.extent.height as f32),
+        };
         FrameParams {
             view_proj,
             cam_pos: eye,
@@ -779,13 +856,26 @@ impl TerrainApp {
             effect_time,
             shadows: view.shadows && self.shadows,
             // y: the working space is BT.2020 (the shaders' `wide` flag).
-            photometry: [self.tone.exposure(), if self.working.is_wide() { 1.0 } else { 0.0 }, self.tone.sun_illuminance, crate::lighting::SKY_ILLUMINANCE],
+            photometry: [
+                self.tone.exposure(),
+                if self.working.is_wide() { 1.0 } else { 0.0 },
+                self.tone.sun_illuminance,
+                crate::lighting::SKY_ILLUMINANCE,
+            ],
             working: self.working,
             // The units' shadows when the graph draws them.
             // (and the particles' coloured shadows when it draws those).
-            unit_shadows: (view.shadows && self.shadows && self.graph_has(LibraryResource::ShadowMap)).then(|| crate::shadow::Cascades {
-                tinted: self.graph_has(LibraryResource::ParticleShadows),
-                ..crate::shadow::cascades(eye, (camera.target3() - eye).normalize(), ((camera.fov_y * 0.5).tan() * aspect, (camera.fov_y * 0.5).tan()), camera.distance, sun::direction())
+            unit_shadows: (view.shadows && self.shadows && self.graph_has(LibraryResource::ShadowMap)).then(|| {
+                crate::shadow::Cascades {
+                    tinted: self.graph_has(LibraryResource::ParticleShadows),
+                    ..crate::shadow::cascades(
+                        eye,
+                        (camera.target3() - eye).normalize(),
+                        ((camera.fov_y * 0.5).tan() * aspect, (camera.fov_y * 0.5).tan()),
+                        camera.distance,
+                        sun::direction(),
+                    )
+                }
             }),
         }
     }
@@ -802,7 +892,11 @@ impl TerrainApp {
 /// renderer sets it.
 /// Distance fog as the sky's radiance and its density.
 fn fog(info: &TerrainInfo, on: bool, working: WorkingSpace) -> [f32; 4] {
-    let density = if on { 1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2) } else { 0.0 };
+    let density = if on {
+        1.0 / (info.cells.0.max(info.cells.1) as f32 * info.cell_size * 1.2)
+    } else {
+        0.0
+    };
     let r = crate::lighting::sky_radiance(working);
     [r[0], r[1], r[2], density]
 }
@@ -814,7 +908,11 @@ pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32
     camera.ground = source.height_at(camera.target);
     let eye = camera.eye(|p| source.height_at(p));
     let view_proj = camera.proj(width as f32 / height.max(1) as f32) * camera.view(eye);
-    LodView { pos: eye, view_proj, proj_scale: camera.proj_scale(height as f32) }
+    LodView {
+        pos: eye,
+        view_proj,
+        proj_scale: camera.proj_scale(height as f32),
+    }
 }
 
 impl RenderApp for TerrainApp {
@@ -865,7 +963,15 @@ impl RenderApp for TerrainApp {
         // The scene's draws write the HDR scene image.
         let color = SCENE_FORMAT;
         let s = &self.source;
-        let shadows = self.shadows.then(|| sun::shadow_heights(&s.heightmap, s.info.cell_size, s.info.height_scale, s.info.height_offset, sun::direction()));
+        let shadows = self.shadows.then(|| {
+            sun::shadow_heights(
+                &s.heightmap,
+                s.info.cell_size,
+                s.info.height_scale,
+                s.info.height_offset,
+                sun::direction(),
+            )
+        });
         let default_atlas;
         let decals = match &self.decals {
             Some(setup) => {
@@ -881,16 +987,46 @@ impl RenderApp for TerrainApp {
             None => None,
         };
         self.decals_written.clear();
-        let terrain = TerrainRenderer::new(gpu, &s.heightmap, &s.pyramid, s.info, s.materials.as_deref(), self.tileset.as_deref(), self.vision.as_ref().map(|f| f.grid), shadows.as_deref(), self.shadows && self.units.is_some(), decals, &lights, color, DEPTH_FORMAT, frames_in_flight)
-            .context("terrain renderer")?;
+        let terrain = TerrainRenderer::new(
+            gpu,
+            &s.heightmap,
+            &s.pyramid,
+            s.info,
+            s.materials.as_deref(),
+            self.tileset.as_deref(),
+            self.vision.as_ref().map(|f| f.grid),
+            shadows.as_deref(),
+            self.shadows && self.units.is_some(),
+            decals,
+            &lights,
+            color,
+            DEPTH_FORMAT,
+            frames_in_flight,
+        )
+        .context("terrain renderer")?;
         if let Some(setup) = &self.units {
             // The looks' colours carry their own gamut tags; the renderer
             // converts them into the working space at upload (stage 4).
-            self.unit_renderer = Some(UnitRenderer::new(gpu, &terrain, &lights, setup, self.working, color, DEPTH_FORMAT, frames_in_flight).context("unit renderer")?);
+            self.unit_renderer = Some(
+                UnitRenderer::new(
+                    gpu,
+                    &terrain,
+                    &lights,
+                    setup,
+                    self.working,
+                    color,
+                    DEPTH_FORMAT,
+                    frames_in_flight,
+                )
+                .context("unit renderer")?,
+            );
         }
         if let Some(setup) = &self.particles {
             // So do the effects' colours and their bursts' light tints.
-            self.particle_renderer = Some(ParticleRenderer::new(gpu, &terrain, &lights, setup, self.working, color, frames_in_flight).context("particle renderer")?);
+            self.particle_renderer = Some(
+                ParticleRenderer::new(gpu, &terrain, &lights, setup, self.working, color, frames_in_flight)
+                    .context("particle renderer")?,
+            );
         }
         self.renderer = Some(terrain);
         self.lights = Some(lights);
@@ -916,7 +1052,12 @@ impl RenderApp for TerrainApp {
                     status.active = true;
                 }
                 Err(error) if self.module.is_none() => return Err(error.context("render module")),
-                Err(error) => self.module_status.lock().unwrap_or_else(|p| p.into_inner()).errors.push(format!("reload rejected, the running module stays: {error:#}")),
+                Err(error) => self
+                    .module_status
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .errors
+                    .push(format!("reload rejected, the running module stays: {error:#}")),
             }
         }
         let (graph, resources, glow) = match self.module.take() {
@@ -927,7 +1068,8 @@ impl RenderApp for TerrainApp {
                         Ok(d) => {
                             let old = std::mem::replace(&mut state.programs, d.programs);
                             self.retire(old);
-                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, Some(self.declare_key(&env)));
+                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) =
+                                (d.graph, d.resources, d.uniform_bytes, Some(self.declare_key(&env)));
                         }
                         Err(error) => {
                             self.module = Some(state);
@@ -941,14 +1083,28 @@ impl RenderApp for TerrainApp {
                 out
             }
             None => {
-                let (graph, wiring) = self.wire(native_graph(&env, self.output), &env, |p| Ok((NATIVE, ScenePassSource::Library(*p))))?;
+                let (graph, wiring) = self.wire(native_graph(&env, self.output), &env, |p| {
+                    Ok((NATIVE, ScenePassSource::Library(*p)))
+                })?;
                 (graph, wiring.resources, wiring.glow)
             }
         };
-        let backbuffers: Vec<ResourceId> = graph.resources.iter().enumerate().filter(|(_, r)| r.class == ResourceClass::Backbuffer).map(|(i, _)| ResourceId(i as u32)).collect();
+        let backbuffers: Vec<ResourceId> = graph
+            .resources
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.class == ResourceClass::Backbuffer)
+            .map(|(i, _)| ResourceId(i as u32))
+            .collect();
         match self.output {
-            TerrainOutput::Present => anyhow::ensure!(backbuffers.len() == 1, "the graph declares {} Backbuffer resources; presenting needs one", backbuffers.len()),
-            TerrainOutput::Readback => anyhow::ensure!(backbuffers.is_empty(), "an offscreen graph declares no Backbuffer"),
+            TerrainOutput::Present => anyhow::ensure!(
+                backbuffers.len() == 1,
+                "the graph declares {} Backbuffer resources; presenting needs one",
+                backbuffers.len()
+            ),
+            TerrainOutput::Readback => {
+                anyhow::ensure!(backbuffers.is_empty(), "an offscreen graph declares no Backbuffer")
+            }
         }
         self.wiring = Some(Wiring { resources, glow });
         Ok((graph, backbuffers.first().copied()))
@@ -990,20 +1146,41 @@ impl RenderApp for TerrainApp {
         // cannot jump the exposure.
         let dt = match self.output {
             TerrainOutput::Readback => 1.0 / 60.0,
-            TerrainOutput::Present => self.last_adapt_at.map_or(0.0, |last| wall_now.saturating_duration_since(last).as_secs_f32().min(0.1)),
+            TerrainOutput::Present => self.last_adapt_at.map_or(0.0, |last| {
+                wall_now.saturating_duration_since(last).as_secs_f32().min(0.1)
+            }),
         };
         self.last_adapt_at = Some(wall_now);
         // The meter undoes the fog of war's dimming where the terrain shades
         // by it this frame.
-        let vision = if params.vision { self.renderer.as_ref().and_then(|r| r.vision_uniform()) } else { None };
+        let vision = if params.vision {
+            self.renderer.as_ref().and_then(|r| r.vision_uniform())
+        } else {
+            None
+        };
         if let Some(exposure) = &mut self.exposure {
-            exposure.write_frame(slot, &ExposureFrame { auto: self.tone.auto, scene_ev100: self.tone.ev100, dt, view_proj: params.view_proj, vision, bloom: if has_bloom { self.tone.bloom } else { 0.0 }, working: self.working });
+            exposure.write_frame(
+                slot,
+                &ExposureFrame {
+                    auto: self.tone.auto,
+                    scene_ev100: self.tone.ev100,
+                    dt,
+                    view_proj: params.view_proj,
+                    vision,
+                    bloom: if has_bloom { self.tone.bloom } else { 0.0 },
+                    working: self.working,
+                },
+            );
         }
         let tone = self.tone;
         if let Some(tonemap) = &mut self.tonemap {
             // SDR writes BT.709; HDR writes the display intermediate in the
             // working space, which post.encode maps to the output gamut.
-            let written = if self.encoding.uses_display() { self.working.gamut() } else { Gamut::Bt709 };
+            let written = if self.encoding.uses_display() {
+                self.working.gamut()
+            } else {
+                Gamut::Bt709
+            };
             tonemap.write(slot, tone, has_bloom, has_exposure, self.working, written);
         }
         let gamut = self.gamut();
@@ -1051,7 +1228,10 @@ impl RenderApp for TerrainApp {
             // (decals never expire: otherwise it would stay on for good).
             let i = &self.source.info;
             let heights = (i.height_offset, i.height_offset + i.height_scale);
-            renderer.set_decals_live(slot, set.any_in_view(&super::renderer::frustum_planes(params.view_proj), heights));
+            renderer.set_decals_live(
+                slot,
+                set.any_in_view(&super::renderer::frustum_planes(params.view_proj), heights),
+            );
         }
         if let (Some(units), Some(setup)) = (self.unit_renderer.as_mut(), self.units.as_ref()) {
             // This slot's previous frame has completed: its count is final.
@@ -1112,27 +1292,50 @@ impl RenderApp for TerrainApp {
             // widest cull radius): bound the lights there so adaptation
             // never hides one it would show.
             // Only a graph with the exposure image adapts.
-            let ev100 = if self.tone.auto && has_exposure { crate::lighting::MIN_EV100 } else { self.tone.ev100 };
+            let ev100 = if self.tone.auto && has_exposure {
+                crate::lighting::MIN_EV100
+            } else {
+                self.tone.ev100
+            };
             let cutoff = crate::lighting::cull_cutoff(crate::lighting::exposure(ev100));
             list.retain(|l| {
                 let (c, r) = l.bounds(cutoff);
                 planes.iter().all(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] >= -r)
             });
-            let clustered = self.wiring.as_ref().is_some_and(|w| w.resources.contains(&Some(LibraryResource::LightClusters)));
+            let clustered = self
+                .wiring
+                .as_ref()
+                .is_some_and(|w| w.resources.contains(&Some(LibraryResource::LightClusters)));
             // The units' models may carry lights, which the pass appends
             // even with no host light.
             let unit_rows = self.unit_renderer.as_ref().map_or(0, |u| u.rows(slot));
             // The append needs the rows; without them the slot's total is
             // stale (no stream this frame) and must not reach the header.
-            let unit_lights = if unit_rows > 0 { self.unit_renderer.as_ref().map_or(0, |u| u.model_light_total(slot)) } else { 0 };
+            let unit_lights = if unit_rows > 0 {
+                self.unit_renderer.as_ref().map_or(0, |u| u.model_light_total(slot))
+            } else {
+                0
+            };
             let model_lights = unit_lights > 0 && self.unit_renderer.as_ref().is_some_and(|u| u.has_model_lights());
             // The map's heights, with room above for the units, the
             // particles and the lights over them.
             let i = &self.source.info;
             let (y_lo, y_hi) = (i.height_offset, i.height_offset + i.height_scale + 80.0);
-            let depths = crate::lights::depth_range(params.view_proj, params.cam_pos, axes[2], camera.near(), y_lo, y_hi);
+            let depths =
+                crate::lights::depth_range(params.view_proj, params.cam_pos, axes[2], camera.near(), y_lo, y_hi);
             let on = clustered && (!list.is_empty() || model_lights);
-            let frame = LightFrame { view_proj: params.view_proj, cam_pos: params.cam_pos, axes, near: camera.near(), extent: self.extent, on, depths, unit_rows, unit_lights, cutoff };
+            let frame = LightFrame {
+                view_proj: params.view_proj,
+                cam_pos: params.cam_pos,
+                axes,
+                near: camera.near(),
+                extent: self.extent,
+                on,
+                depths,
+                unit_rows,
+                unit_lights,
+                cutoff,
+            };
             lights.write_frame(slot, &frame, &list);
             *self.light_stats.lock().unwrap_or_else(|p| p.into_inner()) = lights.stats();
             self.frame_lights = list;
@@ -1153,7 +1356,12 @@ impl RenderApp for TerrainApp {
             };
             input.camera[..3].copy_from_slice(&params.cam_pos.to_array());
             let result = state.module.frame(&input).and_then(|frame| {
-                anyhow::ensure!(frame.uniforms.len() == state.uniform_bytes, "`frame` returned {} uniform bytes; the fullscreen programs declare {}", frame.uniforms.len(), state.uniform_bytes);
+                anyhow::ensure!(
+                    frame.uniforms.len() == state.uniform_bytes,
+                    "`frame` returned {} uniform bytes; the fullscreen programs declare {}",
+                    frame.uniforms.len(),
+                    state.uniform_bytes
+                );
                 Ok(frame)
             });
             match result {
@@ -1167,7 +1375,13 @@ impl RenderApp for TerrainApp {
                 Err(error) => {
                     state.failed = true;
                     state.frame = ModuleFrame::default();
-                    self.module_status.lock().unwrap_or_else(|p| p.into_inner()).errors.push(format!("render module stopped (its last graph keeps rendering): {error:#}"));
+                    self.module_status
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .errors
+                        .push(format!(
+                            "render module stopped (its last graph keeps rendering): {error:#}"
+                        ));
                 }
             }
             state.frames += 1;
@@ -1190,14 +1404,28 @@ impl RenderApp for TerrainApp {
             LibraryResource::UnitPalette => Binding::Buffer(units()?.palette()),
             LibraryResource::ReadbackTarget => {
                 let o = offscreen()?;
-                Binding::Image(ImageBinding { image: o.image.image, view: o.image.view, format: self.output_format, extent: o.extent, range: o.image.range(), identity: (0xAE7 << 40) | 10 })
+                Binding::Image(ImageBinding {
+                    image: o.image.image,
+                    view: o.image.view,
+                    format: self.output_format,
+                    extent: o.extent,
+                    range: o.image.range(),
+                    identity: (0xAE7 << 40) | 10,
+                })
             }
             LibraryResource::ReadbackBuffer => {
                 let o = offscreen()?;
-                Binding::Buffer(BufferBinding { buffer: o.buffer.buffer, offset: 0, size: o.buffer.size, identity: (0xAE7 << 40) | 11 })
+                Binding::Buffer(BufferBinding {
+                    buffer: o.buffer.buffer,
+                    offset: 0,
+                    size: o.buffer.size,
+                    identity: (0xAE7 << 40) | 11,
+                })
             }
             LibraryResource::ShadowMap => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().binding()),
-            LibraryResource::ParticleShadows => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().color_binding()),
+            LibraryResource::ParticleShadows => {
+                Binding::Image(self.renderer.as_ref()?.unit_shadow_map().color_binding())
+            }
             LibraryResource::ParticleState => Binding::Buffer(self.particle_renderer.as_ref()?.state()),
             LibraryResource::ParticleKeys => Binding::Buffer(self.particle_renderer.as_ref()?.keys()),
             LibraryResource::ParticleIndirect => Binding::Buffer(self.particle_renderer.as_ref()?.indirect()),
@@ -1225,7 +1453,8 @@ impl RenderApp for TerrainApp {
     }
 
     fn retarget(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<bool> {
-        if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight {
+        if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight
+        {
             self.destroy(gpu);
             self.create(gpu, target, frames_in_flight)?;
             return Ok(true);
@@ -1295,14 +1524,30 @@ impl TerrainApp {
         if self.hdr.is_some() && self.encoding.uses_display() {
             self.levels = self.hdr_settings().levels(self.encoding);
         }
-        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { target.format };
+        let output = if self.output == TerrainOutput::Readback {
+            self.encoding.readback_format()
+        } else {
+            target.format
+        };
         self.output_format = output;
-        self.output_space = if self.output == TerrainOutput::Present { target.color_space } else { vk::ColorSpaceKHR::SRGB_NONLINEAR };
+        self.output_space = if self.output == TerrainOutput::Present {
+            target.color_space
+        } else {
+            vk::ColorSpaceKHR::SRGB_NONLINEAR
+        };
         // In HDR the tonemap writes the display intermediate, paper-white
         // units; `post.encode` maps it to the output.
-        let tonemap_out = if self.encoding.uses_display() { crate::encode::DISPLAY_FORMAT } else { output };
+        let tonemap_out = if self.encoding.uses_display() {
+            crate::encode::DISPLAY_FORMAT
+        } else {
+            output
+        };
         self.tonemap = Some(Tonemap::new(gpu, tonemap_out, frames_in_flight).context("tonemap")?);
-        self.encode = if self.encoding.uses_display() { Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?) } else { None };
+        self.encode = if self.encoding.uses_display() {
+            Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?)
+        } else {
+            None
+        };
         Ok(())
     }
 
@@ -1322,10 +1567,23 @@ impl TerrainApp {
     /// Create the offscreen target and readback buffer for `extent`
     /// (readback output only; call before `run_headless`).
     pub fn create_offscreen(&mut self, gpu: &GpuDevice, extent: vk::Extent2D) -> Result<()> {
-        let desc = ImageDesc::color_2d(self.encoding.readback_format(), extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+        let desc = ImageDesc::color_2d(
+            self.encoding.readback_format(),
+            extent.width,
+            extent.height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+        );
         let image = OwnedImage::new(gpu, desc, "terrain offscreen")?;
         let size = extent.width as u64 * extent.height as u64 * self.encoding.bytes_per_pixel();
-        let buffer = OwnedBuffer::new(gpu, BufferDesc { size, usage: vk::BufferUsageFlags::TRANSFER_DST }, MemoryLocation::GpuToCpu, "terrain readback")?;
+        let buffer = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size,
+                usage: vk::BufferUsageFlags::TRANSFER_DST,
+            },
+            MemoryLocation::GpuToCpu,
+            "terrain readback",
+        )?;
         self.offscreen = Some(Offscreen { image, buffer, extent });
         Ok(())
     }
@@ -1428,33 +1686,65 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     }
                 }
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
-                LibraryPass::LightsCluster => self.lights.context("lights not created")?.record_cluster(ctx, self.units),
+                LibraryPass::LightsCluster => self
+                    .lights
+                    .context("lights not created")?
+                    .record_cluster(ctx, self.units),
                 LibraryPass::ExposureClear => exposure()?.record_clear(ctx),
                 LibraryPass::ExposureAdapt => exposure()?.record_adapt(ctx),
                 LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
-                LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => anyhow::bail!("bloom passes are wired as PassWork::Bloom"),
+                LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => {
+                    anyhow::bail!("bloom passes are wired as PassWork::Bloom")
+                }
                 LibraryPass::ExposureMeter => anyhow::bail!("exposure.meter is wired as PassWork::ExposureMeter"),
                 LibraryPass::PostEncode => anyhow::bail!("post.encode is wired as PassWork::Encode"),
                 LibraryPass::HostRead | LibraryPass::Present => {}
             },
             PassWork::Fullscreen { sampled } => {
                 let programs = self.programs.context("fullscreen pass without a module")?;
-                let (program, _) = programs.get(pass.program as usize).and_then(Option::as_ref).context("fullscreen program missing")?;
+                let (program, _) = programs
+                    .get(pass.program as usize)
+                    .and_then(Option::as_ref)
+                    .context("fullscreen program missing")?;
                 let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
                 program.record(ctx, &images, self.sampler)?;
             }
-            PassWork::Particles { color, depth, glow } => particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?, ctx.image(*glow)?)?,
+            PassWork::Particles { color, depth, glow } => {
+                particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?, ctx.image(*glow)?)?
+            }
             PassWork::Tonemap { scene, bloom, exposure } => {
                 let bloom = bloom.map(|r| ctx.image(r)).transpose()?;
                 let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
-                self.tonemap.context("tonemap not created")?.record(ctx, ctx.image(*scene)?, bloom, exposure, self.sampler)?
+                self.tonemap.context("tonemap not created")?.record(
+                    ctx,
+                    ctx.image(*scene)?,
+                    bloom,
+                    exposure,
+                    self.sampler,
+                )?
             }
-            PassWork::Encode { display } => self.encode.context("encode not created")?.record(ctx, ctx.image(*display)?, self.sampler)?,
-            PassWork::Bloom { pass: bloom_pass, input, output, exposure } => {
+            PassWork::Encode { display } => {
+                self.encode
+                    .context("encode not created")?
+                    .record(ctx, ctx.image(*display)?, self.sampler)?
+            }
+            PassWork::Bloom {
+                pass: bloom_pass,
+                input,
+                output,
+                exposure,
+            } => {
                 let exposure = exposure.map(|r| ctx.image(r)).transpose()?;
-                self.bloom.context("bloom not created")?.record(ctx, *bloom_pass, ctx.image(*input)?, ctx.image(*output)?, exposure, self.sampler)?
+                self.bloom.context("bloom not created")?.record(
+                    ctx,
+                    *bloom_pass,
+                    ctx.image(*input)?,
+                    ctx.image(*output)?,
+                    exposure,
+                    self.sampler,
+                )?
             }
             PassWork::ExposureMeter { scene, depth, glow } => {
                 let depth = depth.map(|r| ctx.image(r)).transpose()?;
@@ -1492,22 +1782,54 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     let indirect = library_buffer(&mut graph, LibraryResource::TerrainIndirect);
     // Sampled usage for the particles (always, so a graph is the same
     // with and without them up to their passes).
-    let depth = graph.image("depth", ImageDesc::depth_2d(env.depth_format, width, height, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+    let depth = graph.image(
+        "depth",
+        ImageDesc::depth_2d(
+            env.depth_format,
+            width,
+            height,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        ),
+        ResourceClass::Transient,
+    );
     let target = match output {
-        TerrainOutput::Present => graph.image("target", ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT), ResourceClass::Backbuffer),
+        TerrainOutput::Present => graph.image(
+            "target",
+            ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+            ResourceClass::Backbuffer,
+        ),
         TerrainOutput::Readback => graph.image(
             LibraryResource::ReadbackTarget.name(),
-            ImageDesc::color_2d(env.color_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC),
+            ImageDesc::color_2d(
+                env.color_format,
+                width,
+                height,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            ),
             ResourceClass::External,
         ),
     };
     // The HDR scene the draws write; `post.tonemap` turns it into the target
     // (SDR) or into the display, which `post.encode` maps to the target (HDR).
-    let scene = graph.image(ae_render_abi::module::SCENE_NAME, ImageDesc::color_2d(env.scene_format, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED), ResourceClass::Transient);
+    let scene = graph.image(
+        ae_render_abi::module::SCENE_NAME,
+        ImageDesc::color_2d(
+            env.scene_format,
+            width,
+            height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        ),
+        ResourceClass::Transient,
+    );
     let display = env.encoding.uses_display().then(|| {
         graph.image(
             crate::encode::DISPLAY_NAME,
-            ImageDesc::color_2d(crate::encode::DISPLAY_FORMAT, width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED),
+            ImageDesc::color_2d(
+                crate::encode::DISPLAY_FORMAT,
+                width,
+                height,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            ),
             ResourceClass::Transient,
         )
     });
@@ -1515,23 +1837,49 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     // scene draw; the bloom reads it at a quarter of the size.
     let glow = graph.image(
         ae_render_abi::module::GLOW_NAME,
-        ImageDesc::color_2d(vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32), width, height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED),
+        ImageDesc::color_2d(
+            vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32),
+            width,
+            height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        ),
         ResourceClass::Transient,
     );
     let (bw, bh) = ae_render_abi::module::bloom_size(width, height);
     let bloom_image = |graph: &mut FrameGraph<LibraryPass>, name: &str| {
         graph.image(
             name,
-            ImageDesc::color_2d(vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32), bw, bh, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED),
+            ImageDesc::color_2d(
+                vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32),
+                bw,
+                bh,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            ),
             ResourceClass::Transient,
         )
     };
     let bloom0 = bloom_image(&mut graph, ae_render_abi::module::BLOOM_NAME);
     let bloom1 = bloom_image(&mut graph, ae_render_abi::module::BLOOM_SCRATCH_NAME);
     // The unit buffers, then the units' shadow map.
-    let units = env.units.then(|| [LibraryResource::UnitInstances, LibraryResource::UnitVisible, LibraryResource::UnitIndirect, LibraryResource::UnitCounts, LibraryResource::UnitPalette].map(|r| library_buffer(&mut graph, r)));
+    let units = env.units.then(|| {
+        [
+            LibraryResource::UnitInstances,
+            LibraryResource::UnitVisible,
+            LibraryResource::UnitIndirect,
+            LibraryResource::UnitCounts,
+            LibraryResource::UnitPalette,
+        ]
+        .map(|r| library_buffer(&mut graph, r))
+    });
     let map = (env.units && env.shadows).then(|| library_shadow_map(&mut graph));
-    let particles = env.particles.then(|| [LibraryResource::ParticleState, LibraryResource::ParticleKeys, LibraryResource::ParticleIndirect].map(|r| library_buffer(&mut graph, r)));
+    let particles = env.particles.then(|| {
+        [
+            LibraryResource::ParticleState,
+            LibraryResource::ParticleKeys,
+            LibraryResource::ParticleIndirect,
+        ]
+        .map(|r| library_buffer(&mut graph, r))
+    });
     // The particles' coloured shadows, with the map.
     let tint = (map.is_some() && particles.is_some()).then(|| library_particle_shadows(&mut graph));
     // The clustered lights: the list the host writes and each cluster's.
@@ -1540,16 +1888,30 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     // slots: the executor derives the cross-frame barriers).
     let exposure = graph.image(
         ae_render_abi::module::EXPOSURE_NAME,
-        ImageDesc::color_2d(vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32), 1, 1, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE),
+        ImageDesc::color_2d(
+            vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32),
+            1,
+            1,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+        ),
         ResourceClass::External,
     );
     let exposure_histogram = library_buffer(&mut graph, LibraryResource::ExposureHistogram);
     // A receiver samples the maps the graph has, and reads the lights.
     let receivers = [map, tint];
-    fn lit(pass: ae_framegraph::PassBuilder<'_, LibraryPass>, lights: [ResourceId; 2], stage: ShaderStage) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
-        pass.access(lights[0], Role::StorageBufferRead(stage)).access(lights[1], Role::StorageBufferRead(stage))
+    fn lit(
+        pass: ae_framegraph::PassBuilder<'_, LibraryPass>,
+        lights: [ResourceId; 2],
+        stage: ShaderStage,
+    ) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
+        pass.access(lights[0], Role::StorageBufferRead(stage))
+            .access(lights[1], Role::StorageBufferRead(stage))
     }
-    fn receive(mut pass: ae_framegraph::PassBuilder<'_, LibraryPass>, maps: [Option<ResourceId>; 2], lights: [ResourceId; 2]) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
+    fn receive(
+        mut pass: ae_framegraph::PassBuilder<'_, LibraryPass>,
+        maps: [Option<ResourceId>; 2],
+        lights: [ResourceId; 2],
+    ) -> ae_framegraph::PassBuilder<'_, LibraryPass> {
         for map in maps.into_iter().flatten() {
             pass = pass.sampled(map, ShaderStage::Fragment);
         }
@@ -1568,7 +1930,10 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
             .access(palette, Role::StorageBufferWrite(ShaderStage::Compute))
             .id();
-        graph.pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset).access(draws, Role::TransferDst).id();
+        graph
+            .pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset)
+            .access(draws, Role::TransferDst)
+            .id();
         graph
             .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
             .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
@@ -1578,7 +1943,11 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     }
     // The lights' clusters, before anything lit.
     let write = Role::StorageBufferWrite(ShaderStage::Compute);
-    graph.pass("lights", PassKind::Compute, LibraryPass::LightsCluster).access(lights[0], write).access(lights[1], write).id();
+    graph
+        .pass("lights", PassKind::Compute, LibraryPass::LightsCluster)
+        .access(lights[0], write)
+        .access(lights[1], write)
+        .id();
     // The units' shadows: the units drawn from the sun, before anything
     // that samples the map.
     if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
@@ -1632,16 +2001,42 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             lights,
         )
         .id();
-        graph.pass("units count", PassKind::Transfer, LibraryPass::UnitsCount).access(draws, Role::TransferSrc).discard(counts, Role::TransferDst).id();
-        graph.pass("units count read", PassKind::Transfer, LibraryPass::HostRead).access(counts, Role::HostRead).root().id();
+        graph
+            .pass("units count", PassKind::Transfer, LibraryPass::UnitsCount)
+            .access(draws, Role::TransferSrc)
+            .discard(counts, Role::TransferDst)
+            .id();
+        graph
+            .pass("units count read", PassKind::Transfer, LibraryPass::HostRead)
+            .access(counts, Role::HostRead)
+            .root()
+            .id();
     }
     if env.water {
         // After the units (a third writer of the target), testing against
         // the depth they leave without writing it.
-        receive(graph.pass("water", PassKind::Graphics, LibraryPass::WaterDraw).color(scene, LoadOp::Load).color(glow, LoadOp::Load).depth_read(depth), receivers, lights).id();
+        receive(
+            graph
+                .pass("water", PassKind::Graphics, LibraryPass::WaterDraw)
+                .color(scene, LoadOp::Load)
+                .color(glow, LoadOp::Load)
+                .depth_read(depth),
+            receivers,
+            lights,
+        )
+        .id();
     }
     if let Some([state, keys, draws]) = particles {
-        lit(graph.pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim).access(state, write).access(keys, write).access(draws, write), lights, ShaderStage::Compute).id();
+        lit(
+            graph
+                .pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim)
+                .access(state, write)
+                .access(keys, write)
+                .access(draws, write),
+            lights,
+            ShaderStage::Compute,
+        )
+        .id();
         // Over everything else, sampling the depth the scene left.
         graph
             .pass("particles", PassKind::Graphics, LibraryPass::ParticlesDraw)
@@ -1658,7 +2053,10 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     // shows), the EV adapted. It runs after every scene writer (the
     // particles) and before the bloom and the tonemap, so the frame's eased
     // EV is the one shown.
-    graph.pass("exposure clear", PassKind::Transfer, LibraryPass::ExposureClear).access(exposure_histogram, Role::TransferDst).id();
+    graph
+        .pass("exposure clear", PassKind::Transfer, LibraryPass::ExposureClear)
+        .access(exposure_histogram, Role::TransferDst)
+        .id();
     graph
         .pass("exposure meter", PassKind::Compute, LibraryPass::ExposureMeter)
         .sampled(scene, ShaderStage::Compute)
@@ -1673,22 +2071,57 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         .id();
     // The bloom: the glow at a quarter size, brightest 2x2 mean per 4x4,
     // then an 11-tap Gaussian along x and y (RA3-graphics' three passes).
-    graph.pass("bloom downsample", PassKind::Graphics, LibraryPass::BloomDownsample).sampled(glow, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
-    graph.pass("bloom blur x", PassKind::Graphics, LibraryPass::BloomBlurX).sampled(bloom0, ShaderStage::Fragment).color(bloom1, LoadOp::DontCare).id();
-    graph.pass("bloom blur y", PassKind::Graphics, LibraryPass::BloomBlurY).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
-    graph.pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(display.unwrap_or(target), LoadOp::DontCare).id();
+    graph
+        .pass("bloom downsample", PassKind::Graphics, LibraryPass::BloomDownsample)
+        .sampled(glow, ShaderStage::Fragment)
+        .sampled(exposure, ShaderStage::Fragment)
+        .color(bloom0, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("bloom blur x", PassKind::Graphics, LibraryPass::BloomBlurX)
+        .sampled(bloom0, ShaderStage::Fragment)
+        .color(bloom1, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("bloom blur y", PassKind::Graphics, LibraryPass::BloomBlurY)
+        .sampled(bloom1, ShaderStage::Fragment)
+        .color(bloom0, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap)
+        .sampled(scene, ShaderStage::Fragment)
+        .sampled(bloom0, ShaderStage::Fragment)
+        .sampled(exposure, ShaderStage::Fragment)
+        .color(display.unwrap_or(target), LoadOp::DontCare)
+        .id();
     if let Some(display) = display {
         // The display's light, in the output's encoding (PQ or scRGB).
-        graph.pass("encode", PassKind::Graphics, LibraryPass::PostEncode).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        graph
+            .pass("encode", PassKind::Graphics, LibraryPass::PostEncode)
+            .sampled(display, ShaderStage::Fragment)
+            .color(target, LoadOp::DontCare)
+            .id();
     }
     match output {
         TerrainOutput::Present => {
-            graph.pass("present", PassKind::Present, LibraryPass::Present).present(target).root().id();
+            graph
+                .pass("present", PassKind::Present, LibraryPass::Present)
+                .present(target)
+                .root()
+                .id();
         }
         TerrainOutput::Readback => {
             let readback = library_buffer(&mut graph, LibraryResource::ReadbackBuffer);
-            graph.pass("copy", PassKind::Transfer, LibraryPass::ReadbackCopy).access(target, Role::TransferSrc).discard(readback, Role::TransferDst).id();
-            graph.pass("host read", PassKind::Transfer, LibraryPass::HostRead).access(readback, Role::HostRead).root().id();
+            graph
+                .pass("copy", PassKind::Transfer, LibraryPass::ReadbackCopy)
+                .access(target, Role::TransferSrc)
+                .discard(readback, Role::TransferDst)
+                .id();
+            graph
+                .pass("host read", PassKind::Transfer, LibraryPass::HostRead)
+                .access(readback, Role::HostRead)
+                .root()
+                .id();
         }
     }
     graph
@@ -1696,14 +2129,26 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
 
 /// A library buffer as a graph declares it: `External`, size 0.
 pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> ResourceId {
-    graph.buffer(r.name(), BufferDesc { size: 0, usage: vk::BufferUsageFlags::empty() }, ResourceClass::External)
+    graph.buffer(
+        r.name(),
+        BufferDesc {
+            size: 0,
+            usage: vk::BufferUsageFlags::empty(),
+        },
+        ResourceClass::External,
+    )
 }
 
 /// The units' shadow map as a graph declares it (`External`).
 pub fn library_shadow_map<R>(graph: &mut FrameGraph<R>) -> ResourceId {
     use ae_render_abi::module as m;
     let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
-    let desc = ImageDesc::depth_2d(vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32), m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT, usage);
+    let desc = ImageDesc::depth_2d(
+        vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32),
+        m::SHADOW_MAP_WIDTH,
+        m::SHADOW_MAP_HEIGHT,
+        usage,
+    );
     graph.image(LibraryResource::ShadowMap.name(), desc, ResourceClass::External)
 }
 
@@ -1711,7 +2156,12 @@ pub fn library_shadow_map<R>(graph: &mut FrameGraph<R>) -> ResourceId {
 pub fn library_particle_shadows<R>(graph: &mut FrameGraph<R>) -> ResourceId {
     use ae_render_abi::module as m;
     let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
-    let desc = ImageDesc::color_2d(vk::Format::from_raw(m::PARTICLE_SHADOW_FORMAT as i32), m::PARTICLE_SHADOW_WIDTH, m::PARTICLE_SHADOW_HEIGHT, usage);
+    let desc = ImageDesc::color_2d(
+        vk::Format::from_raw(m::PARTICLE_SHADOW_FORMAT as i32),
+        m::PARTICLE_SHADOW_WIDTH,
+        m::PARTICLE_SHADOW_HEIGHT,
+        usage,
+    );
     graph.image(LibraryResource::ParticleShadows.name(), desc, ResourceClass::External)
 }
 
@@ -1752,19 +2202,42 @@ impl TerrainApp {
     /// The module's graph for `env`, decoded and wired, with its fullscreen
     /// programs reflected, checked and built.
     fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
-        let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 }
+        let flags = if env.units { DECLARE_UNITS } else { 0 }
+            | if self.output == TerrainOutput::Readback {
+                DECLARE_READBACK
+            } else {
+                0
+            }
+            | if env.water { DECLARE_WATER } else { 0 }
             | if env.shadows { DECLARE_SHADOWS } else { 0 }
             | if env.particles { DECLARE_PARTICLES } else { 0 };
-        let target = DeclareTarget { width: env.extent.width, height: env.extent.height, color_format: env.color_format, flags, encoding: env.encoding, levels: env.levels, working: env.working, gamut: env.gamut };
-        let declared = module
-            .declare(&target)?
-            .with_context(|| format!("the module declines a {}x{} {:?} {:?} target", env.extent.width, env.extent.height, env.color_format, env.encoding))?;
-        let graph = ae_framegraph::descriptor::decode(&declared.graph).map_err(|e| anyhow::anyhow!("graph declaration: {e}"))?;
+        let target = DeclareTarget {
+            width: env.extent.width,
+            height: env.extent.height,
+            color_format: env.color_format,
+            flags,
+            encoding: env.encoding,
+            levels: env.levels,
+            working: env.working,
+            gamut: env.gamut,
+        };
+        let declared = module.declare(&target)?.with_context(|| {
+            format!(
+                "the module declines a {}x{} {:?} {:?} target",
+                env.extent.width, env.extent.height, env.color_format, env.encoding
+            )
+        })?;
+        let graph = ae_framegraph::descriptor::decode(&declared.graph)
+            .map_err(|e| anyhow::anyhow!("graph declaration: {e}"))?;
         let programs = ProgramTable::decode(&declared.programs).map_err(|e| anyhow::anyhow!("program table: {e}"))?;
         let (graph, wiring) = self.wire(graph, env, |&payload| {
-            let program = programs.get(payload as usize).with_context(|| format!("payload {payload} names no program (the table has {})", programs.len()))?;
+            let program = programs
+                .get(payload as usize)
+                .with_context(|| format!("payload {payload} names no program (the table has {})", programs.len()))?;
             match *program {
-                Program::Library(name) => LibraryPass::from_name(name).map(|lib| (payload, ScenePassSource::Library(lib))).with_context(|| format!("no library pass `{name}`")),
+                Program::Library(name) => LibraryPass::from_name(name)
+                    .map(|lib| (payload, ScenePassSource::Library(lib)))
+                    .with_context(|| format!("no library pass `{name}`")),
                 Program::Fullscreen { .. } => Ok((payload, ScenePassSource::Fullscreen)),
             }
         })?;
@@ -1777,7 +2250,9 @@ impl TerrainApp {
         let mut runner: Vec<Option<&str>> = vec![None; programs.len()];
         let result = (|| -> Result<usize> {
             for pass in &graph.passes {
-                let PassWork::Fullscreen { sampled } = &pass.record.work else { continue };
+                let PassWork::Fullscreen { sampled } = &pass.record.work else {
+                    continue;
+                };
                 let formats: Vec<vk::Format> = pass
                     .color_attachments()
                     .map(|i| match graph.resources[i.resource.index()].desc {
@@ -1791,22 +2266,50 @@ impl TerrainApp {
                         Program::Fullscreen { label, .. } => label,
                         Program::Library(name) => name,
                     };
-                    anyhow::bail!("passes `{first}` and `{}` both run fullscreen program {slot} (`{label}`); a fullscreen program runs in one pass (push it once per pass)", pass.name);
+                    anyhow::bail!(
+                        "passes `{first}` and `{}` both run fullscreen program {slot} (`{label}`); a fullscreen program runs in one pass (push it once per pass)",
+                        pass.name
+                    );
                 }
                 runner[slot] = Some(&pass.name);
                 shapes[slot] = Some((formats, sampled.len()));
             }
             let mut offset = 0;
             for (slot, program) in programs.iter().enumerate() {
-                let Program::Fullscreen { label, spirv, uniform_bytes } = *program else { continue };
-                let Some((formats, sampled)) = &shapes[slot] else { continue };
-                built[slot] = Some((FullscreenProgram::new(gpu, label, spirv, uniform_bytes, *sampled, formats, self.frames_in_flight)?, offset));
+                let Program::Fullscreen {
+                    label,
+                    spirv,
+                    uniform_bytes,
+                } = *program
+                else {
+                    continue;
+                };
+                let Some((formats, sampled)) = &shapes[slot] else {
+                    continue;
+                };
+                built[slot] = Some((
+                    FullscreenProgram::new(
+                        gpu,
+                        label,
+                        spirv,
+                        uniform_bytes,
+                        *sampled,
+                        formats,
+                        self.frames_in_flight,
+                    )?,
+                    offset,
+                ));
                 offset += uniform_bytes as usize;
             }
             Ok(offset)
         })();
         match result {
-            Ok(uniform_bytes) => Ok(ModuleGraph { graph, resources: wiring.resources, programs: built, uniform_bytes }),
+            Ok(uniform_bytes) => Ok(ModuleGraph {
+                graph,
+                resources: wiring.resources,
+                programs: built,
+                uniform_bytes,
+            }),
             Err(error) => {
                 for (mut program, _) in built.into_iter().flatten() {
                     program.destroy(gpu);
@@ -1819,7 +2322,12 @@ impl TerrainApp {
     /// What the library needs to agree with for `target`.
     fn env(&self, target: TargetInfo) -> Result<LibraryEnv> {
         let renderer = self.renderer.as_ref().context("terrain renderer not created")?;
-        Ok(LibraryEnv { color_format: self.output_format, scene_format: renderer.formats().0, depth_format: DEPTH_FORMAT, extent: target.extent, units: self.unit_renderer.is_some(),
+        Ok(LibraryEnv {
+            color_format: self.output_format,
+            scene_format: renderer.formats().0,
+            depth_format: DEPTH_FORMAT,
+            extent: target.extent,
+            units: self.unit_renderer.is_some(),
             water: self.water && renderer.has_water(),
             shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
             particles: self.particle_renderer.is_some(),
@@ -1832,7 +2340,12 @@ impl TerrainApp {
 
     /// Size the library resources of `graph`, check its library passes and
     /// turn its payloads into [`ScenePass`]es.
-    fn wire<R>(&self, mut graph: FrameGraph<R>, env: &LibraryEnv, source: impl Fn(&R) -> Result<(u32, ScenePassSource)>) -> Result<(FrameGraph<ScenePass>, Wiring)> {
+    fn wire<R>(
+        &self,
+        mut graph: FrameGraph<R>,
+        env: &LibraryEnv,
+        source: impl Fn(&R) -> Result<(u32, ScenePassSource)>,
+    ) -> Result<(FrameGraph<ScenePass>, Wiring)> {
         let units = self.unit_renderer.as_ref();
         let terrain = self.renderer.as_ref();
         let offscreen = self.offscreen.as_ref();
@@ -1844,16 +2357,24 @@ impl TerrainApp {
             LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
             LibraryResource::UnitCounts => units.map(|u| u.counts_desc()),
             LibraryResource::UnitPalette => units.map(|u| u.palette_desc()),
-            LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc { size: o.buffer.size, usage: vk::BufferUsageFlags::TRANSFER_DST }),
+            LibraryResource::ReadbackBuffer => offscreen.map(|o| BufferDesc {
+                size: o.buffer.size,
+                usage: vk::BufferUsageFlags::TRANSFER_DST,
+            }),
             LibraryResource::ParticleState => self.particle_renderer.as_ref().map(|p| p.state_desc()),
             LibraryResource::ParticleKeys => self.particle_renderer.as_ref().map(|p| p.keys_desc()),
             LibraryResource::ParticleIndirect => self.particle_renderer.as_ref().map(|p| p.indirect_desc()),
             LibraryResource::LightList => self.lights.as_ref().map(|l| l.list_desc()),
             LibraryResource::LightClusters => self.lights.as_ref().map(|l| l.clusters_desc()),
             LibraryResource::ExposureHistogram => self.exposure.as_ref().map(|e| e.histogram_desc()),
-            LibraryResource::ReadbackTarget | LibraryResource::ShadowMap | LibraryResource::ParticleShadows | LibraryResource::Exposure => None,
+            LibraryResource::ReadbackTarget
+            | LibraryResource::ShadowMap
+            | LibraryResource::ParticleShadows
+            | LibraryResource::Exposure => None,
         })?;
-        if resources.contains(&Some(LibraryResource::ReadbackTarget)) && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent) {
+        if resources.contains(&Some(LibraryResource::ReadbackTarget))
+            && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent)
+        {
             anyhow::bail!("`readback.target` needs an offscreen target of the graph's extent (create_offscreen)");
         }
         let mut passes = Vec::with_capacity(graph.passes.len());
@@ -1864,16 +2385,42 @@ impl TerrainApp {
                     library::check(&graph, index, lib, &resources, env)?;
                     match lib {
                         LibraryPass::ReadbackCopy => {
-                            let image = pass.intents.iter().find(|i| i.role == Role::TransferSrc).map(|i| i.resource).context("readback image")?;
-                            let buffer = pass.intents.iter().find(|i| resources[i.resource.index()] == Some(LibraryResource::ReadbackBuffer)).map(|i| i.resource).context("readback buffer")?;
+                            let image = pass
+                                .intents
+                                .iter()
+                                .find(|i| i.role == Role::TransferSrc)
+                                .map(|i| i.resource)
+                                .context("readback image")?;
+                            let buffer = pass
+                                .intents
+                                .iter()
+                                .find(|i| resources[i.resource.index()] == Some(LibraryResource::ReadbackBuffer))
+                                .map(|i| i.resource)
+                                .context("readback buffer")?;
                             PassWork::Readback { image, buffer }
                         }
                         LibraryPass::ParticlesDraw => {
-                            let depth = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment) && resources[i.resource.index()].is_none()).map(|i| i.resource).context("particles depth")?;
+                            let depth = pass
+                                .intents
+                                .iter()
+                                .find(|i| {
+                                    i.role == Role::Sampled(ShaderStage::Fragment)
+                                        && resources[i.resource.index()].is_none()
+                                })
+                                .map(|i| i.resource)
+                                .context("particles depth")?;
                             let mut color = None;
                             let mut glow = None;
-                            for intent in pass.intents.iter().filter(|i| matches!(i.role, Role::ColorAttachment(_))) {
-                                let ae_framegraph::ResourceDesc::Image(image) = graph.resources[intent.resource.index()].desc else { continue };
+                            for intent in pass
+                                .intents
+                                .iter()
+                                .filter(|i| matches!(i.role, Role::ColorAttachment(_)))
+                            {
+                                let ae_framegraph::ResourceDesc::Image(image) =
+                                    graph.resources[intent.resource.index()].desc
+                                else {
+                                    continue;
+                                };
                                 if image.format == env.scene_format {
                                     color = Some(intent.resource);
                                 } else {
@@ -1885,16 +2432,31 @@ impl TerrainApp {
                             PassWork::Particles { color, depth, glow }
                         }
                         LibraryPass::Tonemap => {
-                            let sampled: Vec<ResourceId> = pass.intents.iter().filter(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).collect();
+                            let sampled: Vec<ResourceId> = pass
+                                .intents
+                                .iter()
+                                .filter(|i| i.role == Role::Sampled(ShaderStage::Fragment))
+                                .map(|i| i.resource)
+                                .collect();
                             let image = |r: ResourceId| match graph.resources[r.index()].desc {
                                 ae_framegraph::ResourceDesc::Image(image) => image,
                                 ae_framegraph::ResourceDesc::Buffer(_) => unreachable!("post.tonemap samples an image"),
                             };
                             let is_exposure = |r: ResourceId| {
                                 let i = image(r);
-                                i.width == 1 && i.height == 1 && i.format == vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32)
+                                i.width == 1
+                                    && i.height == 1
+                                    && i.format == vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32)
                             };
-                            let scene = sampled.iter().copied().find(|&r| image(r).width == env.extent.width && image(r).height == env.extent.height && image(r).format == env.scene_format).context("tonemap scene")?;
+                            let scene = sampled
+                                .iter()
+                                .copied()
+                                .find(|&r| {
+                                    image(r).width == env.extent.width
+                                        && image(r).height == env.extent.height
+                                        && image(r).format == env.scene_format
+                                })
+                                .context("tonemap scene")?;
                             let exposure = sampled.iter().copied().find(|&r| is_exposure(r));
                             let bloom = sampled.iter().copied().find(|&r| r != scene && Some(r) != exposure);
                             PassWork::Tonemap { scene, bloom, exposure }
@@ -1905,33 +2467,65 @@ impl TerrainApp {
                                 LibraryPass::BloomBlurX => BloomPass::BlurX,
                                 _ => BloomPass::BlurY,
                             };
-                            let sampled: Vec<ResourceId> = pass.intents.iter().filter(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).collect();
+                            let sampled: Vec<ResourceId> = pass
+                                .intents
+                                .iter()
+                                .filter(|i| i.role == Role::Sampled(ShaderStage::Fragment))
+                                .map(|i| i.resource)
+                                .collect();
                             let size = |r: ResourceId| match graph.resources[r.index()].desc {
                                 ae_framegraph::ResourceDesc::Image(image) => (image.width, image.height),
                                 ae_framegraph::ResourceDesc::Buffer(_) => (0, 0),
                             };
-                            let input = sampled.iter().copied().find(|&r| size(r) != (1, 1)).context("bloom input")?;
+                            let input = sampled
+                                .iter()
+                                .copied()
+                                .find(|&r| size(r) != (1, 1))
+                                .context("bloom input")?;
                             let exposure = sampled.iter().copied().find(|&r| size(r) == (1, 1));
-                            let output = pass.intents.iter().find(|i| matches!(i.role, Role::ColorAttachment(_))).map(|i| i.resource).context("bloom output")?;
-                            PassWork::Bloom { pass: kind, input, output, exposure }
+                            let output = pass
+                                .intents
+                                .iter()
+                                .find(|i| matches!(i.role, Role::ColorAttachment(_)))
+                                .map(|i| i.resource)
+                                .context("bloom output")?;
+                            PassWork::Bloom {
+                                pass: kind,
+                                input,
+                                output,
+                                exposure,
+                            }
                         }
                         LibraryPass::ExposureMeter => {
                             // Format and size, as the library checks them.
                             let spec = |r: ResourceId| match graph.resources[r.index()].desc {
-                                ae_framegraph::ResourceDesc::Image(image) => Some((image.format, image.width, image.height)),
+                                ae_framegraph::ResourceDesc::Image(image) => {
+                                    Some((image.format, image.width, image.height))
+                                }
                                 ae_framegraph::ResourceDesc::Buffer(_) => None,
                             };
                             let (w, h) = (env.extent.width, env.extent.height);
                             let format = |raw: u32| vk::Format::from_raw(raw as i32);
-                            let sampled: Vec<ResourceId> = pass.intents.iter().filter(|i| i.role == Role::Sampled(ShaderStage::Compute)).map(|i| i.resource).collect();
-                            let find = |want: (vk::Format, u32, u32)| sampled.iter().copied().find(|&r| spec(r) == Some(want));
+                            let sampled: Vec<ResourceId> = pass
+                                .intents
+                                .iter()
+                                .filter(|i| i.role == Role::Sampled(ShaderStage::Compute))
+                                .map(|i| i.resource)
+                                .collect();
+                            let find =
+                                |want: (vk::Format, u32, u32)| sampled.iter().copied().find(|&r| spec(r) == Some(want));
                             let scene = find((env.scene_format, w, h)).context("exposure meter scene")?;
                             let depth = find((env.depth_format, w, h));
                             let glow = find((format(ae_render_abi::module::GLOW_FORMAT), w, h));
                             PassWork::ExposureMeter { scene, depth, glow }
                         }
                         LibraryPass::PostEncode => {
-                            let display = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment)).map(|i| i.resource).context("post.encode display")?;
+                            let display = pass
+                                .intents
+                                .iter()
+                                .find(|i| i.role == Role::Sampled(ShaderStage::Fragment))
+                                .map(|i| i.resource)
+                                .context("post.encode display")?;
                             PassWork::Encode { display }
                         }
                         lib => PassWork::Library(lib),
@@ -1939,17 +2533,26 @@ impl TerrainApp {
                 }
                 ScenePassSource::Fullscreen => {
                     let name = &pass.name;
-                    anyhow::ensure!(pass.kind == PassKind::Graphics, "fullscreen pass `{name}` must be a Graphics pass");
+                    anyhow::ensure!(
+                        pass.kind == PassKind::Graphics,
+                        "fullscreen pass `{name}` must be a Graphics pass"
+                    );
                     let mut sampled = Vec::new();
                     for intent in &pass.intents {
                         let r = &graph.resources[intent.resource.index()];
                         match intent.role {
                             Role::ColorAttachment(_) => {}
                             Role::Sampled(ShaderStage::Fragment) if r.desc.is_image() => sampled.push(intent.resource),
-                            role => anyhow::bail!("fullscreen pass `{name}` uses `{}` as {role:?}; it takes colour attachments and fragment-sampled images", r.name),
+                            role => anyhow::bail!(
+                                "fullscreen pass `{name}` uses `{}` as {role:?}; it takes colour attachments and fragment-sampled images",
+                                r.name
+                            ),
                         }
                     }
-                    anyhow::ensure!(pass.color_attachments().count() > 0, "fullscreen pass `{name}` has no colour attachment");
+                    anyhow::ensure!(
+                        pass.color_attachments().count() > 0,
+                        "fullscreen pass `{name}` has no colour attachment"
+                    );
                     PassWork::Fullscreen { sampled }
                 }
             };
@@ -1969,7 +2572,19 @@ impl TerrainApp {
         let glow = library::glow_resource(&graph);
         let graph = FrameGraph {
             resources: graph.resources,
-            passes: graph.passes.into_iter().zip(passes).map(|(p, record)| ae_framegraph::Pass { name: p.name, kind: p.kind, scope: p.scope, intents: p.intents, conditional: p.conditional, record }).collect(),
+            passes: graph
+                .passes
+                .into_iter()
+                .zip(passes)
+                .map(|(p, record)| ae_framegraph::Pass {
+                    name: p.name,
+                    kind: p.kind,
+                    scope: p.scope,
+                    intents: p.intents,
+                    conditional: p.conditional,
+                    record,
+                })
+                .collect(),
             roots: graph.roots,
             plan_version: graph.plan_version,
         };
@@ -1987,19 +2602,41 @@ mod tests {
         // 248, so the signal's peak is 203 × SDL's headroom (it shows at the
         // panel's 441), not the panel's absolute 441 (which would show at
         // 539 and be tone-mapped again).
-        let hdr = HdrSettings { paper_white: None, peak: None, headroom: 441.0 / 248.0, display_peak: 441.0 };
+        let hdr = HdrSettings {
+            paper_white: None,
+            peak: None,
+            headroom: 441.0 / 248.0,
+            display_peak: 441.0,
+        };
         for encoding in [OutputEncoding::Hdr10Pq, OutputEncoding::ScRgb] {
             let levels = hdr.levels(encoding);
             assert_eq!(levels.paper_white, 203.0, "{encoding:?}");
-            assert!((levels.peak - 203.0 * 441.0 / 248.0).abs() < 1e-3, "{encoding:?}: {levels:?}");
+            assert!(
+                (levels.peak - 203.0 * 441.0 / 248.0).abs() < 1e-3,
+                "{encoding:?}: {levels:?}"
+            );
             assert!((levels.headroom() - 441.0 / 248.0).abs() < 1e-5);
         }
         // KDE's SDR mode (SDR white 155, peak 200): the headroom is above 1,
         // so no floor at the paper white is needed.
-        let sdr_mode = HdrSettings { headroom: 200.0 / 155.0, display_peak: 200.0, ..hdr };
+        let sdr_mode = HdrSettings {
+            headroom: 200.0 / 155.0,
+            display_peak: 200.0,
+            ..hdr
+        };
         assert!((sdr_mode.levels(OutputEncoding::Hdr10Pq).peak - 203.0 * 200.0 / 155.0).abs() < 1e-3);
         // Overrides are in the signal's nits and taken as given.
-        let forced = HdrSettings { paper_white: Some(100.0), peak: Some(400.0), ..hdr };
-        assert_eq!(forced.levels(OutputEncoding::Hdr10Pq), DisplayLevels { paper_white: 100.0, peak: 400.0 });
+        let forced = HdrSettings {
+            paper_white: Some(100.0),
+            peak: Some(400.0),
+            ..hdr
+        };
+        assert_eq!(
+            forced.levels(OutputEncoding::Hdr10Pq),
+            DisplayLevels {
+                paper_white: 100.0,
+                peak: 400.0
+            }
+        );
     }
 }

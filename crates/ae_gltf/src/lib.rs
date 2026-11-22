@@ -29,8 +29,9 @@ mod mesh;
 pub mod textures;
 
 use ae_model::{
-    AlphaMode, Bone, Bounds, DEFAULT_SOURCE_RADIUS, Channel, Clip, Filter, GLTF_TO_ENGINE, Interpolation, Joint, LightKind, Material, Model, ModelLight, Path as BonePath, Primitive, Range,
-    Sampler, TextureRef, UvTransform, Wrap, pose,
+    AlphaMode, Bone, Bounds, Channel, Clip, DEFAULT_SOURCE_RADIUS, Filter, GLTF_TO_ENGINE, Interpolation, Joint,
+    LightKind, Material, Model, ModelLight, Path as BonePath, Primitive, Range, Sampler, TextureRef, UvTransform, Wrap,
+    pose,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::Engine as _;
@@ -39,7 +40,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Required extensions the converter handles.
-pub const ACCEPTED_EXTENSIONS: [&str; 4] = ["KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_texture_basisu", "KHR_lights_punctual"];
+pub const ACCEPTED_EXTENSIONS: [&str; 4] = [
+    "KHR_texture_transform",
+    "KHR_materials_emissive_strength",
+    "KHR_texture_basisu",
+    "KHR_lights_punctual",
+];
 
 pub struct Converted {
     pub model: Model,
@@ -61,7 +67,10 @@ pub fn convert(bytes: &[u8], base: Option<&Path>) -> Result<Converted> {
     let json = gltf.document.into_json();
     for ext in &json.extensions_required {
         if !ACCEPTED_EXTENSIONS.contains(&ext.as_str()) {
-            bail!("glTF requires extension {ext}, which the converter does not take (taken: {})", ACCEPTED_EXTENSIONS.join(", "));
+            bail!(
+                "glTF requires extension {ext}, which the converter does not take (taken: {})",
+                ACCEPTED_EXTENSIONS.join(", ")
+            );
         }
     }
     let mut warnings = Vec::new();
@@ -87,13 +96,20 @@ pub fn convert(bytes: &[u8], base: Option<&Path>) -> Result<Converted> {
     let mut model = c.model;
     model.merge_primitives();
     model.validate().context("converted model")?;
-    Ok(Converted { model, warnings: c.warnings })
+    Ok(Converted {
+        model,
+        warnings: c.warnings,
+    })
 }
 
 fn read_uri(uri: &str, base: Option<&Path>, what: &str) -> Result<Vec<u8>> {
     if let Some(rest) = uri.strip_prefix("data:") {
-        let (_, data) = rest.split_once(";base64,").with_context(|| format!("{what}: data URI not base64"))?;
-        return base64::engine::general_purpose::STANDARD.decode(data).with_context(|| format!("{what}: base64"));
+        let (_, data) = rest
+            .split_once(";base64,")
+            .with_context(|| format!("{what}: data URI not base64"))?;
+        return base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .with_context(|| format!("{what}: base64"));
     }
     let base = base.with_context(|| format!("{what}: external file {uri} but no base directory"))?;
     let decoded = percent_decode(uri);
@@ -126,7 +142,13 @@ fn load_buffers(doc: &gltf::Document, mut blob: Option<Vec<u8>>, base: Option<&P
             gltf::buffer::Source::Bin => blob.take().context("GLB buffer without a BIN chunk")?,
             gltf::buffer::Source::Uri(uri) => read_uri(uri, base, &format!("buffer {}", b.index()))?,
         };
-        ensure!(data.len() >= b.length(), "buffer {}: {} bytes, declared {}", b.index(), data.len(), b.length());
+        ensure!(
+            data.len() >= b.length(),
+            "buffer {}: {} bytes, declared {}",
+            b.index(),
+            data.len(),
+            b.length()
+        );
         out.push(data);
     }
     Ok(out)
@@ -163,7 +185,14 @@ impl<'a> Converter<'a> {
     fn run(&mut self) -> Result<()> {
         let root = Mat4::from_quat(GLTF_TO_ENGINE);
         let (_, r, _) = root.to_scale_rotation_translation();
-        self.model.bones.push(Bone { name: "__gltf_root".into(), parent: None, rest: root.to_cols_array(), translation: [0.0; 3], rotation: r.to_array(), scale: [1.0; 3] });
+        self.model.bones.push(Bone {
+            name: "__gltf_root".into(),
+            parent: None,
+            rest: root.to_cols_array(),
+            translation: [0.0; 3],
+            rotation: r.to_array(),
+            scale: [1.0; 3],
+        });
         let roots: Vec<gltf::Node> = match self.doc.default_scene().or_else(|| self.doc.scenes().next()) {
             Some(s) => s.nodes().collect(),
             None => {
@@ -198,12 +227,19 @@ impl<'a> Converter<'a> {
     }
 
     fn add_bones<'d>(&mut self, node: gltf::Node<'d>, parent: u32, order: &mut Vec<gltf::Node<'d>>) -> Result<()> {
-        ensure!(!self.node_bone.contains_key(&node.index()), "node {} reached twice (not a tree)", node.index());
+        ensure!(
+            !self.node_bone.contains_key(&node.index()),
+            "node {} reached twice (not a tree)",
+            node.index()
+        );
         let bone = self.model.bones.len() as u32;
         self.node_bone.insert(node.index(), bone);
         let rest = Mat4::from_cols_array_2d(&node.transform().matrix());
         let (t, r, s) = node.transform().decomposed();
-        let name = node.name().map(str::to_owned).unwrap_or_else(|| format!("node{}", node.index()));
+        let name = node
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("node{}", node.index()));
         if let Some(light) = node.light() {
             let what = format!("light {} on node {}", light.name().unwrap_or("(unnamed)"), name);
             let kind = light.kind();
@@ -219,7 +255,10 @@ impl<'a> Converter<'a> {
                 kind => {
                     let joint = self.joint(bone, Mat4::IDENTITY)?;
                     let (kind, inner_angle, outer_angle) = match kind {
-                        gltf::khr_lights_punctual::Kind::Spot { inner_cone_angle, outer_cone_angle } => {
+                        gltf::khr_lights_punctual::Kind::Spot {
+                            inner_cone_angle,
+                            outer_cone_angle,
+                        } => {
                             let outer = outer_cone_angle.clamp(1e-3, std::f32::consts::FRAC_PI_2);
                             (LightKind::Spot, inner_cone_angle.clamp(0.0, outer), outer)
                         }
@@ -247,12 +286,23 @@ impl<'a> Converter<'a> {
                         // The source radius regularises the near field; glTF
                         // has none, so a range-derived size or a small
                         // default.
-                        size: if range > 0.0 { (range / 8.0).max(0.05) } else { DEFAULT_SOURCE_RADIUS },
+                        size: if range > 0.0 {
+                            (range / 8.0).max(0.05)
+                        } else {
+                            DEFAULT_SOURCE_RADIUS
+                        },
                     });
                 }
             }
         }
-        self.model.bones.push(Bone { name, parent: Some(parent), rest: rest.to_cols_array(), translation: t, rotation: r, scale: s });
+        self.model.bones.push(Bone {
+            name,
+            parent: Some(parent),
+            rest: rest.to_cols_array(),
+            translation: t,
+            rotation: r,
+            scale: s,
+        });
         order.push(node.clone());
         for c in node.children() {
             self.add_bones(c, bone, order)?;
@@ -266,7 +316,10 @@ impl<'a> Converter<'a> {
             return Ok(j);
         }
         let j = u16::try_from(self.model.joints.len()).context("more than 65536 joints")?;
-        self.model.joints.push(Joint { bone, inverse_bind: inverse_bind.to_cols_array() });
+        self.model.joints.push(Joint {
+            bone,
+            inverse_bind: inverse_bind.to_cols_array(),
+        });
         self.joint_of.insert((bone, bits), j);
         Ok(j)
     }
@@ -278,10 +331,19 @@ impl<'a> Converter<'a> {
             Some(it) => it.map(|m| Mat4::from_cols_array_2d(&m)).collect(),
             None => vec![Mat4::IDENTITY; skin.joints().len()],
         };
-        ensure!(ibms.len() >= skin.joints().len(), "skin {}: {} inverse bind matrices for {} joints", skin.index(), ibms.len(), skin.joints().len());
+        ensure!(
+            ibms.len() >= skin.joints().len(),
+            "skin {}: {} inverse bind matrices for {} joints",
+            skin.index(),
+            ibms.len(),
+            skin.joints().len()
+        );
         let mut out = Vec::new();
         for (j, node) in skin.joints().enumerate() {
-            let bone = *self.node_bone.get(&node.index()).with_context(|| format!("skin {}: joint node {} not in the scene", skin.index(), node.index()))?;
+            let bone = *self
+                .node_bone
+                .get(&node.index())
+                .with_context(|| format!("skin {}: joint node {} not in the scene", skin.index(), node.index()))?;
             out.push(self.joint(bone, ibms[j])?);
         }
         Ok(out)
@@ -302,11 +364,15 @@ impl<'a> Converter<'a> {
             let joints = match (&skin_joints, source.has_joints) {
                 (Some(j), true) => mesh::Joints::Skin(j.clone()),
                 (Some(_), false) => {
-                    self.warn(format!("{what}: on a skinned node but without JOINTS_0/WEIGHTS_0; drawn as a piece"));
+                    self.warn(format!(
+                        "{what}: on a skinned node but without JOINTS_0/WEIGHTS_0; drawn as a piece"
+                    ));
                     mesh::Joints::Piece(self.joint(bone, Mat4::IDENTITY)?)
                 }
                 (None, true) => {
-                    self.warn(format!("{what}: has JOINTS_0 but its node has no skin; drawn as a piece"));
+                    self.warn(format!(
+                        "{what}: has JOINTS_0 but its node has no skin; drawn as a piece"
+                    ));
                     mesh::Joints::Piece(self.joint(bone, Mat4::IDENTITY)?)
                 }
                 (None, false) => mesh::Joints::Piece(self.joint(bone, Mat4::IDENTITY)?),
@@ -346,14 +412,20 @@ impl<'a> Converter<'a> {
         let (normal_texture, normal_scale) = match m.normal_texture() {
             Some(t) => {
                 let tr = transform_of(t.extension_value("KHR_texture_transform"));
-                (Some(self.texture_ref_raw(t.texture(), t.tex_coord(), tr, false, &what)?), t.scale())
+                (
+                    Some(self.texture_ref_raw(t.texture(), t.tex_coord(), tr, false, &what)?),
+                    t.scale(),
+                )
             }
             None => (None, 1.0),
         };
         let (occlusion_texture, occlusion_strength) = match m.occlusion_texture() {
             Some(t) => {
                 let tr = transform_of(t.extension_value("KHR_texture_transform"));
-                (Some(self.texture_ref_raw(t.texture(), t.tex_coord(), tr, false, &what)?), t.strength())
+                (
+                    Some(self.texture_ref_raw(t.texture(), t.tex_coord(), tr, false, &what)?),
+                    t.strength(),
+                )
             }
             None => (None, 1.0),
         };
@@ -364,7 +436,9 @@ impl<'a> Converter<'a> {
         let strength = m.emissive_strength().unwrap_or(1.0);
         let alpha = match m.alpha_mode() {
             gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
-            gltf::material::AlphaMode::Mask => AlphaMode::Mask { cutoff: m.alpha_cutoff().unwrap_or(0.5) },
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask {
+                cutoff: m.alpha_cutoff().unwrap_or(0.5),
+            },
             gltf::material::AlphaMode::Blend => AlphaMode::Blend,
         };
         let material = Material {
@@ -389,14 +463,41 @@ impl<'a> Converter<'a> {
         Ok(i)
     }
 
-    fn texture_ref(&mut self, t: gltf::Texture, uv: u32, tr: Option<gltf::texture::TextureTransform>, srgb: bool, what: &str) -> Result<TextureRef> {
-        let tr = tr.map(|tr| (UvTransform { offset: tr.offset(), rotation: tr.rotation(), scale: tr.scale() }, tr.tex_coord()));
+    fn texture_ref(
+        &mut self,
+        t: gltf::Texture,
+        uv: u32,
+        tr: Option<gltf::texture::TextureTransform>,
+        srgb: bool,
+        what: &str,
+    ) -> Result<TextureRef> {
+        let tr = tr.map(|tr| {
+            (
+                UvTransform {
+                    offset: tr.offset(),
+                    rotation: tr.rotation(),
+                    scale: tr.scale(),
+                },
+                tr.tex_coord(),
+            )
+        });
         self.texture_ref_raw(t, uv, tr, srgb, what)
     }
 
-    fn texture_ref_raw(&mut self, t: gltf::Texture, uv: u32, tr: Option<(UvTransform, Option<u32>)>, srgb: bool, what: &str) -> Result<TextureRef> {
+    fn texture_ref_raw(
+        &mut self,
+        t: gltf::Texture,
+        uv: u32,
+        tr: Option<(UvTransform, Option<u32>)>,
+        srgb: bool,
+        what: &str,
+    ) -> Result<TextureRef> {
         // KHR_texture_basisu's source first, the fallback otherwise.
-        let basis = t.extension_value("KHR_texture_basisu").and_then(|v| v.get("source")).and_then(|v| v.as_u64()).map(|v| v as usize);
+        let basis = t
+            .extension_value("KHR_texture_basisu")
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
         let image = match (basis, t.source()) {
             (Some(i), _) => i,
             (None, Some(img)) => img.index(),
@@ -427,46 +528,77 @@ impl<'a> Converter<'a> {
             gltf::texture::WrappingMode::MirroredRepeat => Wrap::MirroredRepeat,
             gltf::texture::WrappingMode::ClampToEdge => Wrap::ClampToEdge,
         };
-        let sampler = Sampler { mag: filter(s.mag_filter()), min, mip, wrap_s: wrap(s.wrap_s()), wrap_t: wrap(s.wrap_t()) };
-        Ok(TextureRef { texture, uv, sampler, transform: tr.map(|(t, _)| t) })
+        let sampler = Sampler {
+            mag: filter(s.mag_filter()),
+            min,
+            mip,
+            wrap_s: wrap(s.wrap_s()),
+            wrap_t: wrap(s.wrap_t()),
+        };
+        Ok(TextureRef {
+            texture,
+            uv,
+            sampler,
+            transform: tr.map(|(t, _)| t),
+        })
     }
 
     fn image(&mut self, index: usize, srgb: bool) -> Result<u32> {
         if let Some(&t) = self.texture_of.get(&(index, srgb)) {
             return Ok(t);
         }
-        let img = self.doc.images().nth(index).with_context(|| format!("image {index} out of range"))?;
+        let img = self
+            .doc
+            .images()
+            .nth(index)
+            .with_context(|| format!("image {index} out of range"))?;
         let name = img.name().map(str::to_owned).unwrap_or_else(|| format!("image{index}"));
         let what = format!("image {index} ({name})");
         let bytes = match img.source() {
             gltf::image::Source::View { view, .. } => {
                 let buf = &self.buffers[view.buffer().index()];
-                buf.get(view.offset()..view.offset() + view.length()).with_context(|| format!("{what}: view out of its buffer"))?.to_vec()
+                buf.get(view.offset()..view.offset() + view.length())
+                    .with_context(|| format!("{what}: view out of its buffer"))?
+                    .to_vec()
             }
             gltf::image::Source::Uri { uri, .. } => read_uri(uri, self.base, &what)?,
         };
         let ktx2 = textures::to_ktx2(&bytes, srgb, &mut self.warnings, &what)?;
         let t = self.model.textures.len() as u32;
         self.model.textures.push(ktx2);
-        self.model.texture_names.push(if srgb { name } else { format!("{name} (linear)") });
+        self.model
+            .texture_names
+            .push(if srgb { name } else { format!("{name} (linear)") });
         self.texture_of.insert((index, srgb), t);
         Ok(t)
     }
 
     fn add_clip(&mut self, a: &gltf::Animation) -> Result<()> {
-        let name = a.name().map(str::to_owned).unwrap_or_else(|| format!("clip{}", a.index()));
+        let name = a
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("clip{}", a.index()));
         let mut channels = Vec::new();
         let mut duration = 0.0f32;
         for ch in a.channels() {
             let target = ch.target();
             let Some(&bone) = self.node_bone.get(&target.node().index()) else {
-                self.warn(format!("clip {name}: a channel on node {} outside the scene, dropped", target.node().index()));
+                self.warn(format!(
+                    "clip {name}: a channel on node {} outside the scene, dropped",
+                    target.node().index()
+                ));
                 continue;
             };
             let reader = ch.reader(self.buffer());
-            let times: Vec<f32> = reader.read_inputs().with_context(|| format!("clip {name}: no key times"))?.collect();
+            let times: Vec<f32> = reader
+                .read_inputs()
+                .with_context(|| format!("clip {name}: no key times"))?
+                .collect();
             use gltf::animation::util::ReadOutputs as O;
-            let (path, values): (BonePath, Vec<f32>) = match reader.read_outputs().with_context(|| format!("clip {name}: no key values"))? {
+            let (path, values): (BonePath, Vec<f32>) = match reader
+                .read_outputs()
+                .with_context(|| format!("clip {name}: no key values"))?
+            {
                 O::Translations(it) => (BonePath::Translation, it.flatten().collect()),
                 O::Rotations(it) => (BonePath::Rotation, it.into_f32().flatten().collect()),
                 O::Scales(it) => (BonePath::Scale, it.flatten().collect()),
@@ -480,19 +612,48 @@ impl<'a> Converter<'a> {
                 gltf::animation::Interpolation::Linear => Interpolation::Linear,
                 gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
             };
-            let per = path.components() * if interpolation == Interpolation::CubicSpline { 3 } else { 1 };
-            ensure!(!times.is_empty() && values.len() == times.len() * per, "clip {name}: {} keys, {} values", times.len(), values.len());
-            ensure!(times.windows(2).all(|w| w[0] <= w[1]), "clip {name}: key times not increasing");
+            let per = path.components()
+                * if interpolation == Interpolation::CubicSpline {
+                    3
+                } else {
+                    1
+                };
+            ensure!(
+                !times.is_empty() && values.len() == times.len() * per,
+                "clip {name}: {} keys, {} values",
+                times.len(),
+                values.len()
+            );
+            ensure!(
+                times.windows(2).all(|w| w[0] <= w[1]),
+                "clip {name}: key times not increasing"
+            );
             duration = duration.max(*times.last().unwrap());
             let data = &mut self.model.clip_data;
-            let t = Range { offset: data.len() as u64, len: times.len() as u64 };
+            let t = Range {
+                offset: data.len() as u64,
+                len: times.len() as u64,
+            };
             data.extend(&times);
-            let v = Range { offset: data.len() as u64, len: values.len() as u64 };
+            let v = Range {
+                offset: data.len() as u64,
+                len: values.len() as u64,
+            };
             data.extend(&values);
-            channels.push(Channel { bone, path, interpolation, times: t, values: v });
+            channels.push(Channel {
+                bone,
+                path,
+                interpolation,
+                times: t,
+                values: v,
+            });
         }
         if !channels.is_empty() {
-            self.model.clips.push(Clip { name, duration, channels });
+            self.model.clips.push(Clip {
+                name,
+                duration,
+                channels,
+            });
         }
         Ok(())
     }
@@ -513,7 +674,10 @@ impl<'a> Converter<'a> {
             min = min.min(q);
             max = max.max(q);
         }
-        Bounds { min: min.to_array(), max: max.to_array() }
+        Bounds {
+            min: min.to_array(),
+            max: max.to_array(),
+        }
     }
 }
 
@@ -521,8 +685,22 @@ impl<'a> Converter<'a> {
 /// occlusion infos, which the gltf crate gives no accessor for).
 fn transform_of(v: Option<&gltf::json::Value>) -> Option<(UvTransform, Option<u32>)> {
     let v = v?;
-    let pair = |key: &str, d: [f32; 2]| v.get(key).and_then(|a| a.as_array()).map(|a| [a[0].as_f64().unwrap_or(d[0] as f64) as f32, a[1].as_f64().unwrap_or(d[1] as f64) as f32]).unwrap_or(d);
-    let t = UvTransform { offset: pair("offset", [0.0, 0.0]), rotation: v.get("rotation").and_then(|r| r.as_f64()).unwrap_or(0.0) as f32, scale: pair("scale", [1.0, 1.0]) };
+    let pair = |key: &str, d: [f32; 2]| {
+        v.get(key)
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                [
+                    a[0].as_f64().unwrap_or(d[0] as f64) as f32,
+                    a[1].as_f64().unwrap_or(d[1] as f64) as f32,
+                ]
+            })
+            .unwrap_or(d)
+    };
+    let t = UvTransform {
+        offset: pair("offset", [0.0, 0.0]),
+        rotation: v.get("rotation").and_then(|r| r.as_f64()).unwrap_or(0.0) as f32,
+        scale: pair("scale", [1.0, 1.0]),
+    };
     Some((t, v.get("texCoord").and_then(|t| t.as_u64()).map(|t| t as u32)))
 }
 

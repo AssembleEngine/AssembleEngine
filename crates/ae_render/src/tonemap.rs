@@ -76,17 +76,40 @@ impl Tonemap {
         // Three samplers: the scene, the bloom and the 1×1 exposure image.
         // A graph without a bloom or an exposure pass binds the scene to
         // the missing one and the uniform switches it off.
-        Ok(Self { program: FullscreenProgram::new(gpu, "post.tonemap", spirv!("tonemap.frag"), UNIFORM_BYTES, 3, &[format], frames_in_flight)? })
+        Ok(Self {
+            program: FullscreenProgram::new(
+                gpu,
+                "post.tonemap",
+                spirv!("tonemap.frag"),
+                UNIFORM_BYTES,
+                3,
+                &[format],
+                frames_in_flight,
+            )?,
+        })
     }
 
     /// Frame slot `slot`'s parameters (before it records): the graph's
     /// bloom, whether it declares the exposure image, and the EV100 the
     /// scene was stored at ([`ToneParams::ev100`]).
-    pub fn write(&mut self, slot: usize, params: ToneParams, bloom: bool, exposure: bool, working: WorkingSpace, output: Gamut) {
+    pub fn write(
+        &mut self,
+        slot: usize,
+        params: ToneParams,
+        bloom: bool,
+        exposure: bool,
+        working: WorkingSpace,
+        output: Gamut,
+    ) {
         // Exposure was applied before the scene was stored; the auto
         // exposure scales the stored scene by the image's EV against this
         // reference (1 when they agree).
-        let mut words: Vec<f32> = vec![params.bloom, if bloom { 1.0 } else { 0.0 }, if exposure { 1.0 } else { 0.0 }, params.ev100];
+        let mut words: Vec<f32> = vec![
+            params.bloom,
+            if bloom { 1.0 } else { 0.0 },
+            if exposure { 1.0 } else { 0.0 },
+            params.ev100,
+        ];
         // `output` is the gamut the tonemap writes in: SDR's BT.709 (the
         // scene, in the working space, is mapped to it and, when the working
         // space is wider, compressed into it), or in HDR the working space
@@ -101,7 +124,12 @@ impl Tonemap {
         // in the output's primaries by then); w: 1 when the output gamut is
         // narrower than the working space.
         let out_luma = output.luminance_row();
-        words.extend_from_slice(&[out_luma[0], out_luma[1], out_luma[2], if output.contains(working) { 0.0 } else { 1.0 }]);
+        words.extend_from_slice(&[
+            out_luma[0],
+            out_luma[1],
+            out_luma[2],
+            if output.contains(working) { 0.0 } else { 1.0 },
+        ]);
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.program.write_uniforms(slot, &bytes);
     }
@@ -109,8 +137,19 @@ impl Tonemap {
     /// The scene, plus the bloom's blurred light and the exposure image when
     /// the graph has them (the scene stands in for either otherwise,
     /// unread).
-    pub fn record(&self, ctx: &PassContext<'_>, scene: ImageBinding, bloom: Option<ImageBinding>, exposure: Option<ImageBinding>, sampler: vk::Sampler) -> Result<()> {
-        self.program.record(ctx, &[scene, bloom.unwrap_or(scene), exposure.unwrap_or(scene)], sampler)
+    pub fn record(
+        &self,
+        ctx: &PassContext<'_>,
+        scene: ImageBinding,
+        bloom: Option<ImageBinding>,
+        exposure: Option<ImageBinding>,
+        sampler: vk::Sampler,
+    ) -> Result<()> {
+        self.program.record(
+            ctx,
+            &[scene, bloom.unwrap_or(scene), exposure.unwrap_or(scene)],
+            sampler,
+        )
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

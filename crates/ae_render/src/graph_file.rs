@@ -75,13 +75,16 @@
 use crate::colorspace::{Gamut, WorkingSpace};
 use crate::encode::{DisplayLevels, OutputEncoding};
 use crate::module::{DeclareTarget, Declared, ModuleFrame};
-use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
+use ae_render_abi::module::{
+    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program,
+    ProgramTable,
+};
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
+use ash::vk;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
-use ash::vk;
 
 pub const FILE_VERSION: u32 = 1;
 
@@ -154,7 +157,12 @@ enum When {
 
 impl When {
     fn holds(when: Option<When>, flags: u32, hdr: bool) -> bool {
-        let (units, readback, water, shadows) = (flags & DECLARE_UNITS != 0, flags & DECLARE_READBACK != 0, flags & DECLARE_WATER != 0, flags & DECLARE_SHADOWS != 0);
+        let (units, readback, water, shadows) = (
+            flags & DECLARE_UNITS != 0,
+            flags & DECLARE_READBACK != 0,
+            flags & DECLARE_WATER != 0,
+            flags & DECLARE_SHADOWS != 0,
+        );
         match when {
             None => true,
             Some(When::Units) => units,
@@ -274,7 +282,10 @@ pub struct GraphFile {
 
 fn hex_decode(text: &str) -> Result<Vec<u8>> {
     ensure!(text.len().is_multiple_of(2), "odd number of hex digits");
-    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).with_context(|| format!("hex digits {:?}", &text[i..i + 2]))).collect()
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).with_context(|| format!("hex digits {:?}", &text[i..i + 2])))
+        .collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -398,29 +409,65 @@ impl GraphFile {
     /// (`fragment_hex`), as [`inline`] writes it.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let spec: FileSpec = serde_json::from_slice(bytes).context("parsing the graph file")?;
-        ensure!(spec.version == FILE_VERSION, "graph file version {}; this host reads {FILE_VERSION}", spec.version);
+        ensure!(
+            spec.version == FILE_VERSION,
+            "graph file version {}; this host reads {FILE_VERSION}",
+            spec.version
+        );
         let mut spirv = BTreeMap::new();
         for p in &spec.programs {
             if let Some(path) = &p.fragment {
-                bail!("program `{}`: `fragment` {path:?} is not inlined (load the file through `graph_file::inline` or `module::build`)", p.name);
+                bail!(
+                    "program `{}`: `fragment` {path:?} is not inlined (load the file through `graph_file::inline` or `module::build`)",
+                    p.name
+                );
             }
-            let hex = p.fragment_hex.as_deref().with_context(|| format!("program `{}` has no `fragment`", p.name))?;
+            let hex = p
+                .fragment_hex
+                .as_deref()
+                .with_context(|| format!("program `{}` has no `fragment`", p.name))?;
             let bytes = hex_decode(hex).with_context(|| format!("program `{}`", p.name))?;
-            ensure!(!bytes.is_empty() && bytes.len().is_multiple_of(4), "program `{}`: SPIR-V of {} bytes", p.name, bytes.len());
-            ensure!(spirv.insert(p.name.clone(), bytes).is_none(), "program `{}` is declared twice", p.name);
+            ensure!(
+                !bytes.is_empty() && bytes.len().is_multiple_of(4),
+                "program `{}`: SPIR-V of {} bytes",
+                p.name,
+                bytes.len()
+            );
+            ensure!(
+                spirv.insert(p.name.clone(), bytes).is_none(),
+                "program `{}` is declared twice",
+                p.name
+            );
         }
         let mut names = std::collections::BTreeSet::new();
         for r in &spec.resources {
             ensure!(names.insert(r.name.as_str()), "resource `{}` is declared twice", r.name);
         }
-        ensure!(spec.resources.iter().filter(|r| r.kind == ResourceKind::Output).count() == 1, "a graph file declares exactly one `output` resource");
-        let file = Self { spec, spirv, entries: Vec::new(), loaded: std::time::Instant::now() };
+        ensure!(
+            spec.resources.iter().filter(|r| r.kind == ResourceKind::Output).count() == 1,
+            "a graph file declares exactly one `output` resource"
+        );
+        let file = Self {
+            spec,
+            spirv,
+            entries: Vec::new(),
+            loaded: std::time::Instant::now(),
+        };
         // Every scene and output encoding the file can be asked for must
         // declare (a graph file is checked before its first frame, not
         // discovered per frame).
         for encoding in [OutputEncoding::Sdr, OutputEncoding::Hdr10Pq, OutputEncoding::ScRgb] {
             for flags in SCENE_FLAGS {
-                let target = DeclareTarget { width: 64, height: 64, color_format: vk::Format::B8G8R8A8_SRGB, flags, encoding, levels: DisplayLevels::default(), working: WorkingSpace::Bt709, gamut: Gamut::Bt709 };
+                let target = DeclareTarget {
+                    width: 64,
+                    height: 64,
+                    color_format: vk::Format::B8G8R8A8_SRGB,
+                    flags,
+                    encoding,
+                    levels: DisplayLevels::default(),
+                    working: WorkingSpace::Bt709,
+                    gamut: Gamut::Bt709,
+                };
                 file.build(&target).with_context(|| {
                     format!(
                         "declaring for {encoding:?}, {}units, {}water, {}shadows, {}particles, {}",
@@ -428,7 +475,11 @@ impl GraphFile {
                         if flags & DECLARE_WATER != 0 { "" } else { "no " },
                         if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
                         if flags & DECLARE_PARTICLES != 0 { "" } else { "no " },
-                        if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
+                        if flags & DECLARE_READBACK != 0 {
+                            "readback"
+                        } else {
+                            "present"
+                        }
                     )
                 })?;
             }
@@ -437,7 +488,12 @@ impl GraphFile {
     }
 
     fn build(&self, target: &DeclareTarget) -> Result<(Declared, Vec<Entry>)> {
-        let (width, height, color_format, flags) = (target.width, target.height, target.color_format.as_raw() as u32, target.flags);
+        let (width, height, color_format, flags) = (
+            target.width,
+            target.height,
+            target.color_format.as_raw() as u32,
+            target.flags,
+        );
         let readback = flags & DECLARE_READBACK != 0;
         let hdr = target.encoding.uses_display();
         let mut g = GraphBuilder::new();
@@ -449,7 +505,11 @@ impl GraphFile {
             let at = || format!("resource `{}`", r.name);
             let reference = match r.kind {
                 ResourceKind::Library => {
-                    ensure!(r.format.is_none() && r.usage.is_empty() && r.class.is_none() && r.scale.is_none(), "{}: a library resource takes no format, usage, class or scale", at());
+                    ensure!(
+                        r.format.is_none() && r.usage.is_empty() && r.class.is_none() && r.scale.is_none(),
+                        "{}: a library resource takes no format, usage, class or scale",
+                        at()
+                    );
                     if r.name == ae_render_abi::module::SHADOW_MAP_NAME {
                         g.image(&r.name, ae_render_abi::module::shadow_map_spec(), Class::External)
                     } else if r.name == ae_render_abi::module::PARTICLE_SHADOW_NAME {
@@ -461,7 +521,13 @@ impl GraphFile {
                     }
                 }
                 ResourceKind::Image => {
-                    let fmt = format(r.format.as_deref().with_context(|| format!("{} needs a format", at()))?, color_format).with_context(at)?;
+                    let fmt = format(
+                        r.format
+                            .as_deref()
+                            .with_context(|| format!("{} needs a format", at()))?,
+                        color_format,
+                    )
+                    .with_context(at)?;
                     let scale = r.scale.unwrap_or(1.0);
                     ensure!(scale > 0.0 && scale <= 4.0, "{}: scale {scale} (0 < scale <= 4)", at());
                     let size = |v: u32| ((v as f32 * scale).round() as u32).max(1);
@@ -469,16 +535,31 @@ impl GraphFile {
                         ImageClass::Transient => Class::Transient,
                         ImageClass::Persistent => Class::Persistent,
                     };
-                    let spec = ImageSpec { aspect: aspect(fmt), ..ImageSpec::color_2d(fmt, size(width), size(height), usage(&r.usage).with_context(at)?) };
+                    let spec = ImageSpec {
+                        aspect: aspect(fmt),
+                        ..ImageSpec::color_2d(fmt, size(width), size(height), usage(&r.usage).with_context(at)?)
+                    };
                     g.image(&r.name, spec, class)
                 }
                 ResourceKind::Output => {
-                    ensure!(r.format.is_none() && r.class.is_none() && r.scale.is_none(), "{}: the output has the target's format and size", at());
+                    ensure!(
+                        r.format.is_none() && r.class.is_none() && r.scale.is_none(),
+                        "{}: the output has the target's format and size",
+                        at()
+                    );
                     let extra = usage(&r.usage).with_context(at)?;
                     let reference = if readback {
-                        g.image("readback.target", ImageSpec::color_2d(color_format, width, height, 0x10 | 0x1 | extra), Class::External)
+                        g.image(
+                            "readback.target",
+                            ImageSpec::color_2d(color_format, width, height, 0x10 | 0x1 | extra),
+                            Class::External,
+                        )
                     } else {
-                        g.image("target", ImageSpec::color_2d(color_format, width, height, 0x10 | extra), Class::Backbuffer)
+                        g.image(
+                            "target",
+                            ImageSpec::color_2d(color_format, width, height, 0x10 | extra),
+                            Class::Backbuffer,
+                        )
                     };
                     output = Some(reference);
                     reference
@@ -491,23 +572,45 @@ impl GraphFile {
             let at = || format!("pass `{}`", p.name);
             let payload = match (&p.library, &p.program) {
                 (Some(name), None) => {
-                    entries.push(Entry { flag: p.flag, ..Entry::default() });
+                    entries.push(Entry {
+                        flag: p.flag,
+                        ..Entry::default()
+                    });
                     table.library(name)
                 }
                 (None, Some(name)) => {
-                    let spec = self.spec.programs.iter().find(|q| &q.name == name).with_context(|| format!("{}: no program `{name}`", at()))?;
+                    let spec = self
+                        .spec
+                        .programs
+                        .iter()
+                        .find(|q| &q.name == name)
+                        .with_context(|| format!("{}: no program `{name}`", at()))?;
                     let block = |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
                     let uniforms = block(&spec.uniforms);
                     let uniforms_off = match spec.uniforms_flag {
                         None => None,
                         Some(bit) => {
                             ensure!(bit < 32, "{}: uniforms_flag bit {bit} (0..32)", at());
-                            ensure!(spec.uniforms_off.len() == spec.uniforms.len(), "{}: uniforms_off has {} floats; uniforms has {}", at(), spec.uniforms_off.len(), spec.uniforms.len());
+                            ensure!(
+                                spec.uniforms_off.len() == spec.uniforms.len(),
+                                "{}: uniforms_off has {} floats; uniforms has {}",
+                                at(),
+                                spec.uniforms_off.len(),
+                                spec.uniforms.len()
+                            );
                             Some((bit, block(&spec.uniforms_off)))
                         }
                     };
-                    let index = table.push(Program::Fullscreen { label: &spec.name, spirv: &self.spirv[&spec.name], uniform_bytes: uniforms.len() as u32 });
-                    entries.push(Entry { flag: p.flag, uniforms, uniforms_off });
+                    let index = table.push(Program::Fullscreen {
+                        label: &spec.name,
+                        spirv: &self.spirv[&spec.name],
+                        uniform_bytes: uniforms.len() as u32,
+                    });
+                    entries.push(Entry {
+                        flag: p.flag,
+                        uniforms,
+                        uniforms_off,
+                    });
                     index
                 }
                 _ => bail!("{}: give exactly one of `library` and `program`", at()),
@@ -522,10 +625,18 @@ impl GraphFile {
                 let (resource, role, discard) = access(a).with_context(at)?;
                 let Some(&reference) = refs.get(resource) else {
                     // Declared, but not in this scene: the access goes with it.
-                    ensure!(self.spec.resources.iter().any(|r| r.name == resource), "{}: no resource `{resource}`", at());
+                    ensure!(
+                        self.spec.resources.iter().any(|r| r.name == resource),
+                        "{}: no resource `{resource}`",
+                        at()
+                    );
                     continue;
                 };
-                w = if discard { w.discard(reference, role) } else { w.access(reference, role) };
+                w = if discard {
+                    w.discard(reference, role)
+                } else {
+                    w.access(reference, role)
+                };
             }
             if let Some(bit) = p.flag {
                 ensure!(bit < 32, "{}: flag bit {bit} (0..32)", at());
@@ -541,16 +652,31 @@ impl GraphFile {
             let buffer = g.buffer("readback.buffer", 0, 0, Class::External);
             entries.push(Entry::default());
             let copy = table.library("readback.copy");
-            g.pass("copy", PassKind::Transfer, copy).access(output, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
+            g.pass("copy", PassKind::Transfer, copy)
+                .access(output, Role::TransferSrc)
+                .discard(buffer, Role::TransferDst)
+                .id();
             entries.push(Entry::default());
             let read = table.library("host.read");
-            g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
+            g.pass("host read", PassKind::Transfer, read)
+                .access(buffer, Role::HostRead)
+                .root()
+                .id();
         } else {
             entries.push(Entry::default());
             let present = table.library("present");
-            g.pass("present", PassKind::Present, present).present(output).root().id();
+            g.pass("present", PassKind::Present, present)
+                .present(output)
+                .root()
+                .id();
         }
-        Ok((Declared { graph: g.finish(), programs: table.finish() }, entries))
+        Ok((
+            Declared {
+                graph: g.finish(),
+                programs: table.finish(),
+            },
+            entries,
+        ))
     }
 
     /// The graph for a target (as a module's `declare`).
@@ -588,12 +714,17 @@ impl GraphFile {
 /// [`GraphFile::parse`] (and so `RenderModule::load`) takes.
 pub fn inline(path: &Path) -> Result<Vec<u8>> {
     let text = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let mut value: serde_json::Value = serde_json::from_slice(&text).with_context(|| format!("parse {}", path.display()))?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&text).with_context(|| format!("parse {}", path.display()))?;
     let dir = path.parent().unwrap_or(Path::new("."));
     if let Some(programs) = value.get_mut("programs").and_then(|p| p.as_array_mut()) {
         for program in programs {
-            let Some(object) = program.as_object_mut() else { continue };
-            let Some(fragment) = object.remove("fragment") else { continue };
+            let Some(object) = program.as_object_mut() else {
+                continue;
+            };
+            let Some(fragment) = object.remove("fragment") else {
+                continue;
+            };
             let fragment = fragment.as_str().context("`fragment` is a path")?.to_string();
             let file = dir.join(&fragment);
             let spirv = if fragment.ends_with(".spv") {
@@ -616,7 +747,12 @@ fn compile(file: &Path) -> Result<Vec<u8>> {
         .args(["-o", "-"])
         .output()
         .with_context(|| format!("running {glslc}"))?;
-    ensure!(output.status.success(), "{glslc} failed for {}:\n{}", file.display(), String::from_utf8_lossy(&output.stderr));
+    ensure!(
+        output.status.success(),
+        "{glslc} failed for {}:\n{}",
+        file.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(output.stdout)
 }
 
@@ -635,8 +771,14 @@ mod tests {
     #[test]
     fn roles_and_accesses_parse() {
         assert_eq!(role("color:clear").unwrap(), Role::ColorAttachment(LoadOp::Clear));
-        assert_eq!(role("storage_buffer_read:vertex").unwrap(), Role::StorageBufferRead(ShaderStage::Vertex));
-        assert_eq!(access("units.counts transfer_dst discard").unwrap(), ("units.counts", Role::TransferDst, true));
+        assert_eq!(
+            role("storage_buffer_read:vertex").unwrap(),
+            Role::StorageBufferRead(ShaderStage::Vertex)
+        );
+        assert_eq!(
+            access("units.counts transfer_dst discard").unwrap(),
+            ("units.counts", Role::TransferDst, true)
+        );
         for bad in ["color", "indirect:vertex", "sampled:pixel", "present", "blend:add"] {
             assert!(role(bad).is_err(), "{bad}");
         }
@@ -645,27 +787,56 @@ mod tests {
 
     #[test]
     fn errors_name_what_is_wrong() {
-        let err = |text: String| GraphFile::parse(text.as_bytes()).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let err = |text: String| {
+            GraphFile::parse(text.as_bytes())
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default()
+        };
         assert!(err(file(LOD)).is_empty(), "{}", err(file(LOD)));
-        let e = err(file(&LOD.replace("terrain.indirect storage", "terrain.indirekt storage")));
-        assert!(e.contains("pass `terrain lod`") && e.contains("no resource `terrain.indirekt`"), "{e}");
-        let e = err(file(&LOD.replace(r#""library": "terrain.lod""#, r#""program": "nope""#)));
+        let e = err(file(
+            &LOD.replace("terrain.indirect storage", "terrain.indirekt storage"),
+        ));
+        assert!(
+            e.contains("pass `terrain lod`") && e.contains("no resource `terrain.indirekt`"),
+            "{e}"
+        );
+        let e = err(file(
+            &LOD.replace(r#""library": "terrain.lod""#, r#""program": "nope""#),
+        ));
         assert!(e.contains("no program `nope`"), "{e}");
         let e = err(file(&LOD.replace("compute\", \"library", "computer\", \"library")));
         assert!(e.contains("parsing"), "{e}");
         let e = err(file(LOD).replace("\"version\": 1", "\"version\": 2"));
         assert!(e.contains("version 2"), "{e}");
-        let e = err(file(LOD).replace(r#"{"name": "target", "kind": "output"}"#, r#"{"name": "target", "kind": "library"}"#));
+        let e = err(file(LOD).replace(
+            r#"{"name": "target", "kind": "output"}"#,
+            r#"{"name": "target", "kind": "library"}"#,
+        ));
         assert!(e.contains("exactly one `output`"), "{e}");
     }
 
     #[test]
     fn conditional_passes_follow_their_flag() {
-        let text = file(&format!(r#"{LOD}, {{"name": "extra", "kind": "compute", "library": "terrain.lod", "flag": 3, "access": ["terrain.leaves storage_buffer_write:compute"], "root": true}}"#));
+        let text = file(&format!(
+            r#"{LOD}, {{"name": "extra", "kind": "compute", "library": "terrain.lod", "flag": 3, "access": ["terrain.leaves storage_buffer_write:compute"], "root": true}}"#
+        ));
         let mut f = GraphFile::parse(text.as_bytes()).unwrap();
-        let target = DeclareTarget { width: 64, height: 64, color_format: vk::Format::B8G8R8A8_SRGB, flags: 0, encoding: OutputEncoding::Sdr, levels: DisplayLevels::default(), working: WorkingSpace::Bt709, gamut: Gamut::Bt709 };
+        let target = DeclareTarget {
+            width: 64,
+            height: 64,
+            color_format: vk::Format::B8G8R8A8_SRGB,
+            flags: 0,
+            encoding: OutputEncoding::Sdr,
+            levels: DisplayLevels::default(),
+            working: WorkingSpace::Bt709,
+            gamut: Gamut::Bt709,
+        };
         f.declare(&target).unwrap();
-        let input = |flags| FrameInput { flags, ..FrameInput::default() };
+        let input = |flags| FrameInput {
+            flags,
+            ..FrameInput::default()
+        };
         assert!(f.frame(&input(0)).is_disabled(1) && !f.frame(&input(0)).is_disabled(0));
         assert!(!f.frame(&input(1 << 3)).is_disabled(1));
     }
