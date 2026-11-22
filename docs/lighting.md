@@ -37,6 +37,15 @@ Eye adaptation (`ae_render::exposure`, `ToneParams::auto`) closes the HDR
 loop on the GPU: the CPU never reads a value back, and a new EV takes effect
 in the same frame's bloom and tonemap.
 
+- **The key follows the curve** (`ToneParams::key`): Lottes keeps 0.5, its mid
+  anchor; with no curve (the default) it is 0.32 (`KEY_LUMINANCE_NO_CURVE`).
+  At 0.5 with no shoulder white is one stop above the mean, and the default
+  map adapted brighter than its start until its road and lights clipped
+  (mean sRGB luma 150 at 0.5 s, 186 at 10 s); at 0.32 it settles at its
+  start's look (143.5, then 152.8), and white is 1.6 stops above the key.
+  Measured with `ae-client --capture` (crossing water map, 10,000 units,
+  default camera, 1280×720, 30 and 600 frames at a fixed 1/60 s).
+
 - **Metering** (`exposure.meter`, compute): the scene is sampled at a
   quarter resolution (four taps per 4×4 block, averaged), and its Rec. 709
   luminance's log2 added to one of 128 histogram bins over −8..+8 EV

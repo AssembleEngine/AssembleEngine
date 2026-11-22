@@ -3206,7 +3206,11 @@ Steps (commit and stop for compaction after each):
   it (`lottes_tone()`); under no curve the specular saturates at 255 and the waves change
   34 of 1678 water pixels against 105. The sky test expects the pass-through. The GPU
   bench now runs the default as well, so its tonemap pass differs from the baseline
-  (recorded under Lottes).
+  (recorded under Lottes). Auto-exposure's key follows the curve: at Lottes' 0.5 with no
+  curve the default map adapted brighter until its road and the lights on it clipped (mean
+  sRGB luma 150 at 0.5 s, 186 at 10 s, `--capture`, 1280×720, 10,000 units); at 0.32
+  (`KEY_LUMINANCE_NO_CURVE`) it settles at its start's look (143.5, then 152.8). Lottes
+  keeps 0.5, and `auto_exposure_holds_the_key_across_sunlight` runs under it.
 - **Stage 1 is done** (2026-11-21). Lottes 2016 (`x^a / ((x^a)^d * b + c)`) was then the
   default curve (`Clamp` stayed for exact linear reads). `a` and `d` are 1 (with these
   anchors a larger shoulder exponent makes the curve fall again past the peak, so values
