@@ -113,6 +113,11 @@ impl Light {
 
     /// A cone along `direction`, full inside `inner` and dark outside
     /// `outer` (half-angles, radians).
+    ///
+    /// Eight scalars, taken as such: every call site reads as the light it
+    /// defines, and a parameter struct would only rename the same eight fields
+    /// on the way into this one.
+    #[allow(clippy::too_many_arguments)]
     pub fn cone(
         position: Vec3,
         direction: Vec3,

@@ -30,6 +30,7 @@ use crate::math::{CellPos, Rect, SectorPos, WorldPos, TICK_HZ, TICK_SECONDS};
 use crate::nav::crowd::{CrowdMap, Traffic, CROWD_AWARE_MIN_UNITS, UPDATE_TICKS as CROWD_UPDATE_TICKS};
 use crate::par::Par;
 pub use crate::reference::commands::{ArrivalSlot, CommandKind, CommandPayload, CommandRecord, CommandStatus};
+use std::ops::{Add, Sub};
 
 /// Times a stalled unit's give-up timer restarts before it gives up.
 const STUCK_RETRIES: u8 = 2;
@@ -618,6 +619,13 @@ struct QueuedCommand {
 
 /// Engine core. It is single-threaded; independent navigation jobs run on the
 /// compute pool and are only published at fixed tick boundaries.
+/// Formation cohorts: (profile, segment, target) groups with their shared
+/// target cell and members.
+type Cohorts = BTreeMap<(u8, u32, Option<(i32, i32)>), (CellPos, Vec<usize>)>;
+
+/// Cost overlays by id: inclusive cell rectangle and extra cost.
+type CostOverlays = BTreeMap<u64, ((i32, i32, i32, i32), u8)>;
+
 pub struct NavService {
     pub cfg: NavConfig,
     pub profiles: Vec<MovementProfile>,
@@ -702,7 +710,7 @@ pub struct NavService {
     repair_ground: bool,
     /// Cost overlays by id: inclusive cell rectangle (clipped to the map)
     /// and extra cost.
-    cost_overlays: BTreeMap<u64, ((i32, i32, i32, i32), u8)>,
+    cost_overlays: CostOverlays,
 }
 
 impl NavService {
@@ -1806,7 +1814,7 @@ impl NavService {
         }
         // Group into (profile, segment) cohorts with a shared target.
         let seg_len = FORMATION_SEGMENT_CELLS as f32 * geom.cell_size;
-        let mut groups: BTreeMap<(u8, u32, Option<(i32, i32)>), (CellPos, Vec<usize>)> = BTreeMap::new();
+        let mut groups: Cohorts = BTreeMap::new();
         let mut seg_targets: BTreeMap<(u8, u32), Option<CellPos>> = BTreeMap::new();
         for &(i, pid, t, c) in &placed {
             let seg = (t / seg_len) as u32;
@@ -2269,7 +2277,7 @@ impl NavService {
             self.nav.jobs_completed += 1;
             match result {
                 WorkerResult::Field { field, .. } => match field {
-                    Some(f) => self.insert_field(f),
+                    Some(f) => self.insert_field(*f),
                     None => self.nav.jobs_failed += 1,
                 },
                 WorkerResult::Hierarchy { hierarchy } => {
@@ -3517,14 +3525,14 @@ impl NavService {
     fn update_unit_progress(&mut self, nav_driven: &[bool]) {
         let tick = self.tick;
         let geom = self.hierarchy.terrain.geom.clone();
-        for i in 0..self.units.len() {
+        for (i, &driven) in nav_driven.iter().enumerate() {
             let goal = self.units[i]
                 .cohort_id
                 .and_then(|c| self.cohorts.get(&c))
                 .and_then(|c| c.stages.last())
                 .map(|s| geom.cell_center(s.target));
             let moved = self.units[i].body.pos.dist(self.units[i].last_pos);
-            if nav_driven[i] && moved > self.cfg.cell_size * 0.004 {
+            if driven && moved > self.cfg.cell_size * 0.004 {
                 if let Some(cid) = self.units[i].command_id {
                     if let Some(rec) = self.commands.get_mut(&cid) {
                         if rec.first_move_tick.is_none() {
@@ -4379,7 +4387,7 @@ fn steer_one(env: &SteerEnv, u: &mut Unit, out: &mut SteerOut, chain: &mut Vec<C
                         .unwrap_or(next);
                     // Only far waypoints are kept, so a unit whose view is
                     // one cell recomputes on its staggered tick only.
-                    u.waypoint = Some((wc, u.stage_idx)).filter(|_| far(Some((wc, u.stage_idx))));
+                    u.waypoint = far(Some((wc, u.stage_idx))).then_some((wc, u.stage_idx));
                 }
                 match u.waypoint {
                     Some((wc, _)) if far(u.waypoint) => geom.cell_center(wc),

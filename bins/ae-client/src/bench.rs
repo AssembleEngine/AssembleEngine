@@ -516,11 +516,17 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
     o
 }
 
+/// The terrain of a map and its nav terrain, built once per map.
+type Sources = BTreeMap<(u8, i32), (Arc<TerrainSource>, Option<Arc<Terrain>>)>;
+
+/// A scene's unit stream and its poser, built once per map and unit set.
+type Streams = BTreeMap<(u8, i32, u32, bool), (Arc<InstanceStream>, Option<Posing>)>;
+
 /// Map sources and unit streams, built once per map.
 #[derive(Default)]
 struct Cache {
-    sources: BTreeMap<(u8, i32), (Arc<TerrainSource>, Option<Arc<Terrain>>)>,
-    streams: BTreeMap<(u8, i32, u32, bool), (Arc<InstanceStream>, Option<Posing>)>,
+    sources: Sources,
+    streams: Streams,
     fox: Option<ClassModel>,
     fox_light: Option<ClassModel>,
 }

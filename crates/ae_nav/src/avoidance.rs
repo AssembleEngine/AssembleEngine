@@ -13,6 +13,7 @@
 //! bit-identical results.
 use crate::math::WorldPos;
 use crate::par::Par;
+use std::ops::{Add, Sub};
 
 #[derive(Clone, Copy, Debug)]
 pub struct AvoidanceConfig {

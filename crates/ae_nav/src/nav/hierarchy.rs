@@ -472,11 +472,11 @@ impl ProfileHierarchy {
         let sector_count = (g.sectors_x() * g.sectors_y()) as usize;
         let mut region_of: Vec<Arc<[u16]>> = match previous {
             Some(p) => p.region_of.clone(),
-            None => vec![Arc::from(Vec::new()); sector_count],
+            None => (0..sector_count).map(|_| Arc::from(Vec::new())).collect(),
         };
         let mut sectors: Vec<Arc<SectorGraph>> = match previous {
             Some(p) => p.sectors.clone(),
-            None => vec![Arc::new(SectorGraph::default()); sector_count],
+            None => (0..sector_count).map(|_| Arc::new(SectorGraph::default())).collect(),
         };
         let relabel: Vec<u32> = (0..sector_count as u32)
             .filter(|s| previous.is_none() || dirty[*s as usize])
@@ -559,7 +559,9 @@ impl ProfileHierarchy {
         let sector_ids: Vec<u32> = (0..sector_count as u32).collect();
         let lists = par_map(&sector_ids, threads, |&s| {
             let ids = &sector_nodes[s as usize];
-            let mut lists: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>)> = ids
+            /// Per node: its outgoing edges (node, cost), then its incoming ones.
+            type Edges = (Vec<(u32, u32)>, Vec<(u32, u32)>);
+            let mut lists: Vec<Edges> = ids
                 .iter()
                 .map(|&n| {
                     let node = &nodes[n as usize];

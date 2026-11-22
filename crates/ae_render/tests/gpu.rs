@@ -1233,7 +1233,6 @@ fn photometric_sun_exposure_and_inverse_square() {
                 sun_illuminance: sun,
                 bloom: 0.0,
                 auto: false,
-                ..Default::default()
             });
         if unculled {
             app = app.with_unculled_lights();
@@ -5598,7 +5597,6 @@ fn particles_light_by_illuminance() {
         sun_illuminance: 0.0,
         bloom: 0.0,
         auto: false,
-        ..Default::default()
     };
     // 10 m from the puff: 10 000 lx at 1e6 cd, 40 000 lx at 4e6 cd.
     let light = |intensity: f32| Light::point(Vec3::new(128.0, 40.0, 138.0), Vec3::ONE, intensity, 0.0, 0.05);
@@ -5780,6 +5778,7 @@ fn still_effect(color: [f32; 4], size: f32, emissive: bool) -> ae_render::partic
 ///   error, for each method.
 /// * the same, as a volume (each fragment its sphere's chord; overlapping
 ///   chords mixed as media), against the flat layers in the cluster.
+///
 /// The numbers are printed; the assertions hold what was measured: the
 /// centre sort is close to exact in the cluster, the exact per-pixel
 /// order pops about as much as the sort when the two cross (the moments,
@@ -6120,8 +6119,8 @@ fn particles_order_independence() {
         );
         pops.push((worst, jumps));
     }
-    for k in 0..modes.len() {
-        assert_eq!(frames[k].iter().map(|f| magenta(f)).sum::<usize>(), 0);
+    for frame in frames.iter().take(modes.len()) {
+        assert_eq!(frame.iter().map(|f| magenta(f)).sum::<usize>(), 0);
     }
     // Measured: in the cluster, the centre sort is within 1.6 (mean) of the
     // exact order, and the moments about as close.
@@ -8002,6 +8001,8 @@ fn units_model_shadows_culled() {
     use ae_render::thread::{TargetInfo, run_headless};
     use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
+    /// What one frame renders: colour bytes, its extent and the cascade lists.
+    type Frames = (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>);
 
     let gpu = gpu();
     let heightmap = Heightmap {
@@ -8136,7 +8137,7 @@ fn units_model_shadows_culled() {
         2
     ];
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
-    let render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
+    let render = |shadows: bool| -> Frames {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream {
             tick: 1,
@@ -8386,8 +8387,10 @@ fn units_pose_models() {
     enum Spec {
         Rest,
         Missing,
-        Records(Channels, Channels, bool),
+        Records(Box<Channels>, Box<Channels>, bool),
     }
+    /// A placed unit: position, facing, size, layer count and its channels.
+    type Unit = ((f32, f32), (f32, f32), f32, u32, Spec);
     let (looped, once, pingpong) = (PlayMode::Loop, PlayMode::Once, PlayMode::PingPong);
     let layer = |clip: u16, mode: PlayMode, phase: f32| Layer {
         clip,
@@ -8405,8 +8408,8 @@ fn units_pose_models() {
     };
     let one = |clip: u16, mode: PlayMode, ta: f32, tb: f32| {
         Spec::Records(
-            with(&[layer(clip, mode, ta)], &[]),
-            with(&[layer(clip, mode, tb)], &[]),
+            Box::new(with(&[layer(clip, mode, ta)], &[])),
+            Box::new(with(&[layer(clip, mode, tb)], &[])),
             false,
         )
     };
@@ -8424,7 +8427,7 @@ fn units_pose_models() {
         ..l
     };
     let weighted = |l: Layer, weight: f32| Layer { weight, ..l };
-    let mut units: Vec<((f32, f32), (f32, f32), f32, u32, Spec)> = vec![
+    let mut units: Vec<Unit> = vec![
         ((420.0, 440.0), (1.0, 0.0), 20.0, 0, Spec::Rest),
         ((510.0, 440.0), (1.0, 0.0), 20.0, 0, one(1, looped, 0.5, 0.5)),
         ((600.0, 440.0), (1.0, 0.0), 20.0, 0, one(2, looped, 0.6, 1.0)),
@@ -8436,8 +8439,14 @@ fn units_pose_models() {
             40.0,
             1,
             Spec::Records(
-                with(&[layer(2, looped, 0.3), weighted(layer(1, looped, 0.1), 0.5)], &[]),
-                with(&[layer(2, looped, 0.4), weighted(layer(1, looped, 0.2), 0.5)], &[]),
+                Box::new(with(
+                    &[layer(2, looped, 0.3), weighted(layer(1, looped, 0.1), 0.5)],
+                    &[],
+                )),
+                Box::new(with(
+                    &[layer(2, looped, 0.4), weighted(layer(1, looped, 0.2), 0.5)],
+                    &[],
+                )),
                 true,
             ),
         ),
@@ -8455,8 +8464,14 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(&[layer(2, looped, 0.5), additive(layer(1, looped, 0.4), 1, 0.7)], &[]),
-                with(&[layer(2, looped, 1.0), additive(layer(1, looped, 0.6), 1, 0.7)], &[]),
+                Box::new(with(
+                    &[layer(2, looped, 0.5), additive(layer(1, looped, 0.4), 1, 0.7)],
+                    &[],
+                )),
+                Box::new(with(
+                    &[layer(2, looped, 1.0), additive(layer(1, looped, 0.6), 1, 0.7)],
+                    &[],
+                )),
                 true,
             ),
         ),
@@ -8468,14 +8483,14 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(
+                Box::new(with(
                     &[layer(1, looped, 0.5)],
                     &[
                         entry(2, manual_kind::TURN, about_y(30.0)),
                         entry(1, manual_kind::MOVE, [0.0, 0.5, 0.0, 0.0]),
                     ],
-                ),
-                with(
+                )),
+                Box::new(with(
                     &[layer(1, looped, 0.5)],
                     &[
                         entry(2, manual_kind::TURN, about_y(60.0)),
@@ -8485,7 +8500,7 @@ fn units_pose_models() {
                             ..entry(1, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0])
                         },
                     ],
-                ),
+                )),
                 false,
             ),
         ),
@@ -8496,8 +8511,8 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))]),
-                with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))]),
+                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))])),
+                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))])),
                 true,
             ),
         ),
@@ -8509,7 +8524,7 @@ fn units_pose_models() {
             20.0,
             0,
             Spec::Records(
-                with(
+                Box::new(with(
                     &[
                         weighted(layer(1, looped, 0.5), 0.5),
                         weighted(layer(2, looped, 0.5), 0.0),
@@ -8520,8 +8535,8 @@ fn units_pose_models() {
                         },
                     ],
                     &[],
-                ),
-                with(
+                )),
+                Box::new(with(
                     &[
                         weighted(layer(1, looped, 0.7), 0.5),
                         weighted(layer(2, looped, 0.5), 0.0),
@@ -8532,7 +8547,7 @@ fn units_pose_models() {
                         },
                     ],
                     &[],
-                ),
+                )),
                 false,
             ),
         ),
@@ -8591,7 +8606,7 @@ fn units_pose_models() {
         (1.0, 0.0),
         20.0,
         0,
-        Spec::Records(half_round, half_round, false),
+        Spec::Records(Box::new(half_round), Box::new(half_round), false),
     ));
 
     // The sim's rigs; the arm's has a mask (its arm only), which the

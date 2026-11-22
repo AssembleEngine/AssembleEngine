@@ -5,6 +5,7 @@ use crate::math::WorldPos;
 use crate::par::Par;
 use crate::terrain::{Medium, Terrain};
 use serde::{Deserialize, Serialize};
+use std::ops::Add;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Body {

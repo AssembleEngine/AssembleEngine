@@ -53,12 +53,8 @@ impl WorldPos {
     pub fn lerp(self, o: Self, t: f32) -> Self {
         Self::new(self.x + (o.x - self.x) * t, self.y + (o.y - self.y) * t)
     }
-    pub fn add(self, o: Self) -> Self {
-        Self::new(self.x + o.x, self.y + o.y)
-    }
-    pub fn sub(self, o: Self) -> Self {
-        Self::new(self.x - o.x, self.y - o.y)
-    }
+    // `a.add(b)` and `a.sub(b)` are the `Add`/`Sub` impls below, called as
+    // methods (the traits are in scope where nav uses them): one definition.
     pub fn scaled(self, s: f32) -> Self {
         Self::new(self.x * s, self.y * s)
     }

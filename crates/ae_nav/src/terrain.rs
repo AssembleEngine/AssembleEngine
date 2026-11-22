@@ -191,6 +191,12 @@ pub struct TerrainPatch {
     pub overlay: Vec<(i32, i32, u8)>,
 }
 
+impl Default for TerrainPatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TerrainPatch {
     pub fn new() -> Self {
         Self {
@@ -446,6 +452,9 @@ impl Terrain {
 
     pub fn len(&self) -> usize {
         self.blocked.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.blocked.is_empty()
     }
     pub fn is_blocked(&self, c: CellPos) -> bool {
         self.geom.in_bounds(c) && self.blocked[self.geom.cell_index(c)] != 0

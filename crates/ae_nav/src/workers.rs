@@ -39,8 +39,13 @@ impl WorkerJob {
 }
 
 pub enum WorkerResult {
-    Hierarchy { hierarchy: Arc<NavHierarchy> },
-    Field { key: FieldKey, field: Option<FlowField> },
+    Hierarchy {
+        hierarchy: Arc<NavHierarchy>,
+    },
+    Field {
+        key: FieldKey,
+        field: Option<Box<FlowField>>,
+    },
 }
 
 struct Sink {
@@ -137,7 +142,10 @@ impl ComputePool {
                                 WorkerJob::BuildField { hierarchy, key } => {
                                     let grid = hierarchy.grid(key.profile_id);
                                     let field = build_flow_field(&hierarchy.terrain, grid, key.clone());
-                                    WorkerResult::Field { key, field }
+                                    WorkerResult::Field {
+                                        key,
+                                        field: field.map(Box::new),
+                                    }
                                 }
                             };
                             drop(busy);

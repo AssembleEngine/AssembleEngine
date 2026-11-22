@@ -54,6 +54,10 @@ fn wire<R>(mut graph: FrameGraph<R>, env: &LibraryEnv, program: impl Fn(&R) -> L
 }
 
 /// The encode target's format and colour space stand-in for `encoding`.
+///
+/// Nine inputs because a test says them out loud (size, three feature flags,
+/// encoding and levels); a struct would be built at every call site for less.
+#[allow(clippy::too_many_arguments)]
 fn target_for(
     width: u32,
     height: u32,

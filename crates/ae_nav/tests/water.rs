@@ -254,10 +254,10 @@ fn generated_crossing(threads: usize) -> (u64, Vec<u8>, [usize; 3]) {
     let start: Vec<WorldPos> = (0..s.bodies.len()).map(|i| s.bodies.pos(i)).collect();
     let mut wet = vec![false; s.bodies.len()];
     s.run(1500, |tick, _, b| {
-        for i in 0..b.len() {
+        for (i, &profile) in b.profile.iter().enumerate() {
             let c = terrain.geom.world_to_cell(b.pos(i));
             let d = depth_at(&terrain, c);
-            match b.profile[i] {
+            match profile {
                 class::SCOUT | class::HEAVY => assert!(
                     d <= FORD_DEPTH,
                     "tick {tick}: land unit {i} at {c:?} in {d} dm of water"
@@ -276,8 +276,8 @@ fn generated_crossing(threads: usize) -> (u64, Vec<u8>, [usize; 3]) {
     s.nav.write_modes(&mut modes);
     if std::env::var_os("AE_WATER_DEBUG").is_some() {
         let mut by = std::collections::BTreeMap::new();
-        for i in 0..b.len() {
-            *by.entry((b.profile[i], modes[i])).or_insert(0) += 1;
+        for (i, &profile) in b.profile.iter().enumerate() {
+            *by.entry((profile, modes[i])).or_insert(0) += 1;
         }
         eprintln!("(profile, mode) -> count: {by:?}");
         for i in (0..b.len()).filter(|&i| b.profile[i] == class::SHIP).take(50) {

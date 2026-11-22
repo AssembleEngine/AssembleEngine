@@ -2,6 +2,7 @@
 //! slots. The requested point is kept distinct from generated slots.
 use crate::math::{CellPos, WorldPos};
 use serde::{Deserialize, Serialize};
+use std::ops::{Add, Sub};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CommandKind {

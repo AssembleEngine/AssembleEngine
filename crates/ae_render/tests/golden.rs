@@ -35,6 +35,9 @@ const EXTENT: vk::Extent2D = vk::Extent2D {
 
 /// The levels the client sends (M13 stage 5): 203 nit paper white, 361 nit
 /// peak.
+/// One golden case's name and the declaration it builds.
+type Case = fn() -> String;
+
 const LEVELS: DisplayLevels = DisplayLevels {
     paper_white: 203.0,
     peak: 361.0,
@@ -171,7 +174,7 @@ fn check(name: &str, dot: &str) -> Option<String> {
 
 #[test]
 fn baked_plans_match_the_golden_dot_files() {
-    let cases: [(&str, fn() -> String); 16] = [
+    let cases: [(&str, Case); 16] = [
         ("scene_units_present", || {
             scene(true, false, false, TerrainOutput::Present)
         }),

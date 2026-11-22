@@ -19,6 +19,9 @@ use ae_nav::scenario::{Scenario, land_crossing, water_crossing};
 use anyhow::{Result, bail};
 use std::time::Instant;
 
+/// A scenario built for a worker count.
+type Build = fn(u32, i32, usize) -> Scenario;
+
 struct Run {
     tick_ns: Vec<f64>,
     hash: u64,
@@ -87,7 +90,7 @@ pub fn run(options: &Options) -> Result<Report> {
     if options.threads > 1 && !workers.contains(&options.threads) {
         workers.push(options.threads);
     }
-    let scenarios: [(&str, fn(u32, i32, usize) -> Scenario); 2] = [("land", land_crossing), ("water", water_crossing)];
+    let scenarios: [(&str, Build); 2] = [("land", land_crossing), ("water", water_crossing)];
     for (name, build) in scenarios {
         let tag = format!("{name}_units{units}_map{map}_ticks{ticks}");
         let mut first: Option<(usize, Run)> = None;
