@@ -17,16 +17,18 @@ use crate::poser::Poser;
 use ae_model::anim::Rig;
 use ae_nav::math::TICK_SECONDS;
 use ae_render::decals::{Blend, Decal, DecalFeed, layer};
-use ae_render::particles::{ParticleFeed, explosion};
+use ae_render::particles::{Burst, EFFECT_NAMES, ParticleFeed, explosion};
 use ae_render::terrain::app::{VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, AnimWrites, InstanceStream, NO_POSE, UnitClass, UnitFeed};
 use ae_sdk::Entity;
 use ae_sdk::aim::Orientation;
 use ae_sdk::anim::{Anim, model_id};
+use ae_sdk::fx::Effect;
 use ae_sdk::nav::MoveOrder;
 use ae_sensors::{Bits, SensorGrid};
 use ae_services::anim::AnimPlugin;
+use ae_services::fx::{FxFeed, FxPlugin};
 use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
 use ae_services::view::{SENSOR_CELL, ViewPipeline};
@@ -335,6 +337,10 @@ pub struct Sim {
     last_los: Option<Bits>,
     /// The module declares `Orientation` (its units may be drawn by it).
     has_orientation: bool,
+    /// The effects the sim's `fx` system published since the last stream.
+    fx: Option<Arc<FxFeed>>,
+    /// Effect names already warned about (not in the effects catalogue).
+    warned_fx: Vec<u64>,
     /// The units' channels after the last tick, by entity (with a poser).
     /// Milliseconds of the last stream's posing (reading the channels
     /// included).
@@ -372,7 +378,14 @@ impl Sim {
             max_workers: o.workers,
             ..RuntimeConfig::default()
         };
-        let mut plugins: Vec<Arc<dyn ae_sim::host::HostPlugin>> = vec![Arc::new(nav), Arc::new(spatial)];
+        // The effects sink, with a feed: the refactor's flashes and the
+        // death smoke become particles where the observer sees them.
+        let fx = Arc::new(FxFeed::default());
+        let mut plugins: Vec<Arc<dyn ae_sim::host::HostPlugin>> = vec![
+            Arc::new(nav),
+            Arc::new(spatial),
+            Arc::new(FxPlugin::new(Some(fx.clone()))),
+        ];
         if !o.mounts.is_empty() {
             let mut vfs = ae_vfs::Vfs::new();
             for m in &o.mounts {
@@ -477,6 +490,8 @@ impl Sim {
             last_units: Vec::new(),
             last_los: None,
             has_orientation,
+            fx: Some(fx),
+            warned_fx: Vec::new(),
             pose_ms: 0.0,
             read_ms: 0.0,
         })
@@ -628,6 +643,7 @@ impl Sim {
     /// Capture the world and build the stream (`tick_seconds` 0: no
     /// interpolation): every unit, or what the observer sees.
     pub fn stream(&mut self, tick_seconds: f32) -> Result<InstanceStream> {
+        self.emit_fx();
         self.rt.capture(&self.world, &self.spec, &mut self.capture)?;
         if self.view.is_none() {
             self.emit_deaths();
@@ -735,6 +751,24 @@ impl Sim {
         Ok(stream)
     }
 
+    /// The effects the sim's `fx` system has published since the last
+    /// stream, as particles where the observer sees them. Effects of tick
+    /// N start when the stream of tick N is published: the unit is then
+    /// drawn between N-1 and N, so a burst leads the drawn bone by up to a
+    /// tick of the unit's motion.
+    fn emit_fx(&mut self) {
+        let Some(feed) = &self.fx else { return };
+        let effects = feed.take();
+        if effects.is_empty() {
+            return;
+        }
+        let Some(fx) = self.effects.clone() else { return };
+        let bursts = fx_bursts(&effects, &fx, &mut self.warned_fx);
+        if let Some(particles) = &fx.particles {
+            particles.emit_all(&bursts);
+        }
+    }
+
     /// The next stream writes the whole animation table (its reader missed
     /// writes: `UnitFeed::wants_whole`).
     pub fn write_whole_anim(&mut self) {
@@ -788,6 +822,42 @@ fn deaths(
         }
     }
     sites
+}
+
+/// The sim's effects as bursts: one per effect the observer sees (`fx`'s
+/// `sees`, at the effect's nav `(x, y)`), named by the effects catalogue
+/// (`EFFECT_NAMES`); an unknown name is warned about once and skipped.
+/// `dir` is unused: the catalogue's effects are spherical for now.
+fn fx_bursts(effects: &[Effect], fx: &Effects, warned: &mut Vec<u64>) -> Vec<Burst> {
+    let mut bursts = Vec::new();
+    for e in effects {
+        let Some(effect) = EFFECT_NAMES
+            .iter()
+            .position(|name| ae_sdk::abi::name_id(name) == e.effect)
+        else {
+            if !warned.contains(&e.effect) {
+                warned.push(e.effect);
+                eprintln!(
+                    "effect {:#018x} is not one of {}: skipped",
+                    e.effect,
+                    EFFECT_NAMES.join(", ")
+                );
+            }
+            continue;
+        };
+        if !fx.sees(e.pos[0], e.pos[2]) {
+            continue;
+        }
+        bursts.push(Burst {
+            pos: e.pos,
+            ground: true,
+            effect: effect as u32,
+            count: e.count,
+            scale: e.scale,
+            seed: e.seed,
+        });
+    }
+    bursts
 }
 
 /// Where explosions go: the particles (flash, fire, sparks, smoke) and a
@@ -1521,6 +1591,59 @@ mod tests {
             decals[0]
         );
         assert!(deaths(&last, &last, |_, _| true).is_empty(), "nobody died");
+    }
+
+    /// A sim effect becomes a burst only where the observer sees it, with
+    /// the catalogue's index for its name; an unknown name is skipped and
+    /// warned about once.
+    #[test]
+    fn effects_become_bursts_only_where_seen() {
+        let fx = Effects {
+            particles: Some(Arc::default()),
+            ..Effects::default()
+        };
+        let flash = ae_sdk::abi::name_id("flash");
+        let effect = |x: f32, y: f32, effect: u64| Effect {
+            entity: Entity(1),
+            tick: 5,
+            pos: [x, 3.0, y],
+            dir: [1.0, 0.0, 0.0],
+            effect,
+            count: 2,
+            scale: 1.5,
+            seed: 9,
+            bone: 3,
+            flags: 0,
+        };
+        // No observer: everything is seen.
+        let bursts = fx_bursts(&[effect(5.0, 6.0, flash)], &fx, &mut Vec::new());
+        assert_eq!(bursts.len(), 1);
+        assert_eq!(
+            (
+                bursts[0].pos,
+                bursts[0].ground,
+                bursts[0].effect,
+                bursts[0].count,
+                bursts[0].scale
+            ),
+            ([5.0, 3.0, 6.0], true, 0, 2, 1.5),
+            "flash is the catalogue's first effect"
+        );
+        // One seen, one in the fog.
+        let grid = SensorGrid::new(100.0, 100.0, 10.0);
+        let mut los = Bits::new(grid.width, grid.height);
+        los.set(0, 0);
+        fx.set_sight(los, grid);
+        let seen = effect(5.0, 6.0, flash);
+        let unseen = effect(55.0, 55.0, flash);
+        assert_eq!(fx_bursts(&[seen, unseen], &fx, &mut Vec::new()).len(), 1);
+        // An unknown name: skipped, and only warned about once.
+        let mut warned = Vec::new();
+        let unknown = effect(5.0, 6.0, ae_sdk::abi::name_id("nope"));
+        assert!(fx_bursts(&[unknown], &fx, &mut warned).is_empty());
+        assert_eq!(warned, [ae_sdk::abi::name_id("nope")]);
+        assert!(fx_bursts(&[unknown], &fx, &mut warned).is_empty());
+        assert_eq!(warned.len(), 1);
     }
 
     /// An explosion set off by hand is seen whole or not at all: where the

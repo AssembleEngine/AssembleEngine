@@ -25,6 +25,9 @@ anim = ["dep:libm"]
 # world positions, weapon aim requests. Opt-in like nav (its components
 # take entity ids in every module that compiles them).
 aim = ["anim", "nav"]
+# Effects at joints (`ae_sdk::fx`, M14): the `Effect` event and the helper
+# that emits one at a bone. Opt-in like aim; needs it.
+fx = ["aim"]
 # Unit coroutines (`ae_sdk::script`, M14): async scripts in host-owned
 # slots, resumed by a game system.
 script = []

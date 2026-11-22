@@ -43,6 +43,9 @@ pub mod anim;
 #[cfg(feature = "aim")]
 pub mod aim;
 
+#[cfg(feature = "fx")]
+pub mod fx;
+
 #[cfg(feature = "script")]
 pub mod script;
 

@@ -18,6 +18,7 @@
 
 pub mod anim;
 pub mod catalog;
+pub mod fx;
 pub mod nav;
 pub mod spatial;
 pub mod view;

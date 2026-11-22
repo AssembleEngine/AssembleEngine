@@ -364,6 +364,10 @@ pub mod engine {
     /// fire-from bones, aim requests and answers (M14;
     /// `ae_sdk::aim::Weapons`).
     pub const WEAPONS: u64 = 0xAE00_0000_0000_0013;
+    /// Event `Effect { entity, tick: u64, pos, dir: [f32; 3], effect: u64,
+    /// count: u32, scale: f32, seed: u32, bone: u16, flags: u16 }`: a
+    /// particle effect at a bone, in the world (M14; `ae_sdk::fx::Effect`).
+    pub const EFFECT: u64 = 0xAE00_0000_0000_0014;
 }
 
 /// The sim's own names (`ae_lookup` scope [`SCOPE`](sim::SCOPE)), the same

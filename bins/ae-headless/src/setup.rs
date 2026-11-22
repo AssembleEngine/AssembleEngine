@@ -170,9 +170,10 @@ impl Setup {
     }
 
     /// The host plugins: nav and spatial with a map, the catalogue with
-    /// content defs, animation with content models.
+    /// content defs, animation with content models, the effects sink (no
+    /// feed: nothing draws them here).
     pub fn plugins(&self) -> Vec<Arc<dyn HostPlugin>> {
-        let mut plugins: Vec<Arc<dyn HostPlugin>> = Vec::new();
+        let mut plugins: Vec<Arc<dyn HostPlugin>> = vec![Arc::new(ae_services::fx::FxPlugin::default())];
         if let Some(n) = &self.nav {
             plugins.push(Arc::new(n.clone()));
             plugins.push(Arc::new(SpatialPlugin::square(n.extent(), 64.0)));

@@ -229,7 +229,7 @@ fn qnorm(q: [f32; 4]) -> [f32; 4] {
 }
 
 /// `v` rotated by `q` (as `ae_model::anim::qrot`).
-fn qrot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn qrot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
     let r = qmul(qmul(q, [v[0], v[1], v[2], 0.0]), qconj(q));
     [r[0], r[1], r[2]]
 }
