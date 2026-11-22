@@ -587,8 +587,8 @@ changes.
 
 - **The pair is chosen, not guessed.** `--hdr off|auto|hdr10|scrgb` (auto
   by default) resolves against the surface's offered pairs: auto takes HDR10
-  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) when the surface offers
-  it and SDL reports the window HDR-capable, else scRGB
+  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) whenever the surface
+  offers it (SDL's window HDR state only supplies the levels), else scRGB
   (`R16G16B16A16_SFLOAT` + `EXTENDED_SRGB_LINEAR_EXT`), else the SDR pair.
   An explicit `hdr10` or `scrgb` the surface does not offer is an error
   naming what it does. `U` toggles HDR and SDR at runtime; the swapchain is

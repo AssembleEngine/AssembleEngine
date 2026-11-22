@@ -3356,8 +3356,7 @@ Steps (commit and stop for compaction after each):
 - **Stage 5 is done** (2026-11-22). The client's swapchain carries an HDR encoding:
   `--hdr off|auto|hdr10|scrgb` (auto by default) resolves against the surface's pairs
   (`ae_render::swapchain::{HdrRequest, TargetFormat, resolve_target}`). Auto takes HDR10
-  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) when the surface offers it and SDL
-  reports the window HDR-capable, else scRGB (`R16G16B16A16_SFLOAT` +
+  (`A2B10G10R10_UNORM_PACK32` + `HDR10_ST2084_EXT`) when the surface offers it, else scRGB (`R16G16B16A16_SFLOAT` +
   `EXTENDED_SRGB_LINEAR_EXT`), else SDR. An explicit mode the surface does not offer is
   an error naming what it does; nothing falls back silently. `VK_EXT_swapchain_colorspace`
   is enabled on the instance (with a surface) and `VK_EXT_hdr_metadata` on the device, and
@@ -3432,6 +3431,10 @@ Steps (commit and stop for compaction after each):
   HDR-capable while KWin's HDR switch is off (SDR white 155, peak 200), so `auto` stays
   on HDR10 and the metadata follows the lower headroom; the compositor maps the
   signal's 203 onto its 155.
+  Since 2026-11-22 `auto` does not consult SDL at all: it takes HDR10, then scRGB, whenever
+  the surface offers them (HDR10 first: 4 B/px against scRGB's 8, and the signal HDR
+  displays take natively), and SDL's state only supplies the headroom (1.0, peak = paper
+  white, when SDL reports no HDR). That settles the KDE-switch-off question by keeping HDR.
   55 GPU tests pass with validation, 73 lib tests (5 new, one of them the default
   levels), module 1, golden 2, graph_file 2; `cargo test --workspace` is clean. Two bugs
   the recreate exposed are fixed: the instance now enables `VK_EXT_swapchain_colorspace`
@@ -4541,12 +4544,6 @@ From M13 stage 7 (2026-11-22):
     corners smoothly on a bright sky.
   - HDR darks against SDR and whether the P3 fire reads redder in HDR than in SDR.
   Record any result here as reported, with the display and settings used.
-- **`--hdr auto` with KDE's HDR switch off** (a decision for the user): SDL still reports the
-  window HDR-capable there (SDR white 155, peak 200, headroom 1.29), so `auto` picks HDR10 and
-  the compositor maps it back to SDR. Either keep that (the metadata follows the lower
-  headroom), or have `auto` choose SDR below a minimum headroom; conditions for the second: the
-  threshold is a named constant with its reason, the log names why SDR was chosen, and the
-  windowed HDR-switch run is repeated.
 - **Query the compositor's target primaries instead of `--display-gamut`.** SDL does not expose
   them; KWin does over `wp_color_management` (the probe's reference machine reports about 96% of
   P3) or they can come from the EDID in sysfs. Conditions: the queried primaries drive the
