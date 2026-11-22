@@ -1110,6 +1110,10 @@ fn run(o: Options) -> Result<ExitCode> {
             };
             let detail = detail + if sim_speed.paused() { " | paused" } else { "" };
             let detail = detail + if render.present_mode == "FIFO" { " | vsync on" } else { " | vsync off" };
+            // What the swapchain carries, and what KWin/SDL report for the
+            // display (the compositor maps the signal's white onto its own).
+            let display = if hdr_capable { format!(" -> display white {:.0}, peak {:.0} nits", display_peak / headroom, display_peak) } else { " (display SDR)".into() };
+            let detail = detail + &format!(" | {}{display}", render.output);
             window.set_title(&format!("AssembleEngine | {label} | {fps:.0} fps{detail}"));
             sample = (Instant::now(), frames);
         }

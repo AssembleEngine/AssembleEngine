@@ -44,6 +44,18 @@ pub trait RenderApp: Send + 'static {
     /// whenever the swapchain's (format, colour space) pair changes.
     fn create(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()>;
 
+    /// The swapchain's (format, colour space) pair changed after the first
+    /// `create` (device idle). Returns whether objects the app binds as
+    /// externals were replaced: the executor then forgets their layouts.
+    /// The default destroys and creates everything; an app that keeps its
+    /// format-independent objects (state that builds up over frames)
+    /// rebuilds only the rest and returns `false`.
+    fn retarget(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<bool> {
+        self.destroy(gpu);
+        self.create(gpu, target, frames_in_flight)?;
+        Ok(true)
+    }
+
     /// The HDR metadata the swapchain should carry after a recreate (the
     /// levels and the output gamut); `None` for an SDR output.
     fn hdr_metadata(&self) -> Option<(crate::encode::DisplayLevels, crate::colorspace::Gamut)> {
@@ -122,6 +134,10 @@ pub struct GpuRenderStats {
     pub app_status: String,
     pub device: String,
     pub present_mode: String,
+    /// The output the swapchain carries: the encoding, and in HDR the
+    /// levels the frame is encoded at (signal nits), e.g.
+    /// `HDR10 (PQ), white 203, peak 361 nits`.
+    pub output: String,
     /// The validation layer is on (the counts below mean nothing otherwise).
     pub validation: bool,
     pub validation_errors: u64,
@@ -279,6 +295,7 @@ fn render_main<A: RenderApp>(
     let mut stats = GpuRenderStats {
         device: gpu.device_name.clone(),
         present_mode: format!("{:?}", swapchain.present_mode),
+        output: output_label(target, app.hdr_metadata()),
         ..GpuRenderStats::default()
     };
     if config.verbose {
@@ -340,12 +357,12 @@ fn render_main<A: RenderApp>(
                     // The pair (format, colour space) drives the encoding and
                     // the graph: rebuild the app's target-dependent objects.
                     // A resize only moves the extent (the graph redeclares).
-                    app.destroy(&gpu);
-                    app.create(&gpu, target, config.frames_in_flight)?;
-                    // Every object the app binds is new (the recreate
-                    // waited for the device): no external image keeps the
+                    // When the app replaced what it binds (the recreate
+                    // waited for the device), no external image keeps the
                     // old one's layout under its reused identity.
-                    executor.forget_external_states();
+                    if app.retarget(&gpu, target, config.frames_in_flight)? {
+                        executor.forget_external_states();
+                    }
                 }
                 metadata_pending = true;
             }
@@ -385,6 +402,7 @@ fn render_main<A: RenderApp>(
                 if let Some((levels, gamut)) = app.hdr_metadata() {
                     swapchain.set_hdr_metadata(&gpu, levels, gamut)?;
                 }
+                stats.output = output_label(target, app.hdr_metadata());
                 metadata_pending = false;
             }
             let resources = executor.graph().resources.len();
@@ -458,6 +476,15 @@ fn render_main<A: RenderApp>(
     swapchain.destroy(&gpu);
     drop(gpu);
     result
+}
+
+/// [`GpuRenderStats::output`] for `target` and the app's HDR metadata.
+fn output_label(target: TargetInfo, metadata: Option<(crate::encode::DisplayLevels, crate::colorspace::Gamut)>) -> String {
+    let encoding = target.target().encoding().label();
+    match metadata {
+        Some((levels, _)) => format!("{encoding}, white {:.0}, peak {:.0} nits", levels.paper_white, levels.peak),
+        None => encoding.into(),
+    }
 }
 
 /// Drives an app offscreen in steps, keeping one executor (so rebakes

@@ -856,23 +856,7 @@ impl RenderApp for TerrainApp {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
-        // The client's present path follows the swapchain's colour space
-        // (M13 stage 5): HDR10, scRGB or SDR. An offscreen app keeps the
-        // encoding it was given (the capture path stays SDR).
-        if self.output == TerrainOutput::Present {
-            self.encoding = target.target().encoding();
-        }
-        if self.hdr.is_some() && self.encoding.uses_display() {
-            self.levels = self.hdr_settings().levels(self.encoding);
-        }
-        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { target.format };
-        self.output_format = output;
-        self.output_space = if self.output == TerrainOutput::Present { target.color_space } else { vk::ColorSpaceKHR::SRGB_NONLINEAR };
-        // In HDR the tonemap writes the display intermediate, paper-white
-        // units; `post.encode` maps it to the output.
-        let tonemap_out = if self.encoding.uses_display() { crate::encode::DISPLAY_FORMAT } else { output };
-        self.tonemap = Some(Tonemap::new(gpu, tonemap_out, frames_in_flight).context("tonemap")?);
-        self.encode = if self.encoding.uses_display() { Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?) } else { None };
+        self.create_output(gpu, target, frames_in_flight)?;
         self.bloom = Some(Bloom::new(gpu, frames_in_flight).context("bloom")?);
         self.exposure = Some(Exposure::new(gpu, frames_in_flight).context("exposure")?);
         self.last_adapt_at = None;
@@ -1246,17 +1230,23 @@ impl RenderApp for TerrainApp {
         format!("terrain: {} leaves, {} drawn{units}", stats.leaves, stats.drawn)
     }
 
-    fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
-        // The running module stays loaded across a rebuild (a swapchain pair
-        // change destroys and creates the app): its format-dependent
-        // programs go, its declaration is made again for the new target.
-        if let Some(state) = self.module.as_mut() {
-            gpu.wait_idle();
-            for (mut program, _) in std::mem::take(&mut state.programs).into_iter().flatten() {
-                program.destroy(gpu);
-            }
-            state.declared_for = None;
+    fn retarget(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<bool> {
+        if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight {
+            self.destroy(gpu);
+            self.create(gpu, target, frames_in_flight)?;
+            return Ok(true);
         }
+        // Only the output side depends on the pair. The terrain's tree
+        // refines a level per frame from its root and holds the sim's
+        // ground edits, the particles and the exposure carry state too:
+        // rebuilding them made the ground settle anew on every HDR toggle.
+        self.destroy_module_programs(gpu);
+        self.create_output(gpu, target, frames_in_flight)?;
+        Ok(false)
+    }
+
+    fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
+        self.destroy_module_programs(gpu);
         if self.sampler != vk::Sampler::null() {
             unsafe { gpu.device.destroy_sampler(self.sampler, None) };
             self.sampler = vk::Sampler::null();
@@ -1293,6 +1283,48 @@ impl RenderApp for TerrainApp {
 }
 
 impl TerrainApp {
+    /// The objects that depend on the output (format, colour space) pair:
+    /// the encoding, its levels, the tonemap and `post.encode`.
+    fn create_output(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()> {
+        if let Some(mut old) = self.tonemap.take() {
+            old.destroy(gpu);
+        }
+        if let Some(mut old) = self.encode.take() {
+            old.destroy(gpu);
+        }
+        // The client's present path follows the swapchain's colour space
+        // (M13 stage 5): HDR10, scRGB or SDR. An offscreen app keeps the
+        // encoding it was given (the capture path stays SDR).
+        if self.output == TerrainOutput::Present {
+            self.encoding = target.target().encoding();
+        }
+        if self.hdr.is_some() && self.encoding.uses_display() {
+            self.levels = self.hdr_settings().levels(self.encoding);
+        }
+        let output = if self.output == TerrainOutput::Readback { self.encoding.readback_format() } else { target.format };
+        self.output_format = output;
+        self.output_space = if self.output == TerrainOutput::Present { target.color_space } else { vk::ColorSpaceKHR::SRGB_NONLINEAR };
+        // In HDR the tonemap writes the display intermediate, paper-white
+        // units; `post.encode` maps it to the output.
+        let tonemap_out = if self.encoding.uses_display() { crate::encode::DISPLAY_FORMAT } else { output };
+        self.tonemap = Some(Tonemap::new(gpu, tonemap_out, frames_in_flight).context("tonemap")?);
+        self.encode = if self.encoding.uses_display() { Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?) } else { None };
+        Ok(())
+    }
+
+    /// The running module stays loaded across a rebuild or a retarget: its
+    /// format-dependent programs go, its declaration is made again for the
+    /// new target.
+    fn destroy_module_programs(&mut self, gpu: &Arc<GpuDevice>) {
+        if let Some(state) = self.module.as_mut() {
+            gpu.wait_idle();
+            for (mut program, _) in std::mem::take(&mut state.programs).into_iter().flatten() {
+                program.destroy(gpu);
+            }
+            state.declared_for = None;
+        }
+    }
+
     /// Create the offscreen target and readback buffer for `extent`
     /// (readback output only; call before `run_headless`).
     pub fn create_offscreen(&mut self, gpu: &GpuDevice, extent: vk::Extent2D) -> Result<()> {
