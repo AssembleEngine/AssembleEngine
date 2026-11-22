@@ -4549,6 +4549,30 @@ From M13 stage 7 (2026-11-22):
   P3) or they can come from the EDID in sysfs. Conditions: the queried primaries drive the
   output gamut and the `vkSetHdrMetadataEXT` primaries, `--display-gamut` stays the override,
   and a run reports the queried values beside the chosen ones.
+- **Reinspect `--working-space` and `--display-gamut`, and remove both if neither earns its
+  keep** (added 2026-11-22). At the defaults neither changes a visible pixel:
+  - a BT.709 scene lies inside P3, so `--display-gamut bt2020` compresses nothing, and its only
+    other effect, the metadata primaries, is probably ignored by KWin (unchecked);
+  - in SDR, `--working-space bt2020` moves sunlit ground by a channel mean of 1.54 codes, max 2
+    (stage 3's measurement, taken under the since-removed Lottes curve), and its wider colours
+    are compressed straight back into BT.709.
+
+  The case for keeping them is HDR on a wide-gamut panel: saturated lit colour beyond BT.709
+  that P3 output can show. Conditions:
+  - re-measure without the curve, in SDR, HDR10 and scRGB: a saturated scene (fire, team
+    colours, coloured lights on grass) lit in BT.709 against BT.2020, with the share of display
+    pixels outside BT.709;
+  - check whether KWin uses the HDR metadata primaries;
+  - look at the result on the reference panel.
+
+  If no case shows a difference worth the option, remove the switch and keep the fixed choice:
+  - the working space stays BT.709;
+  - the output gamut follows the encoding (BT.709 for SDR, P3 for HDR10, BT.2020 for scRGB)
+    until the queried primaries above replace it.
+
+  Remove the matching render-module ABI fields only if no module reads them. If one case does
+  show a difference, keep the option for that case alone and record the numbers that justify
+  it.
 - **HDR captures.** `--capture` still writes the SDR readback (8-bit sRGB), so a capture shows
   neither the encoding nor the display's levels. Conditions: a capture option selects
   `sdr|hdr10|scrgb` (the readback already supports all three), writes the packed 10-bit or 16F
