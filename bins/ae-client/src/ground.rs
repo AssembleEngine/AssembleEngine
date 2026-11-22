@@ -137,7 +137,7 @@ mod tests {
         let old = ae_nav::scenario::water_crossing_terrain(256);
         let mut new = old.clone();
         let cx = 256usize;
-        let mut set_ground = |t: &mut Terrain, x: usize, y: usize| {
+        let set_ground = |t: &mut Terrain, x: usize, y: usize| {
             let i = y * cx + x;
             t.height[i] += 30;
         };

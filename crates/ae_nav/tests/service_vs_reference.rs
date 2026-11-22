@@ -185,7 +185,7 @@ fn churn_scenario(threads: usize) -> (u64, usize, Vec<u8>) {
                     .iter()
                     .copied()
                     .enumerate()
-                    .filter(|(i, _)| (i + t as usize) % 9 == 0)
+                    .filter(|(i, _)| (i + t as usize).is_multiple_of(9))
                     .map(|(_, e)| e)
                     .collect();
                 assert_eq!(nav.remove_units(&gone), gone.len());

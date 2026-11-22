@@ -528,9 +528,9 @@ struct Cache {
 impl Cache {
     fn source(&mut self, o: &Options) -> Result<Arc<TerrainSource>> {
         let key = (o.map as u8, o.map_cells);
-        if !self.sources.contains_key(&key) {
+        if let std::collections::btree_map::Entry::Vacant(e) = self.sources.entry(key) {
             let (source, nav) = terrain_source(o)?;
-            self.sources.insert(key, (Arc::new(source), nav));
+            e.insert((Arc::new(source), nav));
         }
         Ok(self.sources[&key].0.clone())
     }
@@ -720,7 +720,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let (mut live_pose, mut live_writes, mut live_publish) = (Vec::new(), Vec::new(), Vec::new());
     let (mut live_read, mut live_poser) = (Vec::new(), Vec::new());
     let mut tick_live = |frame: usize, measured: bool| -> Result<()> {
-        let Some((sim, feed)) = live.as_mut().filter(|_| frame % LIVE_FRAMES == 0) else {
+        let Some((sim, feed)) = live.as_mut().filter(|_| frame.is_multiple_of(LIVE_FRAMES)) else {
             return Ok(());
         };
         sim.tick()?;

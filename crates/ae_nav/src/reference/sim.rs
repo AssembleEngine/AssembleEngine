@@ -2760,7 +2760,7 @@ impl Simulation {
                 self.handle_command(c, tick);
             }
         }
-        if tick % CROWD_UPDATE_TICKS == 0 {
+        if tick.is_multiple_of(CROWD_UPDATE_TICKS) {
             self.update_crowd();
         }
         ph.commands_ms = split();
@@ -3073,10 +3073,9 @@ impl Simulation {
                 }
             })
         };
-        if !st.slots.contains_key(&region) {
-            let slot = make(region, field_priority(PRIORITY_NEEDED, dist));
-            st.slots.insert(region, slot);
-        }
+        st.slots
+            .entry(region)
+            .or_insert_with(|| make(region, field_priority(PRIORITY_NEEDED, dist)));
         let Some(Some(far)) = st.slots.get(&region).map(|s| s.as_ref().and_then(|s| s.next_node)) else {
             return;
         };
@@ -3920,7 +3919,7 @@ fn steer_one(env: &SteerEnv, u: &mut Unit, out: &mut SteerOut, chain: &mut Vec<C
         // `WAYPOINT_REFRESH_TICKS`) it heads for the next route node
         // without a visibility check: computing every unit's
         // waypoint on the command's tick cost 16 ms at 10k units.
-        let refresh = (tick + u.id as u64) % WAYPOINT_REFRESH_TICKS == 0;
+        let refresh = (tick + u.id as u64).is_multiple_of(WAYPOINT_REFRESH_TICKS);
         let mut blocked = false;
         if fresh && refresh {
             let aim = if is_final {
@@ -4003,7 +4002,9 @@ fn steer_one(env: &SteerEnv, u: &mut Unit, out: &mut SteerOut, chain: &mut Vec<C
                     }
                     None => false,
                 };
-                if (tick + u.id as u64) % WAYPOINT_REFRESH_TICKS == 0 || (u.waypoint.is_some() && !far(u.waypoint)) {
+                if (tick + u.id as u64).is_multiple_of(WAYPOINT_REFRESH_TICKS)
+                    || (u.waypoint.is_some() && !far(u.waypoint))
+                {
                     let route = if fresh && ctx.key.nav_version == h.version {
                         Some((&**ctx, slot.next_node))
                     } else {

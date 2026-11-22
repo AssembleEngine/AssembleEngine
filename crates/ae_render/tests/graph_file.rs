@@ -47,7 +47,7 @@ fn graph_files_declare_what_the_modules_declare() {
                     let target = DeclareTarget {
                         width,
                         height,
-                        color_format: vk::Format::from_raw(format as i32),
+                        color_format: vk::Format::from_raw(format),
                         flags,
                         encoding,
                         levels,

@@ -225,7 +225,7 @@ mod tests {
                 idle(|| std::thread::sleep(std::time::Duration::from_millis(50)));
             }
             let t = total();
-            assert!(t >= 5_000_000 && t < 50_000_000, "busy {t} ns");
+            assert!((5_000_000..50_000_000).contains(&t), "busy {t} ns");
         })
         .join()
         .unwrap();

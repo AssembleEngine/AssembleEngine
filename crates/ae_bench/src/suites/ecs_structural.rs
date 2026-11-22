@@ -85,10 +85,10 @@ impl World {
             let entity = fb::create_entity(self.world);
             let position = [serial as f32, -(serial as f32)];
             fb::set_component(self.world, entity, self.position, bytes(&position))?;
-            if serial % 2 == 0 {
+            if serial.is_multiple_of(2) {
                 fb::set_component(self.world, entity, self.velocity, bytes(&[1.0f32, 0.5]))?;
             }
-            if serial % 3 == 0 {
+            if serial.is_multiple_of(3) {
                 fb::set_component(self.world, entity, self.health, bytes(&serial))?;
             }
             self.alive.push(entity);

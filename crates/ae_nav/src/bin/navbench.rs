@@ -1303,7 +1303,7 @@ fn run(sc: &Scenario, opts: &Opts, workers: usize) -> ScenarioResult {
             .units
             .iter()
             .zip(&blocked_ticks)
-            .filter(|(u, &b)| commanded.contains(&u.id) && b > 30 * ae_nav::math::TICK_HZ as u32)
+            .filter(|(u, &b)| commanded.contains(&u.id) && b > 30 * ae_nav::math::TICK_HZ)
             .count(),
         crossed_off_line: match sc.arena {
             Some((_, h)) => sim

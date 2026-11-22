@@ -285,7 +285,7 @@ fn scripts_answer_callins_the_same_at_any_worker_count() -> Result<()> {
         let reused = r
             .scripts
             .iter()
-            .filter(|(e, _)| (*e as u32) % 4 == 0 && (*e as u32) < UNITS as u32 && (e >> 32) != 0)
+            .filter(|(e, _)| (*e as u32).is_multiple_of(4) && (*e as u32) < UNITS as u32 && (e >> 32) != 0)
             .count();
         eprintln!(
             "churn, {w} worker(s): digest {:016x}; {reused} new units on old indices",

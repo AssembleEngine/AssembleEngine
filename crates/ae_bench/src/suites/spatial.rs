@@ -13,7 +13,7 @@ const MAP: f32 = 20_480.0;
 
 /// `n` units in 40 squads scattered over the map, each squad a dense disc.
 fn army(n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut s = 0x5EED_0F_5A7A_u64;
+    let mut s = 0x005E_ED0F_5A7A_u64;
     let mut f = move || {
         s ^= s << 13;
         s ^= s >> 7;

@@ -1394,10 +1394,10 @@ fn run(o: Options) -> Result<ExitCode> {
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
             steer(&window, &events, &mut view, source, dt, &sim_speed);
-            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
-                if explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0 {
-                    println!("X: the camera target is out of sight; no explosion");
-                }
+            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0)
+                && explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0
+            {
+                println!("X: the camera target is out of sight; no explosion");
             }
             // The exercise keeps particles alive through its resizes.
             if let Some(feed) = effects_feed

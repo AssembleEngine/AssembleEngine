@@ -32,7 +32,7 @@ pub const ROOT_SIZE: i32 = 1 << LATTICE_BITS;
 /// hypotenuse alike) is cut into the same number of segments, so a leaf and its
 /// one-level-different neighbour still share identical vertices along their common edge.
 pub const SUBMESH_LEVELS: u32 = 4;
-const _: () = assert!(SUBMESH_LEVELS % 2 == 0);
+const _: () = assert!(SUBMESH_LEVELS.is_multiple_of(2));
 /// Weight denominator of sub-mesh vertices (barycentric weights sum to this).
 pub const SUBMESH_DENOM: i32 = 1 << (SUBMESH_LEVELS / 2);
 
@@ -178,7 +178,7 @@ impl Cbt {
         while self.node_sum(id) > 1 {
             let c = self.node_sum(2 * id);
             if handle < c {
-                id = 2 * id;
+                id *= 2;
             } else {
                 handle -= c;
                 id = 2 * id + 1;
@@ -372,7 +372,7 @@ mod tests {
                     let ctr = (t[0] + t[1] + t[2]) / 3;
                     let d = (ctr - f).as_vec2().length() / ROOT_SIZE as f32;
                     let size = (depth_of(id) as f32 * -0.5).exp2();
-                    if size > d * 0.5 || hash(id as u64 ^ iter << 40) % 7 == 0 {
+                    if size > d * 0.5 || hash(id as u64 ^ iter << 40).is_multiple_of(7) {
                         c.split_conforming(id);
                     }
                 }
@@ -384,7 +384,7 @@ mod tests {
                     }
                     let (b, t) = diamond(id);
                     let key = b.min(t) as u64 | (b.max(t) as u64) << 32;
-                    if hash(key ^ iter) % 3 != 0 {
+                    if !hash(key ^ iter).is_multiple_of(3) {
                         merge_conforming(&mut c, id);
                     }
                 }

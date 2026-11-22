@@ -439,7 +439,7 @@ impl Collider {
             let t = lap(&mut stats.broadphase_ms, t);
             for _iter in 0..cfg.solver_iterations.max(1) {
                 stats.solver_iterations += 1;
-                stats.contacts += solve_pairs(ids, bodies, &pairs, cfg, contacts_out, contact_limit);
+                stats.contacts += solve_pairs(ids, bodies, pairs, cfg, contacts_out, contact_limit);
             }
             lap(&mut stats.pair_solve_ms, t);
         }

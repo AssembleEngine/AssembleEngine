@@ -220,7 +220,14 @@ impl World {
         let n = self.serial;
         self.serial += 1;
         unsafe {
-            let e = fb::spawn_in_table(self.world, if n % 3 == 0 { self.with_health } else { self.plain });
+            let e = fb::spawn_in_table(
+                self.world,
+                if n.is_multiple_of(3) {
+                    self.with_health
+                } else {
+                    self.plain
+                },
+            );
             // The entity already has these components: the sets write in place.
             fb::set_component(self.world, e, self.position, bytes(&[seed(n, 1), seed(n, 2)]))?;
             fb::set_component(
@@ -229,7 +236,7 @@ impl World {
                 self.velocity,
                 bytes(&[seed(n, 3) * 0.05, seed(n, 4) * 0.05]),
             )?;
-            if n % 3 == 0 {
+            if n.is_multiple_of(3) {
                 fb::set_component(self.world, e, self.health, bytes(&n))?;
             }
             self.alive.push(e);

@@ -156,7 +156,7 @@ fn seed(n: usize, model: u64, upper: u16) -> (Vec<Anim>, Vec<Body>) {
 /// hundred (pending until the ticker takes it).
 fn commands(anims: &mut [Anim], tick: u64) {
     for (i, a) in anims.iter_mut().enumerate() {
-        if (i as u64 + tick) % 100 == 0 && i % 10 != 0 {
+        if (i as u64 + tick).is_multiple_of(100) && i % 10 != 0 {
             let angle = ((i as u64 * 31 + tick) % 300) as f32 / 100.0 - 1.5;
             a.turn(5 + (i % 7) as u16, Axis::UP, angle, 2.0).ramp(6.0);
         }

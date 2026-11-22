@@ -3514,7 +3514,7 @@ fn parallel_recording_matches_serial() {
         let readback = graph.buffer("readback", buffer_desc, ResourceClass::External);
         for p in 0..PASSES {
             graph
-                .pass(&format!("draw {p}"), PassKind::Graphics, p)
+                .pass(format!("draw {p}"), PassKind::Graphics, p)
                 .color(target, if p == 0 { LoadOp::Clear } else { LoadOp::Load })
                 .id();
         }
@@ -5608,7 +5608,7 @@ fn particles_light_by_illuminance() {
             &source,
             camera,
             extent,
-            Some((&[burst], vec![effect.clone()], 1, ParticleBlend::Sorted)),
+            Some((&[burst], vec![effect], 1, ParticleBlend::Sorted)),
             lights,
             tone,
         )
@@ -8136,7 +8136,7 @@ fn units_model_shadows_culled() {
         2
     ];
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
-    let mut render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
+    let render = |shadows: bool| -> (Vec<u8>, Option<(u32, u32)>, Vec<[u32; 3]>) {
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(InstanceStream {
             tick: 1,
@@ -8199,7 +8199,7 @@ fn units_model_shadows_culled() {
     assert_eq!(lit_cascades, vec![[0; 3]; 2], "no shadow map: no cascade lists");
     assert_eq!(cascades[1], [0, 0, 0], "the far pillar is in no cascade");
     assert!(
-        cascades[0].iter().any(|&n| n == 1) && cascades[0].iter().all(|&n| n <= 1),
+        cascades[0].contains(&1) && cascades[0].iter().all(|&n| n <= 1),
         "the pillar toward the sun is in a cascade: {:?}",
         cascades[0]
     );

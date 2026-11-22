@@ -242,7 +242,7 @@ fn main() -> Result<()> {
         memory.grow(target_pages - current)?;
         Ok(())
     })?;
-    let mut guests2 = vec![
+    let mut guests2 = [
         instantiate_module2(&engine, &module2, &memory, true)?,
         instantiate_module2(&engine, &module2, &memory, false)?,
     ];
