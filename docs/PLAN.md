@@ -215,15 +215,6 @@ Goal: catch regressions and find bottlenecks per subsystem, without launching th
 - Wall-time benches run on one pinned machine (nightly); counter benches run on every PR.
 - Each milestone's exit numbers (10k/50k digests and timings) become permanent scenario benches.
 
-**Consent before measuring**
-- No performance measurement or benchmark runs without the user's explicit consent, given for that
-  run. The user may have other work running on the machine, and wall times taken alongside it are
-  inconclusive.
-- Before measuring, ask the user to stop whatever else runs and to commit the machine to the
-  benchmark. If they do not, postpone every measurement to the last stage of the task.
-- Deterministic counters (fuel, expansions, command counts) and digests are not timings. Tests that
-  check them run without asking.
-
 **Tracy (optional, cargo feature `tracy`; zero cost when off)**
 - `ae_profile` crate: thin macros over `tracy-client`, compiled to nothing without the feature.
 - Zones: tick phases, each schedule layer, each system, each row-range job per worker, command merge, each
@@ -4273,6 +4264,50 @@ Design:
       explosion is its death script's effects, not the vanish explosion.
     - Covered in step 6, F: the duel death sequence, the nav case, and the
       client's checks.
+  - Step 6, E0: masks from content — done (2026-11-22).
+    - A rig file beside the model: `Fox.rig.json` for the Khronos Fox, or
+      `models/<name>.rig.json` in content. `Rig::apply_rig_file` builds named
+      masks from joint subtrees (`roots`), taking out masks named in `minus`
+      (so `lower` and `upper` do not overlap). `SimOptions::rigs`,
+      `AnimPlugin::from_content`, ae-headless's content rigs and the
+      `ae_services` tests apply it, so the sim and the renderer get the same
+      masks.
+    - `Fox.rig.json`: `upper` is `b_Spine01_02`'s subtree (spine 2, neck,
+      head and arms); `lower` is `b_Hip_01`'s minus `upper` (the hip, tail and
+      legs). A test checks the hierarchy, that no bone is in both, and that
+      the root is in neither. No existing game's digest changes (none uses a
+      mask yet).
+  - Step 6, E: the duel game — done (2026-11-22).
+    - `games/duel`: pairs of an actor A (the Fox, radius 1, `Script`,
+      `Weapons`, `Pair`) and a target B (the Fox at rest, with `B`); B stands
+      12 m ahead and 6 m to A's left; a 10-wide grid of 24 m pairs. A `Pair`
+      carries the chest to aim at and the target entity, found at tick 1
+      through the spatial index (spawns have no ids yet).
+    - Timeline (per pair, staggered 2 ticks per pair; pair 0 immediate): A
+      walks at 1.5 m/s to tick 45 (Walk, `per_metre`), stands, runs at 3 m/s
+      from 75 (Run) and posts `STARTED_MOVING`/`STOPPED_MOVING`; a script
+      plays Survey at rest, Walk then Run. From 90, every 3 ticks `asker`
+      asks weapon 0 to point from A's aim-from bone at B's chest (B's `Body`
+      through `get`). The script takes the aim in steps: the upper Survey on
+      layer 1 (the rifle off the back, 250 ms), `b_Spine02_03` about up at
+      180°/s, the neck and then the head (`turn_toward`); a newer request
+      retargets a turn in place rather than restarting the sequence. Aimed
+      from `b_Spine02_03` (a stable origin, so the head follows the
+      spine-to-target line) and fired from the head.
+    - Once aimed, `firer` (after `host(anim)`) fires 3 shots 10 ticks apart,
+      each a `"flash"` 0.3 m `FORWARD` from the head and a `FIRED` callin
+      (the script kicks the head and re-aims). At tick 180 `fate` kills A;
+      `steer` has `without(Dying)`. The death script stops the upper layer,
+      plays Survey once, falls 90° about `FORWARD` (720°/s²), emits
+      `"smoke"` at the spine, waits 1.5 s and returns: A despawned at about
+      tick 276 (+ stagger). `STUCK` makes it wait for the SDK's 5 s cap.
+    - Parameter bits: bit 16 `STUCK`, bit 17 `BACKWARDS` (A faces +x and walks
+      -x, its `Orientation` against its velocity), bit 18 `STANDING` (A at
+      rest: no clips, the exact aim).
+    - Client: `NavAgent.profile` is read only when the game schedules nav
+      (crossing, skirmish); `scripted` and `duel` have no nav rows, so `duel`
+      runs without a per-game name (the schema declares `NavAgent` in both,
+      so the schema alone cannot say).
 
 ### M15 — Fully bindless resources (priority: medium)
 
