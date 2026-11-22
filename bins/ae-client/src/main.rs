@@ -901,16 +901,6 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut headroom = if hdr_capable { display_state.headroom } else { 1.0 };
     let mut display_peak = if hdr_capable { display_state.peak_nits() } else { 0.0 };
     let mut hdr_request = o.hdr;
-    // A module graph has no HDR support until stage 6: HDR stays off for
-    // the whole run, including the toggle key.
-    let module_blocks_hdr = o.render_module.is_some();
-    if module_blocks_hdr && hdr_request != HdrRequest::Off {
-        // M13 stage 6 adds HDR to the module ABI; until then a module graph
-        // samples and writes an SDR target (and check_graph would reject an
-        // HDR one), so fall back once, clearly.
-        eprintln!("--render-module {} with --hdr {}: render modules have no HDR support until M13 stage 6; falling back to SDR", o.render_module.as_deref().unwrap_or(""), match hdr_request { HdrRequest::Auto => "auto", HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb", HdrRequest::Off => "off" });
-        hdr_request = HdrRequest::Off;
-    }
     let hdr_settings = Arc::new(Mutex::new(HdrSettings { paper_white: o.paper_white, peak: o.peak, headroom, display_peak }));
     println!(
         "[hdr] --hdr {} | SDL HDR {} | SDR white {:.1} nits | headroom {:.3}x | paper white {} | peak {}",
@@ -995,9 +985,7 @@ fn run(o: Options) -> Result<ExitCode> {
         if hdr_toggle_due {
             next_hdr_toggle += hdr_toggle_seconds.unwrap_or(1.0);
         }
-        if (events.pressed & keys::U != 0 || hdr_toggle_due) && module_blocks_hdr {
-            println!("HDR stays off: render modules have no HDR support until M13 stage 6");
-        } else if events.pressed & keys::U != 0 || hdr_toggle_due {
+        if events.pressed & keys::U != 0 || hdr_toggle_due {
             hdr_request = if hdr_request == HdrRequest::Off { o.hdr.toggled_on() } else { HdrRequest::Off };
             println!("HDR {}", if hdr_request == HdrRequest::Off { "off (SDR)" } else { match hdr_request { HdrRequest::Hdr10 => "hdr10", HdrRequest::ScRgb => "scrgb", _ => "auto" } });
             thread.set_hdr(HdrControl { request: hdr_request, capable: hdr_capable, headroom });

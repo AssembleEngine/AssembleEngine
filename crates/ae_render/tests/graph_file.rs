@@ -7,8 +7,10 @@
 //! kind and a few targets, and the same per-frame output (uniforms, which
 //! conditional passes run) for each flag value. No GPU needed.
 
-use ae_render::module::{RenderModule, build, engine};
+use ae_render::encode::{DisplayLevels, OutputEncoding};
+use ae_render::module::{DeclareTarget, RenderModule, build, engine};
 use ae_render_abi::module::FrameInput;
+use ash::vk;
 use std::path::Path;
 
 fn repo(path: &str) -> String {
@@ -31,19 +33,24 @@ fn graph_files_declare_what_the_modules_declare() {
         let file_bytes = build(&repo(&format!("render/{name}.graph.json"))).unwrap();
         let mut file = RenderModule::load(&engine, &file_bytes).unwrap();
         assert!(matches!(file, RenderModule::File(_)) && matches!(wasm, RenderModule::Wasm(_)));
-        for (width, height, format) in [(1280, 720, 50), (64, 32, 43), (1, 1, 37)] {
-            for flags in ae_render::graph_file::SCENE_FLAGS {
-                let want = wasm.declare(width, height, format, flags).unwrap().expect("the module declares");
-                let got = file.declare(width, height, format, flags).unwrap().expect("the file declares");
-                assert!(canonical(&got.graph) == canonical(&want.graph), "{name} {width}x{height} flags {flags}: graph descriptors differ");
-                assert!(got.programs == want.programs, "{name} {width}x{height} flags {flags}: program tables differ");
-                let programs = ae_render_abi::module::ProgramTable::decode(&want.programs).unwrap().len() as u32;
-                for app_flags in [0, 1, 2, 3] {
-                    let input = FrameInput { width, height, flags: app_flags, ..FrameInput::default() };
-                    let (w, f) = (wasm.frame(&input).unwrap(), file.frame(&input).unwrap());
-                    assert_eq!(f.uniforms, w.uniforms, "{name}: uniforms with flags {app_flags}");
-                    for p in 0..programs {
-                        assert_eq!(f.is_disabled(p), w.is_disabled(p), "{name}: program {p} with flags {app_flags}");
+        let levels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+        for encoding in [OutputEncoding::Sdr, OutputEncoding::Hdr10Pq, OutputEncoding::ScRgb] {
+            for (width, height, format) in [(1280, 720, 50), (64, 32, 43), (1, 1, 37)] {
+                for flags in ae_render::graph_file::SCENE_FLAGS {
+                    let target = DeclareTarget { width, height, color_format: vk::Format::from_raw(format as i32), flags, encoding, levels, working: Default::default(), gamut: encoding.default_gamut() };
+                    let session = || DeclareTarget { ..target };
+                    let want = wasm.declare(&session()).unwrap().expect("the module declares");
+                    let got = file.declare(&session()).unwrap().expect("the file declares");
+                    assert!(canonical(&got.graph) == canonical(&want.graph), "{name} {encoding:?} {width}x{height} flags {flags}: graph descriptors differ");
+                    assert!(got.programs == want.programs, "{name} {encoding:?} {width}x{height} flags {flags}: program tables differ");
+                    let programs = ae_render_abi::module::ProgramTable::decode(&want.programs).unwrap().len() as u32;
+                    for app_flags in [0, 1, 2, 3] {
+                        let input = FrameInput { width, height, flags: app_flags, ..FrameInput::default() };
+                        let (w, f) = (wasm.frame(&input).unwrap(), file.frame(&input).unwrap());
+                        assert_eq!(f.uniforms, w.uniforms, "{name} {encoding:?}: uniforms with flags {app_flags}");
+                        for p in 0..programs {
+                            assert_eq!(f.is_disabled(p), w.is_disabled(p), "{name} {encoding:?}: program {p} with flags {app_flags}");
+                        }
                     }
                 }
             }

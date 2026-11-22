@@ -8,22 +8,40 @@
 //! |---|---|---|
 //! | `memory` | memory | |
 //! | [`EXPORT_VERSION`] | `() -> u32` ([`MODULE_VERSION`]) | at load |
-//! | [`EXPORT_DECLARE`] | `(width, height, color_format, flags) -> u32` | at load, on reload, when the target changes |
+//! | [`EXPORT_DECLARE_INPUT`] | `() -> u32` | at load: where the host writes [`DeclareInput`] |
+//! | [`EXPORT_DECLARE`] | `() -> u32` | at load, on reload, when the target changes |
 //! | [`EXPORT_INPUT`] | `() -> u32` | at load: where the host writes [`FrameInput`] |
 //! | [`EXPORT_FRAME`] | `() -> u32` | once per frame, after the host wrote the input |
 //!
-//! `declare` returns the address of four `u32`s: graph pointer and length
-//! (the frame graph declaration, [`crate::GraphBuilder`]), program table
-//! pointer and length ([`ProgramTable`]); 0 if the module cannot render
-//! that target. `flags` holds [`DECLARE_UNITS`], [`DECLARE_READBACK`],
-//! [`DECLARE_WATER`], [`DECLARE_SHADOWS`] and [`DECLARE_PARTICLES`] (the
-//! last three added later; a module that ignores them simply draws no
-//! water, no unit shadows, or no particles).
+//! The host writes [`DeclareInput`] first: the target's size and colour
+//! format, the scene's flags, and the output's display spec (the encoding,
+//! the levels in signal nits, the working space and the output gamut).
+//! `declare` then returns the address of four `u32`s: graph pointer and
+//! length (the frame graph declaration, [`crate::GraphBuilder`]), program
+//! table pointer and length ([`ProgramTable`]); 0 if the module cannot
+//! render that target. [`DeclareInput::flags`] holds [`DECLARE_UNITS`],
+//! [`DECLARE_READBACK`], [`DECLARE_WATER`], [`DECLARE_SHADOWS`] and
+//! [`DECLARE_PARTICLES`] (the last three added later; a module that ignores
+//! them simply draws no water, no unit shadows, or no particles).
+//!
 //! `frame` returns the address of [`FrameOutput`] as four `u32`s: pointer
 //! and word count of a bitset of *disabled* programs (a conditional pass
 //! whose payload's bit is set is skipped), pointer and length of the
 //! uniform bytes: every fullscreen program's block, in program order, each
 //! [`Program::Fullscreen::uniform_bytes`] long.
+//!
+//! # The display rule (contract version 2)
+//!
+//! When [`DeclareInput::encoding`] is not [`OutputEncoding::Sdr`], the
+//! graph keeps a display intermediate and ends in a `post.encode` pass:
+//! `post.tonemap` writes the display ([`display_spec`], RGBA16F linear
+//! light in units of paper white, in the working space), every pass that
+//! changes colour (a module's grade, a vignette) runs on it, and only
+//! `post.encode` writes the output. In SDR there is no display image and no
+//! encode: `post.tonemap` writes the output itself. `declare` must honour
+//! exactly the encoding it is given; the host checks the rule
+//! (`ae_render::library::check_graph`) and refuses a graph with a missing
+//! or extra `post.encode`.
 //!
 //! # Program table (version 1)
 //!
@@ -36,10 +54,14 @@
 //! its sampled inputs are bindings 1.. in intent order).
 
 pub const EXPORT_VERSION: &str = "ae_render_version";
+pub const EXPORT_DECLARE_INPUT: &str = "ae_render_declare_input";
 pub const EXPORT_DECLARE: &str = "ae_render_declare";
 pub const EXPORT_INPUT: &str = "ae_render_input";
 pub const EXPORT_FRAME: &str = "ae_render_frame";
-pub const MODULE_VERSION: u32 = 1;
+/// The contract version: 2 adds [`DeclareInput`] (the display spec) and the
+/// display rule. A version 1 module (its `declare` took the four scalars)
+/// is refused at load, never called with the new signature.
+pub const MODULE_VERSION: u32 = 2;
 
 /// `declare` flag: the scene has units (`units.*` resources and passes exist).
 pub const DECLARE_UNITS: u32 = 1 << 0;
@@ -64,6 +86,142 @@ pub const DECLARE_SHADOWS: u32 = 1 << 3;
 /// depth itself), so a graph that draws particles declares its depth
 /// buffer with sampled usage. A graph without them draws no particles.
 pub const DECLARE_PARTICLES: u32 = 1 << 4;
+
+/// How the output image encodes the display's light ([`DeclareInput::encoding`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum OutputEncoding {
+    /// An sRGB 8-bit target: no display intermediate, no `post.encode`.
+    Sdr = 0,
+    /// HDR10: ST.2084 (PQ) in BT.2020, at `v * paper_white` nits.
+    Hdr10Pq = 1,
+    /// scRGB: BT.709-relative linear light, `v * paper_white / 80`.
+    ScRgb = 2,
+}
+
+impl OutputEncoding {
+    pub fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Sdr),
+            1 => Some(Self::Hdr10Pq),
+            2 => Some(Self::ScRgb),
+            _ => None,
+        }
+    }
+
+    /// Whether the graph keeps a display intermediate and ends in
+    /// `post.encode` (the display rule).
+    pub fn uses_display(self) -> bool {
+        !matches!(self, Self::Sdr)
+    }
+}
+
+/// The space the scene is lit in and the display intermediate stores
+/// ([`DeclareInput::working_space`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WorkingSpace {
+    /// BT.709 / sRGB primaries: the default.
+    Bt709 = 0,
+    /// BT.2020 primaries, D65 white.
+    Bt2020 = 1,
+}
+
+impl WorkingSpace {
+    pub fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bt709),
+            1 => Some(Self::Bt2020),
+            _ => None,
+        }
+    }
+}
+
+/// The primaries the display intermediate is mapped to before encoding
+/// ([`DeclareInput::output_gamut`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Gamut {
+    Bt709 = 0,
+    P3 = 1,
+    Bt2020 = 2,
+}
+
+impl Gamut {
+    pub fn from_wire(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bt709),
+            1 => Some(Self::P3),
+            2 => Some(Self::Bt2020),
+            _ => None,
+        }
+    }
+
+    /// The R, G and B primaries' chromaticities (`x`, `y`), D65 white.
+    pub fn primaries(self) -> [[f32; 2]; 3] {
+        match self {
+            Self::Bt709 => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
+            Self::P3 => [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]],
+            Self::Bt2020 => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+        }
+    }
+}
+
+/// What the host writes before calling `declare` (`#[repr(C)]`, 60 bytes):
+/// the target and the output's display spec. Fixed size, so an ABI
+/// extension appends reserved words rather than moving fields.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DeclareInput {
+    pub width: u32,
+    pub height: u32,
+    /// `VkFormat` of the target (the swapchain's, or the readback image's).
+    pub color_format: u32,
+    /// [`DECLARE_UNITS`], [`DECLARE_READBACK`], [`DECLARE_WATER`],
+    /// [`DECLARE_SHADOWS`], [`DECLARE_PARTICLES`].
+    pub flags: u32,
+    /// [`OutputEncoding`] as a wire value.
+    pub encoding: u32,
+    /// [`WorkingSpace`] as a wire value.
+    pub working_space: u32,
+    /// [`Gamut`] as a wire value.
+    pub output_gamut: u32,
+    /// Paper white in nits: signal nits, relative to the output's reference
+    /// (the display's 1.0, and the display intermediate's unit).
+    pub paper_white: f32,
+    /// The display's peak in the same signal nits (paper white × headroom).
+    pub peak: f32,
+    pub reserved: [u32; 6],
+}
+
+pub const DECLARE_INPUT_BYTES: usize = 60;
+const _: () = assert!(size_of::<DeclareInput>() == DECLARE_INPUT_BYTES);
+
+impl DeclareInput {
+    pub fn to_bytes(&self) -> [u8; DECLARE_INPUT_BYTES] {
+        // Safety: repr(C), only u32 and f32 fields, no padding.
+        unsafe { core::mem::transmute_copy(self) }
+    }
+
+    pub fn from_bytes(bytes: &[u8; DECLARE_INPUT_BYTES]) -> Self {
+        // Safety: as above; every bit pattern is valid.
+        unsafe { core::mem::transmute_copy(bytes) }
+    }
+
+    /// The encoding, as the module should read it (`None` for a value this
+    /// ABI does not know).
+    pub fn output_encoding(&self) -> Option<OutputEncoding> {
+        OutputEncoding::from_wire(self.encoding)
+    }
+
+    pub fn working(&self) -> Option<WorkingSpace> {
+        WorkingSpace::from_wire(self.working_space)
+    }
+
+    pub fn gamut(&self) -> Option<Gamut> {
+        Gamut::from_wire(self.output_gamut)
+    }
+}
 
 /// The `shadows.map` library image as a graph declares it (`External`):
 /// [`SHADOW_MAP_FORMAT`], [`SHADOW_MAP_WIDTH`] × [`SHADOW_MAP_HEIGHT`],
@@ -112,6 +270,19 @@ pub const SCENE_NAME: &str = "scene";
 pub fn scene_spec(width: u32, height: u32) -> crate::ImageSpec {
     // Usage: sampled (0x4) | colour attachment (0x10).
     crate::ImageSpec::color_2d(SCENE_FORMAT, width, height, 0x4 | 0x10)
+}
+
+/// The display intermediate (`DISPLAY_NAME`): the working space's linear
+/// light in units of paper white, which `post.encode` maps to the output.
+/// An HDR graph declares it (`Transient`, sampled, full size) and has
+/// `post.tonemap` and any colour-changing pass (a module's grade, a
+/// vignette) write it; only `post.encode` writes the target. An SDR graph
+/// has no display and no encode.
+pub const DISPLAY_FORMAT: u32 = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
+pub const DISPLAY_NAME: &str = "display";
+pub fn display_spec(width: u32, height: u32) -> crate::ImageSpec {
+    // Usage: sampled (0x4) | colour attachment (0x10).
+    crate::ImageSpec::color_2d(DISPLAY_FORMAT, width, height, 0x4 | 0x10)
 }
 
 /// The scene's glow image: the second colour attachment of every scene
@@ -368,5 +539,33 @@ mod tests {
         let mut input = FrameInput { width: 3, height: 4, time: 1.5, ..FrameInput::default() };
         input.view_proj[5] = -2.0;
         assert_eq!(FrameInput::from_bytes(&input.to_bytes()), input);
+    }
+
+    #[test]
+    fn declare_input_round_trips_the_display_spec() {
+        let input = DeclareInput {
+            width: 3840,
+            height: 1600,
+            color_format: 48,
+            flags: DECLARE_UNITS | DECLARE_READBACK,
+            encoding: OutputEncoding::Hdr10Pq as u32,
+            working_space: WorkingSpace::Bt2020 as u32,
+            output_gamut: Gamut::P3 as u32,
+            paper_white: 203.0,
+            peak: 361.0,
+            reserved: [0; 6],
+        };
+        let back = DeclareInput::from_bytes(&input.to_bytes());
+        assert_eq!(back, input);
+        assert_eq!(back.output_encoding(), Some(OutputEncoding::Hdr10Pq));
+        assert_eq!(back.working(), Some(WorkingSpace::Bt2020));
+        assert_eq!(back.gamut(), Some(Gamut::P3));
+        assert_eq!(Gamut::P3.primaries(), [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]]);
+        // The display rule: only SDR has no display intermediate.
+        assert!(!OutputEncoding::Sdr.uses_display() && OutputEncoding::Hdr10Pq.uses_display() && OutputEncoding::ScRgb.uses_display());
+        // Unknown wire values are refusable rather than guessed.
+        assert_eq!(OutputEncoding::from_wire(9), None);
+        assert_eq!(WorkingSpace::from_wire(2), None);
+        assert_eq!(Gamut::from_wire(3), None);
     }
 }

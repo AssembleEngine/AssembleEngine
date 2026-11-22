@@ -111,10 +111,22 @@ impl Gamut {
 
     /// The R, G and B primaries' chromaticities (`x`, `y`).
     pub fn primaries(self) -> [[f32; 2]; 3] {
+        use ae_render_abi::module::Gamut as Wire;
         match self {
-            Self::Bt709 => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
-            Self::P3 => [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]],
-            Self::Bt2020 => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+            Self::Bt709 => Wire::Bt709.primaries(),
+            Self::P3 => Wire::P3.primaries(),
+            Self::Bt2020 => Wire::Bt2020.primaries(),
+        }
+    }
+
+    /// The wire value a render module's declaration receives
+    /// ([`ae_render_abi::module::Gamut`]).
+    pub fn to_wire(self) -> u32 {
+        use ae_render_abi::module::Gamut as Wire;
+        match self {
+            Self::Bt709 => Wire::Bt709 as u32,
+            Self::P3 => Wire::P3 as u32,
+            Self::Bt2020 => Wire::Bt2020 as u32,
         }
     }
 
@@ -160,6 +172,16 @@ impl Gamut {
 }
 
 impl WorkingSpace {
+    /// The wire value a render module's declaration receives
+    /// ([`ae_render_abi::module::WorkingSpace`]).
+    pub fn to_wire(self) -> u32 {
+        use ae_render_abi::module::WorkingSpace as Wire;
+        match self {
+            Self::Bt709 => Wire::Bt709 as u32,
+            Self::Bt2020 => Wire::Bt2020 as u32,
+        }
+    }
+
     /// The primaries of the working space.
     pub fn gamut(self) -> Gamut {
         match self {

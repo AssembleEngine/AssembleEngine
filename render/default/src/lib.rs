@@ -5,11 +5,12 @@
 //! or readback, all from the engine's pass library; the draws write the HDR
 //! scene image and the glow (their light sources only), the bloom reads the
 //! glow at a quarter size, and `post.tonemap` turns both into the target
-//! with the eased EV. It declares the same graph the engine declares
-//! natively (`ae_render::terrain::app::native_graph`), which the host's
-//! tests check pass for pass.
+//! with the eased EV, or into the display intermediate when the output is
+//! HDR (`post.encode` maps that to the target). It declares the same graph
+//! the engine declares natively (`ae_render::terrain::app::native_graph`),
+//! which the host's tests check pass for pass.
 
-use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME, EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 #[derive(Default)]
 struct Scene;
@@ -34,6 +35,10 @@ impl RenderModule for Scene {
         };
         // The HDR scene the draws write; `post.tonemap` turns it into the target.
         let scene = g.image(SCENE_NAME, scene_spec(w, h), Class::Transient);
+        // An HDR output keeps the display intermediate (paper-white units,
+        // working space): the tonemap writes it and `post.encode` maps it to
+        // the target. SDR has neither and the tonemap writes the target.
+        let display = env.uses_display().then(|| g.image(DISPLAY_NAME, display_spec(w, h), Class::Transient));
         // The glow (the bloom's input) and the quarter-size bloom buffers.
         let glow = g.image(GLOW_NAME, glow_spec(w, h), Class::Transient);
         let bloom0 = g.image(BLOOM_NAME, bloom_spec(w, h), Class::Transient);
@@ -174,7 +179,12 @@ impl RenderModule for Scene {
         let blur_y = p.library("bloom.blur_y");
         g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).sampled(exposure, ShaderStage::Fragment).color(display.unwrap_or(target), LoadOp::DontCare).id();
+        if let Some(display) = display {
+            // The display's light, in the output's encoding (PQ or scRGB).
+            let encode = p.library("post.encode");
+            g.pass("encode", PassKind::Graphics, encode).sampled(display, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+        }
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");

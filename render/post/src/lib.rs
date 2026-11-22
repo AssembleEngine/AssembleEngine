@@ -1,15 +1,23 @@
 //! A render module with post-processing: the terrain and units (engine
 //! library passes) draw into the HDR `scene` image; the engine's
-//! `post.tonemap` turns it into `ldr` (the target's format); a fullscreen
-//! program of this module grades that into the target; a second one, a
-//! vignette, blends over the target when the host sets flag bit 0 (it is a
-//! conditional pass the module disables otherwise). Then present or
+//! `post.tonemap` turns it into the display intermediate when the output is
+//! HDR (or into `ldr`, the target's format, in SDR); a fullscreen program of
+//! this module grades it; a second one adds a vignette when the host sets
+//! flag bit 0. Then `post.encode` writes the target in HDR, or present /
 //! readback, as in the default module.
+//!
+//! The grade runs on the display, before the encode, so it works above
+//! paper white: its values are not clamped at 1 (the display is linear light
+//! up to the peak) and the encode maps them once, at the end. The HDR
+//! vignette multiplies the display, which is range-safe (paper white and the
+//! peak scale together); the SDR one blends black over the target, where
+//! there is no display intermediate.
 
-use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, Declaration, DeclareEnv, FrameInput, FrameOutput, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
+use ae_render_sdk::{BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, FrameInput, FrameOutput, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, Program, ProgramTable, RenderModule, ResourceRef, Role, PARTICLE_SHADOW_NAME, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk};
 
 const GRADE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grade.frag.spv"));
 const VIGNETTE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vignette.frag.spv"));
+const VIGNETTE_DISPLAY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vignette_display.frag.spv"));
 
 /// Flag bit: draw the vignette.
 pub const FLAG_VIGNETTE: u32 = 1;
@@ -18,6 +26,9 @@ pub const FLAG_VIGNETTE: u32 = 1;
 struct Post {
     /// Payload of the vignette program.
     vignette: u32,
+    /// The output is HDR: the grade and the vignette run on the display and
+    /// `post.encode` writes the target.
+    hdr: bool,
 }
 
 fn library(graph: &mut GraphBuilder, name: &str) -> ResourceRef {
@@ -43,7 +54,14 @@ impl RenderModule for Post {
         let glow = g.image(GLOW_NAME, glow_spec(w, h), Class::Transient);
         let bloom0 = g.image(BLOOM_NAME, bloom_spec(w, h), Class::Transient);
         let bloom1 = g.image(BLOOM_SCRATCH_NAME, bloom_spec(w, h), Class::Transient);
-        let ldr = g.image("ldr", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient);
+        // The output's tail: HDR keeps the display intermediate (linear
+        // light in paper-white units, working space) and maps it once in
+        // `post.encode`; SDR grades `ldr` straight into the target.
+        let hdr = env.uses_display();
+        let display = hdr.then(|| g.image(DISPLAY_NAME, display_spec(w, h), Class::Transient));
+        let graded = hdr.then(|| g.image("display.graded", display_spec(w, h), Class::Transient));
+        let vignetted = hdr.then(|| g.image("display.vignetted", display_spec(w, h), Class::Transient));
+        let ldr = (!hdr).then(|| g.image("ldr", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED), Class::Transient));
         let target = if env.readback {
             g.image("readback.target", ImageSpec::color_2d(env.color_format, w, h, vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_TRANSFER_SRC), Class::External)
         } else {
@@ -164,11 +182,28 @@ impl RenderModule for Post {
         let blur_y = p.library("bloom.blur_y");
         g.pass("bloom blur y", PassKind::Graphics, blur_y).sampled(bloom1, ShaderStage::Fragment).color(bloom0, LoadOp::DontCare).id();
         let tonemap = p.library("post.tonemap");
-        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(ldr, LoadOp::DontCare).id();
+        let tonemap_out = display.or(ldr).expect("an HDR or an SDR tail");
+        g.pass("tonemap", PassKind::Graphics, tonemap).sampled(scene, ShaderStage::Fragment).sampled(bloom0, ShaderStage::Fragment).color(tonemap_out, LoadOp::DontCare).id();
         let grade = p.push(Program::Fullscreen { label: "grade", spirv: GRADE, uniform_bytes: 32 });
-        g.pass("grade", PassKind::Graphics, grade).sampled(ldr, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
-        self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });
-        g.pass("vignette", PassKind::Graphics, self.vignette).color(target, LoadOp::Load).conditional().id();
+        match (display, graded, vignetted) {
+            (Some(display), Some(graded), Some(vignetted)) => {
+                // The grade reads the display and writes the graded display;
+                // the vignette multiplies that into a third intermediate, and
+                // the encode is the only pass that writes the target.
+                g.pass("grade", PassKind::Graphics, grade).sampled(display, ShaderStage::Fragment).color(graded, LoadOp::DontCare).id();
+                self.vignette = p.push(Program::Fullscreen { label: "vignette_display", spirv: VIGNETTE_DISPLAY, uniform_bytes: 16 });
+                g.pass("vignette", PassKind::Graphics, self.vignette).sampled(graded, ShaderStage::Fragment).color(vignetted, LoadOp::DontCare).id();
+                let encode = p.library("post.encode");
+                g.pass("encode", PassKind::Graphics, encode).sampled(vignetted, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+            }
+            _ => {
+                let ldr = ldr.expect("an SDR tail has its intermediate");
+                g.pass("grade", PassKind::Graphics, grade).sampled(ldr, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+                self.vignette = p.push(Program::Fullscreen { label: "vignette", spirv: VIGNETTE, uniform_bytes: 16 });
+                g.pass("vignette", PassKind::Graphics, self.vignette).color(target, LoadOp::Load).conditional().id();
+            }
+        }
+        self.hdr = hdr;
         if env.readback {
             let buffer = library(&mut g, "readback.buffer");
             let copy = p.library("readback.copy");
@@ -183,11 +218,17 @@ impl RenderModule for Post {
     }
 
     fn frame(&mut self, input: &FrameInput, out: &mut FrameOutput) {
-        // grade: tint, then contrast and saturation.
+        // grade: tint, then contrast and saturation (above 1 too: the grade
+        // works on the display, in paper-white units, before the encode).
         floats(&mut out.uniforms, &[1.04, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]);
-        // vignette: strength, radius.
-        floats(&mut out.uniforms, &[0.85, 0.35, 0.0, 0.0]);
-        if input.flags & FLAG_VIGNETTE == 0 {
+        // vignette: strength, radius. The HDR vignette multiplies the display
+        // (range-safe), so it always runs and a zero strength is the
+        // identity; the SDR one blends black over the target and is skipped
+        // when off.
+        let on = input.flags & FLAG_VIGNETTE != 0;
+        let strength = if self.hdr && !on { 0.0 } else { 0.85 };
+        floats(&mut out.uniforms, &[strength, 0.35, 0.0, 0.0]);
+        if !self.hdr && !on {
             out.disable(self.vignette);
         }
     }

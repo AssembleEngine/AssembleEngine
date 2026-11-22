@@ -10,12 +10,53 @@
 //! library's checks). A trap is an error the caller can survive: the scene
 //! keeps its last good graph.
 
-use ae_render_abi::module::{self as abi, FrameInput};
+use crate::colorspace::{Gamut, WorkingSpace};
+use crate::encode::{DisplayLevels, OutputEncoding};
+use ae_render_abi::module::{self as abi, DeclareInput, FrameInput};
 use anyhow::{Context as _, Result, bail, ensure};
+use ash::vk;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
+
+/// What a module is asked to declare for: the target, the scene's flags and
+/// the output's display spec (contract version 2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeclareTarget {
+    pub width: u32,
+    pub height: u32,
+    pub color_format: vk::Format,
+    /// `DECLARE_*` flags: units, readback, water, shadows, particles.
+    pub flags: u32,
+    /// How the output encodes the display's light: HDR keeps the display
+    /// intermediate and ends in `post.encode`, SDR has neither.
+    pub encoding: OutputEncoding,
+    /// The display's paper white and peak, in signal nits.
+    pub levels: DisplayLevels,
+    /// The space the scene is lit in and the display intermediate stores.
+    pub working: WorkingSpace,
+    /// The gamut `post.encode` maps the display to.
+    pub gamut: Gamut,
+}
+
+impl DeclareTarget {
+    /// The [`DeclareInput`] the host writes into the module's memory.
+    pub fn to_abi(self) -> DeclareInput {
+        DeclareInput {
+            width: self.width,
+            height: self.height,
+            color_format: self.color_format.as_raw() as u32,
+            flags: self.flags,
+            encoding: self.encoding.to_wire(),
+            working_space: self.working.to_wire(),
+            output_gamut: self.gamut.to_wire(),
+            paper_white: self.levels.paper_white,
+            peak: self.levels.peak,
+            reserved: [0; 6],
+        }
+    }
+}
 
 /// What `declare` returned: the graph declaration and the program table.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,10 +98,13 @@ impl RenderModule {
     }
 
     /// The module's graph for a target, `None` if it declines.
-    pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<Option<Declared>> {
+    pub fn declare(&mut self, target: &DeclareTarget) -> Result<Option<Declared>> {
         match self {
-            Self::Wasm(m) => m.declare(width, height, color_format, flags),
-            Self::File(f) => f.declare(width, height, color_format, flags),
+            Self::Wasm(m) => {
+                m.declare_input(target)?;
+                m.declare()
+            }
+            Self::File(f) => f.declare(target),
         }
     }
 
@@ -83,8 +127,10 @@ impl RenderModule {
 pub struct WasmModule {
     store: Store<()>,
     memory: Memory,
-    declare: TypedFunc<(u32, u32, u32, u32), u32>,
+    declare: TypedFunc<(), u32>,
     frame: TypedFunc<(), u32>,
+    /// Where [`DeclareInput`] goes before each `declare`.
+    declare_input: u32,
     input: u32,
     pub loaded: Instant,
 }
@@ -100,13 +146,18 @@ impl WasmModule {
         let memory = instance.get_memory(&mut store, "memory").context("the render module exports no `memory`")?;
         let version = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_VERSION).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_VERSION))?;
         let v = version.call(&mut store, ()).map_err(anyhow::Error::from).context("render module version")?;
-        ensure!(v == abi::MODULE_VERSION, "render module contract version {v}; this host runs {}", abi::MODULE_VERSION);
+        // The version comes first: a module built for another ABI is refused
+        // by number, never called with the wrong signature.
+        ensure!(v == abi::MODULE_VERSION, "render module ABI version {v}; this host runs {} (rebuild the module)", abi::MODULE_VERSION);
+        let declare_input_fn = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_DECLARE_INPUT).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_DECLARE_INPUT))?;
+        let declare_input = declare_input_fn.call(&mut store, ()).map_err(anyhow::Error::from).context("render module declaration input buffer")?;
         let declare = instance.get_typed_func(&mut store, abi::EXPORT_DECLARE).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_DECLARE))?;
         let frame = instance.get_typed_func(&mut store, abi::EXPORT_FRAME).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_FRAME))?;
         let input_fn = instance.get_typed_func::<(), u32>(&mut store, abi::EXPORT_INPUT).map_err(anyhow::Error::from).with_context(|| format!("export `{}`", abi::EXPORT_INPUT))?;
         let input = input_fn.call(&mut store, ()).map_err(anyhow::Error::from).context("render module input buffer")?;
-        let mut m = Self { store, memory, declare, frame, input, loaded: Instant::now() };
-        m.bytes(input, abi::FRAME_INPUT_BYTES as u32).context("the input buffer is outside the module's memory")?;
+        let mut m = Self { store, memory, declare, frame, declare_input, input, loaded: Instant::now() };
+        m.bytes(input, abi::FRAME_INPUT_BYTES as u32).context("the frame input buffer is outside the module's memory")?;
+        m.bytes(declare_input, abi::DECLARE_INPUT_BYTES as u32).context("the declaration input buffer is outside the module's memory")?;
         Ok(m)
     }
 
@@ -120,9 +171,18 @@ impl WasmModule {
         Ok(std::array::from_fn(|i| u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap())))
     }
 
-    /// The module's graph for a target, `None` if it declines.
-    pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<Option<Declared>> {
-        let ptr = self.declare.call(&mut self.store, (width, height, color_format, flags)).map_err(anyhow::Error::from).context("render module `declare`")?;
+    /// Write the target and display spec the next `declare` reads.
+    fn declare_input(&mut self, target: &DeclareTarget) -> Result<()> {
+        let at = self.declare_input as usize;
+        let bytes = target.to_abi().to_bytes();
+        let memory = self.memory.data_mut(&mut self.store);
+        memory.get_mut(at..at + bytes.len()).context("the declaration input buffer is outside the module's memory")?.copy_from_slice(&bytes);
+        Ok(())
+    }
+
+    /// The module's graph for the target last written, `None` if it declines.
+    pub fn declare(&mut self) -> Result<Option<Declared>> {
+        let ptr = self.declare.call(&mut self.store, ()).map_err(anyhow::Error::from).context("render module `declare`")?;
         if ptr == 0 {
             return Ok(None);
         }

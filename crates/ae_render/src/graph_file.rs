@@ -33,8 +33,9 @@
 //!   `shadows.color` or the exposure image `exposure` (their fixed specs).
 //!   `image`:
 //!   the target's size times `scale` (default 1), `format` a Vulkan format
-//!   name or `target` (the target's colour format), `usage` flag names,
-//!   `class` `transient` (default) or `persistent`. `output`: the image the
+//!   name, `target` (the target's colour format) or `display` (the HDR
+//!   display intermediate's), `usage` flag names, `class` `transient`
+//!   (default) or `persistent`. `output`: the image the
 //!   frame ends in, exactly one; it becomes `target` (`Backbuffer`) when
 //!   presenting and `readback.target` (`External`, also a transfer source)
 //!   when reading back, and the host appends the present pass or the
@@ -42,7 +43,12 @@
 //! * **Programs** are fullscreen fragment shaders: `fragment` is a `.spv`
 //!   file or a `.frag` compiled with `glslc` (both relative to the file;
 //!   [`inline`] replaces it by `fragment_hex` so the bytes stand alone),
-//!   `uniforms` the floats of its uniform block (binding 0), constant.
+//!   `uniforms` the floats of its uniform block (binding 0). With
+//!   `uniforms_flag` (a bit 0..32) and `uniforms_off` (the same count), the
+//!   block switches: `uniforms` while the bit is set, `uniforms_off` while
+//!   it is clear, and the pass itself always runs (the HDR vignette
+//!   multiplies by zero when off, so the encode always reads a written
+//!   image).
 //! * **Passes** run in file order. `kind` `graphics`, `compute` or
 //!   `transfer`; a payload, either `library` (a library pass name) or
 //!   `program`; `access` entries `"<resource> <role>[ discard]"`, roles
@@ -60,17 +66,22 @@
 //!   can sample `shadows.map` only where the map exists.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
 //!   `readback`, `present`, `water`, `no_water`, `shadows` or `no_shadows`
-//!   (the units cast shadows), `particles` or `no_particles`, or
-//!   `particle_shadows` (both shadows and particles), to exist only in
-//!   such scenes.
+//!   (the units cast shadows), `particles` or `no_particles`,
+//!   `particle_shadows` (both shadows and particles), `hdr` or `sdr` (the
+//!   output's encoding: HDR keeps the display intermediate and ends in
+//!   `post.encode`), to exist only in such scenes. A graph is checked for
+//!   every combination at load, SDR and both HDR encodings included.
 
-use crate::module::{Declared, ModuleFrame};
+use crate::colorspace::{Gamut, WorkingSpace};
+use crate::encode::{DisplayLevels, OutputEncoding};
+use crate::module::{DeclareTarget, Declared, ModuleFrame};
 use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program, ProgramTable};
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use ash::vk;
 
 pub const FILE_VERSION: u32 = 1;
 
@@ -133,10 +144,16 @@ enum When {
     /// The particles cast coloured shadows: units that cast shadows and
     /// particles.
     ParticleShadows,
+    /// The output is HDR (HDR10 or scRGB): the graph keeps the display
+    /// intermediate and ends in `post.encode`.
+    Hdr,
+    /// The output is SDR: `post.tonemap` writes the target, no display and
+    /// no encode.
+    Sdr,
 }
 
 impl When {
-    fn holds(when: Option<When>, flags: u32) -> bool {
+    fn holds(when: Option<When>, flags: u32, hdr: bool) -> bool {
         let (units, readback, water, shadows) = (flags & DECLARE_UNITS != 0, flags & DECLARE_READBACK != 0, flags & DECLARE_WATER != 0, flags & DECLARE_SHADOWS != 0);
         match when {
             None => true,
@@ -151,6 +168,8 @@ impl When {
             Some(When::Particles) => flags & DECLARE_PARTICLES != 0,
             Some(When::NoParticles) => flags & DECLARE_PARTICLES == 0,
             Some(When::ParticleShadows) => shadows && flags & DECLARE_PARTICLES != 0,
+            Some(When::Hdr) => hdr,
+            Some(When::Sdr) => !hdr,
         }
     }
 }
@@ -193,6 +212,15 @@ struct ProgramSpec {
     fragment_hex: Option<String>,
     #[serde(default)]
     uniforms: Vec<f32>,
+    /// When set, the program's uniform block switches with this flag bit:
+    /// `uniforms` while it is set, `uniforms_off` while it is clear. A pass
+    /// that always runs but whose effect is switched on may need this (the
+    /// HDR vignette multiplies by zero when off, the pass itself staying in
+    /// the graph so the encode always reads a written image).
+    #[serde(default)]
+    uniforms_flag: Option<u32>,
+    #[serde(default)]
+    uniforms_off: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,17 +250,25 @@ enum PassKindSpec {
     Transfer,
 }
 
-/// Per program-table entry: the flag bit that enables it, its uniform bytes.
-type Entries = Vec<(Option<u32>, Vec<u8>)>;
+/// Per program-table entry: what `frame` writes and disables.
+#[derive(Debug, Default)]
+struct Entry {
+    /// The pass's conditional bit: disabled while it is clear.
+    flag: Option<u32>,
+    /// The uniform block while the bit is set (or no bit is involved).
+    uniforms: Vec<u8>,
+    /// When the block switches with a bit: `(bit, block while clear)`.
+    uniforms_off: Option<(u32, Vec<u8>)>,
+}
 
 /// A parsed, checked graph file (its programs' SPIR-V in memory).
 pub struct GraphFile {
     spec: FileSpec,
     /// By program name: SPIR-V.
     spirv: BTreeMap<String, Vec<u8>>,
-    /// From the last `declare`: per program-table entry, the flag bit that
-    /// enables it (conditional passes) and its uniform bytes.
-    entries: Entries,
+    /// From the last `declare`: per program-table entry, its uniform bytes
+    /// and flag bits.
+    entries: Vec<Entry>,
     pub loaded: std::time::Instant,
 }
 
@@ -246,11 +282,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// Vulkan format by name (the ones render graphs use), `target` (the
-/// output's), `scene` (the HDR scene's, [`ae_render_abi::module::SCENE_FORMAT`]),
-/// `glow` or `bloom`.
+/// output's), `display` (the HDR display intermediate's,
+/// [`ae_render_abi::module::DISPLAY_FORMAT`]), `scene` (the HDR scene's,
+/// [`ae_render_abi::module::SCENE_FORMAT`]), `glow` or `bloom`.
 fn format(name: &str, target: u32) -> Result<u32> {
     Ok(match name {
         "target" => target,
+        "display" => ae_render_abi::module::DISPLAY_FORMAT,
         "scene" => ae_render_abi::module::SCENE_FORMAT,
         "glow" => ae_render_abi::module::GLOW_FORMAT,
         "bloom" => ae_render_abi::module::BLOOM_FORMAT,
@@ -377,30 +415,37 @@ impl GraphFile {
         }
         ensure!(spec.resources.iter().filter(|r| r.kind == ResourceKind::Output).count() == 1, "a graph file declares exactly one `output` resource");
         let file = Self { spec, spirv, entries: Vec::new(), loaded: std::time::Instant::now() };
-        // Every scene the file can be asked for must declare.
-        for flags in SCENE_FLAGS {
-            file.build(64, 64, 50, flags).with_context(|| {
-                format!(
-                    "declaring for {}units, {}water, {}shadows, {}particles, {}",
-                    if flags & DECLARE_UNITS != 0 { "" } else { "no " },
-                    if flags & DECLARE_WATER != 0 { "" } else { "no " },
-                    if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
-                    if flags & DECLARE_PARTICLES != 0 { "" } else { "no " },
-                    if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
-                )
-            })?;
+        // Every scene and output encoding the file can be asked for must
+        // declare (a graph file is checked before its first frame, not
+        // discovered per frame).
+        for encoding in [OutputEncoding::Sdr, OutputEncoding::Hdr10Pq, OutputEncoding::ScRgb] {
+            for flags in SCENE_FLAGS {
+                let target = DeclareTarget { width: 64, height: 64, color_format: vk::Format::B8G8R8A8_SRGB, flags, encoding, levels: DisplayLevels::default(), working: WorkingSpace::Bt709, gamut: Gamut::Bt709 };
+                file.build(&target).with_context(|| {
+                    format!(
+                        "declaring for {encoding:?}, {}units, {}water, {}shadows, {}particles, {}",
+                        if flags & DECLARE_UNITS != 0 { "" } else { "no " },
+                        if flags & DECLARE_WATER != 0 { "" } else { "no " },
+                        if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
+                        if flags & DECLARE_PARTICLES != 0 { "" } else { "no " },
+                        if flags & DECLARE_READBACK != 0 { "readback" } else { "present" }
+                    )
+                })?;
+            }
         }
         Ok(file)
     }
 
-    fn build(&self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<(Declared, Entries)> {
+    fn build(&self, target: &DeclareTarget) -> Result<(Declared, Vec<Entry>)> {
+        let (width, height, color_format, flags) = (target.width, target.height, target.color_format.as_raw() as u32, target.flags);
         let readback = flags & DECLARE_READBACK != 0;
+        let hdr = target.encoding.uses_display();
         let mut g = GraphBuilder::new();
         let mut table = ProgramTable::new();
         let mut entries = Vec::new();
         let mut refs: BTreeMap<&str, ResourceRef> = BTreeMap::new();
         let mut output = None;
-        for r in self.spec.resources.iter().filter(|r| When::holds(r.when, flags)) {
+        for r in self.spec.resources.iter().filter(|r| When::holds(r.when, flags, hdr)) {
             let at = || format!("resource `{}`", r.name);
             let reference = match r.kind {
                 ResourceKind::Library => {
@@ -442,18 +487,27 @@ impl GraphFile {
             refs.insert(&r.name, reference);
         }
         let output = output.context("the `output` resource has a `when` that excludes this scene")?;
-        for p in self.spec.passes.iter().filter(|p| When::holds(p.when, flags)) {
+        for p in self.spec.passes.iter().filter(|p| When::holds(p.when, flags, hdr)) {
             let at = || format!("pass `{}`", p.name);
             let payload = match (&p.library, &p.program) {
                 (Some(name), None) => {
-                    entries.push((p.flag, Vec::new()));
+                    entries.push(Entry { flag: p.flag, ..Entry::default() });
                     table.library(name)
                 }
                 (None, Some(name)) => {
                     let spec = self.spec.programs.iter().find(|q| &q.name == name).with_context(|| format!("{}: no program `{name}`", at()))?;
-                    let uniforms: Vec<u8> = spec.uniforms.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let block = |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+                    let uniforms = block(&spec.uniforms);
+                    let uniforms_off = match spec.uniforms_flag {
+                        None => None,
+                        Some(bit) => {
+                            ensure!(bit < 32, "{}: uniforms_flag bit {bit} (0..32)", at());
+                            ensure!(spec.uniforms_off.len() == spec.uniforms.len(), "{}: uniforms_off has {} floats; uniforms has {}", at(), spec.uniforms_off.len(), spec.uniforms.len());
+                            Some((bit, block(&spec.uniforms_off)))
+                        }
+                    };
                     let index = table.push(Program::Fullscreen { label: &spec.name, spirv: &self.spirv[&spec.name], uniform_bytes: uniforms.len() as u32 });
-                    entries.push((p.flag, uniforms));
+                    entries.push(Entry { flag: p.flag, uniforms, uniforms_off });
                     index
                 }
                 _ => bail!("{}: give exactly one of `library` and `program`", at()),
@@ -485,14 +539,14 @@ impl GraphFile {
         // The tail every module writes: present, or copy out and read.
         if readback {
             let buffer = g.buffer("readback.buffer", 0, 0, Class::External);
-            entries.push((None, Vec::new()));
+            entries.push(Entry::default());
             let copy = table.library("readback.copy");
             g.pass("copy", PassKind::Transfer, copy).access(output, Role::TransferSrc).discard(buffer, Role::TransferDst).id();
-            entries.push((None, Vec::new()));
+            entries.push(Entry::default());
             let read = table.library("host.read");
             g.pass("host read", PassKind::Transfer, read).access(buffer, Role::HostRead).root().id();
         } else {
-            entries.push((None, Vec::new()));
+            entries.push(Entry::default());
             let present = table.library("present");
             g.pass("present", PassKind::Present, present).present(output).root().id();
         }
@@ -500,19 +554,23 @@ impl GraphFile {
     }
 
     /// The graph for a target (as a module's `declare`).
-    pub fn declare(&mut self, width: u32, height: u32, color_format: u32, flags: u32) -> Result<Option<Declared>> {
-        let (declared, entries) = self.build(width, height, color_format, flags)?;
+    pub fn declare(&mut self, target: &DeclareTarget) -> Result<Option<Declared>> {
+        let (declared, entries) = self.build(target)?;
         self.entries = entries;
         Ok(Some(declared))
     }
 
-    /// Constant uniforms; conditional passes disabled while their flag bit
-    /// is clear.
+    /// The uniforms (switched by their `uniforms_flag` bit where they have
+    /// one); conditional passes disabled while their flag bit is clear.
     pub fn frame(&mut self, input: &FrameInput) -> ModuleFrame {
         let mut frame = ModuleFrame::default();
-        for (index, (flag, uniforms)) in self.entries.iter().enumerate() {
+        for (index, entry) in self.entries.iter().enumerate() {
+            let uniforms = match &entry.uniforms_off {
+                Some((bit, off)) if input.flags & (1 << bit) == 0 => off,
+                _ => &entry.uniforms,
+            };
             frame.uniforms.extend_from_slice(uniforms);
-            if flag.is_some_and(|bit| input.flags & (1 << bit) == 0) {
+            if entry.flag.is_some_and(|bit| input.flags & (1 << bit) == 0) {
                 let word = index / 32;
                 if frame.disabled.len() <= word {
                     frame.disabled.resize(word + 1, 0);
@@ -605,7 +663,8 @@ mod tests {
     fn conditional_passes_follow_their_flag() {
         let text = file(&format!(r#"{LOD}, {{"name": "extra", "kind": "compute", "library": "terrain.lod", "flag": 3, "access": ["terrain.leaves storage_buffer_write:compute"], "root": true}}"#));
         let mut f = GraphFile::parse(text.as_bytes()).unwrap();
-        f.declare(64, 64, 50, 0).unwrap();
+        let target = DeclareTarget { width: 64, height: 64, color_format: vk::Format::B8G8R8A8_SRGB, flags: 0, encoding: OutputEncoding::Sdr, levels: DisplayLevels::default(), working: WorkingSpace::Bt709, gamut: Gamut::Bt709 };
+        f.declare(&target).unwrap();
         let input = |flags| FrameInput { flags, ..FrameInput::default() };
         assert!(f.frame(&input(0)).is_disabled(1) && !f.frame(&input(0)).is_disabled(0));
         assert!(!f.frame(&input(1 << 3)).is_disabled(1));

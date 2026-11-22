@@ -1624,9 +1624,278 @@ fn the_default_module_renders_like_the_native_graph() {
     assert_clean(&gpu);
 }
 
+/// The default module's HDR10 readback is the native graph's: the same
+/// display intermediate and `post.encode` (M13 stage 6), within one PQ code
+/// per channel (the two paths bake the same plan, so the tolerance is for
+/// arithmetic order alone).
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn the_default_module_renders_like_the_native_graph_in_hdr10() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+
+    let gpu = gpu();
+    let levels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+    let wasm = ae_render::module::build("default").expect("build render/default");
+    let (native, native_counts) = scene_pixels_with(&gpu, None, 16, Some((OutputEncoding::Hdr10Pq, levels)));
+    let (from_module, module_counts) = scene_pixels_with(&gpu, Some(wasm), 16, Some((OutputEncoding::Hdr10Pq, levels)));
+    assert_eq!(native_counts, module_counts, "same unit counts");
+    assert_eq!(native.len(), from_module.len());
+    let mut worst = 0i32;
+    let mut differing = 0usize;
+    for (a, b) in native.chunks(4).zip(from_module.chunks(4)) {
+        let (ua, ub) = (u32::from_le_bytes(a.try_into().unwrap()), u32::from_le_bytes(b.try_into().unwrap()));
+        let mut pixel = 0;
+        for shift in [0u32, 10, 20] {
+            let d = (((ua >> shift) & 0x3ff) as i32 - ((ub >> shift) & 0x3ff) as i32).abs();
+            pixel = pixel.max(d);
+            worst = worst.max(d);
+        }
+        if pixel > 0 {
+            differing += 1;
+        }
+    }
+    eprintln!("HDR10 native vs default module: worst channel {worst} PQ code(s), {differing} of {} pixels differ", native.len() / 4);
+    assert!(worst <= 1, "the module's HDR10 frame differs by {worst} PQ codes");
+    assert_clean(&gpu);
+}
+
+/// Replacing the graph while HDR (M13 stage 6): default -> post in HDR10
+/// readback, one rebake, the grade changes the frame, validation silent; and
+/// the vignette flag (a pass that always runs, multiplying by zero when off)
+/// darkens the corners without a rebake.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn render_modules_swap_graphs_in_hdr10() {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::thread::{Headless, TargetInfo};
+
+    let gpu = gpu();
+    let levels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
+    let default = ae_render::module::build("default").expect("build render/default");
+    let post = ae_render::module::build("post").expect("build render/post");
+    let mut app = scene_app_with(&gpu, Some(default), Some((OutputEncoding::Hdr10Pq, levels)));
+    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::A2B10G10R10_UNORM_PACK32, color_space: vk::ColorSpaceKHR::HDR10_ST2084_EXT };
+    let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
+    let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+    let reload = app.module_reload();
+    let mut step = |app: &mut ae_render::terrain::app::TerrainApp, frames: usize| -> (Vec<u8>, u64) {
+        run.frames(app, frames).unwrap();
+        run.wait().unwrap();
+        (app.readback().unwrap(), run.stats().bakes)
+    };
+    let (w, h) = (SCENE_EXTENT.width, SCENE_EXTENT.height);
+    let corner = |p: &[u8]| -> f32 {
+        // Display units from the PQ code (the BT.2020 channels are near the
+        // achromatic axis here, so the green channel's luminance is enough).
+        let at = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            let u = u32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]]);
+            ae_render::encode::pq_eotf(((u >> 10) & 0x3ff) as f32 / 1023.0)
+        };
+        (at(8, 8) + at(w - 8, 8) + at(8, h - 8) + at(w - 8, h - 8)) / 4.0
+    };
+
+    let (plain, bakes) = step(&mut app, 12);
+    assert_eq!(bakes, 1);
+    *reload.lock().unwrap() = Some(post);
+    let (graded, bakes) = step(&mut app, 12);
+    assert_eq!(bakes, 2, "the post module's graph rebaked once");
+    let changed = plain.iter().zip(&graded).filter(|(a, b)| a.abs_diff(**b) > 2).count();
+    assert!(changed > plain.len() / 10, "the grade changes the HDR frame: {changed} of {} bytes", plain.len());
+
+    // The vignette: the flag switches a uniform, not the graph.
+    app.view().lock().unwrap().module_flags = 1;
+    let (vignetted, bakes) = step(&mut app, 4);
+    assert_eq!(bakes, 2, "switching the HDR vignette does not rebake");
+    eprintln!("HDR10 corners {:.1} -> {:.1} nits, centre {:?}", corner(&graded), corner(&vignetted), hdr10_nits(&graded, ((h / 2) * w + w / 2) as usize));
+    assert!(corner(&vignetted) < corner(&graded) * 0.8, "the vignette darkens the corners");
+    drop(run);
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}
+
+/// The post module's grade runs on the display, above paper white (M13
+/// stage 6): the real grade SPIR-V (from the built module) followed by
+/// `post.encode` decodes to the grade's maths at display 1.5 and 2.0 paper
+/// white, and saturation keeps luminance. The native (ungraded) encode of
+/// the same values is reported beside it.
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn the_post_grade_works_above_paper_white() {
+    use ae_render::colorspace::{Gamut, WorkingSpace};
+    use ae_render_abi::module::{Program, ProgramTable};
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+
+    let gpu = gpu();
+    let wasm = ae_render::module::build("post").expect("build render/post");
+    let engine = ae_render::module::engine();
+    let mut module = ae_render::module::RenderModule::load(&engine, &wasm).unwrap();
+    let target = declare_sdr(4, 4, vk::Format::B8G8R8A8_SRGB, 0);
+    let declared = module.declare(&target).unwrap().expect("declares in SDR");
+    let programs = ProgramTable::decode(&declared.programs).unwrap();
+    let grade = programs
+        .iter()
+        .find_map(|p| match *p {
+            Program::Fullscreen { label: "grade", spirv, .. } => Some(spirv.to_vec()),
+            _ => None,
+        })
+        .expect("the post module's grade program");
+
+    // The grade's constants (its uniform block in `frame`).
+    let (contrast, saturation, tint) = (1.12f32, 1.15f32, [1.04f32, 1.0, 0.94]);
+    let expected = |c: [f32; 3]| -> [f32; 3] {
+        let luma = y709(c);
+        let s: [f32; 3] = std::array::from_fn(|k| luma + saturation * (c[k] - luma));
+        let t: [f32; 3] = s.map(|v| (v - 0.18) * contrast + 0.18);
+        [t[0] * tint[0], t[1] * tint[1], t[2] * tint[2]]
+    };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let values: [[f32; 4]; 4] = [[1.5, 1.5, 1.5, 1.0], [2.0, 2.0, 2.0, 1.0], [1.8, 1.2, 0.9, 1.0], [2.4, 1.6, 1.2, 1.0]];
+    let graded = grade_values(&gpu, &grade, &values);
+    let native = encode_values(&gpu, OutputEncoding::Hdr10Pq, vk::Extent2D { width: 4, height: 4 }, levels, WorkingSpace::Bt709, Gamut::P3, &values);
+    let display = |frame: &[u8]| -> [f32; 3] {
+        // BT.2020 nits back to the working space's paper-white units (P3
+        // contains BT.709, so the map is a pure re-expression).
+        let c = ae_render::colorspace::convert(Gamut::Bt2020, Gamut::Bt709, hdr10_nits(frame, 0));
+        c.map(|v| v / levels.paper_white)
+    };
+    let mut worst = 0.0f32;
+    for (k, (want, frame)) in values.iter().zip(&native).enumerate() {
+        let (input, graded, plain) = ([want[0], want[1], want[2]], graded[k], display(frame));
+        let expected = expected(input);
+        let delta = (0..3).map(|c| (graded[c] - expected[c]).abs()).fold(0.0, f32::max);
+        worst = worst.max(delta);
+        eprintln!(
+            "display {:.1} input {:?}: native {:?} | graded {:?} | expected {:?} (max {:.4} off); luma native {:.4} -> graded {:.4}",
+            input[0],
+            input.map(|v| (v * 100.0).round() / 100.0),
+            plain.map(|v| (v * 1000.0).round() / 1000.0),
+            graded.map(|v| (v * 1000.0).round() / 1000.0),
+            expected.map(|v| (v * 1000.0).round() / 1000.0),
+            delta,
+            y709(plain),
+            y709(graded)
+        );
+        // Saturation keeps luminance before the contrast: the graded
+        // luminance is the input's through contrast and the tint.
+        let luma_expected = y709(expected);
+        assert!((y709(graded) - luma_expected).abs() < 0.01, "row {k}: luminance {} vs {}", y709(graded), luma_expected);
+    }
+    assert!(worst < 0.01, "the decoded grade is {worst} off the maths");
+    assert_clean(&gpu);
+}
+
+/// The post module's grade over a clear value, then `post.encode` to HDR10,
+/// read back as the display's values in the working space (paper-white
+/// units).
+fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<[f32; 3]> {
+    use ae_render::colorspace::{Gamut, WorkingSpace};
+    use ae_render::encode::{DISPLAY_FORMAT, DisplayLevels, Encode, OutputEncoding};
+    use ae_render::executor::{Binding, BufferBinding, Executor, ExecutorConfig, ImageBinding, PassContext, Recorder};
+    use ae_render::fullscreen::FullscreenProgram;
+    use ae_framegraph::{FrameGraph, LoadOp, PassKind, ResourceId, Role, ShaderStage};
+
+    struct Paint {
+        display: ResourceId,
+        graded: ResourceId,
+        target: ResourceId,
+        buffer: ResourceId,
+        program: FullscreenProgram,
+        encode: Encode,
+        sampler: vk::Sampler,
+        uniforms: [u8; 32],
+        value: [f32; 4],
+        levels: DisplayLevels,
+    }
+    impl Recorder<u32> for Paint {
+        fn clear_color(&self, _pass: &u32, resource: ResourceId) -> [f32; 4] {
+            if resource == self.display { self.value } else { [0.0; 4] }
+        }
+        fn record(&mut self, pass: &u32, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                1 => {
+                    self.program.write_uniforms(ctx.slot, &self.uniforms);
+                    self.program.record(ctx, &[ctx.image(self.display)?], self.sampler)?;
+                }
+                2 => {
+                    self.encode.write(ctx.slot, OutputEncoding::Hdr10Pq, self.levels, WorkingSpace::Bt709, Gamut::P3);
+                    self.encode.record(ctx, ctx.image(self.graded)?, self.sampler)?;
+                }
+                4 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let levels = DisplayLevels { paper_white: 203.0, peak: 1000.0 };
+    let format = OutputEncoding::Hdr10Pq.readback_format();
+    let display_desc = ImageDesc::color_2d(DISPLAY_FORMAT, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+    let buffer_desc = BufferDesc { size: extent.width as u64 * extent.height as u64 * 4, usage: vk::BufferUsageFlags::TRANSFER_DST };
+    let mut graph = FrameGraph::<u32>::new();
+    let display = graph.image("display", display_desc, ResourceClass::External);
+    let graded = graph.image("graded", display_desc, ResourceClass::External);
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    graph.pass("fill", PassKind::Graphics, 0).color(display, LoadOp::Clear).id();
+    graph.pass("grade", PassKind::Graphics, 1).sampled(display, ShaderStage::Fragment).color(graded, LoadOp::DontCare).id();
+    graph.pass("encode", PassKind::Graphics, 2).sampled(graded, ShaderStage::Fragment).color(target, LoadOp::DontCare).id();
+    graph.pass("copy", PassKind::Transfer, 3).access(target, Role::TransferSrc).access(buffer, Role::TransferDst).id();
+    graph.pass("host read", PassKind::Transfer, 4).access(buffer, Role::HostRead).root().id();
+
+    let mut image = OwnedImage::new(gpu, display_desc, "display").unwrap();
+    let mut graded_image = OwnedImage::new(gpu, display_desc, "graded").unwrap();
+    let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
+    let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+    let bindings = [
+        Binding::Image(ImageBinding { image: image.image, view: image.view, format: display_desc.format, extent, range: image.range(), identity: (0x6EA7E << 40) | 1 }),
+        Binding::Image(ImageBinding { image: graded_image.image, view: graded_image.view, format: display_desc.format, extent, range: graded_image.range(), identity: (0x6EA7E << 40) | 2 }),
+        Binding::Image(ImageBinding { image: out.image, view: out.view, format: target_desc.format, extent, range: out.range(), identity: (0x6EA7E << 40) | 3 }),
+        Binding::Buffer(BufferBinding { buffer: readback.buffer, offset: 0, size: buffer_desc.size, identity: (0x6EA7E << 40) | 4 }),
+    ];
+    let sampler_info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST);
+    let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
+    let program = FullscreenProgram::new(gpu, "grade", grade, 32, 1, &[DISPLAY_FORMAT], 2).unwrap();
+    let encode = Encode::new(gpu, OutputEncoding::Hdr10Pq, format, 2).unwrap();
+    let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut paint = Paint { display, graded, target, buffer, program, encode, sampler, uniforms: uniforms.try_into().unwrap(), value: [0.0; 4], levels };
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    executor.set_graph(graph).unwrap();
+    let mut frames = Vec::new();
+    for value in values {
+        paint.value = *value;
+        let token = executor.begin_frame().unwrap();
+        executor.execute(token, &mut paint, &|resource| bindings.get(resource.index()).copied(), &[], &[]).unwrap();
+        executor.wait(token).unwrap();
+        frames.push(readback.mapped().unwrap().to_vec());
+    }
+    paint.program.destroy(gpu);
+    paint.encode.destroy(gpu);
+    unsafe { gpu.device.destroy_sampler(sampler, None) };
+    image.destroy(gpu);
+    graded_image.destroy(gpu);
+    out.destroy(gpu);
+    readback.destroy(gpu);
+    frames
+        .iter()
+        .map(|frame| {
+            let c = ae_render::colorspace::convert(Gamut::Bt2020, Gamut::Bt709, hdr10_nits(frame, 0));
+            c.map(|v| v / levels.paper_white)
+        })
+        .collect()
+}
+
 /// A generated map with a few hundred units, offscreen at 320x200,
 /// natively or driven by `module`.
 fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrain::app::TerrainApp {
+    scene_app_with(gpu, module, None)
+}
+
+/// [`scene_app`], with an HDR display spec (M13: the readback path can
+/// encode HDR10 or scRGB too).
+fn scene_app_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>) -> ae_render::terrain::app::TerrainApp {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
     use ae_render::terrain::heightmap::{build_pyramid, generate};
     use ae_render::terrain::renderer::TerrainInfo;
@@ -1647,6 +1916,9 @@ fn scene_app(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) -> ae_render::terrai
     feed.publish(Arc::new(InstanceStream { tick: 1, published: std::time::Instant::now(), tick_seconds: 0.0, sim_seconds: 0.0, columns: at_rest(columns), anim: AnimWrites::default() }));
     let classes = vec![UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [1.0, 0.8, 0.1], floats: false }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.9, 0.9, 0.95], floats: true }, UnitClass { gamut: ae_render::colorspace::Gamut::Bt709, color: [0.8, 0.1, 0.1], floats: false }];
     let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_units(UnitsSetup { feed, capacity: 512, classes, min_pixels: 5.0, models: Vec::new(), rigs: Vec::new() });
+    if let Some((encoding, levels)) = display {
+        app = app.with_display(encoding, levels);
+    }
     if let Some(wasm) = module {
         app = app.with_module(wasm);
     }
@@ -1665,9 +1937,21 @@ const SCENE_EXTENT: vk::Extent2D = vk::Extent2D { width: 320, height: 200 };
 /// The scene of [`scene_app`] rendered for `frames` frames: the pixels and
 /// the unit counts (rows, visible).
 fn scene_pixels(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize) -> (Vec<u8>, (u32, u32)) {
+    scene_pixels_with(gpu, module, frames, None)
+}
+
+/// [`scene_pixels`] for an output encoding (the target's format and colour
+/// space follow it; the readback image uses [`ae_render::encode::OutputEncoding::readback_format`]).
+fn scene_pixels_with(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>, frames: usize, display: Option<(ae_render::encode::OutputEncoding, ae_render::encode::DisplayLevels)>) -> (Vec<u8>, (u32, u32)) {
+    use ae_render::encode::OutputEncoding;
     use ae_render::thread::{TargetInfo, run_headless};
-    let mut app = scene_app(gpu, module);
-    let target = TargetInfo { extent: SCENE_EXTENT, format: vk::Format::R8G8B8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR };
+    let mut app = scene_app_with(gpu, module, display);
+    let (format, color_space) = match display.map(|(e, _)| e).unwrap_or_default() {
+        OutputEncoding::Sdr => (vk::Format::R8G8B8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+        OutputEncoding::Hdr10Pq => (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
+        OutputEncoding::ScRgb => (vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
+    };
+    let target = TargetInfo { extent: SCENE_EXTENT, format, color_space };
     let config = ExecutorConfig { frames_in_flight: 2, profile: false, bake: BakeOptions::default(), record_threads: 1 };
     run_headless(gpu, &mut app, target, frames, config).unwrap();
     let status = app.module_status().lock().unwrap().clone();
@@ -1691,6 +1975,12 @@ fn mean_rgb(pixels: &[u8], x: u32, y: u32, w: u32, h: u32) -> f64 {
     sum as f64 / (3 * w * h) as f64
 }
 
+/// An SDR declaration target for the reload tests.
+fn declare_sdr(width: u32, height: u32, format: vk::Format, flags: u32) -> ae_render::module::DeclareTarget {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    ae_render::module::DeclareTarget { width, height, color_format: format, flags, encoding: OutputEncoding::Sdr, levels: DisplayLevels::default(), working: Default::default(), gamut: Default::default() }
+}
+
 /// A WAT module that declares `graph` and `programs` (bytes for the test
 /// scene's target) and traps in `frame`.
 fn trapping_module(graph: &[u8], programs: &[u8]) -> Vec<u8> {
@@ -1703,8 +1993,9 @@ fn trapping_module(graph: &[u8], programs: &[u8]) -> Vec<u8> {
             (data (i32.const 64) "{}")
             (data (i32.const {g}) "{}")
             (data (i32.const {p}) "{}")
-            (func (export "ae_render_version") (result i32) i32.const 1)
-            (func (export "ae_render_declare") (param i32 i32 i32 i32) (result i32) i32.const 64)
+            (func (export "ae_render_version") (result i32) i32.const 2)
+            (func (export "ae_render_declare_input") (result i32) i32.const 512)
+            (func (export "ae_render_declare") (result i32) i32.const 64)
             (func (export "ae_render_input") (result i32) i32.const 1024)
             (func (export "ae_render_frame") (result i32) unreachable))"#,
         hex(&words),
@@ -1782,7 +2073,7 @@ fn render_modules_reload_while_running() {
         let engine = ae_render::module::engine();
         let mut m = ae_render::module::RenderModule::load(&engine, &post).unwrap();
         let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
-        let declared = m.declare(w, h, vk::Format::R8G8B8A8_SRGB.as_raw() as u32, flags).unwrap().unwrap();
+        let declared = m.declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags)).unwrap().unwrap();
         let tables = ProgramTable::decode(&declared.programs).unwrap();
         let grade = tables.iter().find_map(|p| match *p {
             Program::Fullscreen { label: "grade", spirv, .. } => Some(spirv.to_vec()),
@@ -1830,7 +2121,7 @@ fn render_modules_reload_while_running() {
         let engine = ae_render::module::engine();
         let mut m = ae_render::module::RenderModule::load(&engine, &default).unwrap();
         let flags = ae_render_abi::module::DECLARE_UNITS | ae_render_abi::module::DECLARE_READBACK;
-        m.declare(w, h, vk::Format::R8G8B8A8_SRGB.as_raw() as u32, flags).unwrap().unwrap()
+        m.declare(&declare_sdr(w, h, vk::Format::R8G8B8A8_SRGB, flags)).unwrap().unwrap()
     };
     *reload.lock().unwrap() = Some(trapping_module(&declared.graph, &declared.programs));
     let (trapped, bakes) = step(&mut app, 8);

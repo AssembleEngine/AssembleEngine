@@ -32,6 +32,7 @@ use super::renderer::{FrameParams, FrameStats, LodView, TerrainInfo, TerrainRend
 use crate::device::GpuDevice;
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
 use crate::memory::{OwnedBuffer, OwnedImage};
+use crate::module::DeclareTarget;
 use crate::thread::{RenderApp, TargetInfo};
 use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
 use crate::fullscreen::FullscreenProgram;
@@ -200,12 +201,31 @@ pub enum PassWork {
     Encode { display: ResourceId },
 }
 
+/// What a module's declaration is for: the target's size and (format,
+/// colour space) pair, and the display spec `declare` was given (a pair
+/// change or a levels change redeclares it, exactly as the native graph is
+/// rebuilt for a new target).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DeclareKey {
+    extent: vk::Extent2D,
+    format: vk::Format,
+    color_space: vk::ColorSpaceKHR,
+    encoding: OutputEncoding,
+    /// Paper white and peak as bits (an exact comparison).
+    paper_white: u32,
+    peak: u32,
+    /// The working space and output gamut `declare` was given (constant
+    /// within a run today, but part of what the module saw).
+    working: WorkingSpace,
+    gamut: Gamut,
+}
+
 /// The render module driving the graph, with its wired declaration.
 struct ModuleState {
     module: RenderModule,
-    /// Target the declaration is for: size and the (format, colour space)
-    /// pair (a colour-space change redeclares too).
-    declared_for: (vk::Extent2D, vk::Format, vk::ColorSpaceKHR),
+    /// What the declaration is for; `None` after a rebuild's destroy (the
+    /// module stays loaded and redeclares on the next frame).
+    declared_for: Option<DeclareKey>,
     graph: FrameGraph<ScenePass>,
     resources: ResourceMap,
     /// By payload: the fullscreen programs and where their uniform blocks
@@ -551,6 +571,20 @@ impl TerrainApp {
     /// The backbuffer's colour space (the module redeclare key).
     fn output_format_space(&self) -> vk::ColorSpaceKHR {
         self.output_space
+    }
+
+    /// What a module's declaration is for (`declare`'s key).
+    fn declare_key(&self, env: &LibraryEnv) -> DeclareKey {
+        DeclareKey {
+            extent: env.extent,
+            format: env.color_format,
+            color_space: self.output_format_space(),
+            encoding: env.encoding,
+            paper_white: env.levels.paper_white.to_bits(),
+            peak: env.levels.peak.to_bits(),
+            working: env.working,
+            gamut: env.gamut,
+        }
     }
 
     /// The window's HDR settings (defaults when the client gave none).
@@ -903,13 +937,13 @@ impl RenderApp for TerrainApp {
         }
         let (graph, resources, glow) = match self.module.take() {
             Some(mut state) => {
-                if state.declared_for != (env.extent, env.color_format, self.output_format_space()) {
+                if state.declared_for != Some(self.declare_key(&env)) {
                     let declared = self.declare_module(&mut state.module, &env);
                     match declared {
                         Ok(d) => {
                             let old = std::mem::replace(&mut state.programs, d.programs);
                             self.retire(old);
-                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, (env.extent, env.color_format, self.output_format_space()));
+                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) = (d.graph, d.resources, d.uniform_bytes, Some(self.declare_key(&env)));
                         }
                         Err(error) => {
                             self.module = Some(state);
@@ -1213,10 +1247,15 @@ impl RenderApp for TerrainApp {
     }
 
     fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
-        if let Some(state) = self.module.take() {
-            for (mut program, _) in state.programs.into_iter().flatten() {
+        // The running module stays loaded across a rebuild (a swapchain pair
+        // change destroys and creates the app): its format-dependent
+        // programs go, its declaration is made again for the new target.
+        if let Some(state) = self.module.as_mut() {
+            gpu.wait_idle();
+            for (mut program, _) in std::mem::take(&mut state.programs).into_iter().flatten() {
                 program.destroy(gpu);
             }
+            state.declared_for = None;
         }
         if self.sampler != vk::Sampler::null() {
             unsafe { gpu.device.destroy_sampler(self.sampler, None) };
@@ -1658,7 +1697,7 @@ impl TerrainApp {
         let d = self.declare_module(&mut module, env)?;
         Ok(ModuleState {
             module,
-            declared_for: (env.extent, env.color_format, self.output_format_space()),
+            declared_for: Some(self.declare_key(env)),
             graph: d.graph,
             resources: d.resources,
             programs: d.programs,
@@ -1690,9 +1729,10 @@ impl TerrainApp {
         let flags = if env.units { DECLARE_UNITS } else { 0 } | if self.output == TerrainOutput::Readback { DECLARE_READBACK } else { 0 } | if env.water { DECLARE_WATER } else { 0 }
             | if env.shadows { DECLARE_SHADOWS } else { 0 }
             | if env.particles { DECLARE_PARTICLES } else { 0 };
+        let target = DeclareTarget { width: env.extent.width, height: env.extent.height, color_format: env.color_format, flags, encoding: env.encoding, levels: env.levels, working: env.working, gamut: env.gamut };
         let declared = module
-            .declare(env.extent.width, env.extent.height, env.color_format.as_raw() as u32, flags)?
-            .with_context(|| format!("the module declines a {}x{} {:?} target", env.extent.width, env.extent.height, env.color_format))?;
+            .declare(&target)?
+            .with_context(|| format!("the module declines a {}x{} {:?} {:?} target", env.extent.width, env.extent.height, env.color_format, env.encoding))?;
         let graph = ae_framegraph::descriptor::decode(&declared.graph).map_err(|e| anyhow::anyhow!("graph declaration: {e}"))?;
         let programs = ProgramTable::decode(&declared.programs).map_err(|e| anyhow::anyhow!("program table: {e}"))?;
         let (graph, wiring) = self.wire(graph, env, |&payload| {

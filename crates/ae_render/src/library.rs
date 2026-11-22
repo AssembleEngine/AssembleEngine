@@ -983,9 +983,9 @@ pub fn check_graph<R>(graph: &FrameGraph<R>, map: &ResourceMap, env: &LibraryEnv
     // tonemap writes the display there, so only the encode writes the target.
     if env.encoding.uses_display() != written(LibraryPass::PostEncode) {
         return Err(error(if env.encoding.uses_display() {
-            "the output is HDR but the graph has no `post.encode` pass (the tonemap writes the display, not the target)".into()
+            format!("the output is {} but the graph has no `post.encode` pass: the tonemap writes the display, not the target", env.encoding.label())
         } else {
-            "the graph has `post.encode` but the output is SDR (the tonemap writes the target)".into()
+            format!("the output is {} but the graph has an extra `post.encode` pass: the tonemap writes the target", env.encoding.label())
         }));
     }
     Ok(())

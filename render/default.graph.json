@@ -6,6 +6,7 @@
     { "name": "depth", "kind": "image", "format": "D32_SFLOAT", "usage": ["depth_stencil_attachment", "sampled"] },
     { "name": "target", "kind": "output" },
     { "name": "scene", "kind": "image", "format": "scene", "usage": ["color_attachment", "sampled"] },
+    { "name": "display", "kind": "image", "format": "display", "usage": ["color_attachment", "sampled"], "when": "hdr" },
     { "name": "glow", "kind": "image", "format": "glow", "usage": ["color_attachment", "sampled"] },
     { "name": "bloom.0", "kind": "image", "format": "bloom", "usage": ["color_attachment", "sampled"], "scale": 0.25 },
     { "name": "bloom.1", "kind": "image", "format": "bloom", "usage": ["color_attachment", "sampled"], "scale": 0.25 },
@@ -65,7 +66,11 @@
       "access": ["bloom.0 sampled:fragment", "bloom.1 color:dont_care"] },
     { "name": "bloom blur y", "kind": "graphics", "library": "bloom.blur_y",
       "access": ["bloom.1 sampled:fragment", "bloom.0 color:dont_care"] },
-    { "name": "tonemap", "kind": "graphics", "library": "post.tonemap",
-      "access": ["scene sampled:fragment", "bloom.0 sampled:fragment", "exposure sampled:fragment", "target color:dont_care"] }
+    { "name": "tonemap", "kind": "graphics", "library": "post.tonemap", "when": "hdr",
+      "access": ["scene sampled:fragment", "bloom.0 sampled:fragment", "exposure sampled:fragment", "display color:dont_care"] },
+    { "name": "tonemap", "kind": "graphics", "library": "post.tonemap", "when": "sdr",
+      "access": ["scene sampled:fragment", "bloom.0 sampled:fragment", "exposure sampled:fragment", "target color:dont_care"] },
+    { "name": "encode", "kind": "graphics", "library": "post.encode", "when": "hdr",
+      "access": ["display sampled:fragment", "target color:dont_care"] }
   ]
 }

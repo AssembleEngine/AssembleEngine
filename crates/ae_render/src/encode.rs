@@ -7,9 +7,9 @@
 //! An SDR graph has no display intermediate and no encode pass: `post.tonemap`
 //! writes the sRGB target directly, so SDR output is byte-identical to what
 //! it was before HDR existed. An HDR graph declares the display between the
-//! tonemap and the encode (and, later, the module's grade and the UI write
-//! it too), and the encode maps the display's values to the output's
-//! encoding.
+//! tonemap and the encode (a render module's grade and vignette write
+//! intermediates from it; the UI is still to come), and the encode maps the
+//! display's values to the output's encoding.
 //!
 //! The display is in the working space ([`WorkingSpace`]); the encode maps
 //! it to the output gamut ([`Gamut`], P3 by default for HDR10), compresses
@@ -47,10 +47,10 @@ pub const SCRGB_REFERENCE_NITS: f32 = 203.0;
 
 /// The display intermediate: linear light in paper-white units, sampled by
 /// the encode pass (and, with the module ABI, by the grade and the UI).
-pub const DISPLAY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+pub const DISPLAY_FORMAT: vk::Format = vk::Format::from_raw(ae_render_abi::module::DISPLAY_FORMAT as i32);
 
 /// The display image's name in a graph.
-pub const DISPLAY_NAME: &str = "display";
+pub const DISPLAY_NAME: &str = ae_render_abi::module::DISPLAY_NAME;
 
 /// How the output image encodes the display's light.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -73,6 +73,15 @@ impl OutputEncoding {
     /// `post.encode`.
     pub fn uses_display(self) -> bool {
         !matches!(self, Self::Sdr)
+    }
+
+    /// The encoding as errors and logs name it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sdr => "SDR",
+            Self::Hdr10Pq => "HDR10 (PQ)",
+            Self::ScRgb => "scRGB",
+        }
     }
 
     /// The readback image's format (the SDR capture is sRGB, as before).
@@ -111,6 +120,17 @@ impl OutputEncoding {
         match self {
             Self::Hdr10Pq => Gamut::Bt2020,
             Self::Sdr | Self::ScRgb => Gamut::Bt709,
+        }
+    }
+
+    /// The wire value a render module's declaration receives
+    /// ([`ae_render_abi::module::OutputEncoding`]).
+    pub fn to_wire(self) -> u32 {
+        use ae_render_abi::module::OutputEncoding as Wire;
+        match self {
+            Self::Sdr => Wire::Sdr as u32,
+            Self::Hdr10Pq => Wire::Hdr10Pq as u32,
+            Self::ScRgb => Wire::ScRgb as u32,
         }
     }
 }

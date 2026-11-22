@@ -1,6 +1,6 @@
 #version 460
-// Darkens the corners: black with alpha rising from `radius` outward,
-// blended over the target.
+// Darkens the corners of the SDR target: black with alpha rising from
+// `radius` outward, blended over what the target holds.
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Vignette {
