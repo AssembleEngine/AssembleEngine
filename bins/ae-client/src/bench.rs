@@ -108,6 +108,34 @@ impl Default for BenchOptions {
 /// not move with the display the bench runs on.
 const BENCH_LEVELS: DisplayLevels = DisplayLevels { paper_white: 203.0, peak: 361.0 };
 
+/// Set in the child processes [`run_isolated`] starts.
+const CHILD_ENV: &str = "AE_BENCH_SCENE_PROCESS";
+
+/// Several scenes run one process each, with this process's arguments and
+/// `--bench <scene>`. In one process the scenes after the heavy ones (the
+/// fox and model scenes) measured up to 3x slow in some runs and not in
+/// others (`lights-200` 0.75-2.3 ms, its terrain 0.30-0.62 ms), at full
+/// clocks and with VRAM to spare; the same scene in a fresh process right
+/// after the heavy ones measures 0.76 ms. Two whole runs of one binary
+/// flagged 11-13 metrics against each other in one process, 1 as one
+/// process per scene. The cause inside the process is not known yet.
+fn run_isolated(scenes: &[&Scene]) -> Result<ExitCode> {
+    let exe = std::env::current_exe().context("the client's own path")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let at = args.iter().position(|a| a == "--bench").context("--bench in the arguments")? + 1;
+    let mut failed = Vec::new();
+    for scene in scenes {
+        let mut child_args = args.clone();
+        child_args[at] = scene.name.to_string();
+        let status = std::process::Command::new(&exe).args(&child_args).env(CHILD_ENV, "1").status().with_context(|| format!("run scene {}", scene.name))?;
+        if !status.success() {
+            failed.push(scene.name);
+        }
+    }
+    println!("{} scenes, one process each; {}", scenes.len(), if failed.is_empty() { "all succeeded".to_string() } else { format!("failed: {}", failed.join(", ")) });
+    Ok(if failed.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
 /// How the camera moves while measuring.
 #[derive(Clone, Copy)]
 enum Path {
@@ -307,6 +335,9 @@ pub fn run(b: &BenchOptions) -> Result<ExitCode> {
         picked
     };
     anyhow::ensure!(b.frames >= 10, "--frames must be at least 10");
+    if scenes.len() > 1 && std::env::var_os(CHILD_ENV).is_none() {
+        return run_isolated(&scenes);
+    }
 
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
@@ -443,19 +474,21 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     };
 
     set_frame(0, b.frames);
-    // Frames for the subdivision to settle, and time for the GPU's clocks
-    // to rise (the first scene otherwise measures 15-25% slow).
+    // Time for the GPU's clocks to rise (the first scene otherwise measures
+    // 15-25% slow): frames with no explosions and no ticks, so how many
+    // there are cannot change what is measured.
     let warm = Instant::now();
-    let mut warm_frames = 0;
-    while warm_frames < b.warmup || warm.elapsed().as_secs_f32() < WARMUP_SECONDS {
-        emit();
-        // The sim ticks in the `--warmup` frames only, so the measured
-        // ticks are the same whatever the frame rate.
-        if warm_frames < b.warmup {
-            tick_live(warm_frames, false)?;
-        }
+    while warm.elapsed().as_secs_f32() < WARMUP_SECONDS {
         headless.frames(&mut app, 1)?;
-        warm_frames += 1;
+    }
+    // Then exactly `--warmup` frames for the subdivision to settle, with
+    // the explosions and ticks: the scene's state when measuring starts is
+    // the same whatever the frame rate (a time-based count here moved
+    // `battle`'s lights and its total between runs).
+    for warm_frame in 0..b.warmup {
+        emit();
+        tick_live(warm_frame, false)?;
+        headless.frames(&mut app, 1)?;
     }
     headless.take_gpu_frames();
     let (mut cpu_frame, mut cpu_record) = (Vec::with_capacity(b.frames), Vec::with_capacity(b.frames));
