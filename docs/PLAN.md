@@ -3466,7 +3466,9 @@ Steps (commit and stop for compaction after each):
 - **Stage 7 is done** (2026-11-22); M13 is complete. `ae-client --bench` gained
   `--bench-output sdr|hdr10|scrgb` (the readback rendered in that encoding through
   `TerrainApp::with_display`, at fixed 203/361 signal nits so a run does not depend on the
-  display) and `--bench-size WxH`. The readback's `copy` and `host read` passes are reported
+  display) and `--bench-size WxH`. A non-SDR run's records are `gpu-<scene>-hdr10` or
+  `gpu-<scene>-scrgb` (HDR10 has SDR's 4 B/px, so the workload info alone would not keep
+  `bench-diff` from pairing it with an SDR record). The readback's `copy` and `host read` passes are reported
   (`pass/copy`, `pass/host read`, with the host bus's 50% `bench-diff` tolerance) but stay
   out of `gpu_total`, which therefore remains comparable with older records.
   Measured on the reference machine (RTX 3060 Ti, KWin Wayland; release; 300 frames after
@@ -4455,6 +4457,12 @@ From M13 stage 7 (2026-11-22):
     corners smoothly on a bright sky.
   - HDR darks against SDR and whether the P3 fire reads redder in HDR than in SDR.
   Record any result here as reported, with the display and settings used.
+- **`--hdr auto` with KDE's HDR switch off** (a decision for the user): SDL still reports the
+  window HDR-capable there (SDR white 155, peak 200, headroom 1.29), so `auto` picks HDR10 and
+  the compositor maps it back to SDR. Either keep that (the metadata follows the lower
+  headroom), or have `auto` choose SDR below a minimum headroom; conditions for the second: the
+  threshold is a named constant with its reason, the log names why SDR was chosen, and the
+  windowed HDR-switch run is repeated.
 - **Query the compositor's target primaries instead of `--display-gamut`.** SDL does not expose
   them; KWin does over `wp_color_management` (the probe's reference machine reports about 96% of
   P3) or they can come from the EDID in sysfs. Conditions: the queried primaries drive the
