@@ -4832,7 +4832,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–E built, B without library-owned externals)
+#### M15 — design (2026-11-22; steps A–F built, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
@@ -5347,6 +5347,44 @@ set at index 2 next to their old sets. How handles reach a shader:
     run) of a program that deliberately indexes past the count reports the error, and the normal
     scenes report none.
 
+  Built (2026-11-23). Every fullscreen program now reads the global set; no shader pins
+  `AE_BINDLESS_SET` off 0 and the per-pass form survives only for contract-2 modules.
+  - `MODULE_VERSION` is 3 and the host accepts 2 and 3. `RenderModule::version()` gates the
+    form: a version-2 module's programs must use the per-pass form, a version-3 module may use
+    either. `tests/module.rs` checks that a version-2 module still loads.
+  - `reflect` reads runtime arrays (`OpTypeRuntimeArray`), separate `OpTypeImage` and
+    `OpTypeSampler`, and a push block's size (`push_bytes`, replacing the `push_constants`
+    flag); aliasing declarations at one binding are deduplicated. `check` returns the
+    `Form` and refuses a mix with the binding named
+    (`test_mixed.frag`: "set 0 binding 0 ... mixes the bindless arrays with the per-pass
+    form").
+  - The bindless form: binding 0 `texture2D[]`, binding 1 `sampler[]`, binding 3 the storage
+    buffers (a `std140` block per program and its `uint handles[]` table) and a push block of
+    at most 16 bytes (`uniforms, samplerIndex, handles, pad`; `sampler` is a GLSL keyword).
+    `shaders/program.glsl` gives `AE_UNIFORMS`, `AE_PROGRAM_IMAGE(k)` and `AE_TABLE`; a
+    program includes `bindless.glsl` with `AE_DECLARE_PUSH 0` and then it. The engine's
+    tonemap, bloom and encode shaders and `render/post`'s three use it.
+  - The table is per frame slot and written when its contents change, which is once per bake
+    after the first frame. It is not one table written at bake time as this design asked: the
+    engine's programs take their sampled images as `ImageBinding`s at record time (a module
+    picks which image feeds `post.encode`), and a per-slot table never writes a buffer another
+    slot may still read. The entries are the same in every slot.
+  - Programs are built at `declare` (the trait now takes the registry) and register their
+    handles in a group: `FullscreenProgram` and the engine `BindlessProgram` (tonemap, bloom,
+    encode) own their uniforms' and table's slotted handles and retire them when a
+    declaration is replaced. `render/legacy` is a contract-2 fixture module; its shaders
+    compile with the engine's include path (`render/post/build.rs` and
+    `graph_file::inline` add it).
+  - Tests: `a_contract_2_module_renders_its_per_pass_programs` (tint 0.5/0.25/0.75 through a
+    gain of 1/0.5/1 reads back as expected), `a_mixed_program_form_fails_at_load`,
+    `a_program_samples_64_images` (one pass, 64 sampled intents),
+    `a_retired_handle_draws_the_fallback_and_logs_once` (white, one log line) and
+    `gpu_assisted_validation_reports_an_unbound_handle` (`AE_VK_GPU_AV=1` reports "Descriptor
+    index 63 is uninitialized"; the bound frames before it are clean).
+  - 61/61 GPU-test captures are identical to `c872490`; 65/65 GPU tests pass (the GPU-AV test
+    reports its deliberate errors, nothing else does); the workspace tests, `fmt --check` and
+    clippy are clean.
+
 **G. Measurements and the descriptor-buffer question.** This step needs the user's consent first.
 
 - `bench-diff` against `bench/results/baseline/` (`AE_BENCH_MACHINE` set): GPU time within each
@@ -5490,6 +5528,9 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ## TODO (open, not a priority now)
 
+- M15: drop the per-pass fullscreen form at the next contract version (`MODULE_VERSION` 4):
+  delete `Form::Legacy`, its `Legacy` struct in `fullscreen.rs` and the `legacy_only` check,
+  `test_post.frag`/`test_post_storage.frag` and `render/legacy`, and refuse version-2 modules.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's

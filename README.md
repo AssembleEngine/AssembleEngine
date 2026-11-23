@@ -102,7 +102,7 @@ killed unit (`Dying`, excluded by `without(Dying)` from spatial queries and nav)
 script under a time cap. `games/duel` is the test game (walk, stop, run, a two-step aim while
 running, three shots that hit and kill the target, its death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
 
-M15 (bindless resources) is in progress, steps A–E built. The library passes read their images,
+M15 (bindless resources) is in progress, steps A–F built. The library passes read their images,
 samplers, buffers and storage images from one global descriptor set per frame slot
 (`crates/ae_render/src/bindless.rs`, `shaders/bindless.glsl`):
 - Images and samplers come from a 128-byte push table.
@@ -112,10 +112,12 @@ samplers, buffers and storage images from one global descriptor set per frame sl
 - Samplers are deduplicated by their settings and shared; a module's handles are retired when
   it is destroyed, so a renderer rebuild does not use up the registry's indices.
 
-Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline binds the
-global set at 0; the demo moved there in step E. The fullscreen module programs (and the engine
-tonemap, bloom and encode programs, which share their shape) still bind a set-0 uniform block
-until step F. Details: [docs/PLAN.md](docs/PLAN.md) "M15 — design".
+Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline and every
+fullscreen program (the engine's tonemap, bloom and encode, and a render module's own shaders)
+reads the global set at 0: a program's std140 block, its sampled images and its sampler are
+handles in a small per-program table, reached through a 16-byte push block. A contract-2 module
+may still use the old per-pass form for one version. Details: [docs/PLAN.md](docs/PLAN.md)
+"M15 — design".
 
 | Crate | What it is | Origin |
 |---|---|---|
