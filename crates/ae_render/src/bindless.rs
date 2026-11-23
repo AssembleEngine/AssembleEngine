@@ -1537,6 +1537,11 @@ impl Bindless {
 /// per-pass buffer is fixed or slotted, so its index never changes and the
 /// table needs no per-frame write. Its own index goes in push word 8
 /// ([`Push::table`]).
+/// The handle table's slots (`AE_HANDLES` in `bindless.glsl`).
+/// The handle table's slots: 64, the most sampled intents a fullscreen pass
+/// may declare (`a_program_samples_64_images`).
+pub const TABLE_SLOTS: usize = 64;
+
 pub struct HandleTable {
     buffer: OwnedBuffer,
     pub index: u32,
@@ -1545,9 +1550,18 @@ pub struct HandleTable {
 impl HandleTable {
     pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, indices: &[u32], name: &str) -> Result<Self> {
         anyhow::ensure!(!indices.is_empty(), "{name}: an empty handle table");
-        let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-        let buffer = upload::buffer(gpu, &bytes, vk::BufferUsageFlags::STORAGE_BUFFER, name)?;
-        let index = bindless.whole_buffer(&buffer)?.index;
+        anyhow::ensure!(
+            indices.len() <= TABLE_SLOTS,
+            "{name}: {} handles, the table holds {TABLE_SLOTS}",
+            indices.len()
+        );
+        // A `uvec4` block: the table is a uniform buffer (M15 G) and every
+        // slot is part of the declared block, so the buffer always holds
+        // the full `TABLE_SLOTS` words.
+        let mut bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+        bytes.resize(TABLE_SLOTS * 4, 0);
+        let buffer = upload::buffer(gpu, &bytes, vk::BufferUsageFlags::UNIFORM_BUFFER, name)?;
+        let index = bindless.whole_uniform_buffer(&buffer)?.index;
         Ok(Self { buffer, index })
     }
 

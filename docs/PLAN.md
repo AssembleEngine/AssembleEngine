@@ -4974,9 +4974,10 @@ is used.
      `ExecutorStats::bindless_live`.
    - The capacity is checked against `maxPerStageDescriptorUniformBuffers` and
      `maxDescriptorSetUniformBuffers` when the device is chosen, with an error naming the limit.
-   - Storage blocks (the handle tables, the leaf, pose and particle buffers) stay at binding 3.
-     A `std140` block written as `readonly buffer` is a storage buffer to the driver, and that is
-     what cost the time.
+   - Storage blocks (the leaf, pose and particle buffers, and the graph buffers the demo binds)
+     stay at binding 3. A `std140` block written as `readonly buffer` is a storage buffer to the
+     driver, and that is what cost the time. The handle tables are a `uvec4` block in the
+     uniform array too, so `AE_BUF(k)` reads a constant offset of a uniform block.
    - The `std140` qualifier keeps the byte offsets, so the CPU structs did not change.
 6. **Identical frames are proven by comparing captures (B).** No second live path is kept. Step B
    adds `ae-tool capture-diff <dir-a> <dir-b>`, which compares the PPMs of two
@@ -5453,16 +5454,31 @@ set at index 2 next to their old sets. How handles reach a shader:
     679.8 (+7.1%), cliffs 1047.6 → 1094.8 (+4.5%), orbit 810.5 → 870.0 (+7.3%), palette 347.2 →
     378.5 (+9.0%), lights-200 753.8 → 818.1 (+8.5%), lights-4000 2023.1 → 2229.1 (+10.2%),
     near-fox 7257.6 → 8281.3 (+14.1%), army-fox 8593.8 → 9709.8 (+13.0%).
-  - What is left is the texturing and dynamic-storage-buffer path, not the blocks: the Fox
-    scenes' `pass/shadows` +21–25% and `pass/units pose` +22–25% (both read the pose, animation
-    and instance buffers through the handle table), `pass/units cull` +32–37%,
-    `pass/particles sim` +22–25%, `pass/exposure adapt` +33% (2–3 µs), `pass/terrain lod` +10%
-    and the scene-specific terrain and lights passes within 10–13%. `pass/terrain`,
-    `pass/tonemap`, `pass/units` and `pass/water` are back at or below the baseline in most
-    scenes (terrain −36% in near-fox, which the baseline measured in a different water state).
-  - The remaining cost is the next commit's subject: the handle tables themselves in the uniform
-    array, packed as `uvec4`, and the handles read into locals once at the top of `units cull`
-    and `units pose`, measured one at a time. Nothing is re-baselined over a regression.
+  - What was left after that was the handle tables themselves, still `uint` arrays in a storage
+    buffer. Moving them into the uniform array as a `uvec4` block (`AE_BUF(k)` reads component
+    `k & 3` of word `k >> 2`, a constant offset) recovered the rest: `pass/shadows` −13%,
+    `pass/units pose` −14%, `pass/particles sim` −13%, `pass/units cull` −5–8%,
+    `pass/terrain` −3–5% and the Fox scenes' `gpu_total` −10%. The tables hold 64 slots and
+    every table buffer is the full 256-byte block.
+  - Reading the handles into locals once at the top of `units cull` and `units pose` (the second
+    candidate) measured flat: within ±1% on every scene, `gpu-army-fox` +2.4% against its 12%
+    spread, `pass/units pose` and `pass/units cull` within their own spreads. It was reverted;
+    with the table a uniform block the compiler already hoists the lookup.
+  - Final `bench-diff` against `335e770`: **2 regressed metrics of 749**, 489 unchanged (the
+    rest are added or removed scenes and workloads). `gpu_total` is +0.8% to +5.7%:
+    cliffs +0.8%, army-fox +1.2%, live-fox +1.6%, near-fox +1.8%, scorched −2.2%, battle +2.7%,
+    orbit +2.8%, army +3.5%, overview +3.5%, army-model-lights +3.5%, lights-200 +4.2%,
+    close +4.3%, lights-1000 +4.6%, lights-low +4.6%, palette +4.9%, lights-4000 +5.7%.
+    The two regressions:
+    - `gpu-army-model-lights/pass/water` 189.4 → 261.1 µs: that pass reports a 161% spread and
+      moves by ±100 µs between runs of the same build, so the ratio is noise.
+    - `gpu-lights-200/pass/lights` 48.4 → 53.3 µs (+10.1%, spread 3%): 5 µs of a 785 µs frame
+      (0.7%), the light cull and list still on the storage-buffer path. `lights-1000` is +8.6%
+      and `lights-4000` +5.7% on the same pass.
+  - Nothing was re-baselined over a regression; `bench/results/baseline` stays at `335e770`.
+    The runs are under `bench/results/m15-g` (before the fix), `m15-g-fix` (blocks as uniform
+    buffers), `m15-g-tables` (the handle tables too) and `m15-g-locals` (the reverted locals
+    variant).
 
 ##### Not part of M15
 

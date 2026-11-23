@@ -59,10 +59,11 @@
 //!   uniform block, bindings 1.. are one combined image sampler per
 //!   `Sampled` intent, in intent order.
 //! * **Bindless** (contract version 3): only the global set. Binding 0 is
-//!   `texture2D images[]`, binding 1 `sampler samplers[]`, binding 3 the
-//!   program's handle table (`uint handles[]`) and binding 4 its `std140`
-//!   block (`uniform` blocks are uniform buffers, not storage buffers: the
-//!   driver's uniform path is cheaper). A push block of at most 16 bytes
+//!   `texture2D images[]`, binding 1 `sampler samplers[]`, and binding 4 the
+//!   `std140` blocks: the program's block and its handle table
+//!   (`uvec4 handles[]`). Both are uniform buffers (`uniform` blocks are
+//!   uniform buffers, not storage buffers: the driver's uniform path is
+//!   cheaper). A push block of at most 16 bytes
 //!   carries `uniforms` (the block's index in the array), `sampler` (the
 //!   sampler's index), `handles` (the table's index) and a pad word. The
 //!   table holds the pass's sampled-image indices in intent order, written

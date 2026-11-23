@@ -58,28 +58,30 @@ layout(push_constant) uniform AePush {
 } ae;
 #endif
 
-// Buffers (binding 3): a pass declares each storage block as an array
-// aliasing binding 3 and reaches it through its handle table: `AE_BUF(k)`
-// is the k-th global index in the pass's table, whose own index is push
-// word 8 (`AE_TABLE`). A pass that names its push words names the eighth
-// `aeTable` and defines AE_TABLE as `ae.aeTable`; a fullscreen program gets
-// it from `program.glsl`.
+// Storage buffers (binding 3): a pass declares each storage block as an
+// array aliasing binding 3.
 //
-// `std140` blocks that were `uniform` buffers keep binding 4 (M15 G): a
-// storage buffer costs noticeably more per access on some drivers. A pass
-// declares them as `layout(std140, set = AE_BINDLESS_SET, binding =
-// AE_UNIFORM_BLOCKS) uniform Name { ... } ae_Name[];` and indexes with the
-// same `AE_BUF(k)` handle.
+// `std140` blocks are uniform buffers (binding 4; M15 G, a storage buffer
+// costs noticeably more per access on some drivers). A pass declares one as
+// `layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS)
+// uniform Name { ... } ae_Name[];`. The pass's handle table is a `uvec4`
+// block in the same array: `AE_BUF(k)` is the k-th global index in it,
+// whose own index is push word 8 (`AE_TABLE`). A pass that names its push
+// words names the eighth `aeTable` and defines AE_TABLE as `ae.aeTable`; a
+// fullscreen program gets it from `program.glsl`.
 #define AE_BUFFERS 3
 #define AE_UNIFORM_BLOCKS 4
 #define AE_STORAGE_IMAGES 2
-layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer AeTable { uint aeHandle[]; } ae_tables[];
+#define AE_HANDLES 64
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform AeTable {
+    uvec4 aeHandle[AE_HANDLES / 4];
+} ae_tables[];
 #if AE_DECLARE_PUSH
 #ifndef AE_TABLE
 #define AE_TABLE ae.words2.w
 #endif
 #endif
-#define AE_BUF(k) ae_tables[AE_TABLE].aeHandle[k]
+#define AE_BUF(k) (ae_tables[AE_TABLE].aeHandle[(k) >> 2][(k) & 3])
 
 #define AE_IMAGE(slot) (ae.images[(slot) >> 2][(slot) & 3])
 #define AE_SAMPLER(slot) (ae.samplers[(slot) >> 2][(slot) & 3])

@@ -111,16 +111,16 @@ samplers, buffers and storage images from one global descriptor set per frame sl
 - Models of every type draw in two multi-draws without rebinding textures.
 - Samplers are deduplicated by their settings and shared; a module's handles are retired when
   it is destroyed, so a renderer rebuild does not use up the registry's indices.
-- `std140` blocks are uniform buffers at binding 4, not storage buffers: measuring found a
-  storage buffer costs 20–30% more per access on the RTX 3060 Ti (step G).
+- `std140` blocks and the handle tables are uniform buffers at binding 4, not storage buffers:
+  measuring found a storage buffer costs 20–30% more per access (step G).
 
 Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline and every
 fullscreen program (the engine's tonemap, bloom and encode, and a render module's own shaders)
 reads the global set at 0: a program's std140 block, its sampled images and its sampler are
 handles in a small per-program table, reached through a 16-byte push block. A contract-2 module
-may still use the old per-pass form for one version. `bench-diff` against the pre-M15 baseline:
-`gpu_total` is 4.5–10% above it in most scenes and 13–14% in the Fox scenes, whose shadow and
-pose passes read their buffers through the handle table. Details: [docs/PLAN.md](docs/PLAN.md)
+may still use the old per-pass form for one version. `bench-diff` against the pre-M15 baseline
+(`335e770`): `gpu_total` is within +0.8% to +5.7%, and 2 of 749 metrics regress (a noisy water
+pass and the lights list at +10% on one scene). Details: [docs/PLAN.md](docs/PLAN.md)
 "M15 — design".
 
 | Crate | What it is | Origin |

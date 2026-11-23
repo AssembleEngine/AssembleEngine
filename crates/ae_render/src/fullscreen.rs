@@ -15,10 +15,10 @@
 //!   intent order (sampled linearly, clamped). Nothing else: no storage
 //!   buffers or images, no push constants.
 //! * **Bindless** ([`Form::Bindless`]): only the global set (M15 F).
-//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`,
-//!   binding 3 the program's `uint handles[]` table and binding 4 its
-//!   `std140` block (`uniform` blocks stay uniform buffers: M15 G measured
-//!   a storage buffer at 20-30% more per access). The push block is at most
+//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`, and
+//!   binding 4 the `std140` blocks: the program's block and its handle
+//!   table (`uvec4 handles[]`), both uniform buffers (M15 G measured a
+//!   storage buffer at 20-30% more per access). The push block is at most
 //!   16 bytes: `uniforms` (the block's index), `sampler` (the sampler's
 //!   index), `handles` (the table's index) and a pad word. The table holds
 //!   the pass's sampled-image indices, in intent order.
@@ -65,7 +65,8 @@ pub enum BindingKind {
     SampledImageArray,
     /// A runtime array of separate samplers (`sampler x[]`), binding 1.
     SamplerArray,
-    /// A runtime array of storage buffers, binding 3: the handle table.
+    /// A runtime array of storage buffers, binding 3. A program refuses
+    /// it: its block and handle table are uniform blocks at binding 4.
     StorageBufferArray,
     /// A runtime array of `uniform` blocks, binding 4: the program's std140
     /// block (M15 G: a former uniform buffer stays one).
@@ -371,20 +372,19 @@ pub fn check(
                 }
             }
         }
-        if sampled > 0 && !has(3, &BindingKind::StorageBufferArray) {
-            return Err("the bindless form declares its handle table at set 0 binding 3".into());
+        // The block and the handle table are both blocks in the uniform
+        // array (binding 4). A std140 block written as a storage buffer at
+        // binding 3 reflects as one; name it, because that is the mistake
+        // this catches (the table moved there in F and to binding 4 in G).
+        if has(3, &BindingKind::StorageBufferArray) {
+            return Err(
+                "set 0 binding 3 is a storage buffer; a program's std140 block and its handle table are uniform blocks at binding 4"
+                    .into(),
+            );
         }
-        if uniform_bytes > 0 && !has(4, &BindingKind::UniformBufferArray) {
-            // A std140 block at binding 3 reflects as a storage buffer; name
-            // it, because that is the mistake this catches.
-            if has(3, &BindingKind::StorageBufferArray) {
-                return Err(
-                    "the program's std140 block is at set 0 binding 3 (a storage buffer); a program block is at binding 4"
-                        .into(),
-                );
-            }
+        if (sampled > 0 || uniform_bytes > 0) && !has(4, &BindingKind::UniformBufferArray) {
             return Err(format!(
-                "the program declares a {uniform_bytes}-byte std140 block; the bindless form declares it at set 0 binding 4 (UniformBufferArray)"
+                "the program declares a {uniform_bytes}-byte std140 block and {sampled} sampled image(s); the bindless form reaches both through set 0 binding 4 (UniformBufferArray)"
             ));
         }
         if r.push_bytes == 0 && (sampled > 0 || uniform_bytes > 0) {
@@ -492,7 +492,7 @@ struct BindlessState {
     tables: Vec<OwnedBuffer>,
     /// The std140 block's slotted index and the handle table's.
     uniforms: crate::bindless::UniformBufferHandle,
-    handles: crate::bindless::BufferHandle,
+    handles: crate::bindless::UniformBufferHandle,
     group: Option<crate::bindless::GroupId>,
 }
 
@@ -869,6 +869,11 @@ impl BindlessState {
         sampled: usize,
         frames_in_flight: usize,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            sampled <= crate::bindless::TABLE_SLOTS,
+            "program `{label}` samples {sampled} images; the handle table holds {}",
+            crate::bindless::TABLE_SLOTS
+        );
         let ubos = (0..frames_in_flight)
             .map(|_| {
                 OwnedBuffer::new(
@@ -882,13 +887,15 @@ impl BindlessState {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        // The handle table is a `uvec4` block in the uniform array (M15 G),
+        // so every slot holds the whole declared block.
         let tables = (0..frames_in_flight)
             .map(|_| {
                 OwnedBuffer::new(
                     gpu,
                     BufferDesc {
-                        size: (sampled * 4) as u64,
-                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                        size: (crate::bindless::TABLE_SLOTS * 4) as u64,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
                     "program handles",
@@ -899,9 +906,9 @@ impl BindlessState {
         for (slot, ubo) in ubos.iter().enumerate() {
             bindless.update_slotted_uniform_buffer(uniforms, slot, ubo.buffer, 0, ubo.size);
         }
-        let handles = bindless.slotted_buffer()?;
+        let handles = bindless.slotted_uniform_buffer()?;
         for (slot, table) in tables.iter().enumerate() {
-            bindless.update_slotted_buffer(handles, slot, table.buffer, 0, table.size);
+            bindless.update_slotted_uniform_buffer(handles, slot, table.buffer, 0, table.size);
         }
         Ok(Self {
             layout: bindless.pipeline_layout(),
@@ -1013,7 +1020,8 @@ mod tests {
 
     /// The bindless form: the global set's arrays, the handle table at 3,
     /// the std140 block at 4 and a 16-byte push block. A mix of the two
-    /// forms, a block at binding 3 or a bindless shader in a contract-2
+    /// forms, a block or table at binding 3 or a bindless shader in a
+    /// contract-2
     /// module is refused with the binding named.
     #[test]
     fn the_bindless_form_is_checked_and_forms_do_not_mix() {
@@ -1024,7 +1032,6 @@ mod tests {
             [
                 (0, 0, BindingKind::SampledImageArray),
                 (0, 1, BindingKind::SamplerArray),
-                (0, 3, BindingKind::StorageBufferArray),
                 (0, 4, BindingKind::UniformBufferArray),
             ]
         );
@@ -1044,11 +1051,12 @@ mod tests {
         let e = check(&mixed, 32, 2, 1, false).unwrap_err();
         assert!(e.contains("mixes") && e.contains("binding 0"), "{e}");
 
-        // A bindless shader that declares no table cannot reach its images.
+        // A program without its uniform array cannot reach its block or its
+        // images.
         let mut missing = program.clone();
-        missing.bindings.retain(|(_, binding, _)| *binding != 3);
+        missing.bindings.retain(|(_, binding, _)| *binding != 4);
         let e = check(&missing, 32, 2, 1, false).unwrap_err();
-        assert!(e.contains("binding 3"), "{e}");
+        assert!(e.contains("binding 4"), "{e}");
 
         // A std140 block at binding 3 is a storage buffer: refused, and the
         // message says where the block belongs.
@@ -1062,12 +1070,6 @@ mod tests {
         storage_block.bindings.sort_by_key(|b| (b.0, b.1));
         let e = check(&storage_block, 32, 2, 1, false).unwrap_err();
         assert!(e.contains("binding 3") && e.contains("binding 4"), "{e}");
-
-        // A program with no block needs no binding 4.
-        let mut no_block = program.clone();
-        no_block.bindings.retain(|(_, binding, _)| *binding != 4);
-        assert_eq!(check(&no_block, 0, 2, 1, false).unwrap(), Form::Bindless);
-        assert!(check(&no_block, 32, 2, 1, false).is_err());
 
         // The push block is at most 16 bytes.
         let mut wide = program.clone();

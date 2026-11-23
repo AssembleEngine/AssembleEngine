@@ -51,12 +51,12 @@
 //!   bindings 1.. are one combined image sampler per `Sampled` intent of the
 //!   pass, in intent order.
 //! * **Bindless** (contract version 3): only the engine's global set.
-//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`,
-//!   binding 3 the program's `uint handles[]` table and binding 4 its
-//!   `std140` block (`uniform` blocks are uniform buffers: they cost less
-//!   per access than storage buffers). The push block is at most 16 bytes:
-//!   `uniforms` (the block's index), `samplerIndex`, `handles` (the table's
-//!   index) and a pad word.
+//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`, and
+//!   binding 4 the `std140` blocks: the program's block and its handle
+//!   table (`uvec4 handles[]`; `AE_BUF(k)` reads slot `k`). Both are
+//!   uniform buffers: they cost less per access than storage buffers. The
+//!   push block is at most 16 bytes: `uniforms` (the block's index),
+//!   `samplerIndex`, `handles` (the table's index) and a pad word.
 //!
 //! A bindless shader includes the engine's interface headers
 //! (`crates/ae_render/shaders/bindless.glsl` and `program.glsl`; add that
