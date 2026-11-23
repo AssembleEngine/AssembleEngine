@@ -29,7 +29,9 @@ float sunAt(vec2 xz, float y) {
 
 // Vision (fog of war): two bit planes over the vision grid, line of sight
 // then explored, rows of u.vision.w words.
-layout(std430, set = 0, binding = 13) readonly buffer VisionBuf { uint vision[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer VisionBuf { uint vision[]; } ae_VisionBuf[];
+// Not `vision`: the frame block has a member of that name.
+#define visionPlanes ae_VisionBuf[AE_BUF(7)].vision
 
 // 1 in line of sight, 0.5 explored, 0.2 never seen; cells off the grid read
 // as the nearest edge cell (the blend reaches half a cell past the map).
@@ -38,10 +40,10 @@ float visionCell(ivec2 c) {
     uint stride = uint(u.vision.w);
     uint i = uint(c.y) * stride + uint(c.x) / 32u;
     uint bit = 1u << (uint(c.x) % 32u);
-    if ((vision[i] & bit) != 0u) {
+    if ((visionPlanes[i] & bit) != 0u) {
         return 1.0;
     }
-    return (vision[stride * uint(u.vision.y) + i] & bit) != 0u ? 0.5 : 0.2;
+    return (visionPlanes[stride * uint(u.vision.y) + i] & bit) != 0u ? 0.5 : 0.2;
 }
 
 // Bilinear over the four nearest cells, so 32 m cells do not show as blocks.

@@ -1,4 +1,5 @@
-// Set 1 of a units renderer whose classes have models (src/models.rs):
+// The models' buffers of a units renderer whose classes have models
+// (src/models.rs), table slots 7..17 (units_common.glsl):
 // shared by units_models_cull.comp, units_pose.comp (which defines POSE),
 // units_models.vert/.frag and units_models_shadow.vert. Include after
 // units_common.glsl.
@@ -8,7 +9,8 @@
 // bitangent's sign), uv0 10..11, uv1 12..13, colour 14..15 (RGBA unorm16);
 // rigid (17 words): joint 16; skinned (20): joints 16..17 (u16), weights
 // 18..19 (unorm16). The indices follow (bound as the index buffer).
-layout(std430, set = 1, binding = 0) readonly buffer Geometry { uint vwords[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Geometry { uint vwords[]; } ae_Geometry[];
+#define vwords ae_Geometry[AE_BUF(7)].vwords
 
 struct Material {
     vec4 baseColor;
@@ -24,15 +26,18 @@ struct Material {
     uvec4 texSampler;  // global sampler for each of `tex`
     uvec4 tex2Sampler; // and for the metallic-roughness texture
 };
-layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Materials { Material materials[]; } ae_Materials[];
+#define materials ae_Materials[AE_BUF(8)].materials
 // Skinning matrices, 3x4: each column holds a row of the affine transform
 // (p' = vec4(p, 1) * m). The models' rest palettes, then a range per unit
 // with animation records (rows' pose offsets point into either), then the pose
 // pass's scratch.
 #ifdef POSE
-layout(std430, set = 1, binding = 2) buffer Palette { mat3x4 palette[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Palette { mat3x4 palette[]; } ae_Palette[];
+#define palette ae_Palette[AE_BUF(9)].palette
 #else
-layout(std430, set = 1, binding = 2) readonly buffer Palette { mat3x4 palette[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Palette { mat3x4 palette[]; } ae_Palette[];
+#define palette ae_Palette[AE_BUF(9)].palette
 #endif
 
 struct ModelClass {
@@ -41,7 +46,8 @@ struct ModelClass {
     vec4 fit;    // x: 1 / footprint radius; y: the sphere radius with manual joints (0: none), z: its centre over sphere.xyz
     uvec4 pose;  // in anim[]: first bone, bones, first joint, the clips' head
 };
-layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; } ae_Classes[];
+#define modelClasses ae_Classes[AE_BUF(10)].modelClasses
 
 // One per indirect command (found by gl_DrawID + ae.words.y).
 struct DrawRecord {
@@ -54,32 +60,40 @@ struct DrawRecord {
     uint pad1;
     uint pad2;
 };
-layout(std430, set = 1, binding = 4) readonly buffer Draws { DrawRecord draws[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Draws { DrawRecord draws[]; } ae_Draws[];
+#define draws ae_Draws[AE_BUF(11)].draws
 // Per class its commands' indices (the cull counts each).
-layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classCommands[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer ClassCommands { uint classCommands[]; } ae_ClassCommands[];
+#define classCommands ae_ClassCommands[AE_BUF(12)].classCommands
 // Per frame: [capacity] each row's palette offset, [capacity] the rows
 // with animation records (the pose jobs), [capacity] each job's scratch offset.
-layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Rows { uint rows[]; } ae_Rows[];
+#define rows ae_Rows[AE_BUF(13)].rows
 #ifdef POSE
 // The models' animation table (models.rs, animation()): per model its bones
 // (rest rows 0..2, parent in 3.x), joints (inverse bind rows 0..2, bone in
 // 3.x), and from ModelClass.pose.w its clips (the sim's bake), masks and
 // rest transforms. Words (uint) are indexed over the whole table, four a
 // vec4.
-layout(std430, set = 1, binding = 8) readonly buffer Anim { vec4 anim[]; };
-uint animWord(uint w) { return floatBitsToUint(anim[w >> 2u][w & 3u]); }
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Anim { vec4 anim[]; } ae_Anim[];
+#define animTable ae_Anim[AE_BUF(14)].anim
+uint animWord(uint w) { return floatBitsToUint(animTable[w >> 2u][w & 3u]); }
 // The units' animation table (units.rs RECORD_CELLS): two records per
 // posed unit from its pose attribute. units_anim_writes.comp writes it.
 #define RECORD_CELLS 15u
 #ifdef ANIM_WRITES
-layout(std430, set = 1, binding = 9) writeonly buffer Records { uvec4 records[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Records { uvec4 records[]; } ae_Records[];
+#define records ae_Records[AE_BUF(15)].records
 #else
-layout(std430, set = 1, binding = 9) readonly buffer Records { uvec4 records[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Records { uvec4 records[]; } ae_Records[];
+#define records ae_Records[AE_BUF(15)].records
 #endif
 // The frame's table writes (u.anim.z of them): cell i goes to table cell
 // stagedAt[i].
-layout(std430, set = 1, binding = 10) readonly buffer Staged { uvec4 staged[]; };
-layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Staged { uvec4 staged[]; } ae_Staged[];
+#define staged ae_Staged[AE_BUF(16)].staged
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer StagedAt { uint stagedAt[]; } ae_StagedAt[];
+#define stagedAt ae_StagedAt[AE_BUF(17)].stagedAt
 #endif
 
 // `ae.words.x`: the shadow caster's cascade (units_pose.comp: the number of

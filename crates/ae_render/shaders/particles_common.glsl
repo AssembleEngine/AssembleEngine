@@ -2,7 +2,7 @@
 //
 // Sampled images are global (bindless.glsl, set 3: sets 0 to 2 are the
 // particles' own and the lights'). The handle table's slots follow the
-// old bindings: 0..6 the bound set 1's images, 7 the hills' shadows, 8 the
+// old bindings: 0..6 the pass's images (its old set 1), 7 the hills' shadows, 8 the
 // heights, 9 the puff; samplers 0 nearest (depth and targets), 1 the
 // puff's, 2 the terrain's linear.
 
@@ -10,10 +10,15 @@
 #define AE_BINDLESS_SET 3
 #endif
 #include "bindless.glsl"
+// Buffers (table slots): 0 the frame block, 1 state, 2 keys, 3 indirect,
+// 4 spawns, 5 keysTmp, 6 histograms, 7..9 the half targets' reference or
+// froxel buffers, 10 and 11 the packets' masks and puffs, 12 and 13 their
+// targets as storage images, 14..16 the lights.
+#define AE_LIGHT_BASE 14
 
 #define MAX_EFFECTS 16
 
-layout(std140, set = 0, binding = 0) uniform Frame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
     mat4 viewProj;
     vec4 camPos;      // xyz eye; w near plane (infinite reverse-Z: depth = near / z)
     vec4 camRight;
@@ -39,7 +44,8 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     // (emission birth, emission death) in cd/m² for emissive effects.
     vec4 effects[MAX_EFFECTS * 6];
     vec4 photometry;  // x: exposure, y: unused, z: sun lux, w: sky lux
-} u;
+} ae_Frame[];
+#define u ae_Frame[AE_BUF(0)]
 
 // One particle: position and age; velocity and life (dead when age >=
 // life); effect, seed, scale bits.
@@ -55,27 +61,33 @@ struct Particle {
 #else
 #define PARTICLES_ACCESS readonly
 #endif
-layout(std430, set = 0, binding = 1) PARTICLES_ACCESS buffer State { Particle particles[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) PARTICLES_ACCESS buffer State { Particle particles[]; } ae_State[];
+#define particles ae_State[AE_BUF(1)].particles
 // The visible particles' sort keys, then from u.pool.x the slots of the
 // coloured shadows' casters (live, not emissive; unsorted).
-layout(std430, set = 0, binding = 2) PARTICLES_ACCESS buffer Keys { uint keys[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) PARTICLES_ACCESS buffer Keys { uint keys[]; } ae_Keys[];
+#define keys ae_Keys[AE_BUF(2)].keys
 // The draw's indirect arguments, then this frame's range of the visible
 // particles' view depths (float bits: positive floats order as uints),
 // then (32 bytes in) the coloured shadows' indirect arguments.
-layout(std430, set = 0, binding = 3) PARTICLES_ACCESS buffer Indirect {
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) PARTICLES_ACCESS buffer Indirect {
     uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance;
     uint depthMin; uint depthMax; uint pad0; uint pad1;
     uint casterVertexCount; uint casterCount; uint casterFirstVertex; uint casterFirstInstance;
-} cmd;
+} ae_Indirect[];
+#define cmd ae_Indirect[AE_BUF(3)]
 
 struct Spawn {
     vec4 posScale;
     uvec4 info; // effect (bit 16: on the ground), count, first index in this frame's spawns, seed
 };
-layout(std430, set = 0, binding = 4) readonly buffer Spawns { Spawn spawns[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Spawns { Spawn spawns[]; } ae_Spawns[];
+#define spawns ae_Spawns[AE_BUF(4)].spawns
 #ifdef PARTICLES_WRITE
-layout(std430, set = 0, binding = 5) buffer KeysTmp { uint keysTmp[]; };
-layout(std430, set = 0, binding = 6) buffer Histograms { uint histograms[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer KeysTmp { uint keysTmp[]; } ae_KeysTmp[];
+#define keysTmp ae_KeysTmp[AE_BUF(5)].keysTmp
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Histograms { uint histograms[]; } ae_Histograms[];
+#define histograms ae_Histograms[AE_BUF(6)].histograms
 #endif
 
 // A particle's light from the clustered lights (particles_sim.comp, in

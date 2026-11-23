@@ -26,7 +26,7 @@ struct Trs {
     vec3 s;
 };
 
-mat3x4 rowsAt(uint i) { return mat3x4(anim[i], anim[i + 1u], anim[i + 2u]); }
+mat3x4 rowsAt(uint i) { return mat3x4(animTable[i], animTable[i + 1u], animTable[i + 2u]); }
 
 // a * b, affine transforms as rows.
 mat3x4 mul(mat3x4 a, mat3x4 b) {
@@ -52,7 +52,7 @@ mat3x4 trsRows(Trs p) {
 }
 
 // A transform in the models' table: (translation, 0), rotation, (scale, 0).
-Trs trsAt(uint i) { return Trs(anim[i].xyz, anim[i + 1u], anim[i + 2u].xyz); }
+Trs trsAt(uint i) { return Trs(animTable[i].xyz, animTable[i + 1u], animTable[i + 2u].xyz); }
 
 vec4 qnorm(vec4 q) {
     float len = length(q);
@@ -96,10 +96,10 @@ float clipTime(float time, float duration, uint mode) {
     return time - duration * floor(time / duration);
 }
 
-// Bone `b` of a model (`bones` of them; its clips' head at anim[clipsAt])
+// Bone `b` of a model (`bones` of them; its clips' head at animTable[clipsAt])
 // by the record at records[rec], into `p`; whether anything posed it.
 bool evalBone(uint rec, uint b, uint bones, uint clipsAt, out Trs p) {
-    uvec4 head = floatBitsToUint(anim[clipsAt]);
+    uvec4 head = floatBitsToUint(animTable[clipsAt]);
     p = trsAt(head.z + 3u * b);
     bool posed = false;
     for (uint l = 0u; l < 4u; l++) {
@@ -109,8 +109,8 @@ bool evalBone(uint rec, uint b, uint bones, uint clipsAt, out Trs p) {
         if (clip == 0u || clip > head.x || weight <= 0.0) {
             continue;
         }
-        uvec4 info = floatBitsToUint(anim[clipsAt + 2u * clip - 1u]);
-        uvec4 at = floatBitsToUint(anim[clipsAt + 2u * clip]);
+        uvec4 info = floatBitsToUint(animTable[clipsAt + 2u * clip - 1u]);
+        uvec4 at = floatBitsToUint(animTable[clipsAt + 2u * clip]);
         uint track = animWord(at.y + b);
         if (track == 0xffffffffu) {
             continue;
@@ -199,7 +199,7 @@ void main() {
     }
     // Parents come before their children (roots have none).
     for (uint k = 0u; k < bones; k++) {
-        uint parent = floatBitsToUint(anim[mc.pose.x + 4u * k + 3u].x);
+        uint parent = floatBitsToUint(animTable[mc.pose.x + 4u * k + 3u].x);
         if (parent != 0xffffffffu) {
             palette[scratch + k] = mul(palette[scratch + parent], palette[scratch + k]);
         }
@@ -207,6 +207,6 @@ void main() {
     uint dst = poseOffset(row);
     for (uint k = 0u; k < mc.cmd.w; k++) {
         uint joint = mc.pose.z + 4u * k;
-        palette[dst + k] = mul(palette[scratch + floatBitsToUint(anim[joint + 3u].x)], rowsAt(joint));
+        palette[dst + k] = mul(palette[scratch + floatBitsToUint(animTable[joint + 3u].x)], rowsAt(joint));
     }
 }

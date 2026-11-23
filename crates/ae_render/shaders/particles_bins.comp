@@ -4,19 +4,22 @@
 // blend shades and marks its ranks in every tile its quad's screen bounds
 // cover, as a bitset (one bit a rank) plus a word-of-words summary.
 // The push words (bindless.glsl's block): the target's size, the bins.
-#define AE_PUSH_WORDS uint width; uint height; uint bin_size; uint bins_x; uint summary_words; uint mask_words; uint pushPad0; uint pushPad1;
+#define AE_PUSH_WORDS uint width; uint height; uint bin_size; uint bins_x; uint summary_words; uint mask_words; uint pushPad0; uint aeTable;
+#define AE_TABLE ae.aeTable
 #include "particles_common.glsl"
 #include "particles_puff.glsl"
 
 layout(local_size_x = 64) in;
 
-layout(set = 1, binding = 4, std430) buffer TileMasks { uint masks[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer TileMasks { uint masks[]; } ae_TileMasks[];
+#define masks ae_TileMasks[AE_BUF(10)].masks
 struct PackedPuff {
     vec4 geom;  // centre in view axes x, y; view depth; 1 / radius
     vec4 color; // premultiplied (alpha: what it covers)
     vec4 ext;   // cos(angle), sin(angle), texture lod, 1: emissive (a bloom source)
 };
-layout(set = 1, binding = 5, std430) buffer PackedPuffs { PackedPuff puffs[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer PackedPuffs { PackedPuff puffs[]; } ae_PackedPuffs[];
+#define puffs ae_PackedPuffs[AE_BUF(11)].puffs
 
 
 void main() {

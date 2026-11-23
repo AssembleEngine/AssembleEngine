@@ -116,14 +116,10 @@ pub struct Exposure {
     image: OwnedImage,
     histogram: OwnedBuffer,
     ubos: Vec<OwnedBuffer>,
-    /// Per slot: the meter's and the adapt's descriptor sets (one each, so
-    /// two passes never rewrite one set in a frame).
-    meter_sets: Vec<vk::DescriptorSet>,
-    adapt_sets: Vec<vk::DescriptorSet>,
-    set_layout: vk::DescriptorSetLayout,
-    empty_layout: vk::DescriptorSetLayout,
+    /// The settings block (slotted), the histogram and the exposure image
+    /// as a storage image (exposure_meter.comp, exposure_adapt.comp).
+    table: crate::bindless::HandleTable,
     layout: vk::PipelineLayout,
-    pool: vk::DescriptorPool,
     sampler: vk::Sampler,
     sampler_index: u32,
     sampled: Sampled2D,
@@ -157,78 +153,20 @@ impl Exposure {
                 gpu,
                 BufferDesc {
                     size: size_of::<Settings>() as u64,
-                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 },
                 MemoryLocation::CpuToGpu,
                 &format!("exposure settings {slot}"),
             )?);
         }
-        let all = vk::ShaderStageFlags::COMPUTE;
-        let (set_layout, empty_layout, layout, pool, meter_sets, adapt_sets, sampler) = unsafe {
-            let bindings = [
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(3)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-                // The terrain's vision planes (bound per frame; the adapt
-                // pass leaves them unwritten).
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(5)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-            ];
-            let set_layout = device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            )?;
-            let empty_layout =
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None)?;
-            let layout = pipeline::pipeline_layout(
-                device,
-                &[set_layout, empty_layout, bindless.set_layout()],
-                size_of::<crate::bindless::Push>() as u32,
-                vk::ShaderStageFlags::COMPUTE,
-            )?;
-            let n = frames_in_flight as u32;
-            let sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 2 * n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 4 * n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_IMAGE,
-                    descriptor_count: 2 * n,
-                },
-            ];
-            let pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(2 * n)
-                    .pool_sizes(&sizes),
-                None,
-            )?;
-            let layouts = vec![set_layout; 2 * frames_in_flight];
-            let sets = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )?;
-            let sampler = device.create_sampler(
+        let layout = pipeline::pipeline_layout(
+            device,
+            &bindless.layouts(2),
+            size_of::<crate::bindless::Push>() as u32,
+            vk::ShaderStageFlags::COMPUTE,
+        )?;
+        let sampler = unsafe {
+            device.create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
                     .min_filter(vk::Filter::LINEAR)
@@ -236,53 +174,14 @@ impl Exposure {
                     .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                     .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
                 None,
-            )?;
-            let histogram_info = [vk::DescriptorBufferInfo {
-                buffer: histogram.buffer,
-                offset: 0,
-                range: vk::WHOLE_SIZE,
-            }];
-            let image_info = [vk::DescriptorImageInfo {
-                sampler: vk::Sampler::null(),
-                image_view: image.view,
-                image_layout: vk::ImageLayout::GENERAL,
-            }];
-            for slot in 0..frames_in_flight {
-                let (meter, adapt) = (sets[2 * slot], sets[2 * slot + 1]);
-                let ubo = [vk::DescriptorBufferInfo {
-                    buffer: ubos[slot].buffer,
-                    offset: 0,
-                    range: vk::WHOLE_SIZE,
-                }];
-                for (set, with_image) in [(meter, false), (adapt, true)] {
-                    let mut writes = vec![
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(0)
-                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                            .buffer_info(&ubo),
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(1)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&histogram_info),
-                    ];
-                    if with_image {
-                        writes.push(
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(set)
-                                .dst_binding(3)
-                                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                                .image_info(&image_info),
-                        );
-                    }
-                    device.update_descriptor_sets(&writes, &[]);
-                }
-            }
-            let meter_sets = (0..frames_in_flight).map(|slot| sets[2 * slot]).collect();
-            let adapt_sets = (0..frames_in_flight).map(|slot| sets[2 * slot + 1]).collect();
-            (set_layout, empty_layout, layout, pool, meter_sets, adapt_sets, sampler)
+            )?
         };
+        let handles = [
+            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.whole_buffer(&histogram)?.index,
+            bindless.storage_image(image.view, vk::ImageLayout::GENERAL)?.index,
+        ];
+        let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "exposure handles")?;
         let meter = pipeline::compute_pipeline(device, spirv!("exposure_meter.comp"), layout)
             .context("exposure meter pipeline")?;
         let adapt = pipeline::compute_pipeline(device, spirv!("exposure_adapt.comp"), layout)
@@ -293,12 +192,8 @@ impl Exposure {
             image,
             histogram,
             ubos,
-            meter_sets,
-            adapt_sets,
-            set_layout,
-            empty_layout,
+            table,
             layout,
-            pool,
             sampler,
             sampler_index,
             sampled,
@@ -398,33 +293,20 @@ impl Exposure {
         scene: ImageBinding,
         depth: Option<ImageBinding>,
         glow: Option<ImageBinding>,
-        vision: Option<vk::Buffer>,
+        vision: Option<u32>,
     ) -> Result<()> {
-        let set = self.meter_sets[ctx.slot];
-        // The histogram and vision buffer stay in set 0 until step D; the
-        // three sampled inputs are handles in the global set.
-        let vision_info = [vk::DescriptorBufferInfo {
-            buffer: vision.unwrap_or(self.histogram.buffer),
-            offset: 0,
-            range: vk::WHOLE_SIZE,
-        }];
+        // The vision planes' global index is the frame's (word 2); word 0
+        // says they apply.
         let mut push = crate::bindless::Push::default();
+        push.table(self.table.index);
         push.words[0] = u32::from(depth.is_some() && vision.is_some());
         push.words[1] = u32::from(glow.is_some());
+        push.words[2] = vision.unwrap_or(0);
         push.image(0, scene.sampled.unwrap_or(0));
         push.image(1, depth.unwrap_or(scene).sampled.unwrap_or(0));
         push.image(2, glow.unwrap_or(scene).sampled.unwrap_or(0));
         push.sampler(0, self.sampler_index);
         unsafe {
-            // The vision buffer is per frame and still an old binding here.
-            ctx.device.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(5)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&vision_info)],
-                &[],
-            );
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.layout,
@@ -434,8 +316,6 @@ impl Exposure {
             );
             ctx.device
                 .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.meter);
-            ctx.device
-                .cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
             ctx.device.cmd_bind_descriptor_sets(
                 ctx.cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -455,12 +335,26 @@ impl Exposure {
 
     /// `exposure.adapt`: the histogram to the eased exposure, one thread.
     pub fn record_adapt(&self, ctx: &PassContext<'_>) {
-        let set = self.adapt_sets[ctx.slot];
+        let mut push = crate::bindless::Push::default();
+        push.table(self.table.index);
         unsafe {
             ctx.device
                 .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.adapt);
-            ctx.device
-                .cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
+            ctx.device.cmd_bind_descriptor_sets(
+                ctx.cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.layout,
+                2,
+                &[ctx.global_set],
+                &[],
+            );
+            ctx.device.cmd_push_constants(
+                ctx.cmd,
+                self.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                pipeline::push_bytes(&push),
+            );
             ctx.device.cmd_dispatch(ctx.cmd, 1, 1, 1);
         }
     }
@@ -472,13 +366,11 @@ impl Exposure {
                 device.destroy_pipeline(pipeline, None);
             }
             device.destroy_pipeline_layout(self.layout, None);
-            device.destroy_descriptor_pool(self.pool, None);
-            device.destroy_descriptor_set_layout(self.set_layout, None);
-            device.destroy_descriptor_set_layout(self.empty_layout, None);
             device.destroy_sampler(self.sampler, None);
         }
         self.image.destroy(gpu);
         self.histogram.destroy(gpu);
+        self.table.destroy(gpu);
         for ubo in &mut self.ubos {
             ubo.destroy(gpu);
         }

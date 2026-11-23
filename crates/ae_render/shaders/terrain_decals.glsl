@@ -14,14 +14,16 @@
 // pipeline used while there are none).
 layout(constant_id = 1) const bool DECALS = false;
 
-layout(std430, set = 0, binding = 17) readonly buffer DecalBuf { uint decalWords[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer DecalBuf { uint decalWords[]; } ae_DecalBuf[];
+#define decalWords ae_DecalBuf[AE_BUF(8)].decalWords
 #define decalAtlas AE_S2D_ARRAY(9, 2)
 // Layer for layer: the tangent normal xy (n * 0.5 + 0.5; z is
 // reconstructed), the roughness texture (used as is) and the glow mask.
 #define decalSurface AE_S2D_ARRAY(10, 2)
 // Layer for layer: x metallic factor; y..w reserved (src/decals.rs,
 // LayerMaterial).
-layout(std430, set = 0, binding = 21) readonly buffer DecalMaterialBuf { vec4 decalMaterials[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer DecalMaterialBuf { vec4 decalMaterials[]; } ae_DecalMaterialBuf[];
+#define decalMaterials ae_DecalMaterialBuf[AE_BUF(9)].decalMaterials
 
 vec4 decalFloats(uint at) {
     return uintBitsToFloat(uvec4(decalWords[at], decalWords[at + 1u], decalWords[at + 2u], decalWords[at + 3u]));
@@ -102,10 +104,10 @@ vec3 levelBy(vec3 v, vec3 from, float sign) {
 // Recoil's black body (shadertoy MslSDl): the colour of a body at `t`
 // kelvin, its brightness rising as t^4 (1 near 2500 K), in gamma space.
 vec3 blackBody(float t) {
-    float u = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t * t) / (1.0 + 8.42420235e-4 * t + 7.08145163e-7 * t * t);
+    float cu = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t * t) / (1.0 + 8.42420235e-4 * t + 7.08145163e-7 * t * t);
     float v = (0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t * t) / (1.0 - 2.89741816e-5 * t + 1.61456053e-7 * t * t);
-    float x = 3.0 * u / (2.0 * u - 8.0 * v + 4.0);
-    float y = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
+    float x = 3.0 * cu / (2.0 * cu - 8.0 * v + 4.0);
+    float y = 2.0 * v / (2.0 * cu - 8.0 * v + 4.0);
     vec3 xyz = vec3(x / y, 1.0, (1.0 - x - y) / y);
     vec3 rgb = xyz * mat3(3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252);
     return max(rgb, 0.0) * pow(0.0004 * t, 4.0);

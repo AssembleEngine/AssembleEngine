@@ -119,6 +119,11 @@ impl Push {
         self.samplers[at / 4][at % 4] = index;
     }
 
+    /// The pass's handle table (`AE_TABLE`, push word 8).
+    pub fn table(&mut self, index: u32) {
+        self.words2[3] = index;
+    }
+
     pub fn sampler_at(&self, at: usize) -> u32 {
         self.samplers[at / 4][at % 4]
     }
@@ -356,6 +361,8 @@ enum Write {
 pub struct Bindless {
     frames: usize,
     set_layout: vk::DescriptorSetLayout,
+    /// No bindings: the sets below the global one in a migrated layout.
+    empty_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     sampled: Slab,
@@ -406,6 +413,8 @@ impl Bindless {
             .bindings(&bindings)
             .push_next(&mut flags_info);
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
+        let empty_layout =
+            unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None) }?;
 
         let n = frames as u32;
         let sizes = [
@@ -516,6 +525,7 @@ impl Bindless {
         let mut this = Self {
             frames,
             set_layout,
+            empty_layout,
             pool,
             sets,
             sampled: Slab::new("sampled image", 3, SAMPLED_IMAGE_CAPACITY, SampledKind::Image2D as u32),
@@ -569,6 +579,14 @@ impl Bindless {
             this.flush_writes(device, slot, fallbacks.iter().copied());
         }
         Ok(this)
+    }
+
+    /// A pipeline layout's sets with the global one at `at`: empty layouts
+    /// below it.
+    pub fn layouts(&self, at: usize) -> Vec<vk::DescriptorSetLayout> {
+        let mut layouts = vec![self.empty_layout; at];
+        layouts.push(self.set_layout);
+        layouts
     }
 
     pub fn set_layout(&self) -> vk::DescriptorSetLayout {
@@ -683,6 +701,22 @@ impl Bindless {
                 layout,
             });
         }
+    }
+
+    /// One storage-buffer index whose slot `k` descriptor is `buffers[k]`
+    /// (whole), for a buffer the pass keeps one of per frame slot.
+    pub fn per_slot_buffer(&mut self, buffers: &[crate::memory::OwnedBuffer]) -> Result<BufferHandle> {
+        anyhow::ensure!(buffers.len() == self.frames, "one buffer per frame slot");
+        let handle = self.slotted_buffer()?;
+        for (slot, b) in buffers.iter().enumerate() {
+            self.update_slotted_buffer(handle, slot, b.buffer, 0, b.size);
+        }
+        Ok(handle)
+    }
+
+    /// A whole buffer, the same in every slot.
+    pub fn whole_buffer(&mut self, buffer: &crate::memory::OwnedBuffer) -> Result<BufferHandle> {
+        self.buffer(buffer.buffer, 0, buffer.size)
     }
 
     /// One storage-buffer index per frame slot, as [`Self::slotted_2d`].
@@ -1094,6 +1128,7 @@ impl Bindless {
         unsafe {
             device.destroy_descriptor_pool(self.pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_set_layout(self.empty_layout, None);
             device.destroy_sampler(self.sampler, None);
         }
         for image in &mut self.fallback_images {
@@ -1101,6 +1136,30 @@ impl Bindless {
         }
         self.fallback_storage.destroy(gpu);
         self.fallback_buffer.destroy(gpu);
+    }
+}
+
+/// A pass's handle table (bindless.glsl `AE_BUF(k)`): a storage buffer of
+/// global buffer and storage-image indices, written once at creation. Every
+/// per-pass buffer is fixed or slotted, so its index never changes and the
+/// table needs no per-frame write. Its own index goes in push word 8
+/// ([`Push::table`]).
+pub struct HandleTable {
+    buffer: OwnedBuffer,
+    pub index: u32,
+}
+
+impl HandleTable {
+    pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, indices: &[u32], name: &str) -> Result<Self> {
+        anyhow::ensure!(!indices.is_empty(), "{name}: an empty handle table");
+        let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+        let buffer = upload::buffer(gpu, &bytes, vk::BufferUsageFlags::STORAGE_BUFFER, name)?;
+        let index = bindless.whole_buffer(&buffer)?.index;
+        Ok(Self { buffer, index })
+    }
+
+    pub fn destroy(&mut self, gpu: &GpuDevice) {
+        self.buffer.destroy(gpu);
     }
 }
 

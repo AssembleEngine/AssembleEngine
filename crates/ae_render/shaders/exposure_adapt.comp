@@ -8,15 +8,19 @@
 // an EV wide, units and particles moving) is filtered rather than followed.
 // Mirrors `lighting::target_ev100` and `lighting::adapt_ev100`.
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+#include "bindless.glsl"
 
-layout(std140, set = 0, binding = 0) uniform Exposure {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Exposure {
     vec4 params;  // x: scene EV100, y: dt, z: min EV100, w: max EV100
     vec4 rates;   // x: 1 when auto, y: the key luminance, z: toward a brighter scene, w: toward a darker one (1/s)
     vec4 trim;    // x: low percentile, y: high percentile, z: bins
-} e;
+} ae_Exposure[];
+#define e ae_Exposure[AE_BUF(0)]
 
-layout(std430, set = 0, binding = 1) readonly buffer Histogram { uint bins[]; } h;
-layout(rgba32f, set = 0, binding = 3) uniform image2D exposure;
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Histogram { uint bins[]; } ae_Histogram[];
+#define h ae_Histogram[AE_BUF(1)]
+layout(rgba32f, set = AE_BINDLESS_SET, binding = AE_STORAGE_IMAGES) uniform image2D ae_storage_rgba32f[];
+#define exposure ae_storage_rgba32f[AE_BUF(2)]
 
 const float LOG2_MIN = -8.0;
 const float LOG2_MAX = 8.0;

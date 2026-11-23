@@ -410,9 +410,6 @@ type PipelineMaker<'a> = dyn Fn(&[u8], &[u8], bool) -> Result<vk::Pipeline> + 'a
 /// The model side of a [`UnitRenderer`] whose classes have models.
 struct Models {
     set: ModelSet,
-    set_layout: vk::DescriptorSetLayout,
-    /// Per slot: set 1 (`shaders/units_models.glsl`).
-    sets: Vec<vk::DescriptorSet>,
     /// Per slot: pose offsets, the pose jobs (rows with animation records,
     /// their scratch offsets).
     rows: Vec<OwnedBuffer>,
@@ -461,16 +458,13 @@ pub struct UnitRenderer {
     min_pixels: f32,
     /// The terrain has shadow heights to shade the units by.
     shadows: bool,
-    set_layout: vk::DescriptorSetLayout,
-    /// Set 1 of the layout without models.
-    empty_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    desc_pool: vk::DescriptorPool,
-    sets: Vec<vk::DescriptorSet>,
-    /// The global sampled handles this pass reads.
+    /// The global sampled handles this pass reads, and its handle table.
     push: crate::bindless::Push,
-    /// The clustered lights' sets (set 2 of the draws; crate::lights).
-    light_sets: Vec<vk::DescriptorSet>,
+    /// The buffers (units_common.glsl): the frame block, the instances,
+    /// the visible list, the indirect, the lights (4..6), then with models
+    /// the models' fourteen (units_models.glsl, units_lights.glsl).
+    table: crate::bindless::HandleTable,
     cull: vk::Pipeline,
     draw: vk::Pipeline,
     /// Into the units' shadow map (`None` when the terrain renderer has
@@ -621,7 +615,7 @@ impl UnitRenderer {
                     gpu,
                     BufferDesc {
                         size: size_of::<FrameUbo>() as u64,
-                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
                     "unit frame",
@@ -692,119 +686,8 @@ impl UnitRenderer {
         push.sampler(1, terrain.linear_sampler_index());
         push.sampler(3, terrain.shadow_color_sampler_index());
         push.sampler(4, terrain.shadow_compare_sampler_index());
-        // Set 1 of the models: seven storage buffers, the texture array
-        // (partially bound), the models' animation table, the units'
-        // animation table, the frame's writes to it and their places, and
-        // the models' lights (their tables and the frame's offsets).
-        let model_layout = match &model_set {
-            Some(_) => Some(unsafe {
-                let storage = |b: u32| {
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(b)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(1)
-                        .stage_flags(all)
-                };
-                let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
-                bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
-                for b in 9..15 {
-                    bindings.push(storage(b).stage_flags(vk::ShaderStageFlags::COMPUTE));
-                }
-                device.create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                    None,
-                )?
-            }),
-            None => None,
-        };
-        let terrain_global = terrain.bindless_set_layout();
-        let (set_layout, empty_layout, pipeline_layout, desc_pool, sets) = unsafe {
-            let set_layout = pipeline::set_layout(
-                device,
-                &[
-                    (vk::DescriptorType::UNIFORM_BUFFER, all),
-                    (vk::DescriptorType::STORAGE_BUFFER, all),
-                    (vk::DescriptorType::STORAGE_BUFFER, all),
-                    (vk::DescriptorType::STORAGE_BUFFER, all),
-                ],
-            )?;
-            // The caster's push constant: the cascade it draws; with models
-            // also the multi-draw's first command (every stage).
-            // Set 2: the clustered lights (the draws' fragments read them;
-            // an empty set 1 without models).
-            let empty_layout = pipeline::set_layout(device, &[])?;
-            let pipeline_layout = match model_layout {
-                Some(models) => pipeline::pipeline_layout(
-                    device,
-                    &[set_layout, models, lights.set_layout(), terrain_global],
-                    128,
-                    all,
-                )?,
-                None => pipeline::pipeline_layout(
-                    device,
-                    &[set_layout, empty_layout, lights.set_layout(), terrain_global],
-                    128,
-                    all,
-                )?,
-            };
-            let n = frames_in_flight as u32;
-            let m = model_layout.is_some() as u32;
-            let sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: (3 + 14 * m) * n,
-                },
-            ];
-            let desc_pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(n * (1 + m))
-                    .pool_sizes(&sizes),
-                None,
-            )?;
-            let layouts = vec![set_layout; frames_in_flight];
-            let sets = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(desc_pool)
-                    .set_layouts(&layouts),
-            )?;
-            for (slot, &set) in sets.iter().enumerate() {
-                let info = |buffer: &OwnedBuffer| {
-                    [vk::DescriptorBufferInfo {
-                        buffer: buffer.buffer,
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }]
-                };
-                let buffers = [
-                    info(&ubos[slot]),
-                    info(&instances[slot]),
-                    info(&visible),
-                    info(&indirect),
-                ];
-                let writes: Vec<vk::WriteDescriptorSet> = buffers
-                    .iter()
-                    .enumerate()
-                    .map(|(i, info)| {
-                        let ty = if i == 0 {
-                            vk::DescriptorType::UNIFORM_BUFFER
-                        } else {
-                            vk::DescriptorType::STORAGE_BUFFER
-                        };
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(i as u32)
-                            .descriptor_type(ty)
-                            .buffer_info(info)
-                    })
-                    .collect();
-                device.update_descriptor_sets(&writes, &[]);
-            }
-            (set_layout, empty_layout, pipeline_layout, desc_pool, sets)
-        };
+        // Every buffer is in the global set at 3 (M15 step D).
+        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(3), 128, all)?;
         let cull_code: &[u8] = if model_set.is_some() {
             spirv!("units_models_cull.comp")
         } else {
@@ -850,21 +733,46 @@ impl UnitRenderer {
             ),
             false => None,
         };
-        let models = match (model_set, model_layout) {
-            (Some(set), Some(layout)) => Some(Self::models(
+        let models = match model_set {
+            Some(set) => Some(Self::models(
                 gpu,
                 set,
-                layout,
-                desc_pool,
                 frames_in_flight,
                 capacity,
-                &palette,
                 pipeline_layout,
                 &graphics,
                 casts,
             )?),
-            _ => None,
+            None => None,
         };
+        let mut handles = vec![
+            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_buffer(&instances)?.index,
+            bindless.whole_buffer(&visible)?.index,
+            bindless.whole_buffer(&indirect)?.index,
+        ];
+        handles.extend(lights.handles());
+        if let Some(m) = &models {
+            let set = &m.set;
+            handles.extend([
+                bindless.buffer(set.geometry.buffer, 0, set.index_offset.max(4))?.index,
+                bindless.whole_buffer(&set.materials)?.index,
+                bindless.whole_buffer(&palette)?.index,
+                bindless.whole_buffer(&set.class_table)?.index,
+                bindless.whole_buffer(&set.draw_table)?.index,
+                bindless.whole_buffer(&set.class_commands)?.index,
+                bindless.per_slot_buffer(&m.rows)?.index,
+                bindless.whole_buffer(&set.anim)?.index,
+                bindless.whole_buffer(&m.table)?.index,
+                bindless.per_slot_buffer(&m.staged)?.index,
+                bindless.per_slot_buffer(&m.staged_at)?.index,
+                bindless.whole_buffer(&set.class_light_table)?.index,
+                bindless.whole_buffer(&set.model_light_table)?.index,
+                bindless.per_slot_buffer(&m.light_offsets)?.index,
+            ]);
+        }
+        let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "unit handles")?;
+        push.table(table.index);
         Ok(Self {
             capacity,
             models,
@@ -872,13 +780,9 @@ impl UnitRenderer {
             classes,
             min_pixels: setup.min_pixels,
             shadows: terrain.has_shadows(),
-            set_layout,
-            empty_layout,
             pipeline_layout,
-            desc_pool,
-            sets,
             push,
-            light_sets: lights.sets(),
+            table,
             cull,
             draw,
             caster,
@@ -893,16 +797,13 @@ impl UnitRenderer {
         })
     }
 
-    /// The model side: per-slot buffers, set 1 and the pipelines.
+    /// The model side: per-slot buffers and the pipelines.
     #[allow(clippy::too_many_arguments)]
     fn models(
         gpu: &GpuDevice,
         set: ModelSet,
-        set_layout: vk::DescriptorSetLayout,
-        pool: vk::DescriptorPool,
         frames_in_flight: usize,
         capacity: u32,
-        palette: &OwnedBuffer,
         pipeline_layout: vk::PipelineLayout,
         graphics: &PipelineMaker<'_>,
         casts: bool,
@@ -958,81 +859,6 @@ impl UnitRenderer {
             vk::BufferUsageFlags::TRANSFER_SRC,
             "unit indirect template",
         )?;
-        let layouts = vec![set_layout; frames_in_flight];
-        let sets = unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )
-        }?;
-        for (slot, &ds) in sets.iter().enumerate() {
-            let info = |buffer: &OwnedBuffer| {
-                [vk::DescriptorBufferInfo {
-                    buffer: buffer.buffer,
-                    offset: 0,
-                    range: vk::WHOLE_SIZE,
-                }]
-            };
-            let geometry = [vk::DescriptorBufferInfo {
-                buffer: set.geometry.buffer,
-                offset: 0,
-                range: set.index_offset.max(4),
-            }];
-            let buffers = [
-                geometry,
-                info(&set.materials),
-                info(palette),
-                info(&set.class_table),
-                info(&set.draw_table),
-                info(&set.class_commands),
-                info(&rows[slot]),
-            ];
-            let mut writes: Vec<vk::WriteDescriptorSet> = buffers
-                .iter()
-                .enumerate()
-                .map(|(i, b)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(ds)
-                        .dst_binding(i as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(b)
-                })
-                .collect();
-            let anim = info(&set.anim);
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(ds)
-                    .dst_binding(8)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&anim),
-            );
-            let cells = [info(&table), info(&staged[slot]), info(&staged_at[slot])];
-            for (b, k) in cells.iter().enumerate() {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(ds)
-                        .dst_binding(9 + b as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(k),
-                );
-            }
-            let lights = [
-                info(&set.class_light_table),
-                info(&set.model_light_table),
-                info(&light_offsets[slot]),
-            ];
-            for (b, k) in lights.iter().enumerate() {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(ds)
-                        .dst_binding(12 + b as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(k),
-                );
-            }
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-        }
         let pose = pipeline::compute_pipeline(device, spirv!("units_pose.comp"), pipeline_layout)
             .context("unit pose pipeline")?;
         let scatter = pipeline::compute_pipeline(device, spirv!("units_anim_writes.comp"), pipeline_layout)
@@ -1058,8 +884,6 @@ impl UnitRenderer {
         };
         Ok(Models {
             set,
-            set_layout,
-            sets,
             rows,
             table,
             table_cells,
@@ -1394,14 +1218,6 @@ impl UnitRenderer {
             );
             unsafe {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.scatter);
-                device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.pipeline_layout,
-                    0,
-                    &self.bound_sets(ctx.slot),
-                    &[],
-                );
                 self.bind_global(
                     ctx,
                     vk::PipelineBindPoint::COMPUTE,
@@ -1420,14 +1236,6 @@ impl UnitRenderer {
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.pose);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.pipeline_layout,
-                0,
-                &self.bound_sets(ctx.slot),
-                &[],
-            );
             self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, all, [jobs, 0, 0, 0]);
             device.cmd_dispatch(cmd, jobs.div_ceil(64), 1, 1);
         }
@@ -1459,8 +1267,6 @@ impl UnitRenderer {
             return false;
         }
         let (device, cmd) = (ctx.device, ctx.cmd);
-        let mut sets = self.bound_sets(ctx.slot);
-        sets.push(self.light_sets[ctx.slot]);
         unsafe {
             // The pose pass's palette writes (an earlier pass) to the
             // append's reads.
@@ -1470,7 +1276,6 @@ impl UnitRenderer {
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
-            device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &sets, &[]);
             self.bind_global(
                 ctx,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1494,14 +1299,6 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.pipeline_layout,
-                0,
-                &self.bound_sets(ctx.slot),
-                &[],
-            );
             self.bind_global(
                 ctx,
                 vk::PipelineBindPoint::COMPUTE,
@@ -1520,22 +1317,6 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &self.bound_sets(ctx.slot),
-                &[],
-            );
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                2,
-                &[self.light_sets[ctx.slot]],
-                &[],
-            );
             self.bind_global(
                 ctx,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1595,15 +1376,6 @@ impl UnitRenderer {
         }
     }
 
-    /// The descriptor sets the pipelines bind: set 0, and with models set 1.
-    fn bound_sets(&self, slot: usize) -> Vec<vk::DescriptorSet> {
-        let mut sets = vec![self.sets[slot]];
-        if let Some(m) = &self.models {
-            sets.push(m.sets[slot]);
-        }
-        sets
-    }
-
     /// The units into each cascade of the units' shadow map: every dart,
     /// and the model units the cull found in the cascade (nothing when the
     /// frame casts no shadows: the map stays cleared). Records inside a
@@ -1618,14 +1390,6 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout,
-                0,
-                &self.bound_sets(ctx.slot),
-                &[],
-            );
             self.bind_global(
                 ctx,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1712,7 +1476,6 @@ impl UnitRenderer {
                 {
                     device.destroy_pipeline(p, None);
                 }
-                device.destroy_descriptor_set_layout(m.set_layout, None);
             }
             for b in m
                 .rows
@@ -1734,10 +1497,8 @@ impl UnitRenderer {
             device.destroy_pipeline(self.cull, None);
             device.destroy_pipeline(self.draw, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
-            device.destroy_descriptor_pool(self.desc_pool, None);
-            device.destroy_descriptor_set_layout(self.set_layout, None);
-            device.destroy_descriptor_set_layout(self.empty_layout, None);
         }
+        self.table.destroy(gpu);
         for b in self
             .instances
             .iter_mut()

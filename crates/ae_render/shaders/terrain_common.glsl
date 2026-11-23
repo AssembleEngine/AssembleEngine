@@ -24,7 +24,11 @@
 #define FLAG_WATER 128u   // the water surface is drawn (terrain: caustics under it)
 #define FLAG_SHADOWS 256u // shade by the hills' shadows (sunShadowTex)
 
-layout(set = 0, binding = 0) uniform FrameUBO {
+// Buffers (bindless.glsl): the handle table holds, in order, the frame
+// block, the tree, bits, snapshot, leaves, indirect, the tileset block
+// (terrain.frag), the vision (terrain_shading.glsl), the decal list and
+// materials (terrain_decals.glsl), then the lights (AE_LIGHT_BASE 10).
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer FrameUBO {
     mat4 viewProj;
     vec4 camPos;         // render camera
     vec4 lodCamPos;      // camera driving the subdivision (differs when frozen)
@@ -46,15 +50,22 @@ layout(set = 0, binding = 0) uniform FrameUBO {
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     vec4 effects;        // x: effect time (s): the sim time drawn, so decals follow the sim's speed
     vec4 photometry;     // x: exposure, y: unused, z: sun lux, w: sky lux
-} u;
+} ae_FrameUBO[];
+#define u ae_FrameUBO[AE_BUF(0)]
+#define AE_LIGHT_BASE 10
 
-layout(std430, set = 0, binding = 1) BUF_QUAL buffer TreeBuf { uint tree[]; };    // sum tree (depth 0..T)
-layout(std430, set = 0, binding = 2) BUF_QUAL buffer BitBuf { uint bits[]; };     // CBT bitfield
-layout(std430, set = 0, binding = 3) readonly buffer SnapBuf { uint snap[]; };    // bitfield snapshot
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer TreeBuf { uint tree[]; } ae_TreeBuf[];
+#define tree ae_TreeBuf[AE_BUF(1)].tree    // sum tree (depth 0..T)
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer BitBuf { uint bits[]; } ae_BitBuf[];
+#define bits ae_BitBuf[AE_BUF(2)].bits     // CBT bitfield
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer SnapBuf { uint snap[]; } ae_SnapBuf[];
+#define snap ae_SnapBuf[AE_BUF(3)].snap    // bitfield snapshot
 struct Leaf { ivec4 a; ivec4 b; };  // a = (v0, v1), b = (v2, heap id, 0)
-layout(std430, set = 0, binding = 4) BUF_QUAL buffer LeafBuf { Leaf leaves[]; };  // draw list
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer LeafBuf { Leaf leaves[]; } ae_LeafBuf[];
+#define leaves ae_LeafBuf[AE_BUF(4)].leaves  // draw list
 // [0..3) update dispatch, [3..8) DrawIndexedIndirectCommand, [8] leaf count
-layout(std430, set = 0, binding = 5) BUF_QUAL buffer IndirectBuf { uint ind[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer IndirectBuf { uint ind[]; } ae_IndirectBuf[];
+#define ind ae_IndirectBuf[AE_BUF(5)].ind
 #define pyramid AE_S2D(0, 0)    // (min, max, E_L, max E_{L-2}) per block
 #define heightTex AE_S2D(1, 1)  // normalised heights, linear filtering
 #define errorTex AE_S2D(2, 0)   // mip m: E_(m+1), exact error at spacing 2^(m+1)

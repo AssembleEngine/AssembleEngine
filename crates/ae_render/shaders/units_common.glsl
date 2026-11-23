@@ -27,7 +27,11 @@
 #define POSE_MANUAL 0x80000000u
 #define MAX_CLASSES 16u
 
-layout(std140, set = 0, binding = 0) uniform Frame {
+// Buffers: the handle table holds the frame block, the instances, the
+// visible list, the indirect, the lights (AE_LIGHT_BASE 4), then the
+// models' (units_models.glsl).
+#define AE_LIGHT_BASE 4
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
     mat4 viewProj;
     vec4 camPos;      // xyz eye; w = pixels per world unit at distance 1
     vec4 frustum[6];  // normalised planes, inside >= 0
@@ -43,23 +47,29 @@ layout(std140, set = 0, binding = 0) uniform Frame {
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: animation table writes
     vec4 photometry;          // x: exposure, y: unused, z: sun lux, w: sky lux
-} u;
+} ae_Frame[];
+#define u ae_Frame[AE_BUF(0)]
 
-layout(std430, set = 0, binding = 1) readonly buffer Instances { uint words[]; } inst;
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Instances { uint words[]; } ae_Instances[];
+#define inst ae_Instances[AE_BUF(1)]
 
 #ifdef CULL
-layout(std430, set = 0, binding = 2) writeonly buffer Visible { uint visible[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Visible { uint visible[]; } ae_Visible[];
+#define visible ae_Visible[AE_BUF(2)].visible
 #ifdef MODELS
 // The darts' VkDrawIndirectCommand (words 0..3), then one
 // VkDrawIndexedIndirectCommand (5 words) per model primitive and class
 // (counts.w of them), then the same commands again for each shadow
 // cascade.
-layout(std430, set = 0, binding = 3) buffer Indirect { uint cmdWords[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint cmdWords[]; } ae_Indirect[];
+#define cmdWords ae_Indirect[AE_BUF(3)].cmdWords
 #else
-layout(std430, set = 0, binding = 3) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } cmd;
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } ae_Indirect[];
+#define cmd ae_Indirect[AE_BUF(3)]
 #endif
 #else
-layout(std430, set = 0, binding = 2) readonly buffer Visible { uint visible[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Visible { uint visible[]; } ae_Visible[];
+#define visible ae_Visible[AE_BUF(2)].visible
 #endif
 
 #define heightTex AE_S2D(0, 1)

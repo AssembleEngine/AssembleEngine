@@ -15,10 +15,11 @@
 #endif
 #include "bindless.glsl"
 #define depthTex AE_S2D(0, 0)
-layout(std140, set = 0, binding = 0) uniform Frame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
     mat4 viewProj;
     vec4 camPos;
-} u;
+} ae_Frame[];
+#define u ae_Frame[AE_BUF(0)]
 #include "particles_reference.glsl"
 
 layout(location = 0) out vec4 outColor;

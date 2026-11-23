@@ -7,9 +7,7 @@
 #ifndef UNITS_LIGHTS_GLSL
 #define UNITS_LIGHTS_GLSL
 
-#ifndef MODEL_SET
-#define MODEL_SET 1
-#endif
+// Table slots 18..20 (units_common.glsl).
 
 // Three vec4 each: the colour and range, the spot's cosines / source radius
 // / joint and kind, and the intensity in candela.
@@ -21,11 +19,14 @@ struct ModelLight {
 };
 
 // Per class: the first model light of its model and how many.
-layout(std430, set = MODEL_SET, binding = 12) readonly buffer ClassLights { uvec2 classLights[MAX_CLASSES]; };
-layout(std430, set = MODEL_SET, binding = 13) readonly buffer ModelLightTable { ModelLight modelLights[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer ClassLights { uvec2 classLights[MAX_CLASSES]; } ae_ClassLights[];
+#define classLights ae_ClassLights[AE_BUF(18)].classLights
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer ModelLightTable { ModelLight modelLights[]; } ae_ModelLightTable[];
+#define modelLights ae_ModelLightTable[AE_BUF(19)].modelLights
 // Per row: where its model's lights start after the host's (the host
 // writes it with the rows).
-layout(std430, set = MODEL_SET, binding = 14) buffer UnitLightAt { uint unitLightAt[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer UnitLightAt { uint unitLightAt[]; } ae_UnitLightAt[];
+#define unitLightAt ae_UnitLightAt[AE_BUF(20)].unitLightAt
 
 uint modelLightCount(uint cls) {
     return classLights[cls].y;

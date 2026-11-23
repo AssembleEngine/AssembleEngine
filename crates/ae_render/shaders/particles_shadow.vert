@@ -4,7 +4,8 @@
 // quad facing the sun, into one cascade of `shadows.color`. The instances
 // are the simulation's list of casters (the keys from u.pool.x), not the
 // camera's sorted list: smoke off screen still shades the view.
-#define AE_PUSH_WORDS uint cascade; uint pushPad0; uint pushPad1; uint pushPad2; uvec4 pushPad3;
+#define AE_PUSH_WORDS uint cascade; uint pushPad0; uint pushPad1; uint pushPad2; uint pushPad3; uint pushPad4; uint pushPad5; uint aeTable;
+#define AE_TABLE ae.aeTable
 #include "particles_common.glsl"
 
 

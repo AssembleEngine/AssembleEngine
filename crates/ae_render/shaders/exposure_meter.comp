@@ -30,7 +30,9 @@
 // the histogram and its percentiles stay plain u32.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(std140, set = 0, binding = 0) uniform Exposure {
+// Buffers: the table holds the settings, the histogram, the exposure
+// image; the vision planes' index is push word 2.
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Exposure {
     vec4 params;  // x: scene EV100, y: dt, z: min EV100, w: max EV100
     vec4 rates;   // x: 1 when auto, y: the key luminance, z/w: rates per second
     vec4 trim;    // x: low percentile, y: high percentile, z: bins
@@ -39,11 +41,14 @@ layout(std140, set = 0, binding = 0) uniform Exposure {
     vec4 meter;   // x: the bloom's strength, y: centre weight, z: centre sigma (of the height)
     mat4 invViewProj;
     vec4 luma;    // xyz: the working space's luminance row
-} e;
+} ae_Exposure[];
+#define e ae_Exposure[AE_BUF(0)]
 
 // Atomics read and write: the graph declares it storage_buffer_read_write.
-layout(std430, set = 0, binding = 1) buffer Histogram { uint bins[]; } h;
-layout(std430, set = 0, binding = 5) readonly buffer VisionBuf { uint planes[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Histogram { uint bins[]; } ae_Histogram[];
+#define h ae_Histogram[AE_BUF(1)]
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer VisionBuf { uint planes[]; } ae_VisionBuf[];
+#define planes ae_VisionBuf[ae.words.z].planes
 // Bindless handles: scene 0, depth 1, glow 2; sampler 0. `ae.words.x`
 // says the depth (and vision) are bound, `ae.words.y` the glow.
 #define scene AE_S2D(0, 0)

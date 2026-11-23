@@ -10,12 +10,14 @@
 #define FROXEL_FIXED 4096.0
 
 // The scatter's indirect dispatch: one workgroup per visible particle.
-layout(std430, set = 1, binding = 7) buffer FroxelDispatch { uvec4 froxelDispatch; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer FroxelDispatch { uvec4 froxelDispatch; } ae_FroxelDispatch[];
+#define froxelDispatch ae_FroxelDispatch[AE_BUF(7)].froxelDispatch
 // Per boundary (FROXEL_SLICES + 1, near to far) the columns, row by row
 // (neighbouring columns side by side): first each slice's light and
 // optical depth (fixed point, from 1), then the light and transmittance in
 // front of each boundary (float bits, from 0).
-layout(std430, set = 1, binding = 8) buffer Froxels { uvec4 froxels[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Froxels { uvec4 froxels[]; } ae_Froxels[];
+#define froxels ae_Froxels[AE_BUF(8)].froxels
 // Per visible particle: centre and radius; premultiplied colour; view
 // depth, angle, its columns' bounds (x | y << 16, first and last; float
 // bits); empty when the bounds are reversed.
@@ -24,7 +26,8 @@ struct FroxelPuff {
     vec4 color;
     vec4 depthAngle;
 };
-layout(std430, set = 1, binding = 9) buffer FroxelPuffs { FroxelPuff puffs[]; };
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer FroxelPuffs { FroxelPuff puffs[]; } ae_FroxelPuffs[];
+#define puffs ae_FroxelPuffs[AE_BUF(9)].puffs
 
 uvec2 halfSize() {
     return uvec2((uvec2(round(1.0 / u.step.zw)) + 1u) / 2u);

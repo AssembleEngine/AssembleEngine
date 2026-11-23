@@ -6,7 +6,6 @@
 #include "photometry.glsl"
 #include "terrain_shading.glsl"
 #include "terrain_decals.glsl"
-#define LIGHT_SET 1
 #include "lights.glsl"
 #ifdef BARY
 #extension GL_EXT_fragment_shader_barycentric : require
@@ -27,7 +26,7 @@ vec3 hue(float h) {
 
 #define tileAlbedo AE_S2D_ARRAY(4, 2) // rgb albedo, a height
 #define tileNormal AE_S2D_ARRAY(5, 2) // rg tangent-space normal
-layout(set = 0, binding = 12) uniform TilesetUBO {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
                         // triplanar, bit 1 directional), w unused
@@ -37,7 +36,8 @@ layout(set = 0, binding = 12) uniform TilesetUBO {
     vec4 warp;          // x boundary warp (cells), y 1 / its feature size (world units),
                         // z macro variation, w 1 / its feature size
     vec4 antiTiling;    // x anti-tiling degree (0..1)
-} tiles;
+} ae_TilesetUBO[];
+#define tiles ae_TilesetUBO[AE_BUF(6)]
 
 // One projected layer: albedo (a = height) and the world normal with the
 // layer's detail applied.

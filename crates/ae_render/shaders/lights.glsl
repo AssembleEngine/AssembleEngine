@@ -1,6 +1,7 @@
 // The clustered lights (src/lights.rs): the frame's light list and its
-// per-cluster index lists, in their own descriptor set. A shader defines
-// LIGHT_SET (the set number its pipeline layout gives the lights) before
+// per-cluster index lists, three buffers in the global set (bindless.glsl).
+// A shader defines AE_LIGHT_BASE, where the three handles start in its
+// pass's handle table (the frame block, the list, the clusters), before
 // including this; the cull (lights_cluster.comp) defines LIGHTS_WRITE.
 //
 // The view is cut into LIGHT_TILES_X x LIGHT_TILES_Y screen tiles and
@@ -20,6 +21,7 @@
 
 // AE_PI and the sky's tint (the ambient specular).
 #include "photometry.glsl"
+#include "bindless.glsl"
 
 #define LIGHT_POINT 1u
 #define LIGHT_CONE 2u
@@ -46,7 +48,7 @@ struct Light {
     vec4 profile;     // x, y: a cone's inner and outer cosines; z: source radius (m); w: intensity (cd)
 };
 
-layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer LightFrame {
     mat4 viewProj;    // the cull's light bounds
     mat4 invViewProj; // the cull's tile corners
     vec4 camPos;      // xyz eye; w: the near plane (infinite reverse-Z: depth = near / z)
@@ -57,7 +59,8 @@ layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
     vec4 slicing;     // x: first slice's far depth; y: slices per log unit of depth; z, w: viewport size (px)
     uvec4 model;      // x: the host's lights (where the units' model lights append at); y: the units' rows; z, w: unused
     vec4 photometry;  // x: the cull cutoff (lux): bounds = sqrt(intensity / x)
-} lf;
+} ae_LightFrame[];
+#define lf ae_LightFrame[AE_BUF(AE_LIGHT_BASE)]
 
 #ifdef LIGHTS_WRITE
 #define LIGHTS_ACCESS
@@ -67,26 +70,38 @@ layout(std140, set = LIGHT_SET, binding = 0) uniform LightFrame {
 
 // The host writes the count and the lights; the cull counts the indices it
 // used and the clusters it cut short.
-layout(std430, set = LIGHT_SET, binding = 1) LIGHTS_ACCESS buffer LightList {
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) LIGHTS_ACCESS buffer LightList {
     uint lightCount;
     uint indexCount;
     uint overflow;
     uint dropped;
     Light lights[];
-};
+} ae_LightList[];
+#define AE_LIGHT_LIST ae_LightList[AE_BUF(AE_LIGHT_BASE + 1)]
+#define lightCount AE_LIGHT_LIST.lightCount
+#define indexCount AE_LIGHT_LIST.indexCount
+#define overflow AE_LIGHT_LIST.overflow
+#define dropped AE_LIGHT_LIST.dropped
+#define lights AE_LIGHT_LIST.lights
 
 // Per cluster (offset, count) into lightIndex; per light its tiles and
 // slices (lights_bounds.comp: x the tile rectangle, x0 y0 x1 y1 a byte
 // each, inclusive; y the slices, first and last a byte each; 0: off
 // screen); per screen tile the lights that reach it (the clusters'
 // candidates).
-layout(std430, set = LIGHT_SET, binding = 2) LIGHTS_ACCESS buffer LightClusters {
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) LIGHTS_ACCESS buffer LightClusters {
     uvec2 clusterRange[LIGHT_CLUSTERS];
     uvec2 lightBounds[LIGHT_MAX];
     uint tileCount[LIGHT_TILES];
     uint tileLights[LIGHT_TILES * LIGHT_PER_TILE];
     uint lightIndex[];
-};
+} ae_LightClusters[];
+#define AE_LIGHT_CLUSTERS ae_LightClusters[AE_BUF(AE_LIGHT_BASE + 2)]
+#define clusterRange AE_LIGHT_CLUSTERS.clusterRange
+#define lightBounds AE_LIGHT_CLUSTERS.lightBounds
+#define tileCount AE_LIGHT_CLUSTERS.tileCount
+#define tileLights AE_LIGHT_CLUSTERS.tileLights
+#define lightIndex AE_LIGHT_CLUSTERS.lightIndex
 
 bool lightsOn() {
     return lf.grid.w != 0u;

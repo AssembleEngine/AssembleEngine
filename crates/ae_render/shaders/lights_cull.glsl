@@ -8,7 +8,8 @@
 // the cut is counted.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_basic : require
-#define LIGHT_SET 0
+#include "bindless.glsl"
+#define AE_LIGHT_BASE 0
 #define LIGHTS_WRITE
 #include "lights.glsl"
 

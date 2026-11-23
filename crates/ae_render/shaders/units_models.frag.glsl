@@ -6,7 +6,8 @@
 #include "photometry.glsl"
 #include "units_common.glsl"
 #include "units_models.glsl"
-#define LIGHT_SET 2
+#define AE_BINDLESS_SET 3
+#define AE_LIGHT_BASE 4
 #include "lights.glsl"
 
 layout(location = 0) in vec3 inWorld;

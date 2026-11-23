@@ -55,6 +55,20 @@ layout(push_constant) uniform AePush {
 } ae;
 #endif
 
+// Buffers (binding 3): a pass declares each block as an array aliasing
+// binding 3, std430 for storage blocks and std140 for former uniform
+// blocks (their offsets unchanged), and reaches it through its handle
+// table: `AE_BUF(k)` is the k-th global index in the pass's table, whose
+// own index is push word 8 (`AE_TABLE`). A pass that names its push words
+// names the eighth `aeTable` and defines AE_TABLE as `ae.aeTable`.
+#define AE_BUFFERS 3
+#define AE_STORAGE_IMAGES 2
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer AeTable { uint aeHandle[]; } ae_tables[];
+#ifndef AE_TABLE
+#define AE_TABLE ae.words2.w
+#endif
+#define AE_BUF(k) ae_tables[AE_TABLE].aeHandle[k]
+
 #define AE_IMAGE(slot) (ae.images[(slot) >> 2][(slot) & 3])
 #define AE_SAMPLER(slot) (ae.samplers[(slot) >> 2][(slot) & 3])
 #define AE_S2D(image, sampler) sampler2D(ae_images[AE_IMAGE(image)], ae_samplers[AE_SAMPLER(sampler)])

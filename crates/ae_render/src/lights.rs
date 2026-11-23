@@ -21,10 +21,11 @@
 //!   run. A tile holds at most [`PER_TILE`], a cluster 256, the index list
 //!   [`INDEX_CAPACITY`] entries; what is cut is counted ([`LightStats`]).
 //! * The lit passes (the terrain, the units, the water and the particles'
-//!   simulation) read the list and the clusters through this module's
-//!   descriptor set ([`LightRenderer::set_layout`]), at the set number their
-//!   pipeline layouts give it. In a graph without the lights the set is
-//!   bound all the same and reads as off.
+//!   simulation) read the frame block, the list and the clusters from the
+//!   global set: [`LightRenderer::handles`] go in their handle tables, at
+//!   the place their shaders give `AE_LIGHT_BASE` (shaders/lights.glsl).
+//!   Each is one slotted index, so the handles are the same every frame.
+//!   In a graph without the lights the buffers read as off.
 //!
 //! Per frame slot: a host-written uniform block and light list, and the
 //! clusters (device memory, written by the pass).
@@ -329,10 +330,10 @@ pub struct LightStats {
 }
 
 pub struct LightRenderer {
-    set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    pool: vk::DescriptorPool,
-    sets: Vec<vk::DescriptorSet>,
+    /// The frame block, the list and the clusters (slotted indices).
+    handles: [u32; 3],
+    table: crate::bindless::HandleTable,
     bounds: vk::Pipeline,
     tiles: vk::Pipeline,
     cull: vk::Pipeline,
@@ -357,7 +358,7 @@ pub struct LightRenderer {
 }
 
 impl LightRenderer {
-    pub fn new(gpu: &GpuDevice, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &mut crate::bindless::Bindless, frames_in_flight: usize) -> Result<Self> {
         let device = &gpu.device;
         let mut ubos = Vec::new();
         let mut staging = Vec::new();
@@ -370,7 +371,7 @@ impl LightRenderer {
                 gpu,
                 BufferDesc {
                     size: size_of::<FrameUbo>() as u64,
-                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    usage: storage,
                 },
                 MemoryLocation::CpuToGpu,
                 &format!("light frame {slot}"),
@@ -422,65 +423,19 @@ impl LightRenderer {
                 &format!("light clusters {slot}"),
             )?);
         }
-        let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-        let ssbo = vk::DescriptorType::STORAGE_BUFFER;
-        let (set_layout, pipeline_layout, pool, sets) = unsafe {
-            let set_layout = pipeline::set_layout(
-                device,
-                &[(vk::DescriptorType::UNIFORM_BUFFER, all), (ssbo, all), (ssbo, all)],
-            )?;
-            let pipeline_layout = pipeline::pipeline_layout(device, &[set_layout], 0, vk::ShaderStageFlags::empty())?;
-            let n = frames_in_flight as u32;
-            let sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: ssbo,
-                    descriptor_count: 2 * n,
-                },
-            ];
-            let pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes),
-                None,
-            )?;
-            let layouts = vec![set_layout; frames_in_flight];
-            let sets = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )?;
-            for (slot, &set) in sets.iter().enumerate() {
-                let info = |b: &OwnedBuffer| {
-                    [vk::DescriptorBufferInfo {
-                        buffer: b.buffer,
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }]
-                };
-                let (u, l, c) = (info(&ubos[slot]), info(&lists[slot]), info(&clusters[slot]));
-                let writes = [
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(0)
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                        .buffer_info(&u),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(1)
-                        .descriptor_type(ssbo)
-                        .buffer_info(&l),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(2)
-                        .descriptor_type(ssbo)
-                        .buffer_info(&c),
-                ];
-                device.update_descriptor_sets(&writes, &[]);
-            }
-            (set_layout, pipeline_layout, pool, sets)
-        };
+        let handles = [
+            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_buffer(&lists)?.index,
+            bindless.per_slot_buffer(&clusters)?.index,
+        ];
+        let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "light handles")?;
+        // The culls read the global set at 2 (lights_cull.glsl).
+        let pipeline_layout = pipeline::pipeline_layout(
+            device,
+            &bindless.layouts(2),
+            size_of::<crate::bindless::Push>() as u32,
+            vk::ShaderStageFlags::COMPUTE,
+        )?;
         let bounds = pipeline::compute_pipeline(device, spirv!("lights_bounds.comp"), pipeline_layout)
             .context("light bounds pipeline")?;
         let tiles = pipeline::compute_pipeline(device, spirv!("lights_tiles.comp"), pipeline_layout)
@@ -488,10 +443,9 @@ impl LightRenderer {
         let cull = pipeline::compute_pipeline(device, spirv!("lights_cluster.comp"), pipeline_layout)
             .context("light cluster pipeline")?;
         Ok(Self {
-            set_layout,
             pipeline_layout,
-            pool,
-            sets,
+            handles,
+            table,
             bounds,
             tiles,
             cull,
@@ -515,19 +469,10 @@ impl LightRenderer {
         self.unculled = unculled;
     }
 
-    /// The lit passes' set (bind [`Self::set`] at the number their layouts
-    /// give it).
-    pub fn set_layout(&self) -> vk::DescriptorSetLayout {
-        self.set_layout
-    }
-
-    pub fn set(&self, slot: usize) -> vk::DescriptorSet {
-        self.sets[slot]
-    }
-
-    /// Every slot's set, for renderers that keep them.
-    pub fn sets(&self) -> Vec<vk::DescriptorSet> {
-        self.sets.clone()
+    /// The global indices of the frame block, the list and the clusters,
+    /// for the lit passes' handle tables (`AE_LIGHT_BASE` + 0, 1, 2).
+    pub fn handles(&self) -> [u32; 3] {
+        self.handles
     }
 
     /// Write `slot`'s uniforms and light list (its previous submission has
@@ -681,9 +626,18 @@ impl LightRenderer {
                 ctx.cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
-                0,
-                &[self.sets[ctx.slot]],
+                2,
+                &[ctx.global_set],
                 &[],
+            );
+            let mut push = crate::bindless::Push::default();
+            push.table(self.table.index);
+            ctx.device.cmd_push_constants(
+                ctx.cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                pipeline::push_bytes(&push),
             );
             let listed = ((self.staged[ctx.slot] - HEADER_BYTES) / size_of::<Light>() as u64) as u32;
             // The append may have made it longer than the host's list: walk
@@ -732,9 +686,8 @@ impl LightRenderer {
             gpu.device.destroy_pipeline(self.tiles, None);
             gpu.device.destroy_pipeline(self.cull, None);
             gpu.device.destroy_pipeline_layout(self.pipeline_layout, None);
-            gpu.device.destroy_descriptor_pool(self.pool, None);
-            gpu.device.destroy_descriptor_set_layout(self.set_layout, None);
         }
+        self.table.destroy(gpu);
         for b in self
             .ubos
             .iter_mut()

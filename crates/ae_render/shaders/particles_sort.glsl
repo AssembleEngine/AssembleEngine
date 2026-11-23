@@ -4,7 +4,8 @@
 // key carries the slot), the count read from the indirect buffer, and the
 // buffers chosen by direction (0: keys -> keysTmp, 1: back).
 #define PARTICLES_WRITE
-#define AE_PUSH_WORDS uint shift; uint direction; uint pushPad0; uint pushPad1; uvec4 pushPad2;
+#define AE_PUSH_WORDS uint shift; uint direction; uint pushPad0; uint pushPad1; uint pushPad2; uint pushPad3; uint pushPad4; uint aeTable;
+#define AE_TABLE ae.aeTable
 #include "particles_common.glsl"
 
 #define WORKGROUP_SIZE 256

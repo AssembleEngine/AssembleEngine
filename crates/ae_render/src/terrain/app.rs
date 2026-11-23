@@ -971,7 +971,7 @@ impl RenderApp for TerrainApp {
         self.bloom = Some(Bloom::new(gpu, bindless, frames_in_flight).context("bloom")?);
         self.exposure = Some(Exposure::new(gpu, bindless, frames_in_flight).context("exposure")?);
         self.last_adapt_at = None;
-        let mut lights = LightRenderer::new(gpu, frames_in_flight).context("lights")?;
+        let mut lights = LightRenderer::new(gpu, bindless, frames_in_flight).context("lights")?;
         lights.set_unculled(self.unculled_lights);
         // The scene's draws write the HDR scene image.
         let color = SCENE_FORMAT;
@@ -1791,7 +1791,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
             PassWork::ExposureMeter { scene, depth, glow } => {
                 let depth = depth.map(|r| ctx.image(r)).transpose()?;
                 let glow = glow.map(|r| ctx.image(r)).transpose()?;
-                let vision = self.renderer.map(|t| t.vision_buffer(ctx.slot));
+                let vision = self.renderer.map(|t| t.vision_handle());
                 exposure()?.record_meter(ctx, ctx.image(*scene)?, depth, glow, vision)?
             }
             PassWork::Readback { image, buffer } => {

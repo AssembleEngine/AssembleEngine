@@ -25,7 +25,6 @@
 #include "terrain_common.glsl"
 #include "photometry.glsl"
 #include "terrain_shading.glsl"
-#define LIGHT_SET 1
 #include "lights.glsl"
 
 layout(location = 0) in vec3 inWorld;
