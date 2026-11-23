@@ -11,6 +11,12 @@
 //! checked by [`Bindless::index_2d`] and its siblings, so a stale handle
 //! draws the fallback and logs once instead of reading another resource's
 //! descriptor.
+//!
+//! Handles are owned: a module registers the ones it makes inside a group
+//! ([`Bindless::group`]) and gives them back when it is destroyed
+//! ([`Bindless::retire_group`]). Samplers are deduplicated by their create
+//! info and reference-counted, so passes that want the same filtering share
+//! one index and one object.
 
 use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -18,7 +24,7 @@ use crate::upload;
 use ae_framegraph::{BakedGraph, FrameGraph, ImageDesc, ResourceDesc, ResourceId};
 use anyhow::{Result, bail};
 use ash::vk;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub const SAMPLED_IMAGE_CAPACITY: u32 = 4096;
@@ -97,6 +103,67 @@ pub struct SamplerHandle {
 pub struct BufferHandle {
     pub index: u32,
     pub generation: u32,
+}
+
+/// A set of handles registered together and given back together: a module
+/// opens one around the handles it makes ([`Bindless::group`]) and retires
+/// it in its teardown ([`Bindless::retire_group`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GroupId(u32);
+
+/// The create info that makes two samplers the same. `p_next` is not part
+/// of it: every sampler the engine makes is a plain
+/// [`vk::SamplerCreateInfo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SamplerKey {
+    flags: vk::SamplerCreateFlags,
+    mag_filter: vk::Filter,
+    min_filter: vk::Filter,
+    mipmap_mode: vk::SamplerMipmapMode,
+    address_u: vk::SamplerAddressMode,
+    address_v: vk::SamplerAddressMode,
+    address_w: vk::SamplerAddressMode,
+    mip_lod_bias: u32,
+    anisotropy: vk::Bool32,
+    max_anisotropy: u32,
+    compare: vk::Bool32,
+    compare_op: vk::CompareOp,
+    min_lod: u32,
+    max_lod: u32,
+    border_color: vk::BorderColor,
+    unnormalized: vk::Bool32,
+}
+
+impl SamplerKey {
+    fn new(info: &vk::SamplerCreateInfo<'_>) -> Self {
+        Self {
+            flags: info.flags,
+            mag_filter: info.mag_filter,
+            min_filter: info.min_filter,
+            mipmap_mode: info.mipmap_mode,
+            address_u: info.address_mode_u,
+            address_v: info.address_mode_v,
+            address_w: info.address_mode_w,
+            mip_lod_bias: info.mip_lod_bias.to_bits(),
+            anisotropy: info.anisotropy_enable,
+            max_anisotropy: info.max_anisotropy.to_bits(),
+            compare: info.compare_enable,
+            compare_op: info.compare_op,
+            min_lod: info.min_lod.to_bits(),
+            max_lod: info.max_lod.to_bits(),
+            border_color: info.border_color,
+            unnormalized: info.unnormalized_coordinates,
+        }
+    }
+}
+
+/// One created sampler: the settings that deduplicate it, the object (owned
+/// by the registry) and how many handles hold it.
+#[derive(Clone, Copy, Debug)]
+struct SamplerEntry {
+    key: SamplerKey,
+    sampler: vk::Sampler,
+    refs: u32,
 }
 
 /// Live counts, binding order, for `ExecutorStats`.
@@ -311,6 +378,26 @@ impl Slab {
             .is_some_and(|entry| entry.live && entry.generation == generation)
     }
 
+    fn is_live(&self, index: u32) -> bool {
+        self.entries.get(index as usize).is_some_and(|entry| entry.live)
+    }
+
+    fn generation(&self, index: u32) -> u32 {
+        self.entries[index as usize].generation
+    }
+
+    /// Make a retiring index live again for a new owner (a sampler whose
+    /// settings are already in every slot's set). Its generation advances,
+    /// so handles of the previous owner stay stale.
+    fn revive(&mut self, index: u32) -> u32 {
+        let entry = &mut self.entries[index as usize];
+        debug_assert!(!entry.live, "reviving a live index");
+        entry.generation = entry.generation.wrapping_add(1).max(1);
+        entry.live = true;
+        self.live += 1;
+        entry.generation
+    }
+
     fn kind(&self, index: u32) -> u32 {
         self.entries.get(index as usize).map_or(u32::MAX, |entry| entry.kind)
     }
@@ -335,6 +422,12 @@ impl Retirements {
             *done = true;
         }
         self.slots.iter().all(|done| *done)
+    }
+
+    /// Whether any slot has applied the fallback yet. Until one has, the
+    /// retiring index still names its old resource in every slot's set.
+    fn any_flushed(&self) -> bool {
+        self.slots.iter().any(|done| *done)
     }
 }
 
@@ -364,6 +457,7 @@ enum Write {
 
 /// The global set, its fallbacks and the handle slabs.
 pub struct Bindless {
+    gpu: Arc<GpuDevice>,
     frames: usize,
     set_layout: vk::DescriptorSetLayout,
     /// The one pipeline layout every engine pass uses: the global set at 0
@@ -377,6 +471,14 @@ pub struct Bindless {
     storage_buffers: Slab,
     pending: Vec<Vec<Write>>,
     retiring: Vec<(usize, u32, Retirements)>,
+    /// The handles each open or finished [`GroupId`] owns.
+    groups: Vec<Vec<(u8, u32, u32)>>,
+    /// The groups currently being built; allocations go to the last one.
+    open_groups: Vec<u32>,
+    /// The created samplers by index (index 0 the fallback), and the
+    /// settings that deduplicate them.
+    sampler_objects: Vec<Option<SamplerEntry>>,
+    sampler_of: HashMap<SamplerKey, u32>,
     warned: HashSet<(u32, u32)>,
     fallback_images: Vec<OwnedImage>,
     fallback_storage: OwnedImage,
@@ -529,6 +631,7 @@ impl Bindless {
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
         let mut this = Self {
+            gpu: gpu.clone(),
             frames,
             set_layout,
             pipeline_layout,
@@ -540,6 +643,14 @@ impl Bindless {
             storage_buffers: Slab::new("storage buffer", 1, STORAGE_BUFFER_CAPACITY, 0),
             pending: (0..frames).map(|_| Vec::new()).collect(),
             retiring: Vec::new(),
+            groups: Vec::new(),
+            open_groups: Vec::new(),
+            sampler_objects: vec![Some(SamplerEntry {
+                key: SamplerKey::new(&sampler_info),
+                sampler,
+                refs: 1,
+            })],
+            sampler_of: HashMap::from([(SamplerKey::new(&sampler_info), 0)]),
             warned: HashSet::new(),
             fallback_images,
             fallback_storage,
@@ -604,6 +715,40 @@ impl Bindless {
         self.sets[slot]
     }
 
+    /// Build `make`'s handles as one group: every handle it registers
+    /// (directly or through a module it builds) is retired together by
+    /// [`Self::retire_group`]. Groups nest; a failure retires what was
+    /// made before the error, since nothing else can be using it.
+    pub fn group<R>(&mut self, make: impl FnOnce(&mut Self) -> Result<R>) -> Result<(R, GroupId)> {
+        let id = GroupId(self.groups.len() as u32);
+        self.groups.push(Vec::new());
+        self.open_groups.push(id.0);
+        let made = make(self);
+        debug_assert_eq!(self.open_groups.pop(), Some(id.0), "groups close in order");
+        match made {
+            Ok(value) => Ok((value, id)),
+            Err(err) => {
+                self.retire_group(id);
+                Err(err)
+            }
+        }
+    }
+
+    /// Retire every handle `group` registered. Handles retired already (or
+    /// reused by another owner since) are left alone.
+    pub fn retire_group(&mut self, group: GroupId) {
+        for (slab, index, generation) in std::mem::take(&mut self.groups[group.0 as usize]) {
+            self.retire_checked(slab as usize, index, generation);
+        }
+    }
+
+    /// Record a handle in the group being built, if any.
+    fn track(&mut self, slab: u8, index: u32, generation: u32) {
+        if let Some(&group) = self.open_groups.last() {
+            self.groups[group as usize].push((slab, index, generation));
+        }
+    }
+
     pub fn sampled_2d(&mut self, view: vk::ImageView, layout: vk::ImageLayout) -> Result<Sampled2D> {
         Ok(Sampled2D(self.register_sampled(view, layout, SampledKind::Image2D)?))
     }
@@ -628,18 +773,72 @@ impl Bindless {
     ) -> Result<ImageHandle> {
         let (index, generation) = self.sampled.alloc(kind as u32)?;
         self.queue_all(Write::Sampled { index, view, layout });
+        self.track(0, index, generation);
         Ok(ImageHandle { index, generation })
     }
 
-    pub fn sampler(&mut self, sampler: vk::Sampler) -> Result<SamplerHandle> {
+    /// A sampler for `info`, created once and shared: passes that ask for
+    /// the same settings get the same index, and the registry owns the
+    /// object. A retired index whose fallback no slot has applied yet is
+    /// reused for the same settings: every slot's descriptor still names
+    /// that sampler, so the new owner needs no write.
+    pub fn sampler(&mut self, info: &vk::SamplerCreateInfo<'_>) -> Result<SamplerHandle> {
+        let key = SamplerKey::new(info);
+        if let Some(&index) = self.sampler_of.get(&key)
+            && self.sampler_objects.get(index as usize).is_some_and(Option::is_some)
+        {
+            if self.samplers.is_live(index) {
+                if let Some(entry) = self.sampler_objects[index as usize].as_mut() {
+                    entry.refs += 1;
+                }
+                let generation = self.samplers.generation(index);
+                self.track(1, index, generation);
+                return Ok(SamplerHandle { index, generation });
+            }
+            let retiring = self
+                .retiring
+                .iter()
+                .position(|(slab, retiring, state)| *slab == 1 && *retiring == index && !state.any_flushed());
+            if let Some(at) = retiring {
+                self.retiring.remove(at);
+                for pending in &mut self.pending {
+                    pending.retain(|write| !matches!(write, Write::Sampler { index: i, .. } if *i == index));
+                }
+                if let Some(entry) = self.sampler_objects[index as usize].as_mut() {
+                    entry.refs = 1;
+                }
+                let generation = self.samplers.revive(index);
+                self.track(1, index, generation);
+                return Ok(SamplerHandle { index, generation });
+            }
+        }
+        let sampler = unsafe { self.gpu.device.create_sampler(info, None) }?;
         let (index, generation) = self.samplers.alloc(0)?;
+        if index as usize >= self.sampler_objects.len() {
+            self.sampler_objects.resize_with(index as usize + 1, || None);
+        }
+        self.sampler_objects[index as usize] = Some(SamplerEntry { key, sampler, refs: 1 });
+        self.sampler_of.insert(key, index);
         self.queue_all(Write::Sampler { index, sampler });
+        self.track(1, index, generation);
         Ok(SamplerHandle { index, generation })
+    }
+
+    /// The sampler object behind a handle (the fallback's if it is stale),
+    /// for a pass whose own layout still binds a combined image sampler.
+    pub fn sampler_object(&self, handle: SamplerHandle) -> vk::Sampler {
+        if self.samplers.resolve(handle.index, handle.generation)
+            && let Some(entry) = self.sampler_objects.get(handle.index as usize).and_then(|e| *e)
+        {
+            return entry.sampler;
+        }
+        self.sampler
     }
 
     pub fn storage_image(&mut self, view: vk::ImageView, layout: vk::ImageLayout) -> Result<StorageImageHandle> {
         let (index, generation) = self.storage_images.alloc(0)?;
         self.queue_all(Write::StorageImage { index, view, layout });
+        self.track(2, index, generation);
         Ok(StorageImageHandle { index, generation })
     }
 
@@ -651,6 +850,7 @@ impl Bindless {
             offset,
             size,
         });
+        self.track(3, index, generation);
         Ok(BufferHandle { index, generation })
     }
 
@@ -667,6 +867,7 @@ impl Bindless {
             view,
             layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         });
+        self.track(0, index, generation);
         Ok(Sampled2D(ImageHandle { index, generation }))
     }
 
@@ -690,6 +891,7 @@ impl Bindless {
             view: self.fallback_storage.view,
             layout: vk::ImageLayout::GENERAL,
         });
+        self.track(2, index, generation);
         Ok(StorageImageHandle { index, generation })
     }
 
@@ -734,6 +936,7 @@ impl Bindless {
             offset: 0,
             size: self.fallback_buffer.size,
         });
+        self.track(3, index, generation);
         Ok(BufferHandle { index, generation })
     }
 
@@ -927,27 +1130,46 @@ impl Bindless {
 
     /// Retire a sampled handle.
     pub fn retire_sampled(&mut self, handle: ImageHandle) {
-        if self.sampled.resolve(handle.index, handle.generation) {
-            self.retire(0, handle.index);
-        }
+        self.retire_checked(0, handle.index, handle.generation);
     }
 
     pub fn retire_sampler(&mut self, handle: SamplerHandle) {
-        if self.samplers.resolve(handle.index, handle.generation) {
-            self.retire(1, handle.index);
-        }
+        self.retire_checked(1, handle.index, handle.generation);
     }
 
     pub fn retire_storage_image(&mut self, handle: StorageImageHandle) {
-        if self.storage_images.resolve(handle.index, handle.generation) {
-            self.retire(2, handle.index);
-        }
+        self.retire_checked(2, handle.index, handle.generation);
     }
 
     pub fn retire_buffer(&mut self, handle: BufferHandle) {
-        if self.storage_buffers.resolve(handle.index, handle.generation) {
-            self.retire(3, handle.index);
+        self.retire_checked(3, handle.index, handle.generation);
+    }
+
+    /// Retire `index` if `generation` still owns it. A sampler index goes
+    /// only when its last holder gives it back; the others go at once.
+    fn retire_checked(&mut self, slab: usize, index: u32, generation: u32) {
+        let live = match slab {
+            0 => self.sampled.resolve(index, generation),
+            1 => self.samplers.resolve(index, generation),
+            2 => self.storage_images.resolve(index, generation),
+            _ => self.storage_buffers.resolve(index, generation),
+        };
+        if !live {
+            return;
         }
+        if slab == 1 {
+            let last = match self.sampler_objects.get_mut(index as usize).and_then(Option::as_mut) {
+                Some(entry) if entry.refs > 1 => {
+                    entry.refs -= 1;
+                    false
+                }
+                _ => true,
+            };
+            if !last {
+                return;
+            }
+        }
+        self.retire(slab, index);
     }
 
     fn retire(&mut self, slab: usize, index: u32) {
@@ -1014,7 +1236,16 @@ impl Bindless {
         for (slab, index) in freed {
             match slab {
                 0 => self.sampled.free(index),
-                1 => self.samplers.free(index),
+                1 => {
+                    // Every slot now names the fallback: the object can go.
+                    if let Some(entry) = self.sampler_objects.get_mut(index as usize).and_then(Option::take) {
+                        if self.sampler_of.get(&entry.key) == Some(&index) {
+                            self.sampler_of.remove(&entry.key);
+                        }
+                        unsafe { device.destroy_sampler(entry.sampler, None) };
+                    }
+                    self.samplers.free(index);
+                }
                 2 => self.storage_images.free(index),
                 _ => self.storage_buffers.free(index),
             }
@@ -1135,7 +1366,9 @@ impl Bindless {
             device.destroy_descriptor_pool(self.pool, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
-            device.destroy_sampler(self.sampler, None);
+            for entry in self.sampler_objects.drain(..).flatten() {
+                device.destroy_sampler(entry.sampler, None);
+            }
         }
         for image in &mut self.fallback_images {
             image.destroy(gpu);
@@ -1221,6 +1454,50 @@ mod tests {
         assert!(!slab.resolve(index, first), "the old generation is stale");
         assert!(slab.resolve(index, second));
         assert_eq!(slab.kind(index), SampledKind::Image2DArray as u32);
+    }
+
+    #[test]
+    fn a_revived_index_serves_the_new_owner_and_stales_the_old_one() {
+        let mut slab = Slab::new("sampler", 1, 8, 0);
+        let (index, first) = slab.alloc(0).unwrap();
+        assert!(slab.retire(index));
+        assert_eq!(slab.live, 1, "the fallback alone is live");
+        let second = slab.revive(index);
+        assert_ne!(second, first, "the new owner gets a new generation");
+        assert!(slab.resolve(index, second));
+        assert!(!slab.resolve(index, first), "the old owner's handle is stale");
+        assert_eq!(slab.live, 2);
+    }
+
+    #[test]
+    fn a_retirement_flushes_every_slot_once() {
+        let mut retirements = Retirements::new(3);
+        assert!(!retirements.any_flushed(), "nothing applied the fallback yet");
+        assert!(!retirements.flush(0));
+        assert!(retirements.any_flushed());
+        assert!(!retirements.flush(0), "a repeated flush of a slot is harmless");
+        assert!(!retirements.flush(1));
+        assert!(retirements.flush(2));
+    }
+
+    #[test]
+    fn sampler_keys_follow_the_create_info() {
+        let base = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::LINEAR);
+        assert_eq!(SamplerKey::new(&base), SamplerKey::new(&base));
+        assert_ne!(
+            SamplerKey::new(&base),
+            SamplerKey::new(&base.min_filter(vk::Filter::LINEAR))
+        );
+        // The app's linear sampler (max_lod 0) and the terrain's (all mips).
+        assert_ne!(
+            SamplerKey::new(&base),
+            SamplerKey::new(&base.max_lod(vk::LOD_CLAMP_NONE))
+        );
+        // A comparison sampler is not the same object as the plain one.
+        assert_ne!(
+            SamplerKey::new(&base),
+            SamplerKey::new(&base.compare_enable(true).compare_op(vk::CompareOp::GREATER_OR_EQUAL))
+        );
     }
 
     #[test]

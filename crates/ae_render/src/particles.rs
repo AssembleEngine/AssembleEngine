@@ -617,10 +617,8 @@ pub struct ParticleRenderer {
     feed: Arc<ParticleFeed>,
     shadows: bool,
     pipeline_layout: vk::PipelineLayout,
-    depth_sampler: vk::Sampler,
     /// Every particle's shape: a soft ball broken up by noise (mipmapped).
     puff: OwnedImage,
-    puff_sampler: vk::Sampler,
     spawn: vk::Pipeline,
     sim: vk::Pipeline,
     histogram: vk::Pipeline,
@@ -682,6 +680,8 @@ pub struct ParticleRenderer {
     reference_handles: [crate::bindless::BufferHandle; 3],
     packet_buffers: [crate::bindless::BufferHandle; 2],
     packet_storage: [crate::bindless::StorageImageHandle; 2],
+    /// The global-set handles, given back by [`Self::retire`].
+    group: Option<crate::bindless::GroupId>,
 }
 
 /// The OIT targets the half draws sample (table slots 2..6).
@@ -690,6 +690,33 @@ const HALF_TARGETS: usize = 5;
 impl ParticleRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
+        terrain: &TerrainRenderer,
+        lights: &crate::lights::LightRenderer,
+        setup: &ParticlesSetup,
+        working: crate::colorspace::WorkingSpace,
+        color_format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
+        let (mut this, group) = bindless.group(|bindless| {
+            Self::build(
+                gpu,
+                bindless,
+                terrain,
+                lights,
+                setup,
+                working,
+                color_format,
+                frames_in_flight,
+            )
+        })?;
+        this.group = Some(group);
+        Ok(this)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
         gpu: &GpuDevice,
         bindless: &mut crate::bindless::Bindless,
         terrain: &TerrainRenderer,
@@ -844,28 +871,18 @@ impl ParticleRenderer {
             vk::ImageViewType::TYPE_2D,
             "particle puff",
         )?;
-        let puff_sampler = unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
-                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .max_lod(vk::LOD_CLAMP_NONE)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-                None,
-            )?
-        };
-        let depth_sampler = unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::NEAREST)
-                    .min_filter(vk::Filter::NEAREST)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-                None,
-            )?
-        };
+        let puff_sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .max_lod(vk::LOD_CLAMP_NONE)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        let depth_sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE);
 
         let puff_index = bindless
             .sampled_2d(puff.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
@@ -875,8 +892,8 @@ impl ParticleRenderer {
         push.image(7, terrain.sun_shadow_index());
         push.image(8, terrain.height_index());
         push.image(9, puff_index);
-        push.sampler(0, bindless.sampler(depth_sampler)?.index);
-        push.sampler(1, bindless.sampler(puff_sampler)?.index);
+        push.sampler(0, bindless.sampler(&depth_sampler_info)?.index);
+        push.sampler(1, bindless.sampler(&puff_sampler_info)?.index);
         push.sampler(2, terrain.linear_sampler_index());
         let half_handles = (0..3 + HALF_TARGETS)
             .map(|_| bindless.slotted_2d())
@@ -1139,9 +1156,7 @@ impl ParticleRenderer {
             feed: setup.feed.clone(),
             shadows: terrain.has_shadows(),
             pipeline_layout,
-            depth_sampler,
             puff,
-            puff_sampler,
             spawn,
             sim,
             histogram,
@@ -1181,7 +1196,16 @@ impl ParticleRenderer {
             puff_index,
             half_handles,
             packet_handles,
+            group: None,
         })
+    }
+
+    /// Give the global-set handles back; the device objects stay until
+    /// [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
+        }
     }
 
     /// `slot`'s half-resolution targets for a frame of `extent`, made or
@@ -2492,8 +2516,6 @@ impl ParticleRenderer {
             {
                 device.destroy_pipeline(p, None);
             }
-            device.destroy_sampler(self.depth_sampler, None);
-            device.destroy_sampler(self.puff_sampler, None);
         }
         for half in self.half.iter_mut().filter_map(Option::take) {
             half.destroy(gpu);

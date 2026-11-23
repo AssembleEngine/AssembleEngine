@@ -847,6 +847,51 @@ fn terrain_renders_offscreen() {
     assert_clean(&gpu);
 }
 
+/// A rebuild of the whole renderer gives its global-set handles back
+/// (M15): ten full rebuilds do not grow the registry's live counts, which
+/// would otherwise exhaust the 64 samplers after about five.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn rebuilding_the_renderer_does_not_leak_handles() {
+    use ae_render::thread::{Headless, RenderApp, TargetInfo};
+
+    let gpu = gpu();
+    let mut app = scene_app(&gpu, None);
+    let target = TargetInfo {
+        extent: SCENE_EXTENT,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
+    let mut headless = Headless::new(&gpu, &mut app, target, config).unwrap();
+    // A running scene first: the baseline counts the graph's own handles.
+    headless.frames(&mut app, 4).unwrap();
+    let baseline = headless.stats().bindless_live;
+    for rebuild in 0..10 {
+        headless.wait().unwrap();
+        // A rebuild of the whole renderer, as the client does when the
+        // frames in flight change: every module is destroyed and created
+        // again (the offscreen output stays).
+        RenderApp::create(&mut app, &gpu, headless.bindless_mut(), target, 2).unwrap();
+        // Every module's images are new objects under reused identities.
+        headless.forget_external_states();
+        headless.frames(&mut app, 2).unwrap();
+        let live = headless.stats().bindless_live;
+        assert_eq!(
+            live, baseline,
+            "rebuild {rebuild} leaked handles: {live:?}, baseline {baseline:?}"
+        );
+    }
+    headless.wait().unwrap();
+    RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}
+
 /// Units over the terrain: an instance stream of four units, reset + cull +
 /// indirect draw after the terrain draw into the same target and depth
 /// buffer. The cull passes three (the fourth is behind the camera: the
@@ -2957,9 +3002,10 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
     let sampler_info = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST);
-    let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
+    let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
+    let sampler = executor.bindless().sampler_object(sampler_handle);
     let program = FullscreenProgram::new(gpu, "grade", grade, 32, 1, &[DISPLAY_FORMAT], 2).unwrap();
-    let sampler_index = executor.bindless_mut().sampler(sampler).unwrap().index;
+    let sampler_index = sampler_handle.index;
     let encode = Encode::new(gpu, executor.bindless(), OutputEncoding::Hdr10Pq, format, 2).unwrap();
     let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]
         .iter()
@@ -2997,7 +3043,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
     }
     paint.program.destroy(gpu);
     paint.encode.destroy(gpu);
-    unsafe { gpu.device.destroy_sampler(sampler, None) };
     image.destroy(gpu);
     graded_image.destroy(gpu);
     out.destroy(gpu);
@@ -10119,8 +10164,7 @@ fn encode_values(
     let sampler_info = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST);
-    let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
-    let sampler_index = executor.bindless_mut().sampler(sampler).unwrap().index;
+    let sampler_index = executor.bindless_mut().sampler(&sampler_info).unwrap().index;
     let encode = Encode::new(gpu, executor.bindless(), encoding, format, 2).unwrap();
     let mut paint = Paint {
         display,
@@ -10152,7 +10196,6 @@ fn encode_values(
         frames.push(readback.mapped().unwrap().to_vec());
     }
     paint.encode.destroy(gpu);
-    unsafe { gpu.device.destroy_sampler(sampler, None) };
     image.destroy(gpu);
     out.destroy(gpu);
     readback.destroy(gpu);

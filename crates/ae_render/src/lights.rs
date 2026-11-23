@@ -355,10 +355,18 @@ pub struct LightRenderer {
     slices: u32,
     /// Every light at every pixel, no culls ([`Self::set_unculled`]).
     unculled: bool,
+    /// The global-set handles, given back by [`Self::retire`].
+    group: Option<crate::bindless::GroupId>,
 }
 
 impl LightRenderer {
     pub fn new(gpu: &GpuDevice, bindless: &mut crate::bindless::Bindless, frames_in_flight: usize) -> Result<Self> {
+        let (mut this, group) = bindless.group(|bindless| Self::build(gpu, bindless, frames_in_flight))?;
+        this.group = Some(group);
+        Ok(this)
+    }
+
+    fn build(gpu: &GpuDevice, bindless: &mut crate::bindless::Bindless, frames_in_flight: usize) -> Result<Self> {
         let device = &gpu.device;
         let mut ubos = Vec::new();
         let mut staging = Vec::new();
@@ -454,7 +462,16 @@ impl LightRenderer {
             stats: LightStats::default(),
             slices: slices_from_env(),
             unculled: false,
+            group: None,
         })
+    }
+
+    /// Give the global-set handles back; the device objects stay until
+    /// [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
+        }
     }
 
     /// Light every pixel and particle by every light, skipping the culls:

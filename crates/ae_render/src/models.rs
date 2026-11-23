@@ -175,7 +175,6 @@ pub struct ModelSet {
     pub class_light_table: OwnedBuffer,
     pub model_light_table: OwnedBuffer,
     images: Vec<OwnedImage>,
-    samplers: Vec<vk::Sampler>,
     pub classes: Vec<ModelClass>,
     /// Every command, opaque ones first.
     pub draws: Vec<Draw>,
@@ -352,28 +351,21 @@ pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4]
     [bone_base, model.bones.len() as u32, joint_base, head as u32]
 }
 
-/// Images and samplers made so far, destroyed if building fails.
+/// Images made so far, destroyed if building fails. Samplers are the
+/// registry's: it deduplicates them by their settings (M15).
 struct Textures<'a> {
     gpu: &'a GpuDevice,
     bindless: &'a mut Bindless,
     images: Vec<OwnedImage>,
     /// The global sampled index of each image.
     image_indices: Vec<u32>,
-    /// Deduplicated glTF sampler state and its global sampler index.
-    samplers: Vec<(Sampler, vk::Sampler, u32)>,
     /// (unique model, texture) → image.
     image_of: Vec<(usize, u32, usize)>,
 }
 
 impl Textures<'_> {
     fn sampler(&mut self, s: &Sampler) -> Result<u32> {
-        if let Some((_, _, index)) = self.samplers.iter().find(|(k, _, _)| k == s) {
-            return Ok(*index);
-        }
-        let sampler = unsafe { self.gpu.device.create_sampler(&sampler_info(s), None) }?;
-        let index = self.bindless.sampler(sampler)?.index;
-        self.samplers.push((*s, sampler, index));
-        Ok(index)
+        Ok(self.bindless.sampler(&sampler_info(s))?.index)
     }
 
     /// The descriptor slot (from 1) of `r`, the UV set and the transform.
@@ -435,9 +427,6 @@ impl Textures<'_> {
     fn destroy(&mut self) {
         for image in &mut self.images {
             image.destroy(self.gpu);
-        }
-        for (_, s, _) in self.samplers.drain(..) {
-            unsafe { self.gpu.device.destroy_sampler(s, None) };
         }
     }
 }
@@ -527,7 +516,6 @@ impl ModelSet {
             bindless,
             images: Vec::new(),
             image_indices: Vec::new(),
-            samplers: Vec::new(),
             image_of: Vec::new(),
         };
         match Self::build(gpu, models, rigs, capacity, max_classes, &mut tex) {
@@ -824,7 +812,6 @@ impl ModelSet {
             class_light_table,
             model_light_table,
             images: std::mem::take(&mut tex.images),
-            samplers: tex.samplers.drain(..).map(|(_, s, _)| s).collect(),
             classes,
             draws,
             opaque,
@@ -861,10 +848,6 @@ impl ModelSet {
         for image in &mut self.images {
             image.destroy(gpu);
         }
-        for &s in &self.samplers {
-            unsafe { gpu.device.destroy_sampler(s, None) };
-        }
-        self.samplers.clear();
         for b in [
             &mut self.geometry,
             &mut self.materials,

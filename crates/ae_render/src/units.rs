@@ -485,6 +485,8 @@ pub struct UnitRenderer {
     indirect: OwnedBuffer,
     /// Per slot: a host copy of `indirect` after the draw.
     counts: Vec<OwnedBuffer>,
+    /// The global-set handles, given back by [`Self::retire`].
+    group: Option<crate::bindless::GroupId>,
 }
 
 impl Models {
@@ -563,6 +565,35 @@ impl UnitRenderer {
     /// depth buffer.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
+        terrain: &TerrainRenderer,
+        lights: &crate::lights::LightRenderer,
+        setup: &UnitsSetup,
+        working: crate::colorspace::WorkingSpace,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
+        let (mut this, group) = bindless.group(|bindless| {
+            Self::build(
+                gpu,
+                bindless,
+                terrain,
+                lights,
+                setup,
+                working,
+                color_format,
+                depth_format,
+                frames_in_flight,
+            )
+        })?;
+        this.group = Some(group);
+        Ok(this)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
         gpu: &GpuDevice,
         bindless: &mut crate::bindless::Bindless,
         terrain: &TerrainRenderer,
@@ -793,7 +824,16 @@ impl UnitRenderer {
             visible,
             indirect,
             counts,
+            group: None,
         })
+    }
+
+    /// Give the global-set handles back (the models' too); the device
+    /// objects stay until [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
+        }
     }
 
     /// The model side: per-slot buffers and the pipelines.

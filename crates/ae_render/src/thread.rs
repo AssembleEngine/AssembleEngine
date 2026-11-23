@@ -621,6 +621,19 @@ impl<P: Sync> Headless<P> {
         self.executor.stats()
     }
 
+    /// The global descriptor set's registry, for an app rebuild between
+    /// frames ([`RenderApp::retarget`]).
+    pub fn bindless_mut(&mut self) -> &mut crate::bindless::Bindless {
+        self.executor.bindless_mut()
+    }
+
+    /// The app replaced the objects it binds as externals: forget their
+    /// last layouts, as the render thread does after a `retarget` that
+    /// returned `true`.
+    pub fn forget_external_states(&mut self) {
+        self.executor.forget_external_states();
+    }
+
     /// See [`Executor::take_gpu_frames`].
     pub fn take_gpu_frames(&mut self) -> Vec<Vec<f32>> {
         self.executor.take_gpu_frames()

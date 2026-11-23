@@ -929,6 +929,9 @@ impl RenderApp for TerrainApp {
         target: TargetInfo,
         frames_in_flight: usize,
     ) -> Result<()> {
+        // A rebuild gives the previous build's global-set handles back
+        // before their device objects go (M15).
+        self.retire_handles(bindless);
         if let Some(mut old) = self.tonemap.take() {
             old.destroy(gpu);
         }
@@ -955,18 +958,17 @@ impl RenderApp for TerrainApp {
         }
         self.gpu = Some(gpu.clone());
         self.frames_in_flight = frames_in_flight;
-        if self.sampler == vk::Sampler::null() {
-            let info = vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-            self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
-        }
-        if self.sampler_handle.is_none() {
-            self.sampler_handle = Some(bindless.sampler(self.sampler)?);
-        }
+        // The module programs' own sets still bind a combined image
+        // sampler; the registry owns the object and deduplicates it.
+        let info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        let handle = bindless.sampler(&info)?;
+        self.sampler = bindless.sampler_object(handle);
+        self.sampler_handle = Some(handle);
         self.create_output(gpu, bindless, target, frames_in_flight)?;
         self.bloom = Some(Bloom::new(gpu, bindless, frames_in_flight).context("bloom")?);
         self.exposure = Some(Exposure::new(gpu, bindless, frames_in_flight).context("exposure")?);
@@ -1489,6 +1491,7 @@ impl RenderApp for TerrainApp {
     ) -> Result<bool> {
         if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight
         {
+            self.retire_handles(bindless);
             self.destroy(gpu);
             self.create(gpu, bindless, target, frames_in_flight)?;
             return Ok(true);
@@ -1504,10 +1507,9 @@ impl RenderApp for TerrainApp {
 
     fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
         self.destroy_module_programs(gpu);
-        if self.sampler != vk::Sampler::null() {
-            unsafe { gpu.device.destroy_sampler(self.sampler, None) };
-            self.sampler = vk::Sampler::null();
-        }
+        // The registry owns the sampler object; this is only the handle
+        // recording passes use.
+        self.sampler = vk::Sampler::null();
         if let Some(mut tonemap) = self.tonemap.take() {
             tonemap.destroy(gpu);
         }
@@ -1540,6 +1542,30 @@ impl RenderApp for TerrainApp {
 }
 
 impl TerrainApp {
+    /// Give every module's global-set handles back (the previous build's).
+    /// The device objects are destroyed right after; the registry outlives
+    /// them.
+    fn retire_handles(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(handle) = self.sampler_handle.take() {
+            bindless.retire_sampler(handle);
+        }
+        if let Some(old) = self.exposure.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.particle_renderer.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.unit_renderer.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.renderer.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.lights.as_mut() {
+            old.retire(bindless);
+        }
+    }
+
     /// The objects that depend on the output (format, colour space) pair:
     /// the encoding, its levels, the tonemap and `post.encode`.
     fn create_output(

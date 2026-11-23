@@ -6,6 +6,10 @@
 //! Everything else reads the global set (`src/bindless.rs`,
 //! `shaders/bindless.glsl`) at set 0.
 //!
+//! Samplers are the registry's too: `Bindless::sampler` creates one per
+//! distinct create info and shares it, so no other source creates or
+//! destroys a sampler (the mip generator's own, in `upload.rs`, stays).
+//!
 //! Still on their own sets, until the step that moves them:
 //! - `fullscreen.rs`: the module `FullscreenProgram` (the render-module
 //!   contract, step F) and the engine `BindlessProgram`'s uniform block at
@@ -67,6 +71,9 @@ fn only_the_global_set_outside_the_exceptions() {
             // One shared pipeline layout (`Bindless::pipeline_layout`).
             "pipeline::pipeline_layout(",
             "create_pipeline_layout",
+            // One sampler object per distinct create info.
+            "create_sampler",
+            "destroy_sampler",
         ] {
             if text.contains(needle) {
                 found.push(format!("{}: {needle}", path.display()));

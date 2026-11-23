@@ -254,7 +254,6 @@ mod gpu {
     /// demo's sampler index and binds the executor's set 0.
     pub struct DemoRenderer {
         gpu: Arc<GpuDevice>,
-        sampler: vk::Sampler,
         sampler_index: u32,
         layout: vk::PipelineLayout,
         triangle: vk::Pipeline,
@@ -276,8 +275,7 @@ mod gpu {
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-            let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
-            let sampler_index = bindless.sampler(sampler)?.index;
+            let sampler_index = bindless.sampler(&sampler_info)?.index;
             let layout = bindless.pipeline_layout();
             let triangle = pipeline::graphics_pipeline(
                 device,
@@ -308,7 +306,6 @@ mod gpu {
             )?;
             Ok(Self {
                 gpu,
-                sampler,
                 sampler_index,
                 layout,
                 triangle,
@@ -525,7 +522,6 @@ mod gpu {
                 device.destroy_pipeline(self.triangle, None);
                 device.destroy_pipeline(self.filter, None);
                 device.destroy_pipeline(self.composite, None);
-                device.destroy_sampler(self.sampler, None);
             }
         }
     }

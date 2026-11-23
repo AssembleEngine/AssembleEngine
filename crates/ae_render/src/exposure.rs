@@ -120,15 +120,22 @@ pub struct Exposure {
     /// as a storage image (exposure_meter.comp, exposure_adapt.comp).
     table: crate::bindless::HandleTable,
     layout: vk::PipelineLayout,
-    sampler: vk::Sampler,
     sampler_index: u32,
     sampled: Sampled2D,
     meter: vk::Pipeline,
     adapt: vk::Pipeline,
+    /// The global-set handles, given back by [`Self::retire`].
+    group: Option<crate::bindless::GroupId>,
 }
 
 impl Exposure {
     pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, frames_in_flight: usize) -> Result<Self> {
+        let (mut this, group) = bindless.group(|bindless| Self::build(gpu, bindless, frames_in_flight))?;
+        this.group = Some(group);
+        Ok(this)
+    }
+
+    fn build(gpu: &GpuDevice, bindless: &mut Bindless, frames_in_flight: usize) -> Result<Self> {
         let device = &gpu.device;
         let image_desc = ImageDesc::color_2d(
             vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32),
@@ -160,17 +167,12 @@ impl Exposure {
             )?);
         }
         let layout = bindless.pipeline_layout();
-        let sampler = unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-                None,
-            )?
-        };
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let handles = [
             bindless.per_slot_buffer(&ubos)?.index,
             bindless.whole_buffer(&histogram)?.index,
@@ -181,7 +183,7 @@ impl Exposure {
             .context("exposure meter pipeline")?;
         let adapt = pipeline::compute_pipeline(device, spirv!("exposure_adapt.comp"), layout)
             .context("exposure adapt pipeline")?;
-        let sampler_index = bindless.sampler(sampler)?.index;
+        let sampler_index = bindless.sampler(&sampler_info)?.index;
         let sampled = bindless.sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         Ok(Self {
             image,
@@ -189,12 +191,20 @@ impl Exposure {
             ubos,
             table,
             layout,
-            sampler,
             sampler_index,
             sampled,
             meter,
             adapt,
+            group: None,
         })
+    }
+
+    /// Give the global-set handles back; the device objects stay until
+    /// [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
+        }
     }
 
     /// The exposure image as the graph binds it.
@@ -360,7 +370,6 @@ impl Exposure {
             for pipeline in [self.meter, self.adapt] {
                 device.destroy_pipeline(pipeline, None);
             }
-            device.destroy_sampler(self.sampler, None);
         }
         self.image.destroy(gpu);
         self.histogram.destroy(gpu);

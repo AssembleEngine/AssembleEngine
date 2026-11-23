@@ -277,12 +277,12 @@ pub struct TerrainRenderer {
     /// 16 bytes without a vision grid).
     vision_bufs: Vec<OwnedBuffer>,
     vision: Option<VisionGrid>,
-    /// Nearest clamp, linear clamp, trilinear repeat (tilesets).
-    samplers: [vk::Sampler; 3],
     /// The global sampled indices of the items drawn above, and the pass's
     /// 128-byte push block (terrain.frag/water.frag macros name them).
     sampled: [u32; 12],
     push: crate::bindless::Push,
+    /// The global-set handles, given back by [`Self::retire`].
+    group: Option<crate::bindless::GroupId>,
 }
 
 /// Texels to rewrite after the terrain changed (see
@@ -327,8 +327,51 @@ fn slice_bytes<T: Copy>(values: &[T]) -> &[u8] {
 }
 
 impl TerrainRenderer {
+    /// The renderer and the shadow map it owns, as one group of global-set
+    /// handles: [`Self::retire`] gives them back.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
+        heightmap: &Heightmap,
+        pyramid: &Pyramid,
+        info: TerrainInfo,
+        materials: Option<&[u8]>,
+        tileset: Option<&Tileset>,
+        vision: Option<VisionGrid>,
+        shadows: Option<&[f32]>,
+        unit_shadows: bool,
+        decals: Option<(&DecalAtlas, u32)>,
+        lights: &crate::lights::LightRenderer,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
+        let (mut this, group) = bindless.group(|bindless| {
+            Self::build(
+                gpu,
+                bindless,
+                heightmap,
+                pyramid,
+                info,
+                materials,
+                tileset,
+                vision,
+                shadows,
+                unit_shadows,
+                decals,
+                lights,
+                color_format,
+                depth_format,
+                frames_in_flight,
+            )
+        })?;
+        this.group = Some(group);
+        Ok(this)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
         gpu: &GpuDevice,
         bindless: &mut crate::bindless::Bindless,
         heightmap: &Heightmap,
@@ -649,36 +692,27 @@ impl TerrainRenderer {
             "tileset table",
         )?;
 
-        let make_sampler = |filter: vk::Filter| unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(filter)
-                    .min_filter(filter)
-                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .max_lod(vk::LOD_CLAMP_NONE),
-                None,
-            )
+        let make_sampler = |filter: vk::Filter| {
+            vk::SamplerCreateInfo::default()
+                .mag_filter(filter)
+                .min_filter(filter)
+                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .max_lod(vk::LOD_CLAMP_NONE)
         };
-        let repeat = unsafe {
-            device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
-                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                    .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .max_lod(vk::LOD_CLAMP_NONE),
-                None,
-            )
-        }?;
         let samplers = [
-            make_sampler(vk::Filter::NEAREST)?,
-            make_sampler(vk::Filter::LINEAR)?,
-            repeat,
+            make_sampler(vk::Filter::NEAREST),
+            make_sampler(vk::Filter::LINEAR),
+            vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .max_lod(vk::LOD_CLAMP_NONE),
         ];
         let sampled = [
             bindless
@@ -728,9 +762,9 @@ impl TerrainRenderer {
         for (at, &index) in sampled.iter().enumerate() {
             push.image(at, index);
         }
-        push.sampler(0, bindless.sampler(samplers[0])?.index);
-        push.sampler(1, bindless.sampler(samplers[1])?.index);
-        push.sampler(2, bindless.sampler(samplers[2])?.index);
+        push.sampler(0, bindless.sampler(&samplers[0])?.index);
+        push.sampler(1, bindless.sampler(&samplers[1])?.index);
+        push.sampler(2, bindless.sampler(&samplers[2])?.index);
         push.sampler(3, unit_shadow_map.color_sampler_index());
         push.sampler(4, unit_shadow_map.sampler_index());
 
@@ -867,10 +901,18 @@ impl TerrainRenderer {
             decal_materials,
             vision_bufs,
             vision,
-            samplers,
             sampled,
             push,
+            group: None,
         })
+    }
+
+    /// Give the global-set handles back (the shadow map's too); the device
+    /// objects stay until [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
+        }
     }
 
     /// Rewrite the textures `update` covers. The device must be idle (no
@@ -892,21 +934,6 @@ impl TerrainRenderer {
                 (&self.shadow_img, shadows),
             ],
         )
-    }
-
-    /// The height texture (one corner per texel, normalised: world height =
-    /// sample × `height_scale` + `height_offset`) with its bilinear sampler,
-    /// for passes that place things on the ground. Lives as long as the
-    /// renderer.
-    pub fn height_texture(&self) -> (vk::ImageView, vk::Sampler) {
-        (self.height_img.view, self.samplers[1])
-    }
-
-    /// The shadow height texture ([`super::sun`]; world heights, one corner
-    /// per texel like [`Self::height_texture`]) with its bilinear sampler;
-    /// 1x1 when the renderer has no shadows. Lives as long as the renderer.
-    pub fn shadow_texture(&self) -> (vk::ImageView, vk::Sampler) {
-        (self.shadow_img.view, self.samplers[1])
     }
 
     /// The units' shadow map (the 1x1 stand-in unless made with
@@ -1317,9 +1344,6 @@ impl TerrainRenderer {
                 .chain(self.water)
             {
                 device.destroy_pipeline(p, None);
-            }
-            for s in self.samplers {
-                device.destroy_sampler(s, None);
             }
         }
         self.table.destroy(gpu);

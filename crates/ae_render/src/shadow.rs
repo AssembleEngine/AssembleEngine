@@ -68,9 +68,7 @@ pub fn color_format() -> vk::Format {
 /// sampler receivers read the map with and the linear one for the colour.
 pub struct ShadowMap {
     image: OwnedImage,
-    sampler: vk::Sampler,
     color: OwnedImage,
-    color_sampler: vk::Sampler,
     /// The global indices: both images, the comparison sampler and the
     /// colour sampler.
     sampled: Sampled2D,
@@ -137,17 +135,13 @@ impl ShadowMap {
             .compare_enable(true)
             .compare_op(vk::CompareOp::GREATER_OR_EQUAL)
             .max_lod(0.0);
-        let sampler = unsafe { gpu.device.create_sampler(&info, None) }?;
-        let color_sampler = unsafe { gpu.device.create_sampler(&info.compare_enable(false), None) }?;
         let sampled = bindless.sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         let color_sampled = bindless.sampled_2d(color.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
-        let sampler_index = bindless.sampler(sampler)?.index;
-        let color_sampler_index = bindless.sampler(color_sampler)?.index;
+        let sampler_index = bindless.sampler(&info)?.index;
+        let color_sampler_index = bindless.sampler(&info.compare_enable(false))?.index;
         Ok(Self {
             image,
-            sampler,
             color,
-            color_sampler,
             sampled,
             color_sampled,
             sampler_index,
@@ -159,17 +153,6 @@ impl ShadowMap {
     /// Whether this is the full map (else the 1x1 stand-in).
     pub fn is_real(&self) -> bool {
         self.real
-    }
-
-    /// View and comparison sampler, for `sampler2DShadow`.
-    pub fn texture(&self) -> (vk::ImageView, vk::Sampler) {
-        (self.image.view, self.sampler)
-    }
-
-    /// The coloured shadows' view and linear sampler (contents meaningful
-    /// only in a frame whose cascades are [`Cascades::tinted`]).
-    pub fn color_texture(&self) -> (vk::ImageView, vk::Sampler) {
-        (self.color.view, self.color_sampler)
     }
 
     pub fn sampled_index(&self) -> u32 {
@@ -217,10 +200,6 @@ impl ShadowMap {
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
-        unsafe {
-            gpu.device.destroy_sampler(self.sampler, None);
-            gpu.device.destroy_sampler(self.color_sampler, None);
-        }
         self.image.destroy(gpu);
         self.color.destroy(gpu);
     }
