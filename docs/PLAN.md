@@ -5306,8 +5306,9 @@ set at index 2 next to their old sets. How handles reach a shader:
   the same on its full path. `Bindless::sampler` now takes a `SamplerCreateInfo` instead of a
   created object: it creates one sampler per distinct create info, reference-counts the
   handles, owns the object, and destroys it when the last holder gives it back (after every
-  slot has flushed the fallback). A sampler retired and asked for again before any slot has
-  flushed is revived in place, since every slot's descriptor already names it. The app's and
+  slot has flushed the fallback). A sampler retired and asked for again while its object is
+  still alive (some slot has not flushed the fallback) is revived in place, and its object is
+  written to every slot again. The app's and
   the exposure's linear clamp sampler is the fallback's own create info, so both take index 0.
   `tests/bindless_only.rs` now also rejects `create_sampler`/`destroy_sampler` outside the
   registry (and `upload.rs`'s mip generator). New GPU test
@@ -5316,6 +5317,17 @@ set at index 2 next to their old sets. How handles reach a shader:
   images, storage buffers), where one rebuild used to add 13, 1 and 23; the scene registers
   seven samplers per build, and deduplication serves them with six indices. 61/61 captures
   identical to `c872490`, 60/60 GPU tests, validation and sync validation silent.
+
+  Review fix (2026-11-23, `984e620`). `retarget`'s full path called `destroy`, which tore down
+  tonemap, encode, bloom and the module's programs without a retire, so each full retarget
+  leaked their slotted buffers (8 storage buffers in the test scene); `retire_handles` now
+  retires them too. A revived sampler used to keep whatever its slots held, which was wrong
+  when `flush_open_slot` had already applied the fallback (it does not mark the retirement) or
+  when no frame had applied the sampler's own first write; the revive now rewrites the object
+  in every slot. The rebuild test also runs ten full retargets, live counts `[21, 6, 2, 32]`
+  after step F; without the fix the first retarget reaches 40 storage buffers. 61/61 captures
+  identical to the step E captures, 65/65 GPU tests, validation and sync validation silent
+  apart from the GPU-AV test's intended messages.
 
 **F. Module contract.**
 
