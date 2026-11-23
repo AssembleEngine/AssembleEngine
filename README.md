@@ -102,7 +102,7 @@ killed unit (`Dying`, excluded by `without(Dying)` from spatial queries and nav)
 script under a time cap. `games/duel` is the test game (walk, stop, run, a two-step aim while
 running, three shots that hit and kill the target, its death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
 
-M15 (bindless resources) is in progress, steps A–G built. The library passes read their images,
+M15 (bindless resources) is done. The library passes read their images,
 samplers, buffers and storage images from one global descriptor set per frame slot
 (`crates/ae_render/src/bindless.rs`, `shaders/bindless.glsl`):
 - Images and samplers come from a 128-byte push table.
@@ -120,7 +120,7 @@ reads the global set at 0: a program's std140 block, its sampled images and its 
 handles in a small per-program table, reached through a 16-byte push block. A contract-2 module
 may still use the old per-pass form for one version. `bench-diff` against the pre-M15 baseline
 (`335e770`): `gpu_total` is within +0.8% to +5.7%, and 2 of 749 metrics regress (a noisy water
-pass and the lights list at +10% on one scene). Details: [docs/PLAN.md](docs/PLAN.md)
+pass and the lights list at +10% on one scene), accepted as the cost of the global set. Details: [docs/PLAN.md](docs/PLAN.md)
 "M15 — design".
 
 | Crate | What it is | Origin |

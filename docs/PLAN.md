@@ -302,7 +302,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
 | **M17** Formatting + lints (done) | rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
-| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (done) · **M15** fully bindless resources (medium) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (done) · **M15** fully bindless resources (done) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M17 — Formatting, lints and the commit gate (done)
 
@@ -2629,7 +2629,7 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M16 (M11, M12, M13, M14 done)
+## Planned milestones M11–M16 (M11, M12, M13, M14, M15 done)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
@@ -4763,7 +4763,15 @@ change expected).
 - Still waiting for M9: save → load → continue with scripts suspended, a death sequence
   among them.
 
-### M15 — Fully bindless resources (priority: medium)
+### M15 — Fully bindless resources (done)
+
+**Done (2026-11-23).** Steps A–G are built: every engine pass and every fullscreen program reads
+one global descriptor set per frame slot, and `std140` blocks and the handle tables are uniform
+buffers in a uniform array sized from the device. The remaining GPU cost against the pre-M15
+baseline `335e770` (`gpu_total` +0.8% to +5.7%, the lights list +10% on `lights-200`; step G
+has the numbers and conditions) was accepted as the price of the global set. Open follow-ups
+are under TODO (the per-pass fullscreen form at contract version 4, the graph-name hash). The
+text below is the design as written before step A, with each step's record.
 
 Where the renderer is today: every pass's descriptor set layout is its shader's set/binding
 contract (`pipeline::set_layout`), image views are written into per-pass sets per frame slot,
@@ -4832,7 +4840,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–G built, B without library-owned externals)
+#### M15 — design (2026-11-22; done 2026-11-23, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
