@@ -4916,6 +4916,9 @@ is used.
      and `shaderStorageImageArrayDynamicIndexing`. These cover the push-constant and uniform
      indices. The NonUniform flags do not cover them, and the validation layer may not report
      their absence.
+   - the core `shaderUniformBufferArrayDynamicIndexing`, for the uniform array step G added
+     (decision 5). Its indices are push words and handle-table words, so no NonUniform flag is
+     needed for it. Whether Vulkan 1.3 makes it mandatory was not checked.
 
    Not verified: which of these Vulkan 1.3 makes mandatory. A fetch of the spec's "Feature
    Requirements" section failed. Step A reads it from the spec sources (`features.adoc`,
@@ -4967,13 +4970,20 @@ is used.
    nearly all of it: the tonemap 17.4 µs, the terrain 320 µs, the frame's `gpu_total` from
    +19–30% to +4.5–9%. Conditions: RTX 3060 Ti, 1280×720, the `ae-client --bench` scenes,
    `335e770` as the base (re-measured, it reproduces within 0.5%).
-   - Binding 4 is the uniform-block array (`UNIFORM_BUFFER`, capacity 64). The frame blocks, the
+   - Binding 4 is the uniform-block array (`UNIFORM_BUFFER`, sized from the device). The frame blocks, the
      tileset table, the exposure settings, the lights' frame block and the engine programs'
      blocks live there. `Bindless::uniform_buffer` and its whole/slotted/per-slot forms own them
      through the same groups and retirement as every other class, and the class appears in
      `ExecutorStats::bindless_live`.
-   - The capacity is checked against `maxPerStageDescriptorUniformBuffers` and
-     `maxDescriptorSetUniformBuffers` when the device is chosen, with an error naming the limit.
+   - The array's size is `bindless::uniform_buffer_capacity`: the smaller of
+     `maxPerStageDescriptorUniformBuffers`, `maxDescriptorSetUniformBuffers` and what
+     `maxPerStageResources` leaves after the fixed classes, capped at 1024
+     (`UNIFORM_BUFFER_MAX`). A device below 64 (`UNIFORM_BUFFER_MIN`) is refused at selection,
+     with an error naming the limit. The RTX 3060 Ti reports 1048576 for both limits and gets
+     1024. A fixed 64 was too few once the handle tables moved in: each fullscreen program holds
+     two entries, 22 are live with `render/post` loaded, and a rebuild keeps the old set until
+     the retired indices flush. `rebuilding_the_renderer_does_not_leak_handles` fills the array
+     to the device's size under a running scene.
    - Storage blocks (the leaf, pose and particle buffers, and the graph buffers the demo binds)
      stay at binding 3. A `std140` block written as `readonly buffer` is a storage buffer to the
      driver, and that is what cost the time. The handle tables are a `uvec4` block in the
