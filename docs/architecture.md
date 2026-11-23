@@ -632,7 +632,7 @@ Two rules keep this from tangling:
 | what is hashed / saved | `crates/ae_sim/src/digest.rs`, `schema.rs` |
 | what an observer may see | `crates/ae_view/src/lib.rs`, `ae_services/src/view.rs` |
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
-| a resource's descriptor or handle | `crates/ae_render/src/bindless.rs`, `executor.rs` (`Binding`) |
+| a resource's descriptor or handle | `crates/ae_render/src/bindless.rs`, `shaders/bindless.glsl` (the push table), `executor.rs` (`Binding`) |
 | how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
 | the working space, the gamut map and its compression | `crates/ae_render/src/colorspace.rs`, `encode.rs` |
 | the exposure and bloom tail (`post.tonemap`, no curve), the display intermediate and the encode | `crates/ae_render/src/tonemap.rs`, `encode.rs`, `library.rs` |

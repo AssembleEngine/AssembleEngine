@@ -4832,7 +4832,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–B built, B without library-owned externals)
+#### M15 — design (2026-11-22; steps A–C built, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
@@ -4934,6 +4934,11 @@ is used.
    The consequence: a handle registered after `begin_frame(k)`, such as a model loaded mid-frame,
    is not usable in frame k. `Bindless::index(h)` returns the fallback until the current slot has
    flushed it.
+
+   Amended in step C (2026-11-23): `Executor::execute` flushes the open slot's writes queued since
+   its `begin_frame` once more, before anything records. Between `begin_frame(k)` and the first
+   record, set k is still idle, so a handle registered in `prepare(k)`, or a slotted update for
+   slot k, is usable in frame k. A handle registered while frame k records is not.
 
    If a target vendor's limits without update-after-bind are below the capacities, the
    alternative is an `UPDATE_AFTER_BIND_POOL` layout with per-binding update-after-bind flags. It
@@ -5157,6 +5162,44 @@ set at index 2 next to their old sets. How handles reach a shader:
 - All samplers move into the sampler array.
 - Acceptance: `capture-diff` identical, validation and sync validation clean.
 
+  Built (2026-11-23, `29aeafc`). The terrain, water, CBT compute, units, models, post chain
+  (tonemap, bloom, encode), exposure and every particle pass read their sampled images and samplers
+  from the global set. Verified against `5635522`: all 61 GPU-test captures byte-identical
+  (`ae-tool capture-diff`), 59 of 59 GPU tests pass with the validation and sync validation layers
+  reporting nothing, and the workspace tests, `fmt --check` and clippy are clean.
+  - `bindless.glsl` declares the aliased `texture2D`/`texture2DArray`/`utexture2D` arrays at
+    binding 0 and `sampler` at binding 1. The push block is 128 bytes: eight pass words
+    (`words`, `words2`; a pass can name them with `AE_PUSH_WORDS`), 16 image slots and 8 sampler
+    slots. `AE_IMAGE(slot)`/`AE_SAMPLER(slot)` read a slot, which is dynamically uniform, so they
+    carry no `nonuniformEXT`. The `_AT` forms take an index already resolved, such as a material
+    record's, and mark it non-uniform.
+  - Shadow maps: `samplerShadow ae_samplers_shadow[]` aliases binding 1, and
+    `sampler2DShadow(texture2D, samplerShadow)` combines a depth image from binding 0 with the
+    comparison sampler (GL_KHR_vulkan_glsl: the comparison comes from the sampler). `glslc -Werror`
+    and `spirv-val` accept it. A first attempt added a combined `sampler2DShadow` binding, because
+    dynamic indexing of it seemed to return "lit". The cause was `unitShadowAt` passing a global
+    index where `AE_IMAGE` expected a slot, which looked the push table up twice and also broke
+    the particle tint. That binding was removed. Decision 3 holds: no combined bindings.
+  - The units' shadow map is a sampled index plus the comparison sampler, in sampler slot 4 of the
+    terrain's and the units' tables.
+  - Models: the 1024-entry `textures[]` is gone, and so is `models::MAX_TEXTURES`. `GpuMaterial`
+    (320 bytes) carries global image indices and one global sampler per texture.
+  - Particles: their layouts put the global set at 3, after set 0, set 1 and the lights at set 2,
+    with empty layouts where a pass has none. Every particle layout has the same 128-byte push range
+    in every stage, so the block stays valid across layouts. Each bind site binds the global set
+    again. Table slots follow the old bindings: 0–6 for set 1's images, 7 the hills' shadows,
+    8 the heights, 9 the puff.
+  - Per-slot targets (half colour/depth/glow, OIT targets, packet colour/glow) use the new
+    slotted handles (`Bindless::slotted_2d`, `update_slotted_2d`, also for storage images and
+    buffers). Each slotted handle is one index whose descriptor differs per slot. A slot's set
+    never points at another slot's image, which that slot may destroy on a resize while this one is
+    in flight.
+  - The per-frame image writes in `record_draw` and `record_meter` are gone. Still written while
+    recording: exposure's vision buffer (step D) and the module `FullscreenProgram` (step F).
+  - Differences from the design: the set-0 and set-1 sampled bindings of the particles stay in
+    their layouts, unwritten and unused by the shaders, until step D removes those sets.
+  - The step B unit test pinning descriptor layouts against `barriers.rs` is still not built.
+
 **D. Buffers, storage images, uniform blocks.**
 
 - Terrain SSBOs 1–5, 13, 17 and 21, and UBOs 0 and 12 (as std140 buffer blocks).
@@ -5352,6 +5395,11 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ## TODO (open, not a priority now)
 
+- M15: retire bindless handles when their owner is destroyed. Terrain, units, models, shadows,
+  particles, exposure and the post passes register at creation and never retire, so each
+  `RenderApp::create`/`retarget` that rebuilds them leaks indices (4,096 sampled, 64 samplers),
+  and the old entries keep pointing at destroyed views. Those views are not read, but the slots
+  are never freed.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
