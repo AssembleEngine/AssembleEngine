@@ -17,7 +17,7 @@
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Tonemap {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Tonemap {
     vec4 params;   // x: bloom strength, y: 1 when the graph has a bloom,
                    // z: 1 when it has the exposure image, w: the EV100 the
                    // scene was stored at

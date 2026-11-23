@@ -6,15 +6,17 @@
 // includes `program.glsl` after this file instead of declaring its own set:
 // its block and sampled images are reached through its handle table.
 //
-// The four arrays are one binding each. Sampled images and separate
-// samplers are combined at the use site, so a handle cannot carry a sampler
-// and a sampler cannot carry an image. All sampled declarations alias
-// binding 0; the CPU handle is typed, and only an index reaches the GPU.
+// The arrays are one binding each: sampled images at 0 (all their types
+// alias it), samplers at 1, storage images at 2, storage buffers at 3 and
+// uniform blocks at 4. Sampled images and separate samplers are combined at
+// the use site, so a handle cannot carry a sampler and a sampler cannot
+// carry an image. The CPU handle is typed, and only an index reaches the
+// GPU.
 //
-// `ae.images` and `ae.samplers` are the pass's handle table, a 128-byte push
-// block: `words` carries the pass's own push words (the terrain's LOD mode,
-// the units' cascade, ...) and `words2`, then 16 image indices and 8
-// sampler indices.
+// `ae.images` and `ae.samplers` are the pass's sampled and sampler slots in
+// a 128-byte push block: `words` carries the pass's own push words (the
+// terrain's LOD mode, the units' cascade, ...) and `words2`, then 16 image
+// indices and 8 sampler indices.
 //
 // `AE_IMAGE(slot)` / `AE_SAMPLER(slot)` read a slot of that table and give
 // the global index; the push block is dynamically uniform, so they carry no
@@ -56,14 +58,20 @@ layout(push_constant) uniform AePush {
 } ae;
 #endif
 
-// Buffers (binding 3): a pass declares each block as an array aliasing
-// binding 3, std430 for storage blocks and std140 for former uniform
-// blocks (their offsets unchanged), and reaches it through its handle
-// table: `AE_BUF(k)` is the k-th global index in the pass's table, whose
-// own index is push word 8 (`AE_TABLE`). A pass that names its push words
-// names the eighth `aeTable` and defines AE_TABLE as `ae.aeTable`; a
-// fullscreen program gets it from `program.glsl`.
+// Buffers (binding 3): a pass declares each storage block as an array
+// aliasing binding 3 and reaches it through its handle table: `AE_BUF(k)`
+// is the k-th global index in the pass's table, whose own index is push
+// word 8 (`AE_TABLE`). A pass that names its push words names the eighth
+// `aeTable` and defines AE_TABLE as `ae.aeTable`; a fullscreen program gets
+// it from `program.glsl`.
+//
+// `std140` blocks that were `uniform` buffers keep binding 4 (M15 G): a
+// storage buffer costs noticeably more per access on some drivers. A pass
+// declares them as `layout(std140, set = AE_BINDLESS_SET, binding =
+// AE_UNIFORM_BLOCKS) uniform Name { ... } ae_Name[];` and indexes with the
+// same `AE_BUF(k)` handle.
 #define AE_BUFFERS 3
+#define AE_UNIFORM_BLOCKS 4
 #define AE_STORAGE_IMAGES 2
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer AeTable { uint aeHandle[]; } ae_tables[];
 #if AE_DECLARE_PUSH

@@ -26,7 +26,7 @@ vec3 hue(float h) {
 
 #define tileAlbedo AE_S2D_ARRAY(4, 2) // rgb albedo, a height
 #define tileNormal AE_S2D_ARRAY(5, 2) // rg tangent-space normal
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer TilesetUBO {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
                         // triplanar, bit 1 directional), w unused

@@ -160,7 +160,7 @@ impl Exposure {
                 gpu,
                 BufferDesc {
                     size: size_of::<Settings>() as u64,
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 },
                 MemoryLocation::CpuToGpu,
                 &format!("exposure settings {slot}"),
@@ -174,7 +174,7 @@ impl Exposure {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let handles = [
-            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_uniform_buffer(&ubos)?.index,
             bindless.whole_buffer(&histogram)?.index,
             bindless.storage_image(image.view, vk::ImageLayout::GENERAL)?.index,
         ];

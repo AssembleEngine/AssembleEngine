@@ -10,7 +10,7 @@
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 #include "bindless.glsl"
 
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Exposure {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Exposure {
     vec4 params;  // x: scene EV100, y: dt, z: min EV100, w: max EV100
     vec4 rates;   // x: 1 when auto, y: the key luminance, z: toward a brighter scene, w: toward a darker one (1/s)
     vec4 trim;    // x: low percentile, y: high percentile, z: bins

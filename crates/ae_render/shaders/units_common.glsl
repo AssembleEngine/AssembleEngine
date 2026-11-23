@@ -30,7 +30,7 @@
 // visible list, the indirect, the lights (AE_LIGHT_BASE 4), then the
 // models' (units_models.glsl).
 #define AE_LIGHT_BASE 4
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame {
     mat4 viewProj;
     vec4 camPos;      // xyz eye; w = pixels per world unit at distance 1
     vec4 frustum[6];  // normalised planes, inside >= 0

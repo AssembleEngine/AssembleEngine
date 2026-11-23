@@ -60,12 +60,14 @@
 //!   `Sampled` intent, in intent order.
 //! * **Bindless** (contract version 3): only the global set. Binding 0 is
 //!   `texture2D images[]`, binding 1 `sampler samplers[]`, binding 3 the
-//!   storage buffers: a `std140` block per program and the program's handle
-//!   table (`uint handles[]`). A push block of at most 16 bytes carries
-//!   `uniforms` (the block's index in the array), `sampler` (the sampler's
-//!   index), `handles` (the table's index) and a pad word. The table holds
-//!   the pass's sampled-image indices in intent order, written by the host
-//!   once per bake: the indices are the same in every frame slot.
+//!   program's handle table (`uint handles[]`) and binding 4 its `std140`
+//!   block (`uniform` blocks are uniform buffers, not storage buffers: the
+//!   driver's uniform path is cheaper). A push block of at most 16 bytes
+//!   carries `uniforms` (the block's index in the array), `sampler` (the
+//!   sampler's index), `handles` (the table's index) and a pad word. The
+//!   table holds the pass's sampled-image indices in intent order, written
+//!   by the host once per bake: the indices are the same in every frame
+//!   slot.
 //!
 //! The next contract version drops the per-pass form.
 

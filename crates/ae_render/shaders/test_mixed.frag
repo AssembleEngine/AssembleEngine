@@ -7,7 +7,7 @@ layout(location = 0) out vec4 color;
 #define AE_DECLARE_PUSH 0
 #include "bindless.glsl"
 #include "program.glsl"
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Params {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Params {
     vec4 tint;
 } ae_uniforms[];
 layout(set = 0, binding = 1) uniform sampler2D legacy;

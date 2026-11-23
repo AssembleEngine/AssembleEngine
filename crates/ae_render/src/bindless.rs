@@ -31,11 +31,17 @@ pub const SAMPLED_IMAGE_CAPACITY: u32 = 4096;
 pub const SAMPLER_CAPACITY: u32 = 64;
 pub const STORAGE_IMAGE_CAPACITY: u32 = 256;
 pub const STORAGE_BUFFER_CAPACITY: u32 = 1024;
+/// `std140` blocks that were `uniform` buffers before M15 (the frame blocks,
+/// the tileset table, the engine programs' blocks). A storage buffer costs
+/// noticeably more per access on some drivers, so these keep their own
+/// binding (M15 G).
+pub const UNIFORM_BUFFER_CAPACITY: u32 = 64;
 
 pub const BINDING_SAMPLED_IMAGE: u32 = 0;
 pub const BINDING_SAMPLER: u32 = 1;
 pub const BINDING_STORAGE_IMAGE: u32 = 2;
 pub const BINDING_STORAGE_BUFFER: u32 = 3;
+pub const BINDING_UNIFORM_BUFFER: u32 = 4;
 
 /// The stages of the shared pipeline layout's push range ([`Push`], 128
 /// bytes). Every `cmd_push_constants` on [`Bindless::pipeline_layout`] passes
@@ -105,6 +111,14 @@ pub struct BufferHandle {
     pub generation: u32,
 }
 
+/// A `std140` block (binding 4): a former `uniform` buffer, kept apart from
+/// the storage buffers because the driver's uniform path is cheaper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UniformBufferHandle {
+    pub index: u32,
+    pub generation: u32,
+}
+
 /// A set of handles registered together and given back together: a module
 /// opens one around the handles it makes ([`Bindless::group`]) and retires
 /// it in its teardown ([`Bindless::retire_group`]).
@@ -167,7 +181,7 @@ struct SamplerEntry {
 }
 
 /// Live counts, binding order, for `ExecutorStats`.
-pub const CLASS_COUNT: usize = 4;
+pub const CLASS_COUNT: usize = 5;
 
 /// The 128-byte push block `bindless.glsl` declares: eight of the pass's own
 /// words, 16 sampled-image indices and 8 sampler indices.
@@ -229,6 +243,12 @@ pub fn check_limits(limits: &vk::PhysicalDeviceLimits) -> Result<(), String> {
             limits.max_per_stage_descriptor_storage_buffers,
             limits.max_descriptor_set_storage_buffers,
         ),
+        (
+            "uniform buffers",
+            UNIFORM_BUFFER_CAPACITY,
+            limits.max_per_stage_descriptor_uniform_buffers,
+            limits.max_descriptor_set_uniform_buffers,
+        ),
     ];
     for (class, want, per_stage, per_set) in checks {
         if per_stage < want || per_set < want {
@@ -238,7 +258,11 @@ pub fn check_limits(limits: &vk::PhysicalDeviceLimits) -> Result<(), String> {
             ));
         }
     }
-    let total = SAMPLED_IMAGE_CAPACITY + SAMPLER_CAPACITY + STORAGE_IMAGE_CAPACITY + STORAGE_BUFFER_CAPACITY;
+    let total = SAMPLED_IMAGE_CAPACITY
+        + SAMPLER_CAPACITY
+        + STORAGE_IMAGE_CAPACITY
+        + STORAGE_BUFFER_CAPACITY
+        + UNIFORM_BUFFER_CAPACITY;
     if limits.max_per_stage_resources < total {
         return Err(format!(
             "the bindless set's {total} descriptors exceed the device's maxPerStageResources {}",
@@ -447,6 +471,12 @@ enum Write {
         offset: u64,
         size: u64,
     },
+    UniformBuffer {
+        index: u32,
+        buffer: vk::Buffer,
+        offset: u64,
+        size: u64,
+    },
 }
 
 /// The global set, its fallbacks and the handle slabs.
@@ -477,6 +507,9 @@ pub struct Bindless {
     fallback_images: Vec<OwnedImage>,
     fallback_storage: OwnedImage,
     fallback_buffer: OwnedBuffer,
+    fallback_uniform: OwnedBuffer,
+    /// `std140` blocks (binding 4).
+    uniform_buffers: Slab,
     sampler: vk::Sampler,
 }
 
@@ -508,8 +541,13 @@ impl Bindless {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(STORAGE_BUFFER_CAPACITY)
                 .stage_flags(stages),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(BINDING_UNIFORM_BUFFER)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(UNIFORM_BUFFER_CAPACITY)
+                .stage_flags(stages),
         ];
-        let flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 4];
+        let flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 5];
         let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(&bindings)
@@ -535,6 +573,10 @@ impl Bindless {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: STORAGE_BUFFER_CAPACITY * n,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: UNIFORM_BUFFER_CAPACITY * n,
             },
         ];
         let pool = unsafe {
@@ -617,6 +659,12 @@ impl Bindless {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             "bindless fallback buffer",
         )?;
+        let fallback_uniform = upload::buffer(
+            gpu,
+            &[0u8; 256],
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            "bindless fallback uniform buffer",
+        )?;
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -635,6 +683,7 @@ impl Bindless {
             samplers: Slab::new("sampler", 1, SAMPLER_CAPACITY, 0),
             storage_images: Slab::new("storage image", 1, STORAGE_IMAGE_CAPACITY, 0),
             storage_buffers: Slab::new("storage buffer", 1, STORAGE_BUFFER_CAPACITY, 0),
+            uniform_buffers: Slab::new("uniform buffer", 1, UNIFORM_BUFFER_CAPACITY, 0),
             pending: (0..frames).map(|_| Vec::new()).collect(),
             retiring: Vec::new(),
             groups: Vec::new(),
@@ -649,6 +698,7 @@ impl Bindless {
             fallback_images,
             fallback_storage,
             fallback_buffer,
+            fallback_uniform,
             sampler,
         };
         // The reserved sampled entries stand for three different
@@ -930,6 +980,65 @@ impl Bindless {
         self.buffer(buffer.buffer, 0, buffer.size)
     }
 
+    /// A `std140` block, the same in every slot.
+    pub fn uniform_buffer(&mut self, buffer: vk::Buffer, offset: u64, size: u64) -> Result<UniformBufferHandle> {
+        let (index, generation) = self.uniform_buffers.alloc(0)?;
+        self.queue_all(Write::UniformBuffer {
+            index,
+            buffer,
+            offset,
+            size,
+        });
+        self.track(4, index, generation);
+        Ok(UniformBufferHandle { index, generation })
+    }
+
+    /// A whole `std140` block, the same in every slot.
+    pub fn whole_uniform_buffer(&mut self, buffer: &crate::memory::OwnedBuffer) -> Result<UniformBufferHandle> {
+        self.uniform_buffer(buffer.buffer, 0, buffer.size)
+    }
+
+    /// One `std140` block index per frame slot, as [`Self::slotted_2d`].
+    pub fn slotted_uniform_buffer(&mut self) -> Result<UniformBufferHandle> {
+        let (index, generation) = self.uniform_buffers.alloc(0)?;
+        self.queue_all(Write::UniformBuffer {
+            index,
+            buffer: self.fallback_uniform.buffer,
+            offset: 0,
+            size: self.fallback_uniform.size,
+        });
+        self.track(4, index, generation);
+        Ok(UniformBufferHandle { index, generation })
+    }
+
+    /// [`Self::per_slot_buffer`] for a `std140` block.
+    pub fn per_slot_uniform_buffer(&mut self, buffers: &[crate::memory::OwnedBuffer]) -> Result<UniformBufferHandle> {
+        anyhow::ensure!(buffers.len() == self.frames, "one buffer per frame slot");
+        let handle = self.slotted_uniform_buffer()?;
+        for (slot, b) in buffers.iter().enumerate() {
+            self.update_slotted_uniform_buffer(handle, slot, b.buffer, 0, b.size);
+        }
+        Ok(handle)
+    }
+
+    pub fn update_slotted_uniform_buffer(
+        &mut self,
+        handle: UniformBufferHandle,
+        slot: usize,
+        buffer: vk::Buffer,
+        offset: u64,
+        size: u64,
+    ) {
+        if self.uniform_buffers.resolve(handle.index, handle.generation) {
+            self.pending[slot].push(Write::UniformBuffer {
+                index: handle.index,
+                buffer,
+                offset,
+                size,
+            });
+        }
+    }
+
     /// One storage-buffer index per frame slot, as [`Self::slotted_2d`].
     pub fn slotted_buffer(&mut self) -> Result<BufferHandle> {
         let (index, generation) = self.storage_buffers.alloc(0)?;
@@ -1148,6 +1257,10 @@ impl Bindless {
         self.retire_checked(3, handle.index, handle.generation);
     }
 
+    pub fn retire_uniform_buffer(&mut self, handle: UniformBufferHandle) {
+        self.retire_checked(4, handle.index, handle.generation);
+    }
+
     /// Retire `index` if `generation` still owns it. A sampler index goes
     /// only when its last holder gives it back; the others go at once.
     fn retire_checked(&mut self, slab: usize, index: u32, generation: u32) {
@@ -1155,7 +1268,8 @@ impl Bindless {
             0 => self.sampled.resolve(index, generation),
             1 => self.samplers.resolve(index, generation),
             2 => self.storage_images.resolve(index, generation),
-            _ => self.storage_buffers.resolve(index, generation),
+            3 => self.storage_buffers.resolve(index, generation),
+            _ => self.uniform_buffers.resolve(index, generation),
         };
         if !live {
             return;
@@ -1180,7 +1294,8 @@ impl Bindless {
             0 => self.sampled.retire(index),
             1 => self.samplers.retire(index),
             2 => self.storage_images.retire(index),
-            _ => self.storage_buffers.retire(index),
+            3 => self.storage_buffers.retire(index),
+            _ => self.uniform_buffers.retire(index),
         };
         if !retiring {
             return;
@@ -1209,11 +1324,17 @@ impl Bindless {
                 view: self.fallback_storage.view,
                 layout: vk::ImageLayout::GENERAL,
             },
-            _ => Write::StorageBuffer {
+            3 => Write::StorageBuffer {
                 index,
                 buffer: self.fallback_buffer.buffer,
                 offset: 0,
                 size: self.fallback_buffer.size,
+            },
+            _ => Write::UniformBuffer {
+                index,
+                buffer: self.fallback_uniform.buffer,
+                offset: 0,
+                size: self.fallback_uniform.size,
             },
         };
         for slot in 0..self.frames {
@@ -1250,7 +1371,8 @@ impl Bindless {
                     self.samplers.free(index);
                 }
                 2 => self.storage_images.free(index),
-                _ => self.storage_buffers.free(index),
+                3 => self.storage_buffers.free(index),
+                _ => self.uniform_buffers.free(index),
             }
         }
         writes
@@ -1312,6 +1434,24 @@ impl Bindless {
                         images.len() - 1,
                     ));
                 }
+                Write::UniformBuffer {
+                    index,
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    buffers.push([vk::DescriptorBufferInfo {
+                        buffer,
+                        offset,
+                        range: size,
+                    }]);
+                    dsts.push((
+                        BINDING_UNIFORM_BUFFER,
+                        index,
+                        vk::DescriptorType::UNIFORM_BUFFER,
+                        buffers.len() - 1,
+                    ));
+                }
                 Write::StorageBuffer {
                     index,
                     buffer,
@@ -1340,7 +1480,10 @@ impl Bindless {
                     .dst_binding(binding)
                     .dst_array_element(index)
                     .descriptor_type(ty);
-                if ty == vk::DescriptorType::STORAGE_BUFFER {
+                if matches!(
+                    ty,
+                    vk::DescriptorType::STORAGE_BUFFER | vk::DescriptorType::UNIFORM_BUFFER
+                ) {
                     write.buffer_info(&buffers[at])
                 } else {
                     write.image_info(&images[at])
@@ -1366,6 +1509,7 @@ impl Bindless {
             self.samplers.live,
             self.storage_images.live,
             self.storage_buffers.live,
+            self.uniform_buffers.live,
         ]
     }
 
@@ -1384,6 +1528,7 @@ impl Bindless {
         }
         self.fallback_storage.destroy(gpu);
         self.fallback_buffer.destroy(gpu);
+        self.fallback_uniform.destroy(gpu);
     }
 }
 
@@ -1526,6 +1671,8 @@ mod tests {
             max_descriptor_set_storage_images: STORAGE_IMAGE_CAPACITY,
             max_per_stage_descriptor_storage_buffers: STORAGE_BUFFER_CAPACITY,
             max_descriptor_set_storage_buffers: STORAGE_BUFFER_CAPACITY,
+            max_per_stage_descriptor_uniform_buffers: UNIFORM_BUFFER_CAPACITY,
+            max_descriptor_set_uniform_buffers: UNIFORM_BUFFER_CAPACITY,
             max_per_stage_resources: u32::MAX,
             ..Default::default()
         };
@@ -1533,5 +1680,9 @@ mod tests {
         limits.max_descriptor_set_storage_buffers = STORAGE_BUFFER_CAPACITY - 1;
         let err = check_limits(&limits).unwrap_err();
         assert!(err.contains("storage buffers"), "{err}");
+        limits.max_descriptor_set_storage_buffers = STORAGE_BUFFER_CAPACITY;
+        limits.max_per_stage_descriptor_uniform_buffers = UNIFORM_BUFFER_CAPACITY - 1;
+        let err = check_limits(&limits).unwrap_err();
+        assert!(err.contains("uniform buffers") && err.contains("64"), "{err}");
     }
 }

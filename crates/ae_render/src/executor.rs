@@ -182,8 +182,8 @@ pub struct ExecutorStats {
     /// Descriptor writes the bindless registry has applied.
     pub bindless_writes: u64,
     /// Live bindless entries, binding order (sampled images, samplers,
-    /// storage images, storage buffers).
-    pub bindless_live: [u32; 4],
+    /// storage images, storage buffers, uniform buffers).
+    pub bindless_live: [u32; 5],
 }
 
 struct Physical {

@@ -13,7 +13,7 @@ layout(location = 0) out vec4 color;
 #define AE_DECLARE_PUSH 0
 #include "bindless.glsl"
 #include "program.glsl"
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Grade {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Grade {
     vec4 tint;    // rgb multiplier
     vec4 params;  // contrast, saturation, unused, unused
 } ae_uniforms[];

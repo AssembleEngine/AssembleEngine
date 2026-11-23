@@ -841,7 +841,7 @@ impl ParticleRenderer {
                     gpu,
                     BufferDesc {
                         size: size_of::<FrameUbo>() as u64,
-                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
                     "particle frame",
@@ -911,7 +911,7 @@ impl ParticleRenderer {
         let packet_buffers = [bindless.slotted_buffer()?, bindless.slotted_buffer()?];
         let packet_storage = [bindless.slotted_storage_image()?, bindless.slotted_storage_image()?];
         let mut handles = vec![
-            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_uniform_buffer(&ubos)?.index,
             bindless.whole_buffer(&state)?.index,
             bindless.whole_buffer(&keys)?.index,
             bindless.whole_buffer(&indirect)?.index,

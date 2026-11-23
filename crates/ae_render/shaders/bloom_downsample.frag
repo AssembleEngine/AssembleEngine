@@ -16,7 +16,7 @@ layout(location = 0) out vec4 color;
 #define AE_DECLARE_PUSH 0
 #include "bindless.glsl"
 #include "program.glsl"
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Bloom {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Bloom {
     vec4 params; // x: the EV100 the scene was stored at, y: 1 when the graph has the exposure image
 } ae_uniforms[];
 // Sampled images, in the pass's order: glow 0, exposure 1.

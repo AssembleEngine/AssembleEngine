@@ -14,7 +14,7 @@
 
 #define MAX_EFFECTS 16
 
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame {
     mat4 viewProj;
     vec4 camPos;      // xyz eye; w near plane (infinite reverse-Z: depth = near / z)
     vec4 camRight;

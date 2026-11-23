@@ -102,7 +102,7 @@ killed unit (`Dying`, excluded by `without(Dying)` from spatial queries and nav)
 script under a time cap. `games/duel` is the test game (walk, stop, run, a two-step aim while
 running, three shots that hit and kill the target, its death). Details: [docs/PLAN.md](docs/PLAN.md) "M14" and "M14 step 6".
 
-M15 (bindless resources) is in progress, steps A–F built. The library passes read their images,
+M15 (bindless resources) is in progress, steps A–G built. The library passes read their images,
 samplers, buffers and storage images from one global descriptor set per frame slot
 (`crates/ae_render/src/bindless.rs`, `shaders/bindless.glsl`):
 - Images and samplers come from a 128-byte push table.
@@ -111,12 +111,16 @@ samplers, buffers and storage images from one global descriptor set per frame sl
 - Models of every type draw in two multi-draws without rebinding textures.
 - Samplers are deduplicated by their settings and shared; a module's handles are retired when
   it is destroyed, so a renderer rebuild does not use up the registry's indices.
+- `std140` blocks are uniform buffers at binding 4, not storage buffers: measuring found a
+  storage buffer costs 20–30% more per access on the RTX 3060 Ti (step G).
 
 Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline and every
 fullscreen program (the engine's tonemap, bloom and encode, and a render module's own shaders)
 reads the global set at 0: a program's std140 block, its sampled images and its sampler are
 handles in a small per-program table, reached through a 16-byte push block. A contract-2 module
-may still use the old per-pass form for one version. Details: [docs/PLAN.md](docs/PLAN.md)
+may still use the old per-pass form for one version. `bench-diff` against the pre-M15 baseline:
+`gpu_total` is 4.5–10% above it in most scenes and 13–14% in the Fox scenes, whose shadow and
+pose passes read their buffers through the handle table. Details: [docs/PLAN.md](docs/PLAN.md)
 "M15 — design".
 
 | Crate | What it is | Origin |

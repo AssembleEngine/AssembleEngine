@@ -48,7 +48,7 @@ struct Light {
     vec4 profile;     // x, y: a cone's inner and outer cosines; z: source radius (m); w: intensity (cd)
 };
 
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer LightFrame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform LightFrame {
     mat4 viewProj;    // the cull's light bounds
     mat4 invViewProj; // the cull's tile corners
     vec4 camPos;      // xyz eye; w: the near plane (infinite reverse-Z: depth = near / z)

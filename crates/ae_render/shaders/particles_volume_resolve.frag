@@ -12,7 +12,7 @@
 // fragments than the list holds: magenta.
 #include "bindless.glsl"
 #define depthTex AE_S2D(0, 0)
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Frame {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame {
     mat4 viewProj;
     vec4 camPos;
 } ae_Frame[];

@@ -379,7 +379,7 @@ impl LightRenderer {
                 gpu,
                 BufferDesc {
                     size: size_of::<FrameUbo>() as u64,
-                    usage: storage,
+                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 },
                 MemoryLocation::CpuToGpu,
                 &format!("light frame {slot}"),
@@ -432,7 +432,7 @@ impl LightRenderer {
             )?);
         }
         let handles = [
-            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_uniform_buffer(&ubos)?.index,
             bindless.per_slot_buffer(&lists)?.index,
             bindless.per_slot_buffer(&clusters)?.index,
         ];

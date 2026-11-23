@@ -462,7 +462,7 @@ impl TerrainRenderer {
                     gpu,
                     BufferDesc {
                         size: size_of::<FrameUbo>() as u64,
-                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
                     "terrain frame",
@@ -688,7 +688,7 @@ impl TerrainRenderer {
         let tile_ubo = upload::buffer(
             gpu,
             &bytes_of(&tile_table)[..TILESET_UBO_BYTES],
-            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
             "tileset table",
         )?;
 
@@ -772,13 +772,13 @@ impl TerrainRenderer {
         // are slotted, so the table is the same every frame.
         let vision_handle = bindless.per_slot_buffer(&vision_bufs)?.index;
         let mut handles = vec![
-            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_uniform_buffer(&ubos)?.index,
             bindless.whole_buffer(&tree)?.index,
             bindless.whole_buffer(&bits)?.index,
             bindless.whole_buffer(&snap)?.index,
             bindless.whole_buffer(&leaves)?.index,
             bindless.whole_buffer(&indirect)?.index,
-            bindless.whole_buffer(&tile_ubo)?.index,
+            bindless.whole_uniform_buffer(&tile_ubo)?.index,
             vision_handle,
             bindless.per_slot_buffer(&decal_bufs)?.index,
             bindless.whole_buffer(&decal_materials)?.index,

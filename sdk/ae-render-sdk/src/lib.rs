@@ -52,8 +52,9 @@
 //!   pass, in intent order.
 //! * **Bindless** (contract version 3): only the engine's global set.
 //!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`,
-//!   binding 3 the storage buffers: a `std140` block per program and the
-//!   program's `uint handles[]` table. The push block is at most 16 bytes:
+//!   binding 3 the program's `uint handles[]` table and binding 4 its
+//!   `std140` block (`uniform` blocks are uniform buffers: they cost less
+//!   per access than storage buffers). The push block is at most 16 bytes:
 //!   `uniforms` (the block's index), `samplerIndex`, `handles` (the table's
 //!   index) and a pad word.
 //!
@@ -67,7 +68,7 @@
 //! #define AE_DECLARE_PUSH 0
 //! #include "bindless.glsl"
 //! #include "program.glsl"
-//! layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Grade {
+//! layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Grade {
 //!     vec4 tint;
 //! } ae_uniforms[];
 //! #define g AE_UNIFORMS

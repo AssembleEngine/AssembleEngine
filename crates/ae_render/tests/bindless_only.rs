@@ -10,6 +10,11 @@
 //! distinct create info and shares it, so no other source creates or
 //! destroys a sampler (the mip generator's own, in `upload.rs`, stays).
 //!
+//! Uniform buffers (binding 4, the former `uniform` blocks) are the
+//! registry's too: `Bindless::uniform_buffer` and its slotted and per-slot
+//! forms are the only makers of a `UNIFORM_BUFFER` descriptor outside the
+//! per-pass form in `fullscreen.rs`.
+//!
 //! Still on their own sets, by design:
 //! - `fullscreen.rs`: the per-pass form a contract-2 module's program may
 //!   still use (M15 F keeps it for one version), and its reflection
@@ -70,6 +75,8 @@ fn only_the_global_set_outside_the_exceptions() {
             // One sampler object per distinct create info.
             "create_sampler",
             "destroy_sampler",
+            // One uniform-buffer slab (binding 4).
+            "DescriptorType::UNIFORM_BUFFER",
         ] {
             if text.contains(needle) {
                 found.push(format!("{}: {needle}", path.display()));

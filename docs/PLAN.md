@@ -4832,7 +4832,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–F built, B without library-owned externals)
+#### M15 — design (2026-11-22; steps A–G built, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
@@ -4956,13 +4956,28 @@ is used.
      reach a declaration of the wrong dimension.
    - If `glslc -Werror` or the validation layer rejects the aliasing, the fallback is one binding
      per view type. That costs no design change.
-5. **Uniform blocks become `layout(std140) buffer` blocks in the storage-buffer array (D).**
-   There is no uniform-buffer binding.
-   - The `std140` qualifier keeps today's byte offsets, so the CPU structs do not change.
-   - The buffers keep `UNIFORM_BUFFER` usage only if a pass that has not migrated yet still binds
-     them. They gain `STORAGE_BUFFER` usage.
-   - This keeps the global set at four classes and stays clear of the small
-     `maxPerStageDescriptorUniformBuffers` that some drivers report.
+5. **Uniform blocks stay uniform buffers, at their own binding 4 (D, amended in G).** The
+   original decision put every `std140` block into the storage-buffer array as a
+   `layout(std140) buffer` block: one class is simpler, and it stays clear of the small
+   `maxPerStageDescriptorUniformBuffers` some drivers report. Step G measured what that costs
+   per access on this machine. With the blocks as storage buffers, the tonemap (one block per
+   pixel) read 22.5 µs against 16.4 µs before M15, the terrain (its frame block and the tileset
+   table) 393 against 302 µs, and the damage showed on every pass whose block was a former
+   uniform buffer, including the buffer-only compute passes. Moving the blocks back recovered
+   nearly all of it: the tonemap 17.4 µs, the terrain 320 µs, the frame's `gpu_total` from
+   +19–30% to +4.5–9%. Conditions: RTX 3060 Ti, 1280×720, the `ae-client --bench` scenes,
+   `335e770` as the base (re-measured, it reproduces within 0.5%).
+   - Binding 4 is the uniform-block array (`UNIFORM_BUFFER`, capacity 64). The frame blocks, the
+     tileset table, the exposure settings, the lights' frame block and the engine programs'
+     blocks live there. `Bindless::uniform_buffer` and its whole/slotted/per-slot forms own them
+     through the same groups and retirement as every other class, and the class appears in
+     `ExecutorStats::bindless_live`.
+   - The capacity is checked against `maxPerStageDescriptorUniformBuffers` and
+     `maxDescriptorSetUniformBuffers` when the device is chosen, with an error naming the limit.
+   - Storage blocks (the handle tables, the leaf, pose and particle buffers) stay at binding 3.
+     A `std140` block written as `readonly buffer` is a storage buffer to the driver, and that is
+     what cost the time.
+   - The `std140` qualifier keeps the byte offsets, so the CPU structs did not change.
 6. **Identical frames are proven by comparing captures (B).** No second live path is kept. Step B
    adds `ae-tool capture-diff <dir-a> <dir-b>`, which compares the PPMs of two
    `AE_TEST_CAPTURE_DIR` runs byte for byte. Each step from C on captures at its base commit and
@@ -4973,8 +4988,8 @@ is used.
    reference.
 7. **Modules never see handle values (F).** The host writes each program's sampled-intent handles
    into a per-program handle table, and the program reads `handles[i]` for intent `i`.
-   - The program declares its uniform block as a std140 entry of the storage-buffer array,
-     indexed by a host push constant.
+   - The program declares its uniform block as a std140 entry of the uniform-block array
+     (binding 4; decision 5), indexed by a host push constant.
    - The shader's form is read by reflection, so the program table's wire format is unchanged.
 8. **`VK_EXT_descriptor_buffer` is not required (G).** It is evaluated only if the measured CPU
    frame still shows descriptor work. With the per-frame writes gone (rule 2 and steps C–D), I
@@ -5376,9 +5391,9 @@ set at index 2 next to their old sets. How handles reach a shader:
     `Form` and refuses a mix with the binding named
     (`test_mixed.frag`: "set 0 binding 0 ... mixes the bindless arrays with the per-pass
     form").
-  - The bindless form: binding 0 `texture2D[]`, binding 1 `sampler[]`, binding 3 the storage
-    buffers (a `std140` block per program and its `uint handles[]` table) and a push block of
-    at most 16 bytes (`uniforms, samplerIndex, handles, pad`; `sampler` is a GLSL keyword).
+  - The bindless form: binding 0 `texture2D[]`, binding 1 `sampler[]`, binding 3 the handle
+    table (the `std140` block moved to binding 4 in G) and a push block of at most 16 bytes
+    (`uniforms, samplerIndex, handles, pad`; `sampler` is a GLSL keyword).
     `shaders/program.glsl` gives `AE_UNIFORMS`, `AE_PROGRAM_IMAGE(k)` and `AE_TABLE`; a
     program includes `bindless.glsl` with `AE_DECLARE_PUSH 0` and then it. The engine's
     tonemap, bloom and encode shaders and `render/post`'s three use it.
@@ -5412,6 +5427,42 @@ set at index 2 next to their old sets. How handles reach a shader:
 - The cost of shader indexing: per-pass GPU time on terrain, models and particles.
 - `VK_EXT_descriptor_buffer` is prototyped only if descriptor work still shows on the CPU frame.
 - Record the numbers with their conditions.
+
+  Measured (2026-11-23; RTX 3060 Ti, driver 620.73.04, 1280×720, `AE_BENCH_MACHINE=rtx3060ti`,
+  `bench/results/baseline` from `335e770`, which reproduces within 0.5% when rebuilt and
+  re-measured, so the differences are M15's, not stale-baseline drift). Before the fix below,
+  `gpu_total` regressed 17–23% in every scene and 91 of 749 metrics failed `bench-diff`:
+  - `pass/terrain` +20–31% (overview 302.1 → 396.3 µs), `pass/tonemap` +21–38% (16.4 → 22.5),
+    `pass/shadows` +34% in the Fox scenes (4.55 → 6.09 ms), `pass/units cull` +46%,
+    `pass/units pose` +21%.
+  - The CPU frame was unchanged within noise (+3–12%, `cpu_frame` 100.1 → 103.5 µs in overview),
+    so `VK_EXT_descriptor_buffer` is not indicated and was not prototyped.
+  - The cause was the blocks: every former `uniform` block had become a `std140` storage buffer
+    (decision 5 as originally written). Three A/B runs in a scratch worktree isolated it: the
+    program blocks (tonemap 22.5 → 17.4 µs), the terrain frame block and tileset table (terrain
+    396 → 322 µs), the units' frame block (shadows 6.09 → 5.52 ms). `nonuniformEXT` on the
+    `_AT` macros and a smaller sampled-image capacity (4096 → 256) changed nothing. Decision 5
+    carries the amendment; `Bindless` gained the uniform-buffer class at binding 4.
+
+  After the fix (`crates/ae_render/src/bindless.rs`, the module contract still version 3):
+  - 61/61 captures identical to the step E set; 66/66 GPU tests with validation and
+    synchronization validation silent (the GPU-AV test's deliberate errors aside); the workspace
+    tests, `fmt --check` and clippy clean.
+  - `bench-diff` against `335e770`: 46 regressed metrics, down from 91, and 648 unchanged.
+    `gpu_total`: overview 650.7 → 700.4 µs (+7.7%), close 508.4 → 547.5 (+7.7%), army 634.6 →
+    679.8 (+7.1%), cliffs 1047.6 → 1094.8 (+4.5%), orbit 810.5 → 870.0 (+7.3%), palette 347.2 →
+    378.5 (+9.0%), lights-200 753.8 → 818.1 (+8.5%), lights-4000 2023.1 → 2229.1 (+10.2%),
+    near-fox 7257.6 → 8281.3 (+14.1%), army-fox 8593.8 → 9709.8 (+13.0%).
+  - What is left is the texturing and dynamic-storage-buffer path, not the blocks: the Fox
+    scenes' `pass/shadows` +21–25% and `pass/units pose` +22–25% (both read the pose, animation
+    and instance buffers through the handle table), `pass/units cull` +32–37%,
+    `pass/particles sim` +22–25%, `pass/exposure adapt` +33% (2–3 µs), `pass/terrain lod` +10%
+    and the scene-specific terrain and lights passes within 10–13%. `pass/terrain`,
+    `pass/tonemap`, `pass/units` and `pass/water` are back at or below the baseline in most
+    scenes (terrain −36% in near-fox, which the baseline measured in a different water state).
+  - The remaining cost is the next commit's subject: the handle tables themselves in the uniform
+    array, packed as `uvec4`, and the handles read into locals once at the top of `units cull`
+    and `units pose`, measured one at a time. Nothing is re-baselined over a regression.
 
 ##### Not part of M15
 

@@ -1,10 +1,10 @@
 // A fullscreen program's interface (M15 step F): the push block and the
 // accessors into the global set. Include after `bindless.glsl` (which
 // declares the arrays), then declare the program's std140 block as
-// `ae_uniforms[]`:
+// `ae_uniforms[]` at binding 4 (the uniform blocks; M15 G):
 //
-//   layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS)
-//   readonly buffer MyBlock { vec4 tint; } ae_uniforms[];
+//   layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS)
+//   uniform MyBlock { vec4 tint; } ae_uniforms[];
 //
 // `AE_UNIFORMS` is this pass's block and `AE_PROGRAM_IMAGE(k)` its k-th
 // sampled image, in the pass's sampled-intent order; both go through the

@@ -28,7 +28,7 @@
 // block, the tree, bits, snapshot, leaves, indirect, the tileset block
 // (terrain.frag), the vision (terrain_shading.glsl), the decal list and
 // materials (terrain_decals.glsl), then the lights (AE_LIGHT_BASE 10).
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer FrameUBO {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform FrameUBO {
     mat4 viewProj;
     vec4 camPos;         // render camera
     vec4 lodCamPos;      // camera driving the subdivision (differs when frozen)

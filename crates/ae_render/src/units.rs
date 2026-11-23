@@ -646,7 +646,7 @@ impl UnitRenderer {
                     gpu,
                     BufferDesc {
                         size: size_of::<FrameUbo>() as u64,
-                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                        usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
                     "unit frame",
@@ -776,7 +776,7 @@ impl UnitRenderer {
             None => None,
         };
         let mut handles = vec![
-            bindless.per_slot_buffer(&ubos)?.index,
+            bindless.per_slot_uniform_buffer(&ubos)?.index,
             bindless.per_slot_buffer(&instances)?.index,
             bindless.whole_buffer(&visible)?.index,
             bindless.whole_buffer(&indirect)?.index,

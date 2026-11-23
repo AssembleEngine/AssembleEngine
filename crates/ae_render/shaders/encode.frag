@@ -17,7 +17,7 @@
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Encode {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Encode {
     vec4 levels;     // x: paper white nits, y: peak nits, z: 1 scRGB / 0 HDR10,
                      // w: 1 when the output gamut is narrower than the working space
     mat3 toOutput;   // the working space to the output gamut
