@@ -1,5 +1,5 @@
 // The units' shadow map (src/shadow.rs) for the classes with models: every
-// model command in one multi-draw per cascade (pc.cascade), one instance
+// model command in one multi-draw per cascade (ae.words.x), one instance
 // per unit of the command's class the cull found in the cascade (the
 // class's region of the visible list for that cascade), skinned as
 // units_models.vert. Opaque commands
@@ -18,8 +18,8 @@ layout(location = 2) flat out uint outMaterial;
 #endif
 
 void main() {
-    DrawRecord d = draws[pc.drawBase + uint(gl_DrawID)];
-    uint row = visible[d.visibleBase + (pc.cascade + 1u) * u.counts.y + uint(gl_InstanceIndex)];
+    DrawRecord d = draws[ae.words.y + uint(gl_DrawID)];
+    uint row = visible[d.visibleBase + (ae.words.x + 1u) * u.counts.y + uint(gl_InstanceIndex)];
     Unit unit = loadUnit(row);
     Skinned s = skinVertex(d, uint(gl_VertexIndex), poseOffset(row));
     vec3 world = place(unit, s.pos * modelClasses[d.cls].fit.x);
@@ -28,7 +28,7 @@ void main() {
     outAlpha = s.color.a;
     outMaterial = d.material;
 #endif
-    uint k = pc.cascade;
+    uint k = ae.words.x;
     vec3 l = vec3(dot(u.unitShadowAxes[0].xyz, world), dot(u.unitShadowAxes[1].xyz, world), dot(u.unitShadowAxes[2].xyz, world));
     gl_Position = vec4((l - u.unitShadowOrigin[k].xyz) * u.unitShadowScale[k].xyz, 1.0);
 }

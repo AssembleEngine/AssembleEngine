@@ -9,6 +9,7 @@
 // (RGBA16F, paper-white units) and post.encode encodes it, clipping at the
 // display's peak.
 #include "gamut.glsl"
+#include "bindless.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
@@ -21,9 +22,10 @@ layout(set = 0, binding = 0) uniform Tonemap {
     vec4 outLuma;  // xyz: the written gamut's luminance row (the compression);
                    // w: 1 when it is narrower than the working space
 } t;
-layout(set = 0, binding = 1) uniform sampler2D scene;
-layout(set = 0, binding = 2) uniform sampler2D bloom;
-layout(set = 0, binding = 3) uniform sampler2D exposureTex;
+// Bindless handles: scene 0, bloom 1, exposure 2; sampler 0.
+#define scene AE_S2D(0, 0)
+#define bloom AE_S2D(1, 0)
+#define exposureTex AE_S2D(2, 0)
 
 void main() {
     vec3 c = max(texelFetch(scene, ivec2(gl_FragCoord.xy), 0).rgb, vec3(0.0));

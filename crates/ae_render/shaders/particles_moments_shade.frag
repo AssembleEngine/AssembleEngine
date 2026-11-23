@@ -5,8 +5,8 @@
 #include "particles_common.glsl"
 #include "particles_frag.glsl"
 
-layout(set = 1, binding = 2) uniform sampler2D momentB0;
-layout(set = 1, binding = 3) uniform sampler2D moments;
+#define momentB0 AE_S2D(2, 0)
+#define moments AE_S2D(3, 0)
 
 layout(location = 0) out vec4 outMedia;
 layout(location = 1) out vec4 outEmissive;

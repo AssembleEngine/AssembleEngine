@@ -5,7 +5,7 @@
 #include "particles_common.glsl"
 #include "particles_froxels.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
+#define depthTex AE_S2D(0, 0)
 
 layout(location = 0) out vec4 outColor;
 

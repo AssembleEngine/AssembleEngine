@@ -25,10 +25,11 @@
 //! ([`DisplayLevels::headroom`], `peak / paper white`), so a fireball's core
 //! decodes above paper white up to what the display shows.
 
+use crate::bindless::Bindless;
 use crate::colorspace::{self, Gamut, WorkingSpace};
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
-use crate::fullscreen::FullscreenProgram;
+use crate::fullscreen::BindlessProgram;
 use crate::pipeline::spirv;
 use anyhow::Result;
 use ash::vk;
@@ -254,21 +255,27 @@ pub fn encode_rgb(
 const UNIFORM_BYTES: u32 = 16 + 2 * 48 + 16;
 
 pub struct Encode {
-    program: FullscreenProgram,
+    program: BindlessProgram,
 }
 
 impl Encode {
     /// For an HDR output of `encoding` (not [`OutputEncoding::Sdr`]) whose
     /// image is `format`.
-    pub fn new(gpu: &GpuDevice, encoding: OutputEncoding, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(
+        gpu: &GpuDevice,
+        bindless: &Bindless,
+        encoding: OutputEncoding,
+        format: vk::Format,
+        frames_in_flight: usize,
+    ) -> Result<Self> {
         anyhow::ensure!(encoding.uses_display(), "an SDR output has no post.encode pass");
         Ok(Self {
-            program: FullscreenProgram::new(
+            program: BindlessProgram::new(
                 gpu,
+                bindless,
                 "post.encode",
                 spirv!("encode.frag"),
                 UNIFORM_BYTES,
-                1,
                 &[format],
                 frames_in_flight,
             )?,
@@ -317,8 +324,8 @@ impl Encode {
     }
 
     /// Record the display image to the pass's colour attachment.
-    pub fn record(&self, ctx: &PassContext<'_>, display: ImageBinding, sampler: vk::Sampler) -> Result<()> {
-        self.program.record(ctx, &[display], sampler)
+    pub fn record(&self, ctx: &PassContext<'_>, display: ImageBinding, sampler: u32) -> Result<()> {
+        self.program.record(ctx, &[display.sampled.unwrap_or(0)], &[sampler])
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

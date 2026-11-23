@@ -13,9 +13,10 @@
 //! exposure-relative and stays 4.0 of display light whatever the adaptation
 //! does.
 
+use crate::bindless::Bindless;
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
-use crate::fullscreen::FullscreenProgram;
+use crate::fullscreen::BindlessProgram;
 use crate::pipeline::spirv;
 use anyhow::{Context as _, Result};
 use ash::vk;
@@ -34,14 +35,15 @@ pub enum BloomPass {
 }
 
 pub struct Bloom {
-    passes: [FullscreenProgram; 3],
+    passes: [BindlessProgram; 3],
 }
 
 impl Bloom {
-    pub fn new(gpu: &GpuDevice, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &Bindless, frames_in_flight: usize) -> Result<Self> {
         let format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
         let make = |label: &str, shader: &[u8], uniforms: u32, sampled: usize| {
-            FullscreenProgram::new(gpu, label, shader, uniforms, sampled, &[format], frames_in_flight)
+            let _ = sampled;
+            BindlessProgram::new(gpu, bindless, label, shader, uniforms, &[format], frames_in_flight)
                 .with_context(|| format!("{label} program"))
         };
         Ok(Self {
@@ -75,14 +77,15 @@ impl Bloom {
         input: ImageBinding,
         _output: ImageBinding,
         exposure: Option<ImageBinding>,
-        sampler: vk::Sampler,
+        sampler: u32,
     ) -> Result<()> {
+        let index = |b: ImageBinding| b.sampled.unwrap_or(0);
         let images = match pass {
-            BloomPass::Downsample => [input, exposure.unwrap_or(input)],
-            BloomPass::BlurX | BloomPass::BlurY => [input, input],
+            BloomPass::Downsample => [index(input), index(exposure.unwrap_or(input))],
+            BloomPass::BlurX | BloomPass::BlurY => [index(input), index(input)],
         };
         let count = if pass == BloomPass::Downsample { 2 } else { 1 };
-        self.passes[pass as usize].record(ctx, &images[..count], sampler)
+        self.passes[pass as usize].record(ctx, &images[..count], &[sampler])
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

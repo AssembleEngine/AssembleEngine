@@ -467,6 +467,8 @@ pub struct UnitRenderer {
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
+    /// The global sampled handles this pass reads.
+    push: crate::bindless::Push,
     /// The clustered lights' sets (set 2 of the draws; crate::lights).
     light_sets: Vec<vk::DescriptorSet>,
     cull: vk::Pipeline,
@@ -568,6 +570,7 @@ impl UnitRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
         terrain: &TerrainRenderer,
         lights: &crate::lights::LightRenderer,
         setup: &UnitsSetup,
@@ -580,7 +583,10 @@ impl UnitRenderer {
         let device = &gpu.device;
         let capacity = setup.capacity;
         let model_set = match setup.models.iter().any(Option::is_some) {
-            true => Some(ModelSet::new(gpu, &setup.models, &setup.rigs, capacity, MAX_CLASSES).context("unit models")?),
+            true => Some(
+                ModelSet::new(gpu, bindless, &setup.models, &setup.rigs, capacity, MAX_CLASSES)
+                    .context("unit models")?,
+            ),
             false => None,
         };
         let mut classes = [[0.8, 0.8, 0.8, 0.0]; MAX_CLASSES];
@@ -678,10 +684,14 @@ impl UnitRenderer {
         };
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-        let (height_view, height_sampler) = terrain.height_texture();
-        let (shadow_view, shadow_sampler) = terrain.shadow_texture();
-        let (unit_shadow_view, unit_shadow_sampler) = terrain.unit_shadow_map().texture();
-        let (tint_view, tint_sampler) = terrain.unit_shadow_map().color_texture();
+        let mut push = crate::bindless::Push::default();
+        push.image(0, terrain.height_index());
+        push.image(1, terrain.sun_shadow_index());
+        push.image(2, terrain.unit_shadow_index());
+        push.image(3, terrain.particle_shadow_index());
+        push.sampler(1, terrain.linear_sampler_index());
+        push.sampler(3, terrain.shadow_color_sampler_index());
+        push.sampler(4, terrain.shadow_compare_sampler_index());
         // Set 1 of the models: seven storage buffers, the texture array
         // (partially bound), the models' animation table, the units'
         // animation table, the frame's writes to it and their places, and
@@ -696,41 +706,18 @@ impl UnitRenderer {
                         .stage_flags(all)
                 };
                 let mut bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..7).map(storage).collect();
-                bindings.push(
-                    vk::DescriptorSetLayoutBinding::default()
-                        .binding(7)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .descriptor_count(models::MAX_TEXTURES)
-                        .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                );
                 bindings.push(storage(8).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 for b in 9..15 {
                     bindings.push(storage(b).stage_flags(vk::ShaderStageFlags::COMPUTE));
                 }
-                let none = vk::DescriptorBindingFlags::empty();
-                let flags = [none; 7]
-                    .into_iter()
-                    .chain([
-                        vk::DescriptorBindingFlags::PARTIALLY_BOUND,
-                        none,
-                        none,
-                        none,
-                        none,
-                        none,
-                        none,
-                        none,
-                    ])
-                    .collect::<Vec<_>>();
-                let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
                 device.create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default()
-                        .bindings(&bindings)
-                        .push_next(&mut flag_info),
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                     None,
                 )?
             }),
             None => None,
         };
+        let terrain_global = terrain.bindless_set_layout();
         let (set_layout, empty_layout, pipeline_layout, desc_pool, sets) = unsafe {
             let set_layout = pipeline::set_layout(
                 device,
@@ -739,10 +726,6 @@ impl UnitRenderer {
                     (vk::DescriptorType::STORAGE_BUFFER, all),
                     (vk::DescriptorType::STORAGE_BUFFER, all),
                     (vk::DescriptorType::STORAGE_BUFFER, all),
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
-                    (vk::DescriptorType::COMBINED_IMAGE_SAMPLER, all),
                 ],
             )?;
             // The caster's push constant: the cascade it draws; with models
@@ -751,12 +734,17 @@ impl UnitRenderer {
             // an empty set 1 without models).
             let empty_layout = pipeline::set_layout(device, &[])?;
             let pipeline_layout = match model_layout {
-                Some(models) => pipeline::pipeline_layout(device, &[set_layout, models, lights.set_layout()], 8, all)?,
+                Some(models) => pipeline::pipeline_layout(
+                    device,
+                    &[set_layout, models, lights.set_layout(), terrain_global],
+                    128,
+                    all,
+                )?,
                 None => pipeline::pipeline_layout(
                     device,
-                    &[set_layout, empty_layout, lights.set_layout()],
-                    4,
-                    vk::ShaderStageFlags::VERTEX,
+                    &[set_layout, empty_layout, lights.set_layout(), terrain_global],
+                    128,
+                    all,
                 )?,
             };
             let n = frames_in_flight as u32;
@@ -769,10 +757,6 @@ impl UnitRenderer {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     descriptor_count: (3 + 14 * m) * n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: (4 + models::MAX_TEXTURES * m) * n,
                 },
             ];
             let desc_pool = device.create_descriptor_pool(
@@ -801,12 +785,7 @@ impl UnitRenderer {
                     info(&visible),
                     info(&indirect),
                 ];
-                let image = [vk::DescriptorImageInfo {
-                    sampler: height_sampler,
-                    image_view: height_view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                }];
-                let mut writes: Vec<vk::WriteDescriptorSet> = buffers
+                let writes: Vec<vk::WriteDescriptorSet> = buffers
                     .iter()
                     .enumerate()
                     .map(|(i, info)| {
@@ -822,49 +801,6 @@ impl UnitRenderer {
                             .buffer_info(info)
                     })
                     .collect();
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(4)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&image),
-                );
-                let shadow = [vk::DescriptorImageInfo {
-                    sampler: shadow_sampler,
-                    image_view: shadow_view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                }];
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(5)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&shadow),
-                );
-                let units = [vk::DescriptorImageInfo {
-                    sampler: unit_shadow_sampler,
-                    image_view: unit_shadow_view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                }];
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(6)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&units),
-                );
-                let tint = [vk::DescriptorImageInfo {
-                    sampler: tint_sampler,
-                    image_view: tint_view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                }];
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(7)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&tint),
-                );
                 device.update_descriptor_sets(&writes, &[]);
             }
             (set_layout, empty_layout, pipeline_layout, desc_pool, sets)
@@ -941,6 +877,7 @@ impl UnitRenderer {
             pipeline_layout,
             desc_pool,
             sets,
+            push,
             light_sets: lights.sets(),
             cull,
             draw,
@@ -1062,22 +999,6 @@ impl UnitRenderer {
                         .buffer_info(b)
                 })
                 .collect();
-            let images: Vec<vk::DescriptorImageInfo> = set
-                .slots
-                .iter()
-                .map(|&(view, sampler)| vk::DescriptorImageInfo {
-                    sampler,
-                    image_view: view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                })
-                .collect();
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(ds)
-                    .dst_binding(7)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&images),
-            );
             let anim = info(&set.anim);
             writes.push(
                 vk::WriteDescriptorSet::default()
@@ -1481,6 +1402,12 @@ impl UnitRenderer {
                     &self.bound_sets(ctx.slot),
                     &[],
                 );
+                self.bind_global(
+                    ctx,
+                    vk::PipelineBindPoint::COMPUTE,
+                    vk::ShaderStageFlags::COMPUTE,
+                    [0; 4],
+                );
                 device.cmd_dispatch(cmd, writes.div_ceil(64), 1, 1);
             }
             barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
@@ -1501,7 +1428,7 @@ impl UnitRenderer {
                 &self.bound_sets(ctx.slot),
                 &[],
             );
-            device.cmd_push_constants(cmd, self.pipeline_layout, all, 0, pipeline::slice_bytes(&[jobs, 0u32]));
+            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, all, [jobs, 0, 0, 0]);
             device.cmd_dispatch(cmd, jobs.div_ceil(64), 1, 1);
         }
     }
@@ -1544,6 +1471,12 @@ impl UnitRenderer {
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
             device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, 0, &sets, &[]);
+            self.bind_global(
+                ctx,
+                vk::PipelineBindPoint::COMPUTE,
+                vk::ShaderStageFlags::COMPUTE,
+                [0; 4],
+            );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.lights_append);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
@@ -1568,6 +1501,12 @@ impl UnitRenderer {
                 0,
                 &self.bound_sets(ctx.slot),
                 &[],
+            );
+            self.bind_global(
+                ctx,
+                vk::PipelineBindPoint::COMPUTE,
+                vk::ShaderStageFlags::COMPUTE,
+                [0; 4],
             );
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
@@ -1597,6 +1536,12 @@ impl UnitRenderer {
                 &[self.light_sets[ctx.slot]],
                 &[],
             );
+            self.bind_global(
+                ctx,
+                vk::PipelineBindPoint::GRAPHICS,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                [0; 4],
+            );
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
             if let Some(m) = &self.models {
                 // Every model command in two multi-draws: opaque, masked.
@@ -1607,12 +1552,11 @@ impl UnitRenderer {
                         continue;
                     }
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                    device.cmd_push_constants(
-                        cmd,
-                        self.pipeline_layout,
+                    self.bind_global(
+                        ctx,
+                        vk::PipelineBindPoint::GRAPHICS,
                         vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        pipeline::slice_bytes(&[0u32, first]),
+                        [0, first, 0, 0],
                     );
                     let offset = models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
                     device.cmd_draw_indexed_indirect(
@@ -1624,6 +1568,30 @@ impl UnitRenderer {
                     );
                 }
             }
+        }
+    }
+
+    /// Bind the global set at 3, and push the pass block (this pass's
+    /// `words` plus the sampled handles).
+    fn bind_global(
+        &self,
+        ctx: &PassContext<'_>,
+        point: vk::PipelineBindPoint,
+        _stages: vk::ShaderStageFlags,
+        words: [u32; 4],
+    ) {
+        let mut block = self.push;
+        block.words = words;
+        unsafe {
+            ctx.device
+                .cmd_bind_descriptor_sets(ctx.cmd, point, self.pipeline_layout, 3, &[ctx.global_set], &[]);
+            ctx.device.cmd_push_constants(
+                ctx.cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                0,
+                crate::pipeline::push_bytes(&block),
+            );
         }
     }
 
@@ -1657,6 +1625,12 @@ impl UnitRenderer {
                 0,
                 &self.bound_sets(ctx.slot),
                 &[],
+            );
+            self.bind_global(
+                ctx,
+                vk::PipelineBindPoint::GRAPHICS,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                [0; 4],
             );
             let push_stages = match self.models {
                 Some(_) => {
@@ -1697,17 +1671,7 @@ impl UnitRenderer {
                     }],
                 );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
-                if self.models.is_some() {
-                    device.cmd_push_constants(
-                        cmd,
-                        self.pipeline_layout,
-                        push_stages,
-                        0,
-                        pipeline::slice_bytes(&[k, 0u32]),
-                    );
-                } else {
-                    device.cmd_push_constants(cmd, self.pipeline_layout, push_stages, 0, &k.to_le_bytes());
-                }
+                self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, push_stages, [k, 0, 0, 0]);
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
                 // The model units the cull found in this cascade (the darts'
                 // caster skipped model classes), by this cascade's copy of
@@ -1724,13 +1688,7 @@ impl UnitRenderer {
                             continue;
                         }
                         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        device.cmd_push_constants(
-                            cmd,
-                            self.pipeline_layout,
-                            push_stages,
-                            0,
-                            pipeline::slice_bytes(&[k, first]),
-                        );
+                        self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, push_stages, [k, first, 0, 0]);
                         device.cmd_draw_indexed_indirect(
                             cmd,
                             self.indirect.buffer,

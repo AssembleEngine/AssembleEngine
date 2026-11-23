@@ -9,7 +9,7 @@
 // is above a particle's centre and within its disc.
 #include "particles_common.glsl"
 
-layout(set = 0, binding = 9) uniform sampler2D puffTex;
+#define puffTex AE_S2D(9, 1)
 
 layout(location = 0) in vec2 inCorner;
 layout(location = 1) flat in vec4 inColor;

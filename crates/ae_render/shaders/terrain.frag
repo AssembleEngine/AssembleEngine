@@ -25,8 +25,8 @@ vec3 hue(float h) {
 // Material tilesets (src/terrain/tileset.rs, docs/tilesets.md)
 // ---------------------------------------------------------------------------
 
-layout(set = 0, binding = 10) uniform sampler2DArray tileAlbedo; // rgb albedo, a height
-layout(set = 0, binding = 11) uniform sampler2DArray tileNormal; // rg tangent-space normal
+#define tileAlbedo AE_S2D_ARRAY(4, 2) // rgb albedo, a height
+#define tileNormal AE_S2D_ARRAY(5, 2) // rg tangent-space normal
 layout(set = 0, binding = 12) uniform TilesetUBO {
     uvec4 materials[8]; // per material id: x ground layer, y cliff layer
     vec4 layers[8];     // x repeats per world unit, y normal strength, z flags (bit 0
@@ -89,7 +89,7 @@ const vec4 ANTI_TILING_SEEDS[16] = vec4[](
 // rotate back into the uv's frame. The degree (0..1) scales both the
 // number of versions and each version's transform, so it is a continuous
 // control, not a switch.
-layout(set = 0, binding = 20) uniform sampler2D antiTilingNoise;
+#define antiTilingNoise AE_S2D(11, 2)
 const float ANTI_TILING_NOISE_SCALE = 1.0 / 48.0; // 16 features per texture
 const float ANTI_TILING_VERSIONS = 8.0;          // at degree 1
 // The part of each index step where two versions blend (Quilez: 0.2..0.8;

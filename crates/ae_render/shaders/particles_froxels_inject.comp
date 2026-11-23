@@ -7,7 +7,7 @@
 #include "particles_common.glsl"
 #include "particles_froxels.glsl"
 
-layout(set = 1, binding = 1) uniform sampler2D puffTex;
+#define puffTex AE_S2D(1, 1)
 
 layout(local_size_x = 64) in;
 

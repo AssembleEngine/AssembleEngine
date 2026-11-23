@@ -36,6 +36,7 @@
 //! texture feed the speculars (M12 step 3); blended materials are drawn as
 //! masks at 0.5.
 
+use crate::bindless::Bindless;
 use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline;
@@ -47,9 +48,6 @@ use ash::vk;
 use glam::Mat4;
 use std::sync::Arc;
 
-/// Texture descriptors in the models' set (partially bound; slot 0: a
-/// white texel).
-pub const MAX_TEXTURES: u32 = 1024;
 /// Bytes of one `VkDrawIndexedIndirectCommand`.
 pub const COMMAND_BYTES: u64 = 20;
 /// Bytes before the first model command in the indirect buffer: the darts'
@@ -83,6 +81,10 @@ struct GpuMaterial {
     xform: [[f32; 4]; 8],
     /// The same for the metallic-roughness texture.
     xform2: [[f32; 4]; 2],
+    /// Global sampler index for each of `tex`.
+    tex_sampler: [u32; 4],
+    /// Global sampler index for the metallic-roughness texture.
+    tex2_sampler: [u32; 4],
 }
 
 #[repr(C)]
@@ -174,8 +176,6 @@ pub struct ModelSet {
     pub model_light_table: OwnedBuffer,
     images: Vec<OwnedImage>,
     samplers: Vec<vk::Sampler>,
-    /// Texture descriptors (slot 0 first); the array's rest is unbound.
-    pub slots: Vec<(vk::ImageView, vk::Sampler)>,
     pub classes: Vec<ModelClass>,
     /// Every command, opaque ones first.
     pub draws: Vec<Draw>,
@@ -355,28 +355,32 @@ pub fn animation(model: &Model, rig: &Rig, anim: &mut Vec<[f32; 4]>) -> [u32; 4]
 /// Images and samplers made so far, destroyed if building fails.
 struct Textures<'a> {
     gpu: &'a GpuDevice,
+    bindless: &'a mut Bindless,
     images: Vec<OwnedImage>,
-    samplers: Vec<(Sampler, vk::Sampler)>,
+    /// The global sampled index of each image.
+    image_indices: Vec<u32>,
+    /// Deduplicated glTF sampler state and its global sampler index.
+    samplers: Vec<(Sampler, vk::Sampler, u32)>,
     /// (unique model, texture) → image.
     image_of: Vec<(usize, u32, usize)>,
-    /// (image, sampler) per descriptor slot from 1.
-    slots: Vec<(usize, usize)>,
 }
 
 impl Textures<'_> {
-    fn sampler(&mut self, s: &Sampler) -> Result<usize> {
-        if let Some(i) = self.samplers.iter().position(|(k, _)| k == s) {
-            return Ok(i);
+    fn sampler(&mut self, s: &Sampler) -> Result<u32> {
+        if let Some((_, _, index)) = self.samplers.iter().find(|(k, _, _)| k == s) {
+            return Ok(*index);
         }
-        self.samplers
-            .push((*s, unsafe { self.gpu.device.create_sampler(&sampler_info(s), None) }?));
-        Ok(self.samplers.len() - 1)
+        let sampler = unsafe { self.gpu.device.create_sampler(&sampler_info(s), None) }?;
+        let index = self.bindless.sampler(sampler)?.index;
+        self.samplers.push((*s, sampler, index));
+        Ok(index)
     }
 
     /// The descriptor slot (from 1) of `r`, the UV set and the transform.
-    fn slot(&mut self, model: &Model, m: usize, r: &Option<TextureRef>) -> Result<(u32, u32, [[f32; 4]; 2])> {
+    fn slot(&mut self, model: &Model, m: usize, r: &Option<TextureRef>) -> Result<(u32, u32, u32, [[f32; 4]; 2])> {
         let Some(r) = r else {
-            return Ok((0, 0, [[1.0, 0.0, 0.0, 1.0], [0.0; 4]]));
+            // The global white fallback and the linear sampler.
+            return Ok((0, 0, 0, [[1.0, 0.0, 0.0, 1.0], [0.0; 4]]));
         };
         let image = match self.image_of.iter().find(|&&(mm, t, _)| mm == m && t == r.texture) {
             Some(&(_, _, i)) => i,
@@ -407,27 +411,22 @@ impl Textures<'_> {
                 } else {
                     upload::image(self.gpu, format, tex.width, tex.height, &levels, "model texture")?
                 };
+                let image_index = self
+                    .bindless
+                    .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                    .0
+                    .index;
                 self.images.push(image);
+                self.image_indices.push(image_index);
                 self.image_of.push((m, r.texture, self.images.len() - 1));
                 self.images.len() - 1
             }
         };
         let sampler = self.sampler(&r.sampler)?;
-        let slot = match self.slots.iter().position(|&s| s == (image, sampler)) {
-            Some(i) => i,
-            None => {
-                self.slots.push((image, sampler));
-                self.slots.len() - 1
-            }
-        };
-        ensure!(
-            slot + 1 < MAX_TEXTURES as usize,
-            "more than {} textures and samplers in the units' models",
-            MAX_TEXTURES - 1
-        );
         let t = r.transform.map_or([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]], |t| t.matrix());
         Ok((
-            (slot + 1) as u32,
+            self.image_indices[image],
+            sampler,
             r.uv,
             [[t[0][0], t[0][1], t[1][0], t[1][1]], [t[2][0], t[2][1], 0.0, 0.0]],
         ))
@@ -437,7 +436,7 @@ impl Textures<'_> {
         for image in &mut self.images {
             image.destroy(self.gpu);
         }
-        for (_, s) in self.samplers.drain(..) {
+        for (_, s, _) in self.samplers.drain(..) {
             unsafe { self.gpu.device.destroy_sampler(s, None) };
         }
     }
@@ -460,6 +459,8 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         uv2: [0; 4],
         xform: [[0.0; 4]; 8],
         xform2: [[0.0; 4]; 2],
+        tex_sampler: [0; 4],
+        tex2_sampler: [0; 4],
     };
     let refs = [
         &mat.base_color_texture,
@@ -468,14 +469,16 @@ fn gpu_material(mat: &ae_model::Material, tex: &mut Textures<'_>, model: &Model,
         &mat.emissive_texture,
     ];
     for (k, r) in refs.into_iter().enumerate() {
-        let (slot, uv, x) = tex.slot(model, m, r)?;
-        g.tex[k] = slot;
+        let (image, sampler, uv, x) = tex.slot(model, m, r)?;
+        g.tex[k] = image;
+        g.tex_sampler[k] = sampler;
         g.uv[k] = uv;
         g.xform[2 * k] = x[0];
         g.xform[2 * k + 1] = x[1];
     }
-    let (slot, uv, x) = tex.slot(model, m, &mat.metallic_roughness_texture)?;
-    g.tex2[0] = slot;
+    let (image, sampler, uv, x) = tex.slot(model, m, &mat.metallic_roughness_texture)?;
+    g.tex2[0] = image;
+    g.tex2_sampler[0] = sampler;
     g.uv2[0] = uv;
     g.xform2 = x;
     match mat.alpha {
@@ -509,6 +512,7 @@ impl ModelSet {
     /// `capacity` units per visible-list region.
     pub fn new(
         gpu: &GpuDevice,
+        bindless: &mut Bindless,
         models: &[Option<Arc<Model>>],
         rigs: &[Option<Arc<Rig>>],
         capacity: u32,
@@ -518,22 +522,13 @@ impl ModelSet {
             gpu.gpu_driven,
             "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound"
         );
-        // The fragment stage sees the models' texture array and the units'
-        // four samplers.
-        let limits = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) }.limits;
-        let need = MAX_TEXTURES + 4;
-        ensure!(
-            limits.max_per_stage_descriptor_samplers >= need && limits.max_per_stage_descriptor_sampled_images >= need,
-            "the units' models need {need} samplers per shader stage; the device allows {} samplers and {} sampled images",
-            limits.max_per_stage_descriptor_samplers,
-            limits.max_per_stage_descriptor_sampled_images
-        );
         let mut tex = Textures {
             gpu,
+            bindless,
             images: Vec::new(),
+            image_indices: Vec::new(),
             samplers: Vec::new(),
             image_of: Vec::new(),
-            slots: Vec::new(),
         };
         match Self::build(gpu, models, rigs, capacity, max_classes, &mut tex) {
             Ok(set) => Ok(set),
@@ -742,21 +737,6 @@ impl ModelSet {
             class_commands.extend_from_slice(&mc.commands);
         }
 
-        // Slot 0: a white texel.
-        tex.images.push(upload::image(
-            gpu,
-            vk::Format::R8G8B8A8_UNORM,
-            1,
-            1,
-            &[&[255; 4]],
-            "model white",
-        )?);
-        let white = (tex.images.len() - 1, tex.sampler(&Sampler::default())?);
-        let slots: Vec<_> = std::iter::once(white)
-            .chain(tex.slots.iter().copied())
-            .map(|(i, s)| (tex.images[i].view, tex.samplers[s].1))
-            .collect();
-
         // The geometry: vertex words, then the indices (16-byte aligned).
         let mut geometry: Vec<u8> = pipeline::slice_bytes(&words).to_vec();
         geometry.resize(geometry.len().next_multiple_of(16), 0);
@@ -844,8 +824,7 @@ impl ModelSet {
             class_light_table,
             model_light_table,
             images: std::mem::take(&mut tex.images),
-            samplers: tex.samplers.drain(..).map(|(_, s)| s).collect(),
-            slots,
+            samplers: tex.samplers.drain(..).map(|(_, s, _)| s).collect(),
             classes,
             draws,
             opaque,
@@ -917,8 +896,9 @@ mod tests {
 
     #[test]
     fn materials_match_the_shader_layout() {
-        // std430 in units_models.glsl: six vec4s, then the arrays.
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 288);
+        // std430 in units_models.glsl: six vec4s, the arrays, then the
+        // global sampler indices.
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 320);
         assert_eq!(std::mem::offset_of!(GpuMaterial, base_color), 0);
         assert_eq!(std::mem::offset_of!(GpuMaterial, emissive), 16);
         assert_eq!(std::mem::offset_of!(GpuMaterial, params), 32);
@@ -929,5 +909,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuMaterial, uv2), 112);
         assert_eq!(std::mem::offset_of!(GpuMaterial, xform), 128);
         assert_eq!(std::mem::offset_of!(GpuMaterial, xform2), 256);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, tex_sampler), 288);
+        assert_eq!(std::mem::offset_of!(GpuMaterial, tex2_sampler), 304);
     }
 }

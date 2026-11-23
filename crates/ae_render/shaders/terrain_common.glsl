@@ -8,6 +8,8 @@
 #define BUF_QUAL
 #endif
 
+#include "bindless.glsl"
+
 #define LATTICE_BITS 20
 #define SUBMESH_DENOM 4   // 2^(SUBMESH_LEVELS/2), SUBMESH_LEVELS = 4 (must stay even)
 #define PYRAMID_BASE_LEVEL 2
@@ -53,10 +55,10 @@ struct Leaf { ivec4 a; ivec4 b; };  // a = (v0, v1), b = (v2, heap id, 0)
 layout(std430, set = 0, binding = 4) BUF_QUAL buffer LeafBuf { Leaf leaves[]; };  // draw list
 // [0..3) update dispatch, [3..8) DrawIndexedIndirectCommand, [8] leaf count
 layout(std430, set = 0, binding = 5) BUF_QUAL buffer IndirectBuf { uint ind[]; };
-layout(set = 0, binding = 6) uniform sampler2D pyramid;   // (min, max, E_L, max E_{L-2}) per block
-layout(set = 0, binding = 7) uniform sampler2D heightTex; // normalised heights, linear filtering
-layout(set = 0, binding = 8) uniform sampler2D errorTex;  // mip m: E_(m+1), exact error at spacing 2^(m+1)
-layout(set = 0, binding = 9) uniform usampler2D materialTex; // material id per cell (FLAG_MATERIALS), else 1x1
+#define pyramid AE_S2D(0, 0)    // (min, max, E_L, max E_{L-2}) per block
+#define heightTex AE_S2D(1, 1)  // normalised heights, linear filtering
+#define errorTex AE_S2D(2, 0)   // mip m: E_(m+1), exact error at spacing 2^(m+1)
+#define materialTex AE_US2D(3, 0) // material id per cell (FLAG_MATERIALS), else 1x1
 
 #define IND_DRAW_INSTANCES 4
 #define IND_LEAF_COUNT 8

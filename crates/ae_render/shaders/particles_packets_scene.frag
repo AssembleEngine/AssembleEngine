@@ -4,10 +4,10 @@
 // The targets hold physical radiance and the scene exposed radiance.
 #include "particles_common.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D particleColor;
-layout(set = 1, binding = 1) uniform sampler2D unusedDepth;
-layout(set = 1, binding = 2) uniform sampler2D unusedDepth2;
-layout(set = 1, binding = 3) uniform sampler2D particleGlow;
+#define particleColor AE_S2D(0, 0)
+#define unusedDepth AE_S2D(1, 0)
+#define unusedDepth2 AE_S2D(2, 0)
+#define particleGlow AE_S2D(3, 0)
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outGlow;

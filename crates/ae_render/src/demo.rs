@@ -588,6 +588,7 @@ mod gpu {
         fn create(
             &mut self,
             gpu: &Arc<GpuDevice>,
+            _bindless: &mut crate::bindless::Bindless,
             target: crate::thread::TargetInfo,
             frames_in_flight: usize,
         ) -> Result<()> {
@@ -622,7 +623,7 @@ mod gpu {
             }
         }
 
-        fn prepare(&mut self, slot: usize) -> Result<()> {
+        fn prepare(&mut self, _bindless: &mut crate::bindless::Bindless, slot: usize) -> Result<()> {
             self.frame += 1;
             let bytes = params_bytes(demo_tint(self.frame));
             let staging = self

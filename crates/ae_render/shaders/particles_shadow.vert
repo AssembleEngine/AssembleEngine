@@ -4,9 +4,9 @@
 // quad facing the sun, into one cascade of `shadows.color`. The instances
 // are the simulation's list of casters (the keys from u.pool.x), not the
 // camera's sorted list: smoke off screen still shades the view.
+#define AE_PUSH_WORDS uint cascade; uint pushPad0; uint pushPad1; uint pushPad2; uvec4 pushPad3;
 #include "particles_common.glsl"
 
-layout(push_constant) uniform Push { uint cascade; } pc;
 
 layout(location = 0) out vec2 outCorner;
 layout(location = 1) flat out vec4 outColor; // colour, opacity
@@ -29,7 +29,7 @@ void main() {
     float angle = float(p.info.y & 0xffffu) * (6.2831853 / 65536.0);
     vec2 c = CORNERS[gl_VertexIndex];
     vec2 r = vec2(c.x * cos(angle) - c.y * sin(angle), c.x * sin(angle) + c.y * cos(angle));
-    uint k = pc.cascade;
+    uint k = ae.cascade;
     vec3 l = vec3(dot(u.shadowAxes[0].xyz, p.posAge.xyz), dot(u.shadowAxes[1].xyz, p.posAge.xyz), dot(u.shadowAxes[2].xyz, p.posAge.xyz));
     vec3 clip = (l - u.shadowOrigin[k].xyz) * u.shadowScale[k].xyz;
     clip.xy += r * radius * u.shadowScale[k].xy;

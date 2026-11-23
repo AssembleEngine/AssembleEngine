@@ -98,15 +98,6 @@ impl VisionGrid {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PushConstants {
-    mode: u32,
-    write_draw: u32,
-    level: u32,
-    pad: u32,
-}
-
 /// What the LOD is computed for (kept apart from the render camera so it
 /// can be frozen).
 #[derive(Clone, Copy, Debug)]
@@ -287,6 +278,11 @@ pub struct TerrainRenderer {
     vision: Option<VisionGrid>,
     /// Nearest clamp, linear clamp, trilinear repeat (tilesets).
     samplers: [vk::Sampler; 3],
+    /// The global sampled indices of the items drawn above, and the pass's
+    /// 128-byte push block (terrain.frag/water.frag macros name them).
+    sampled: [u32; 12],
+    push: crate::bindless::Push,
+    global_layout: vk::DescriptorSetLayout,
 }
 
 /// Texels to rewrite after the terrain changed (see
@@ -334,6 +330,7 @@ impl TerrainRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
         heightmap: &Heightmap,
         pyramid: &Pyramid,
         info: TerrainInfo,
@@ -573,7 +570,7 @@ impl TerrainRenderer {
             }
             None => upload::image(gpu, vk::Format::R32_SFLOAT, 1, 1, &[&[0; 4]], "terrain shadow heights")?,
         };
-        let unit_shadow_map = ShadowMap::new(gpu, unit_shadows)?;
+        let unit_shadow_map = ShadowMap::new(gpu, bindless, unit_shadows)?;
         let array = vk::ImageViewType::TYPE_2D_ARRAY;
         let (tile_albedo, tile_normal, tile_table) = match tileset {
             Some(t) => {
@@ -683,6 +680,60 @@ impl TerrainRenderer {
             make_sampler(vk::Filter::LINEAR)?,
             repeat,
         ];
+        let global_layout = bindless.set_layout();
+        let sampled = [
+            bindless
+                .sampled_2d(pyramid_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d(height_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d(error_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_u2d(material_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d_array(tile_albedo.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d_array(tile_normal.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d(shadow_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            unit_shadow_map.sampled_index(),
+            unit_shadow_map.color_sampled_index(),
+            bindless
+                .sampled_2d_array(decal_atlas.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d_array(decal_surface.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+            bindless
+                .sampled_2d(tile_noise.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+        ];
+        let mut push = crate::bindless::Push::default();
+        for (at, &index) in sampled.iter().enumerate() {
+            push.image(at, index);
+        }
+        push.sampler(0, bindless.sampler(samplers[0])?.index);
+        push.sampler(1, bindless.sampler(samplers[1])?.index);
+        push.sampler(2, bindless.sampler(samplers[2])?.index);
+        push.sampler(3, unit_shadow_map.color_sampler_index());
+        push.sampler(4, unit_shadow_map.sampler_index());
 
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let (set_layout, pipeline_layout, desc_pool, sets) = unsafe {
@@ -693,6 +744,8 @@ impl TerrainRenderer {
                     .descriptor_count(1)
                     .stage_flags(all)
             };
+            // Sampled inputs moved to the global set (step C); only the
+            // buffers remain here until step D.
             let bindings = [
                 b(0, vk::DescriptorType::UNIFORM_BUFFER),
                 b(1, vk::DescriptorType::STORAGE_BUFFER),
@@ -700,21 +753,9 @@ impl TerrainRenderer {
                 b(3, vk::DescriptorType::STORAGE_BUFFER),
                 b(4, vk::DescriptorType::STORAGE_BUFFER),
                 b(5, vk::DescriptorType::STORAGE_BUFFER),
-                b(6, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(7, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(8, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(9, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(10, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(11, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(12, vk::DescriptorType::UNIFORM_BUFFER),
                 b(13, vk::DescriptorType::STORAGE_BUFFER),
-                b(14, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(15, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(16, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(17, vk::DescriptorType::STORAGE_BUFFER),
-                b(18, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(19, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                b(20, vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
                 b(21, vk::DescriptorType::STORAGE_BUFFER),
             ];
             let set_layout = device.create_descriptor_set_layout(
@@ -724,8 +765,8 @@ impl TerrainRenderer {
             // Set 1: the clustered lights (the terrain and the water read them).
             let pipeline_layout = pipeline::pipeline_layout(
                 device,
-                &[set_layout, lights.set_layout()],
-                size_of::<PushConstants>() as u32,
+                &[set_layout, lights.set_layout(), bindless.set_layout()],
+                size_of::<crate::bindless::Push>() as u32,
                 all,
             )?;
             let n = frames_in_flight as u32;
@@ -737,10 +778,6 @@ impl TerrainRenderer {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     descriptor_count: 8 * n,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: 12 * n,
                 },
             ];
             let desc_pool = device.create_descriptor_pool(
@@ -769,22 +806,6 @@ impl TerrainRenderer {
                     info(&leaves),
                     info(&indirect),
                 ];
-                let image = |sampler, view| {
-                    [vk::DescriptorImageInfo {
-                        sampler,
-                        image_view: view,
-                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    }]
-                };
-                let images = [
-                    image(samplers[0], pyramid_img.view),
-                    image(samplers[1], height_img.view),
-                    image(samplers[0], error_img.view),
-                    image(samplers[0], material_img.view),
-                    image(samplers[2], tile_albedo.view),
-                    image(samplers[2], tile_normal.view),
-                ];
-                let shadow = image(samplers[1], shadow_img.view);
                 let mut writes: Vec<vk::WriteDescriptorSet> = infos
                     .iter()
                     .enumerate()
@@ -801,15 +822,6 @@ impl TerrainRenderer {
                             .buffer_info(info)
                     })
                     .collect();
-                for (i, info) in images.iter().enumerate() {
-                    writes.push(
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(6 + i as u32)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                            .image_info(info),
-                    );
-                }
                 let table = [vk::DescriptorBufferInfo {
                     buffer: tile_ubo.buffer,
                     offset: 0,
@@ -834,31 +846,6 @@ impl TerrainRenderer {
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&planes),
                 );
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(14)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&shadow),
-                );
-                let (view, sampler) = unit_shadow_map.texture();
-                let units = image(sampler, view);
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(15)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&units),
-                );
-                let (view, sampler) = unit_shadow_map.color_texture();
-                let tint = image(sampler, view);
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(16)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&tint),
-                );
                 let decal_list = [vk::DescriptorBufferInfo {
                     buffer: decal_bufs[slot].buffer,
                     offset: 0,
@@ -870,30 +857,6 @@ impl TerrainRenderer {
                         .dst_binding(17)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&decal_list),
-                );
-                let atlas = image(samplers[2], decal_atlas.view);
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(18)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&atlas),
-                );
-                let surface = image(samplers[2], decal_surface.view);
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(19)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&surface),
-                );
-                let noise = image(samplers[2], tile_noise.view);
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(20)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&noise),
                 );
                 let material = [vk::DescriptorBufferInfo {
                     buffer: decal_materials.buffer,
@@ -1028,6 +991,9 @@ impl TerrainRenderer {
             vision_bufs,
             vision,
             samplers,
+            sampled,
+            push,
+            global_layout,
         })
     }
 
@@ -1287,18 +1253,9 @@ impl TerrainRenderer {
         };
         let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let push = |mode: u32, write_draw: u32, level: u32| unsafe {
-            device.cmd_push_constants(
-                cmd,
-                self.pipeline_layout,
-                all,
-                0,
-                bytes_of(&PushConstants {
-                    mode,
-                    write_draw,
-                    level,
-                    pad: 0,
-                }),
-            );
+            let mut block = self.push;
+            block.words = [mode, write_draw, level, 0];
+            device.cmd_push_constants(cmd, self.pipeline_layout, all, 0, bytes_of(&block));
         };
         let t = self.max_depth - 5;
         unsafe {
@@ -1311,6 +1268,14 @@ impl TerrainRenderer {
                 self.pipeline_layout,
                 0,
                 &[self.sets[ctx.slot]],
+                &[],
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                2,
+                &[ctx.global_set],
                 &[],
             );
             let pass = |mode: u32, write_draw: bool| {
@@ -1382,6 +1347,21 @@ impl TerrainRenderer {
                 &[self.sets[ctx.slot], self.light_sets[ctx.slot]],
                 &[],
             );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                2,
+                &[ctx.global_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytes_of(&self.push),
+            );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
             let terrain = match self.terrain_decals {
@@ -1417,9 +1397,61 @@ impl TerrainRenderer {
                 &[self.sets[ctx.slot], self.light_sets[ctx.slot]],
                 &[],
             );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                2,
+                &[ctx.global_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytes_of(&self.push),
+            );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, water);
             device.cmd_draw(cmd, 6, 1, 0, 0);
         }
+    }
+
+    /// Global sampled indices the units and particles reuse: the height
+    /// texture, the hills' shadow heights, the units' shadow map and the
+    /// particles' coloured shadows.
+    pub fn bindless_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.global_layout
+    }
+
+    pub fn height_index(&self) -> u32 {
+        self.sampled[1]
+    }
+
+    pub fn sun_shadow_index(&self) -> u32 {
+        self.sampled[6]
+    }
+
+    pub fn unit_shadow_index(&self) -> u32 {
+        self.sampled[7]
+    }
+
+    pub fn particle_shadow_index(&self) -> u32 {
+        self.sampled[8]
+    }
+
+    /// The terrain's linear sampler and the shadows' colour sampler.
+    pub fn linear_sampler_index(&self) -> u32 {
+        self.push.sampler_at(1)
+    }
+
+    pub fn shadow_color_sampler_index(&self) -> u32 {
+        self.push.sampler_at(3)
+    }
+
+    /// The units' shadow map's comparison sampler.
+    pub fn shadow_compare_sampler_index(&self) -> u32 {
+        self.push.sampler_at(4)
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

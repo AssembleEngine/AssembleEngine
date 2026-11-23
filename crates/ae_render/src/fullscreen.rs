@@ -498,6 +498,209 @@ impl FullscreenProgram {
     }
 }
 
+/// A library-owned fullscreen program on the global bindless set (M15
+/// step C). Its uniform block stays set 0 (the module contract is untouched;
+/// step F moves modules), the global set is set 2, and the pass's sampled
+/// handles and sampler index arrive in the 128-byte push block from
+/// `bindless.glsl`.
+pub struct BindlessProgram {
+    pub label: String,
+    pub uniform_bytes: u32,
+    set_layout: vk::DescriptorSetLayout,
+    empty_layout: vk::DescriptorSetLayout,
+    layout: vk::PipelineLayout,
+    pool: Option<vk::DescriptorPool>,
+    sets: Vec<vk::DescriptorSet>,
+    ubos: Vec<OwnedBuffer>,
+    pipeline: vk::Pipeline,
+}
+
+impl BindlessProgram {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        gpu: &GpuDevice,
+        bindless: &crate::bindless::Bindless,
+        label: &str,
+        spirv: &[u8],
+        uniform_bytes: u32,
+        color_formats: &[vk::Format],
+        frames_in_flight: usize,
+    ) -> Result<Self> {
+        let reflection = reflect(spirv).with_context(|| format!("program `{label}`"))?;
+        if !reflection.fragment_main {
+            bail!("program `{label}`: no fragment entry point `main`");
+        }
+        let device = &gpu.device;
+        let stages = vk::ShaderStageFlags::FRAGMENT;
+        unsafe {
+            let empty_layout =
+                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None)?;
+            let (set_layout, pool, sets, ubos) = if uniform_bytes > 0 {
+                let binding = vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(stages);
+                let set_layout = device.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[binding]),
+                    None,
+                )?;
+                let n = frames_in_flight as u32;
+                let pool = device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(n)
+                        .pool_sizes(&[vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: n,
+                        }]),
+                    None,
+                )?;
+                let layouts = vec![set_layout; frames_in_flight];
+                let sets = device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(pool)
+                        .set_layouts(&layouts),
+                )?;
+                let ubos: Vec<OwnedBuffer> = (0..frames_in_flight)
+                    .map(|_| {
+                        OwnedBuffer::new(
+                            gpu,
+                            BufferDesc {
+                                size: uniform_bytes as u64,
+                                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                            },
+                            MemoryLocation::CpuToGpu,
+                            label,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for (slot, &set) in sets.iter().enumerate() {
+                    let info = [vk::DescriptorBufferInfo {
+                        buffer: ubos[slot].buffer,
+                        offset: 0,
+                        range: vk::WHOLE_SIZE,
+                    }];
+                    device.update_descriptor_sets(
+                        &[vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(&info)],
+                        &[],
+                    );
+                }
+                (set_layout, Some(pool), sets, ubos)
+            } else {
+                (empty_layout, None, Vec::new(), Vec::new())
+            };
+            let layout =
+                pipeline::pipeline_layout(device, &[set_layout, empty_layout, bindless.set_layout()], 128, stages)?;
+            let pipeline = pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex: spirv!("fullscreen.vert"),
+                    fragment: spirv,
+                    layout,
+                    color_formats,
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Straight,
+                    glow_blend: Blend::Off,
+                },
+            )
+            .with_context(|| format!("program `{label}` pipeline"))?;
+            Ok(Self {
+                label: label.into(),
+                uniform_bytes,
+                set_layout,
+                empty_layout,
+                layout,
+                pool,
+                sets,
+                ubos,
+                pipeline,
+            })
+        }
+    }
+
+    pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
+        if let Some(mapped) = self.ubos.get_mut(slot).and_then(|u| u.mapped()) {
+            let n = bytes.len().min(self.uniform_bytes as usize);
+            mapped[..n].copy_from_slice(&bytes[..n]);
+        }
+    }
+
+    /// Draw, sampling the images at `images` with `samplers` (indices into
+    /// the global arrays). Records inside the pass's graphics scope.
+    pub fn record(&self, ctx: &PassContext<'_>, images: &[u32], samplers: &[u32]) -> Result<()> {
+        anyhow::ensure!(
+            images.len() <= 16,
+            "program `{}` needs more than 16 sampled images",
+            self.label
+        );
+        anyhow::ensure!(
+            samplers.len() <= 8,
+            "program `{}` needs more than 8 samplers",
+            self.label
+        );
+        let mut push = crate::bindless::Push::default();
+        for (i, &index) in images.iter().enumerate() {
+            push.image(i, index);
+        }
+        for (i, &index) in samplers.iter().enumerate() {
+            push.sampler(i, index);
+        }
+        unsafe {
+            ctx.device.cmd_push_constants(
+                ctx.cmd,
+                self.layout,
+                vk::ShaderStageFlags::FRAGMENT,
+                0,
+                pipeline::push_bytes(&push),
+            );
+            if !self.ubos.is_empty() {
+                ctx.device.cmd_bind_descriptor_sets(
+                    ctx.cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.layout,
+                    0,
+                    &[self.sets[ctx.slot]],
+                    &[],
+                );
+            }
+            ctx.device.cmd_bind_descriptor_sets(
+                ctx.cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.layout,
+                2,
+                &[ctx.global_set],
+                &[],
+            );
+            ctx.device
+                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+        }
+        Ok(())
+    }
+
+    pub fn destroy(&mut self, gpu: &GpuDevice) {
+        unsafe {
+            gpu.device.destroy_pipeline(self.pipeline, None);
+            gpu.device.destroy_pipeline_layout(self.layout, None);
+            if let Some(pool) = self.pool.take() {
+                gpu.device.destroy_descriptor_pool(pool, None);
+            }
+            if self.set_layout != self.empty_layout {
+                gpu.device.destroy_descriptor_set_layout(self.set_layout, None);
+            }
+            gpu.device.destroy_descriptor_set_layout(self.empty_layout, None);
+        }
+        for u in &mut self.ubos {
+            u.destroy(gpu);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -167,7 +167,7 @@ bool evalBone(uint rec, uint b, uint bones, uint clipsAt, out Trs p) {
 
 void main() {
     uint job = gl_GlobalInvocationID.x;
-    if (job >= pc.cascade) {
+    if (job >= ae.words.x) {
         return;
     }
     uint cap = u.counts.y;

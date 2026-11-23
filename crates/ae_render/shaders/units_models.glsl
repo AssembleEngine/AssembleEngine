@@ -21,6 +21,8 @@ struct Material {
     uvec4 uvSet2;   // x: its UV set
     vec4 xform[8];  // per texture: 2x2 matrix (columns), offset
     vec4 xform2[2]; // the metallic-roughness texture's
+    uvec4 texSampler;  // global sampler for each of `tex`
+    uvec4 tex2Sampler; // and for the metallic-roughness texture
 };
 layout(std430, set = 1, binding = 1) readonly buffer Materials { Material materials[]; };
 // Skinning matrices, 3x4: each column holds a row of the affine transform
@@ -41,7 +43,7 @@ struct ModelClass {
 };
 layout(std430, set = 1, binding = 3) readonly buffer Classes { ModelClass modelClasses[MAX_CLASSES]; };
 
-// One per indirect command (found by gl_DrawID + pc.drawBase).
+// One per indirect command (found by gl_DrawID + ae.words.y).
 struct DrawRecord {
     uint material;
     uint cls;
@@ -58,8 +60,6 @@ layout(std430, set = 1, binding = 5) readonly buffer ClassCommands { uint classC
 // Per frame: [capacity] each row's palette offset, [capacity] the rows
 // with animation records (the pose jobs), [capacity] each job's scratch offset.
 layout(std430, set = 1, binding = 6) readonly buffer Rows { uint rows[]; };
-// Partially bound (models::MAX_TEXTURES); indexed per draw, so uniformly.
-layout(set = 1, binding = 7) uniform sampler2D textures[1024];
 #ifdef POSE
 // The models' animation table (models.rs, animation()): per model its bones
 // (rest rows 0..2, parent in 3.x), joints (inverse bind rows 0..2, bone in
@@ -82,9 +82,8 @@ layout(std430, set = 1, binding = 10) readonly buffer Staged { uvec4 staged[]; }
 layout(std430, set = 1, binding = 11) readonly buffer StagedAt { uint stagedAt[]; };
 #endif
 
-// cascade: the shadow caster's (units_pose.comp: the number of jobs);
-// drawBase: the multi-draw's first command.
-layout(push_constant) uniform Push { uint cascade; uint drawBase; } pc;
+// `ae.words.x`: the shadow caster's cascade (units_pose.comp: the number of
+// jobs); `ae.words.y`: the multi-draw's first command.
 
 uint poseOffset(uint row) { return rows[row]; }
 

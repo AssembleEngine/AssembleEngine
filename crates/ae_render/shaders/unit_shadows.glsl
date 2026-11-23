@@ -25,7 +25,12 @@ layout(constant_id = 0) const bool UNIT_SHADOWS = true;
 // between it and the sun let through, per channel (1: none); a receiver
 // nearer the sun than the nearest particle (a unit above the smoke) is
 // not tinted, over a fade of two metres.
-float unitShadowAt(sampler2DShadow tex, sampler2D tintTex, vec4 axes[3], vec4 origin[UNIT_CASCADES], vec4 scale[UNIT_CASCADES], vec3 sun, vec3 p, vec3 n, out vec3 tint) {
+//
+// The maps are global indices (bindless.glsl): the shadow map with its
+// comparison sampler, the tint with its colour sampler.
+float unitShadowAt(uint shadowImage, uint shadowSampler, uint tintImage, uint tintSampler, vec4 axes[3], vec4 origin[UNIT_CASCADES], vec4 scale[UNIT_CASCADES], vec3 sun, vec3 p, vec3 n, out vec3 tint) {
+#define tex AE_SHADOW_AT(shadowImage, shadowSampler)
+#define tintTex AE_S2D_AT(tintImage, tintSampler)
     tint = vec3(1.0);
     if (!UNIT_SHADOWS || scale[0].w < 0.5) {
         return 1.0;
@@ -57,5 +62,7 @@ float unitShadowAt(sampler2DShadow tex, sampler2D tintTex, vec4 axes[3], vec4 or
         }
         return lit;
     }
+#undef tex
+#undef tintTex
     return 1.0;
 }

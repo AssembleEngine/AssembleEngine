@@ -10,7 +10,11 @@
 // blended; overlapping ones mix by how much of their thickness overlaps,
 // so their mix changes continuously as they pass through each other. More
 // fragments than the list holds: magenta.
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
+#ifndef AE_BINDLESS_SET
+#define AE_BINDLESS_SET 3
+#endif
+#include "bindless.glsl"
+#define depthTex AE_S2D(0, 0)
 layout(std140, set = 0, binding = 0) uniform Frame {
     mat4 viewProj;
     vec4 camPos;

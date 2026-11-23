@@ -97,6 +97,33 @@ pub struct BufferHandle {
 /// Live counts, binding order, for `ExecutorStats`.
 pub const CLASS_COUNT: usize = 4;
 
+/// The 128-byte push block `bindless.glsl` declares: eight of the pass's own
+/// words, 16 sampled-image indices and 8 sampler indices.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Push {
+    pub words: [u32; 4],
+    pub words2: [u32; 4],
+    pub images: [[u32; 4]; 4],
+    pub samplers: [[u32; 4]; 2],
+}
+
+const _: () = assert!(size_of::<Push>() == 128);
+
+impl Push {
+    pub fn image(&mut self, at: usize, index: u32) {
+        self.images[at / 4][at % 4] = index;
+    }
+
+    pub fn sampler(&mut self, at: usize, index: u32) {
+        self.samplers[at / 4][at % 4] = index;
+    }
+
+    pub fn sampler_at(&self, at: usize) -> u32 {
+        self.samplers[at / 4][at % 4]
+    }
+}
+
 /// The limits a device must meet for the fixed capacities. Without
 /// update-after-bind these are the ordinary per-stage and per-set limits.
 pub fn check_limits(limits: &vk::PhysicalDeviceLimits) -> Result<(), String> {
@@ -486,7 +513,6 @@ impl Bindless {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
-
         let mut this = Self {
             frames,
             set_layout,
@@ -602,6 +628,91 @@ impl Bindless {
             size,
         });
         Ok(BufferHandle { index, generation })
+    }
+
+    /// One sampled index whose descriptor differs per frame slot (a
+    /// per-slot target). Every slot starts at the fallback;
+    /// [`Self::update_slotted_2d`] writes one slot's set only, so a slot's
+    /// set never references another slot's resource (which that slot may
+    /// destroy while this one is in flight).
+    pub fn slotted_2d(&mut self) -> Result<Sampled2D> {
+        let (index, generation) = self.sampled.alloc(SampledKind::Image2D as u32)?;
+        let view = self.fallback_images[SampledKind::Image2D.fallback() as usize].view;
+        self.queue_all(Write::Sampled {
+            index,
+            view,
+            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        });
+        Ok(Sampled2D(ImageHandle { index, generation }))
+    }
+
+    /// Point `slot`'s descriptor of a slotted handle at `view`. Applied at
+    /// that slot's next flush (`begin_frame`, or [`Self::flush_open_slot`]).
+    pub fn update_slotted_2d(&mut self, handle: Sampled2D, slot: usize, view: vk::ImageView, layout: vk::ImageLayout) {
+        if self.sampled.resolve(handle.0.index, handle.0.generation) {
+            self.pending[slot].push(Write::Sampled {
+                index: handle.0.index,
+                view,
+                layout,
+            });
+        }
+    }
+
+    /// One storage-image index per frame slot, as [`Self::slotted_2d`].
+    pub fn slotted_storage_image(&mut self) -> Result<StorageImageHandle> {
+        let (index, generation) = self.storage_images.alloc(0)?;
+        self.queue_all(Write::StorageImage {
+            index,
+            view: self.fallback_storage.view,
+            layout: vk::ImageLayout::GENERAL,
+        });
+        Ok(StorageImageHandle { index, generation })
+    }
+
+    pub fn update_slotted_storage_image(
+        &mut self,
+        handle: StorageImageHandle,
+        slot: usize,
+        view: vk::ImageView,
+        layout: vk::ImageLayout,
+    ) {
+        if self.storage_images.resolve(handle.index, handle.generation) {
+            self.pending[slot].push(Write::StorageImage {
+                index: handle.index,
+                view,
+                layout,
+            });
+        }
+    }
+
+    /// One storage-buffer index per frame slot, as [`Self::slotted_2d`].
+    pub fn slotted_buffer(&mut self) -> Result<BufferHandle> {
+        let (index, generation) = self.storage_buffers.alloc(0)?;
+        self.queue_all(Write::StorageBuffer {
+            index,
+            buffer: self.fallback_buffer.buffer,
+            offset: 0,
+            size: self.fallback_buffer.size,
+        });
+        Ok(BufferHandle { index, generation })
+    }
+
+    pub fn update_slotted_buffer(
+        &mut self,
+        handle: BufferHandle,
+        slot: usize,
+        buffer: vk::Buffer,
+        offset: u64,
+        size: u64,
+    ) {
+        if self.storage_buffers.resolve(handle.index, handle.generation) {
+            self.pending[slot].push(Write::StorageBuffer {
+                index: handle.index,
+                buffer,
+                offset,
+                size,
+            });
+        }
     }
 
     /// A graph resource's sampled index. `views` is one view per frame
@@ -869,6 +980,20 @@ impl Bindless {
             }
         }
         writes
+    }
+
+    /// Apply `slot`'s writes queued since its `begin_frame`, before the
+    /// frame records (`Executor::execute`). The slot's fence has been
+    /// waited and none of its commands are recorded yet, so its set is
+    /// still idle; a handle registered or updated in `prepare` is therefore
+    /// usable in the same frame. Retirement bookkeeping stays with
+    /// `begin_frame`.
+    pub fn flush_open_slot(&mut self, device: &ash::Device, slot: usize) -> u64 {
+        if self.pending[slot].is_empty() {
+            return 0;
+        }
+        let pending = std::mem::take(&mut self.pending[slot]);
+        self.flush_writes(device, slot, pending.into_iter())
     }
 
     fn flush_writes(&self, device: &ash::Device, slot: usize, pending: impl Iterator<Item = Write>) -> u64 {

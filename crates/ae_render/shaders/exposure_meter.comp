@@ -1,4 +1,5 @@
 #version 460
+#include "bindless.glsl"
 // exposure.meter (src/exposure.rs): the HDR scene's log luminance into a
 // histogram, one count per 4x4 block (four taps, the block's mean
 // luminance). Metering at a quarter of the size keeps the counts few (a
@@ -42,13 +43,12 @@ layout(std140, set = 0, binding = 0) uniform Exposure {
 
 // Atomics read and write: the graph declares it storage_buffer_read_write.
 layout(std430, set = 0, binding = 1) buffer Histogram { uint bins[]; } h;
-layout(set = 0, binding = 2) uniform sampler2D scene;
-layout(set = 0, binding = 4) uniform sampler2D depthTex;
 layout(std430, set = 0, binding = 5) readonly buffer VisionBuf { uint planes[]; };
-layout(set = 0, binding = 6) uniform sampler2D glowTex;
-
-// Whether the graph binds the depth (the vision needs it) and the glow.
-layout(push_constant) uniform Push { uint depth; uint glow; } push;
+// Bindless handles: scene 0, depth 1, glow 2; sampler 0. `ae.words.x`
+// says the depth (and vision) are bound, `ae.words.y` the glow.
+#define scene AE_S2D(0, 0)
+#define depthTex AE_S2D(1, 0)
+#define glowTex AE_S2D(2, 0)
 
 // bloom.downsample's clamp (src/bloom.rs BLOOM_CLAMP).
 const float BLOOM_CLAMP = 4.0;
@@ -110,8 +110,8 @@ void main() {
     ivec2 size = textureSize(scene, 0);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 4;
     if (p.x < size.x && p.y < size.y) {
-        bool undim = e.flags.x > 0.5 && push.depth != 0u;
-        bool glow = push.glow != 0u && e.meter.x > 0.0;
+        bool undim = e.flags.x > 0.5 && ae.words.x != 0u;
+        bool glow = ae.words.y != 0u && e.meter.x > 0.0;
 
         // Four taps at the block's quarters (fewer on an odd edge).
         vec3 c = vec3(0.0);

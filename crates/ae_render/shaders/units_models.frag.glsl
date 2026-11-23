@@ -25,7 +25,13 @@ vec4 sampleTex(Material m, uint k) {
     vec2 uv = m.uvSet[k] == 0u ? inUv.xy : inUv.zw;
     vec4 a = m.xform[2u * k];
     uv = mat2(a.xy, a.zw) * uv + m.xform[2u * k + 1u].xy;
-    return texture(textures[m.tex[k]], uv);
+    return texture(
+        sampler2D(
+            ae_images[nonuniformEXT(m.tex[k])],
+            ae_samplers[nonuniformEXT(m.texSampler[k])]
+        ),
+        uv
+    );
 }
 
 // The metallic-roughness texture (roughness in G, metallic in B), through
@@ -34,7 +40,13 @@ vec4 sampleMetallicRoughness(Material m) {
     vec2 uv = m.uvSet2.x == 0u ? inUv.xy : inUv.zw;
     vec4 a = m.xform2[0u];
     uv = mat2(a.xy, a.zw) * uv + m.xform2[1u].xy;
-    return texture(textures[m.tex2.x], uv);
+    return texture(
+        sampler2D(
+            ae_images[nonuniformEXT(m.tex2.x)],
+            ae_samplers[nonuniformEXT(m.tex2Sampler.x)]
+        ),
+        uv
+    );
 }
 
 void main() {

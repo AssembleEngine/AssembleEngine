@@ -2,9 +2,13 @@
 // Moment-based OIT, resolve: the media's transmittance-weighted colour,
 // normalised and scaled by their total opacity (1 - exp(-b0)), plus the
 // emissive light; premultiplied, for the composite.
-layout(set = 1, binding = 2) uniform sampler2D momentB0;
-layout(set = 1, binding = 4) uniform sampler2D media;
-layout(set = 1, binding = 5) uniform sampler2D emissive;
+#ifndef AE_BINDLESS_SET
+#define AE_BINDLESS_SET 3
+#endif
+#include "bindless.glsl"
+#define momentB0 AE_S2D(2, 0)
+#define media AE_S2D(4, 0)
+#define emissive AE_S2D(5, 0)
 
 layout(location = 0) out vec4 outColor;
 

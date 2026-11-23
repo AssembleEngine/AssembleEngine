@@ -4,18 +4,16 @@
 
 // Shadow heights (src/terrain/sun.rs): per heightmap corner, the highest
 // point above it that the terrain toward the sun shades (world units).
-layout(set = 0, binding = 14) uniform sampler2D sunShadowTex;
-// The units' shadow map (src/shadow.rs; a 1x1 stand-in when off).
-layout(set = 0, binding = 15) uniform sampler2DShadow unitShadowTex;
-// The particles' coloured shadows (a 1x1 stand-in when off).
-layout(set = 0, binding = 16) uniform sampler2D particleShadowTex;
+#define sunShadowTex AE_S2D(6, 1)
 
 #include "unit_shadows.glsl"
 
 // Sunlight reaching world point p (normal n) past the units; `tint` past
-// the particles.
+// the particles. Handles: the units' shadow map 7 with the comparison
+// sampler 4, the particles' coloured shadows 8 with sampler 3 (each a
+// 1x1 stand-in when off).
 float unitSunAt(vec3 p, vec3 n, out vec3 tint) {
-    return unitShadowAt(unitShadowTex, particleShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n, tint);
+    return unitShadowAt(AE_IMAGE(7), AE_SAMPLER(4), AE_IMAGE(8), AE_SAMPLER(3), u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n, tint);
 }
 
 // Sunlight reaching height `y` over world point `xz` past the hills: 1 lit,

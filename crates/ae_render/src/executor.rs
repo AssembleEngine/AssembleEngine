@@ -82,6 +82,8 @@ pub struct PassContext<'a> {
     pub pass: PassId,
     /// Graphics passes: the attachment extent.
     pub render_area: vk::Rect2D,
+    /// The global bindless set for this frame slot.
+    pub global_set: vk::DescriptorSet,
     bindings: &'a [Option<Binding>],
 }
 
@@ -717,6 +719,9 @@ impl<R> Executor<R> {
         let record_started = Instant::now();
         let gpu = self.gpu.clone();
         let device = &gpu.device;
+        // Writes queued after begin_frame (prepare's registrations and
+        // slotted updates) land before anything binds the slot's set.
+        self.stats.bindless_writes += self.bindless.flush_open_slot(device, token.slot);
         let baked = self.baked.as_ref().ok_or_else(|| anyhow!("execute before set_graph"))?;
         let graph = &self.graph;
         let slot = &mut self.slots[token.slot];
@@ -863,6 +868,7 @@ impl<R> Executor<R> {
         let frame = FrameRecording {
             gpu: &gpu,
             slot: token.slot,
+            global_set: self.bindless.set(token.slot),
             bindings: &bindings,
             queries: if timestamps {
                 slot.queries
@@ -1020,6 +1026,7 @@ struct PassPlan {
 struct FrameRecording<'a> {
     gpu: &'a GpuDevice,
     slot: usize,
+    global_set: vk::DescriptorSet,
     bindings: &'a [Option<Binding>],
     /// Null without timestamps.
     queries: vk::QueryPool,
@@ -1052,6 +1059,7 @@ impl FrameRecording<'_> {
                 slot: self.slot,
                 pass: plan.pass,
                 render_area: vk::Rect2D::default(),
+                global_set: self.global_set,
                 bindings: self.bindings,
             };
             match &plan.rendering {

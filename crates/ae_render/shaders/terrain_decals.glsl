@@ -15,10 +15,10 @@
 layout(constant_id = 1) const bool DECALS = false;
 
 layout(std430, set = 0, binding = 17) readonly buffer DecalBuf { uint decalWords[]; };
-layout(set = 0, binding = 18) uniform sampler2DArray decalAtlas;
+#define decalAtlas AE_S2D_ARRAY(9, 2)
 // Layer for layer: the tangent normal xy (n * 0.5 + 0.5; z is
 // reconstructed), the roughness texture (used as is) and the glow mask.
-layout(set = 0, binding = 19) uniform sampler2DArray decalSurface;
+#define decalSurface AE_S2D_ARRAY(10, 2)
 // Layer for layer: x metallic factor; y..w reserved (src/decals.rs,
 // LayerMaterial).
 layout(std430, set = 0, binding = 21) readonly buffer DecalMaterialBuf { vec4 decalMaterials[]; };

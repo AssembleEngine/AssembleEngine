@@ -5,7 +5,7 @@
 #include "particles_common.glsl"
 #include "particles_frag.glsl"
 
-layout(set = 1, binding = 2) uniform sampler2D sliceRange;
+#define sliceRange AE_S2D(2, 0)
 
 layout(location = 0) out vec4 outSlice0;
 layout(location = 1) out vec4 outSlice1;

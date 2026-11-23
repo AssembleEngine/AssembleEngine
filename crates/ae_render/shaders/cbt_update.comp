@@ -8,7 +8,7 @@ layout(local_size_x = 64) in;
 #define MODE_SPLIT 0u
 #define MODE_MERGE 1u
 #define MODE_NONE 2u
-layout(push_constant) uniform PC { uint mode; uint writeDraw; uint level; uint pad; } pc;
+// The bindless push block's words: x mode, y writeDraw, z level, w pad.
 
 struct Bounds {
     vec3 bmin, bmax;
@@ -62,15 +62,15 @@ void main() {
     decodeTriangle(id, v0, v1, v2);
     Bounds r = nodeBounds(v0, v1, v2);
 
-    if (pc.writeDraw != 0u && r.inMap && inFrustum(u.drawFrustum, r.bmin, r.bmax)) {
+    if (ae.words.y != 0u && r.inMap && inFrustum(u.drawFrustum, r.bmin, r.bmax)) {
         uint slot = atomicAdd(ind[IND_DRAW_INSTANCES], 1u);
         if (slot < u.cfg.w) leaves[slot] = Leaf(ivec4(v0, v1), ivec4(v2, int(id), 0));
     }
 
     float tau = u.lod.x;
-    if (pc.mode == MODE_SPLIT) {
+    if (ae.words.x == MODE_SPLIT) {
         if (pixelError(r) > tau) splitConforming(id);
-    } else if (pc.mode == MODE_MERGE && depthOf(id) > 1u) {
+    } else if (ae.words.x == MODE_MERGE && depthOf(id) > 1u) {
         // Merge the whole diamond (parent + the parent's hypotenuse neighbour) when all
         // four children are leaves and neither parent would be split again.
         uint base = id >> 1;

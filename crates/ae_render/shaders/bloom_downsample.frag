@@ -16,8 +16,10 @@ layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Bloom {
     vec4 params; // x: the EV100 the scene was stored at, y: 1 when the graph has the exposure image
 } b;
-layout(set = 0, binding = 1) uniform sampler2D glow;
-layout(set = 0, binding = 2) uniform sampler2D exposureTex;
+#include "bindless.glsl"
+// Bindless handles: glow 0, exposure 1; sampler 0.
+#define glow AE_S2D(0, 0)
+#define exposureTex AE_S2D(1, 0)
 
 const float BLOOM_CLAMP = 4.0;
 

@@ -29,6 +29,7 @@
 //! WickedEngine) multiplies a colour cleared to white instead, which is
 //! the same product, but keeps no depth.
 
+use crate::bindless::{Bindless, Sampled2D};
 use crate::device::GpuDevice;
 use crate::executor::ImageBinding;
 use crate::memory::OwnedImage;
@@ -70,6 +71,12 @@ pub struct ShadowMap {
     sampler: vk::Sampler,
     color: OwnedImage,
     color_sampler: vk::Sampler,
+    /// The global indices: both images, the comparison sampler and the
+    /// colour sampler.
+    sampled: Sampled2D,
+    color_sampled: Sampled2D,
+    sampler_index: u32,
+    color_sampler_index: u32,
     real: bool,
 }
 
@@ -77,7 +84,7 @@ impl ShadowMap {
     /// The full map when `real`, else a 1x1 stand-in. Either is left in
     /// `SHADER_READ_ONLY_OPTIMAL`, the layout receivers bind it in when a
     /// graph does not draw it.
-    pub fn new(gpu: &GpuDevice, real: bool) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, real: bool) -> Result<Self> {
         let (w, h) = if real {
             (m::SHADOW_MAP_WIDTH, m::SHADOW_MAP_HEIGHT)
         } else {
@@ -132,11 +139,19 @@ impl ShadowMap {
             .max_lod(0.0);
         let sampler = unsafe { gpu.device.create_sampler(&info, None) }?;
         let color_sampler = unsafe { gpu.device.create_sampler(&info.compare_enable(false), None) }?;
+        let sampled = bindless.sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+        let color_sampled = bindless.sampled_2d(color.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+        let sampler_index = bindless.sampler(sampler)?.index;
+        let color_sampler_index = bindless.sampler(color_sampler)?.index;
         Ok(Self {
             image,
             sampler,
             color,
             color_sampler,
+            sampled,
+            color_sampled,
+            sampler_index,
+            color_sampler_index,
             real,
         })
     }
@@ -155,6 +170,23 @@ impl ShadowMap {
     /// only in a frame whose cascades are [`Cascades::tinted`]).
     pub fn color_texture(&self) -> (vk::ImageView, vk::Sampler) {
         (self.color.view, self.color_sampler)
+    }
+
+    pub fn sampled_index(&self) -> u32 {
+        self.sampled.0.index
+    }
+
+    pub fn color_sampled_index(&self) -> u32 {
+        self.color_sampled.0.index
+    }
+
+    /// The comparison sampler, for `sampler2DShadow` over `sampled_index`.
+    pub fn sampler_index(&self) -> u32 {
+        self.sampler_index
+    }
+
+    pub fn color_sampler_index(&self) -> u32 {
+        self.color_sampler_index
     }
 
     /// The `shadows.map` library image.

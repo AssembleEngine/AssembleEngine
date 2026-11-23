@@ -16,7 +16,13 @@ void main() {
     if (m.tex.x != 0u) {
         vec2 uv = m.uvSet.x == 0u ? inUv.xy : inUv.zw;
         vec4 a = m.xform[0];
-        alpha *= texture(textures[m.tex.x], mat2(a.xy, a.zw) * uv + m.xform[1].xy).a;
+        alpha *= texture(
+            sampler2D(
+                ae_images[nonuniformEXT(m.tex.x)],
+                ae_samplers[nonuniformEXT(m.texSampler.x)]
+            ),
+            mat2(a.xy, a.zw) * uv + m.xform[1].xy
+        ).a;
     }
     if (alpha < m.emissive.w) {
         discard;

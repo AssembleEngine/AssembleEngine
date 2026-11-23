@@ -6,18 +6,18 @@
 #include "terrain_common.glsl"
 
 layout(local_size_x = 256) in;
-layout(push_constant) uniform PC { uint mode; uint writeDraw; uint level; uint pad; } pc;
+// The bindless push block's words: x mode, y writeDraw, z level, w pad.
 
 shared uint s[512];
 
 void main() {
     uint j = gl_GlobalInvocationID.x;
     uint t = u.cfg.y;
-    if (pc.mode == 0u) {
+    if (ae.words.x == 0u) {
         if (j < (1u << t)) tree[(1u << t) + j] = bitCount(bits[j]);
-    } else if (pc.mode == 1u) {
-        uint id = (1u << pc.level) + j;
-        if (j < (1u << pc.level)) tree[id] = tree[2u * id] + tree[2u * id + 1u];
+    } else if (ae.words.x == 1u) {
+        uint id = (1u << ae.words.z) + j;
+        if (j < (1u << ae.words.z)) tree[id] = tree[2u * id] + tree[2u * id + 1u];
     } else {
         uint top = min(t, 8u);
         uint n = 1u << top;

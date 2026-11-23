@@ -2818,6 +2818,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         program: FullscreenProgram,
         encode: Encode,
         sampler: vk::Sampler,
+        sampler_index: u32,
         uniforms: [u8; 32],
         value: [f32; 4],
         levels: DisplayLevels,
@@ -2840,7 +2841,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
                         WorkingSpace::Bt709,
                         Gamut::P3,
                     );
-                    self.encode.record(ctx, ctx.image(self.graded)?, self.sampler)?;
+                    self.encode.record(ctx, ctx.image(self.graded)?, self.sampler_index)?;
                 }
                 4 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
                 _ => {}
@@ -2905,6 +2906,15 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
     let mut graded_image = OwnedImage::new(gpu, display_desc, "graded").unwrap();
     let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
     let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let display_handle = executor
+        .bindless_mut()
+        .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
+    let graded_handle = executor
+        .bindless_mut()
+        .sampled_2d(graded_image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
     let bindings = [
         Binding::Image(ImageBinding {
             image: image.image,
@@ -2913,7 +2923,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             extent,
             range: image.range(),
             identity: (0x6EA7E << 40) | 1,
-            sampled: None,
+            sampled: Some(display_handle.0.index),
             storage: None,
         }),
         Binding::Image(ImageBinding {
@@ -2923,7 +2933,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             extent,
             range: graded_image.range(),
             identity: (0x6EA7E << 40) | 2,
-            sampled: None,
+            sampled: Some(graded_handle.0.index),
             storage: None,
         }),
         Binding::Image(ImageBinding {
@@ -2949,7 +2959,8 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         .min_filter(vk::Filter::NEAREST);
     let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
     let program = FullscreenProgram::new(gpu, "grade", grade, 32, 1, &[DISPLAY_FORMAT], 2).unwrap();
-    let encode = Encode::new(gpu, OutputEncoding::Hdr10Pq, format, 2).unwrap();
+    let sampler_index = executor.bindless_mut().sampler(sampler).unwrap().index;
+    let encode = Encode::new(gpu, executor.bindless(), OutputEncoding::Hdr10Pq, format, 2).unwrap();
     let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]
         .iter()
         .flat_map(|v| v.to_le_bytes())
@@ -2962,11 +2973,11 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         program,
         encode,
         sampler,
+        sampler_index,
         uniforms: uniforms.try_into().unwrap(),
         value: [0.0; 4],
         levels,
     };
-    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
     executor.set_graph(graph).unwrap();
     let mut frames = Vec::new();
     for value in values {
@@ -9999,7 +10010,7 @@ fn encode_values(
         target: ResourceId,
         buffer: ResourceId,
         encode: Encode,
-        sampler: vk::Sampler,
+        sampler: u32,
         encoding: ae_render::encode::OutputEncoding,
         levels: ae_render::encode::DisplayLevels,
         working: ae_render::colorspace::WorkingSpace,
@@ -10071,6 +10082,11 @@ fn encode_values(
     let mut image = OwnedImage::new(gpu, display_desc, "display").unwrap();
     let mut out = OwnedImage::new(gpu, target_desc, "target").unwrap();
     let mut readback = OwnedBuffer::new(gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let display_handle = executor
+        .bindless_mut()
+        .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
     let bindings = [
         Binding::Image(ImageBinding {
             image: image.image,
@@ -10079,7 +10095,7 @@ fn encode_values(
             extent,
             range: image.range(),
             identity: (0xBEEF << 40) | 1,
-            sampled: None,
+            sampled: Some(display_handle.0.index),
             storage: None,
         }),
         Binding::Image(ImageBinding {
@@ -10104,20 +10120,20 @@ fn encode_values(
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST);
     let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None).unwrap() };
-    let encode = Encode::new(gpu, encoding, format, 2).unwrap();
+    let sampler_index = executor.bindless_mut().sampler(sampler).unwrap().index;
+    let encode = Encode::new(gpu, executor.bindless(), encoding, format, 2).unwrap();
     let mut paint = Paint {
         display,
         target,
         buffer,
         encode,
-        sampler,
+        sampler: sampler_index,
         encoding,
         levels,
         working,
         gamut,
         value: [0.0; 4],
     };
-    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
     executor.set_graph(graph).unwrap();
     let mut frames = Vec::new();
     for value in values {

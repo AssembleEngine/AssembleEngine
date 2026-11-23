@@ -5,6 +5,9 @@
 // on the ground plane (nav x, y = world x, z); the height comes from the
 // terrain's height texture, or the water surface for classes that float.
 
+#define AE_BINDLESS_SET 3
+#include "bindless.glsl"
+
 #define ATTR_X 0u
 #define ATTR_Y 1u
 #define ATTR_PREV_X 2u
@@ -59,20 +62,18 @@ layout(std430, set = 0, binding = 3) buffer Indirect { uint vertexCount; uint in
 layout(std430, set = 0, binding = 2) readonly buffer Visible { uint visible[]; };
 #endif
 
-layout(set = 0, binding = 4) uniform sampler2D heightTex;
+#define heightTex AE_S2D(0, 1)
 // Shadow heights (src/terrain/sun.rs), world units; used when counts.z & 1.
-layout(set = 0, binding = 5) uniform sampler2D sunShadowTex;
-// The units' own shadow map (a 1x1 stand-in when off).
-layout(set = 0, binding = 6) uniform sampler2DShadow unitShadowTex;
-// The particles' coloured shadows (a 1x1 stand-in when off).
-layout(set = 0, binding = 7) uniform sampler2D particleShadowTex;
+#define sunShadowTex AE_S2D(1, 1)
 
 #include "unit_shadows.glsl"
 
 // Sunlight reaching world point p (normal n) past the units; `tint` past
-// the particles.
+// the particles. Handles: the units' shadow map 2 with the comparison
+// sampler 4, the particles' coloured shadows 3 with sampler 3 (each a
+// 1x1 stand-in when off).
 float unitSunAt(vec3 p, vec3 n, out vec3 tint) {
-    return unitShadowAt(unitShadowTex, particleShadowTex, u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n, tint);
+    return unitShadowAt(AE_IMAGE(2), AE_SAMPLER(4), AE_IMAGE(3), AE_SAMPLER(3), u.unitShadowAxes, u.unitShadowOrigin, u.unitShadowScale, normalize(u.sun.xyz), p, n, tint);
 }
 
 // Sunlight reaching world point p past the hills (terrain_shading.glsl's

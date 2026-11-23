@@ -5,16 +5,16 @@
 #include "terrain_common.glsl"
 
 layout(local_size_x = 1) in;
-layout(push_constant) uniform PC { uint mode; uint writeDraw; uint level; uint pad; } pc;
+// The bindless push block's words: x mode, y writeDraw, z level, w pad.
 
 void main() {
-    if (pc.mode == 0u) {
+    if (ae.words.x == 0u) {
         uint count = tree[1];
         ind[IND_LEAF_COUNT] = count;
         ind[0] = (count + 63u) / 64u;
         ind[1] = 1u;
         ind[2] = 1u;
-        if (pc.writeDraw != 0u) ind[IND_DRAW_INSTANCES] = 0u;
+        if (ae.words.y != 0u) ind[IND_DRAW_INSTANCES] = 0u;
     } else {
         ind[IND_DRAW_INSTANCES] = min(ind[IND_DRAW_INSTANCES], u.cfg.w);
     }

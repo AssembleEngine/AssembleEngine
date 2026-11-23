@@ -5,7 +5,11 @@
 // a block keeps the smoke behind the silhouette, and the composite gives
 // it only to the full-resolution pixels at that depth.
 
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
+#ifndef AE_BINDLESS_SET
+#define AE_BINDLESS_SET 3
+#endif
+#include "bindless.glsl"
+#define depthTex AE_S2D(0, 0)
 
 layout(location = 0) out float outDepth;
 

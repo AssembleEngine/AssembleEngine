@@ -4,9 +4,9 @@
 // also the depth test, the pass has no depth attachment).
 
 // The scene depth at the target's resolution (infinite reverse-Z).
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
+#define depthTex AE_S2D(0, 0)
 // The shape (src/particles.rs puff_mips): a ball broken up by noise.
-layout(set = 1, binding = 1) uniform sampler2D puffTex;
+#define puffTex AE_S2D(1, 1)
 
 layout(location = 0) in vec2 inCorner;
 layout(location = 1) in vec4 inColor;   // premultiplied (alpha: what it covers)

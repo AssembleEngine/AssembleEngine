@@ -3,6 +3,8 @@
 // order (the radix sort's far-to-near keys reversed). Packs the puff the
 // blend shades and marks its ranks in every tile its quad's screen bounds
 // cover, as a bitset (one bit a rank) plus a word-of-words summary.
+// The push words (bindless.glsl's block): the target's size, the bins.
+#define AE_PUSH_WORDS uint width; uint height; uint bin_size; uint bins_x; uint summary_words; uint mask_words; uint pushPad0; uint pushPad1;
 #include "particles_common.glsl"
 #include "particles_puff.glsl"
 
@@ -16,14 +18,6 @@ struct PackedPuff {
 };
 layout(set = 1, binding = 5, std430) buffer PackedPuffs { PackedPuff puffs[]; };
 
-layout(push_constant) uniform Push {
-    uint width;
-    uint height;
-    uint bin_size;
-    uint bins_x;
-    uint summary_words;
-    uint mask_words;
-} push;
 
 void main() {
     uint rank = gl_GlobalInvocationID.x;
@@ -48,7 +42,7 @@ void main() {
     // one unit up at unit depth (viewProj[1][1] alone is scaled by the
     // camera's pitch).
     vec4 pu = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camUp.xyz, 1.0);
-    float projScale = abs(pu.y / pu.w) * float(push.height) * 0.5;
+    float projScale = abs(pu.y / pu.w) * float(ae.height) * 0.5;
     float diameter = 2.0 * radius * projScale / z;
     float lod = max(0.0, log2(128.0 / max(diameter, 1e-6)));
     float c = cos(f.angle);
@@ -68,21 +62,21 @@ void main() {
         lo = min(lo, ndc);
         hi = max(hi, ndc);
     }
-    vec2 size = vec2(push.width, push.height);
+    vec2 size = vec2(ae.width, ae.height);
     vec2 mn = behind ? vec2(0.0) : (lo * 0.5 + 0.5) * size - 2.0;
     vec2 mx = behind ? size - 1.0 : (hi * 0.5 + 0.5) * size + 2.0;
     if (any(greaterThanEqual(mn, size)) || any(lessThan(mx, vec2(0.0)))) {
         return;
     }
-    ivec2 tile_lo = ivec2(max(mn, vec2(0.0))) / int(push.bin_size);
-    ivec2 tile_hi = ivec2(min(mx, size - 1.0)) / int(push.bin_size);
+    ivec2 tile_lo = ivec2(max(mn, vec2(0.0))) / int(ae.bin_size);
+    ivec2 tile_hi = ivec2(min(mx, size - 1.0)) / int(ae.bin_size);
     uint word = rank / 32u;
     uint bit = 1u << (rank % 32u);
-    uint stride = push.summary_words + push.mask_words;
+    uint stride = ae.summary_words + ae.mask_words;
     for (int y = tile_lo.y; y <= tile_hi.y; ++y) {
         for (int x = tile_lo.x; x <= tile_hi.x; ++x) {
-            uint base = (uint(y) * push.bins_x + uint(x)) * stride;
-            uint old = atomicOr(masks[base + push.summary_words + word], bit);
+            uint base = (uint(y) * ae.bins_x + uint(x)) * stride;
+            uint old = atomicOr(masks[base + ae.summary_words + word], bit);
             if (old == 0u) {
                 atomicOr(masks[base + word / 32u], 1u << (word % 32u));
             }

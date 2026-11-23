@@ -448,6 +448,9 @@ pub struct TerrainApp {
     frames_in_flight: usize,
     /// Linear, clamped: what fullscreen programs sample with.
     sampler: vk::Sampler,
+    /// Its global sampler-array index once registered (the post passes use
+    /// it instead of the object).
+    sampler_handle: Option<crate::bindless::SamplerHandle>,
     pending_module: Arc<Mutex<Option<Vec<u8>>>>,
     module_status: Arc<Mutex<ModuleStatus>>,
     edits: Arc<Mutex<TerrainEdits>>,
@@ -534,6 +537,7 @@ impl TerrainApp {
             gpu: None,
             frames_in_flight: 1,
             sampler: vk::Sampler::null(),
+            sampler_handle: None,
             pending_module: Arc::default(),
             module_status: Arc::default(),
             edits: Arc::default(),
@@ -918,7 +922,13 @@ pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32
 impl RenderApp for TerrainApp {
     type Pass = ScenePass;
 
-    fn create(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()> {
+    fn create(
+        &mut self,
+        gpu: &Arc<GpuDevice>,
+        bindless: &mut crate::bindless::Bindless,
+        target: TargetInfo,
+        frames_in_flight: usize,
+    ) -> Result<()> {
         if let Some(mut old) = self.tonemap.take() {
             old.destroy(gpu);
         }
@@ -954,9 +964,12 @@ impl RenderApp for TerrainApp {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             self.sampler = unsafe { gpu.device.create_sampler(&info, None)? };
         }
-        self.create_output(gpu, target, frames_in_flight)?;
-        self.bloom = Some(Bloom::new(gpu, frames_in_flight).context("bloom")?);
-        self.exposure = Some(Exposure::new(gpu, frames_in_flight).context("exposure")?);
+        if self.sampler_handle.is_none() {
+            self.sampler_handle = Some(bindless.sampler(self.sampler)?);
+        }
+        self.create_output(gpu, bindless, target, frames_in_flight)?;
+        self.bloom = Some(Bloom::new(gpu, bindless, frames_in_flight).context("bloom")?);
+        self.exposure = Some(Exposure::new(gpu, bindless, frames_in_flight).context("exposure")?);
         self.last_adapt_at = None;
         let mut lights = LightRenderer::new(gpu, frames_in_flight).context("lights")?;
         lights.set_unculled(self.unculled_lights);
@@ -989,6 +1002,7 @@ impl RenderApp for TerrainApp {
         self.decals_written.clear();
         let terrain = TerrainRenderer::new(
             gpu,
+            bindless,
             &s.heightmap,
             &s.pyramid,
             s.info,
@@ -1010,6 +1024,7 @@ impl RenderApp for TerrainApp {
             self.unit_renderer = Some(
                 UnitRenderer::new(
                     gpu,
+                    bindless,
                     &terrain,
                     &lights,
                     setup,
@@ -1024,8 +1039,17 @@ impl RenderApp for TerrainApp {
         if let Some(setup) = &self.particles {
             // So do the effects' colours and their bursts' light tints.
             self.particle_renderer = Some(
-                ParticleRenderer::new(gpu, &terrain, &lights, setup, self.working, color, frames_in_flight)
-                    .context("particle renderer")?,
+                ParticleRenderer::new(
+                    gpu,
+                    bindless,
+                    &terrain,
+                    &lights,
+                    setup,
+                    self.working,
+                    color,
+                    frames_in_flight,
+                )
+                .context("particle renderer")?,
             );
         }
         self.renderer = Some(terrain);
@@ -1110,8 +1134,9 @@ impl RenderApp for TerrainApp {
         Ok((graph, backbuffers.first().copied()))
     }
 
-    fn prepare(&mut self, slot: usize) -> Result<()> {
+    fn prepare(&mut self, bindless: &mut crate::bindless::Bindless, slot: usize) -> Result<()> {
         self.apply_edits()?;
+
         if self.hdr.is_some() && self.encoding.uses_display() {
             self.levels = self.hdr_settings().levels(self.encoding);
         }
@@ -1266,7 +1291,7 @@ impl RenderApp for TerrainApp {
                 photometry: params.photometry,
             };
             let gpu = self.gpu.clone().context("no device")?;
-            particles.write_frame(&gpu, slot, &frame)?;
+            particles.write_frame(&gpu, bindless, slot, &frame)?;
         }
         if let Some(lights) = self.lights.as_mut() {
             // The fixed lights and the bursts', those that can reach the
@@ -1455,11 +1480,17 @@ impl RenderApp for TerrainApp {
         format!("terrain: {} leaves, {} drawn{units}", stats.leaves, stats.drawn)
     }
 
-    fn retarget(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<bool> {
+    fn retarget(
+        &mut self,
+        gpu: &Arc<GpuDevice>,
+        bindless: &mut crate::bindless::Bindless,
+        target: TargetInfo,
+        frames_in_flight: usize,
+    ) -> Result<bool> {
         if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight
         {
             self.destroy(gpu);
-            self.create(gpu, target, frames_in_flight)?;
+            self.create(gpu, bindless, target, frames_in_flight)?;
             return Ok(true);
         }
         // Only the output side depends on the pair. The terrain's tree
@@ -1467,7 +1498,7 @@ impl RenderApp for TerrainApp {
         // ground edits, the particles and the exposure carry state too:
         // rebuilding them made the ground settle anew on every HDR toggle.
         self.destroy_module_programs(gpu);
-        self.create_output(gpu, target, frames_in_flight)?;
+        self.create_output(gpu, bindless, target, frames_in_flight)?;
         Ok(false)
     }
 
@@ -1511,7 +1542,13 @@ impl RenderApp for TerrainApp {
 impl TerrainApp {
     /// The objects that depend on the output (format, colour space) pair:
     /// the encoding, its levels, the tonemap and `post.encode`.
-    fn create_output(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()> {
+    fn create_output(
+        &mut self,
+        gpu: &Arc<GpuDevice>,
+        bindless: &crate::bindless::Bindless,
+        target: TargetInfo,
+        frames_in_flight: usize,
+    ) -> Result<()> {
         if let Some(mut old) = self.tonemap.take() {
             old.destroy(gpu);
         }
@@ -1545,9 +1582,9 @@ impl TerrainApp {
         } else {
             output
         };
-        self.tonemap = Some(Tonemap::new(gpu, tonemap_out, frames_in_flight).context("tonemap")?);
+        self.tonemap = Some(Tonemap::new(gpu, bindless, tonemap_out, frames_in_flight).context("tonemap")?);
         self.encode = if self.encoding.uses_display() {
-            Some(Encode::new(gpu, self.encoding, output, frames_in_flight).context("encode")?)
+            Some(Encode::new(gpu, bindless, self.encoding, output, frames_in_flight).context("encode")?)
         } else {
             None
         };
@@ -1642,6 +1679,7 @@ impl TerrainApp {
             lights: self.lights.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
+            sampler_index: self.sampler_handle.map_or(0, |h| h.index),
             update_lod: self.update_lod,
             wireframe: self.wireframe,
             water: self.water_on,
@@ -1661,6 +1699,7 @@ struct SceneRecorder<'a> {
     lights: Option<&'a LightRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
+    sampler_index: u32,
     update_lod: bool,
     wireframe: Wireframe,
     water: bool,
@@ -1725,13 +1764,13 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     ctx.image(*scene)?,
                     bloom,
                     exposure,
-                    self.sampler,
+                    self.sampler_index,
                 )?
             }
             PassWork::Encode { display } => {
                 self.encode
                     .context("encode not created")?
-                    .record(ctx, ctx.image(*display)?, self.sampler)?
+                    .record(ctx, ctx.image(*display)?, self.sampler_index)?
             }
             PassWork::Bloom {
                 pass: bloom_pass,
@@ -1746,7 +1785,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     ctx.image(*input)?,
                     ctx.image(*output)?,
                     exposure,
-                    self.sampler,
+                    self.sampler_index,
                 )?
             }
             PassWork::ExposureMeter { scene, depth, glow } => {

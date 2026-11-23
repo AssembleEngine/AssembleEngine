@@ -16,7 +16,7 @@ layout(location = 4) out vec4 outColor;
 layout(location = 5) flat out uint outMaterial;
 
 void main() {
-    DrawRecord d = draws[pc.drawBase + uint(gl_DrawID)];
+    DrawRecord d = draws[ae.words.y + uint(gl_DrawID)];
     uint row = visible[d.visibleBase + uint(gl_InstanceIndex)];
     Unit unit = loadUnit(row);
     Skinned s = skinVertex(d, uint(gl_VertexIndex), poseOffset(row));

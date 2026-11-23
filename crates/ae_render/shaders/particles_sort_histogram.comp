@@ -17,7 +17,7 @@ void main() {
         }
         uint elementId = wID * BLOCKS_PER_WORKGROUP * WORKGROUP_SIZE + index * WORKGROUP_SIZE + lID;
         if (elementId < n) {
-            uint bin = (keyIn(elementId) >> push.shift) & uint(RADIX_SORT_BINS - 1);
+            uint bin = (keyIn(elementId) >> ae.shift) & uint(RADIX_SORT_BINS - 1);
             atomicAdd(histogram[bin], 1u);
         }
     }

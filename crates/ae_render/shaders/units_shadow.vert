@@ -5,7 +5,7 @@
 #include "units_common.glsl"
 #include "units_dart.glsl"
 
-layout(push_constant) uniform Push { uint cascade; } pc;
+// `ae.words.x`: the shadow caster's cascade (bindless.glsl's block).
 
 void main() {
     Unit unit = loadUnit(uint(gl_InstanceIndex));
@@ -16,7 +16,7 @@ void main() {
         return;
     }
     vec3 world = place(unit, CORNERS[FACES[gl_VertexIndex]]);
-    uint k = pc.cascade;
+    uint k = ae.words.x;
     vec3 l = vec3(dot(u.unitShadowAxes[0].xyz, world), dot(u.unitShadowAxes[1].xyz, world), dot(u.unitShadowAxes[2].xyz, world));
     gl_Position = vec4((l - u.unitShadowOrigin[k].xyz) * u.unitShadowScale[k].xyz, 1.0);
 }

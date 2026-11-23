@@ -987,15 +987,26 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
 }
 
 /// `ModelSet::new` for the scene's classes and units, 5 times.
-fn model_setup(gpu: &GpuDevice, s: &super::sim::SimOptions) -> Result<Sample> {
+fn model_setup(gpu: &Arc<GpuDevice>, s: &super::sim::SimOptions) -> Result<Sample> {
     let classes = s.classes().len();
     let per_class = models::per_class(&s.models, classes, s.observer.map(|_| classes - 2));
+    // The textures register in a registry of their own, made outside the
+    // timing (its queued writes are never flushed: nothing draws).
+    let mut bindless = ae_render::bindless::Bindless::new(gpu, 1)?;
     let mut times = Vec::new();
     for _ in 0..5 {
         let started = Instant::now();
-        let mut set = ae_render::models::ModelSet::new(gpu, &per_class, &[], s.units, ae_render::units::MAX_CLASSES)?;
+        let mut set = ae_render::models::ModelSet::new(
+            gpu,
+            &mut bindless,
+            &per_class,
+            &[],
+            s.units,
+            ae_render::units::MAX_CLASSES,
+        )?;
         times.push(started.elapsed().as_secs_f64() * 1e3);
         set.destroy(gpu);
     }
+    bindless.destroy(gpu);
     Ok(ns(&mut times))
 }

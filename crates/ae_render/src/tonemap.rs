@@ -11,10 +11,11 @@
 //! intermediate instead ([`crate::encode::DISPLAY_FORMAT`], paper-white
 //! units), which `post.encode` maps to the output.
 
+use crate::bindless::Bindless;
 use crate::colorspace::{self, Gamut, WorkingSpace};
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
-use crate::fullscreen::FullscreenProgram;
+use crate::fullscreen::BindlessProgram;
 use crate::pipeline::spirv;
 use anyhow::Result;
 use ash::vk;
@@ -59,7 +60,7 @@ impl Default for ToneParams {
 }
 
 pub struct Tonemap {
-    program: FullscreenProgram,
+    program: BindlessProgram,
 }
 
 /// How much of the bloom's blurred light joins the scene (RA3's
@@ -72,17 +73,17 @@ const UNIFORM_BYTES: u32 = 16 + 48 + 16;
 
 impl Tonemap {
     /// For an output of `format`.
-    pub fn new(gpu: &GpuDevice, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &Bindless, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         // Three samplers: the scene, the bloom and the 1×1 exposure image.
         // A graph without a bloom or an exposure pass binds the scene to
         // the missing one and the uniform switches it off.
         Ok(Self {
-            program: FullscreenProgram::new(
+            program: BindlessProgram::new(
                 gpu,
+                bindless,
                 "post.tonemap",
                 spirv!("tonemap.frag"),
                 UNIFORM_BYTES,
-                3,
                 &[format],
                 frames_in_flight,
             )?,
@@ -143,12 +144,17 @@ impl Tonemap {
         scene: ImageBinding,
         bloom: Option<ImageBinding>,
         exposure: Option<ImageBinding>,
-        sampler: vk::Sampler,
+        sampler: u32,
     ) -> Result<()> {
+        let index = |b: ImageBinding| b.sampled.unwrap_or(0);
         self.program.record(
             ctx,
-            &[scene, bloom.unwrap_or(scene), exposure.unwrap_or(scene)],
-            sampler,
+            &[
+                index(scene),
+                index(bloom.unwrap_or(scene)),
+                index(exposure.unwrap_or(scene)),
+            ],
+            &[sampler],
         )
     }
 

@@ -3,7 +3,9 @@
 // +-5 is the 4% tail) along the image's x, as RA3-graphics' second pass.
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(set = 0, binding = 1) uniform sampler2D bloom;
+#include "bindless.glsl"
+// Bindless handle: bloom 0; sampler 0.
+#define bloom AE_S2D(0, 0)
 
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);

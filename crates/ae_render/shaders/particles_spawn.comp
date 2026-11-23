@@ -5,7 +5,7 @@
 #define PARTICLES_WRITE
 #include "particles_common.glsl"
 
-layout(set = 0, binding = 8) uniform sampler2D heightTex;
+#define heightTex AE_S2D(8, 2)
 
 layout(local_size_x = 64) in;
 

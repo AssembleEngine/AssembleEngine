@@ -1,10 +1,14 @@
 #version 460
 // Slices, pass 3: front to back, each slice a homogeneous medium of its
 // summed optical depth and light.
-layout(set = 1, binding = 3) uniform sampler2D slice0;
-layout(set = 1, binding = 4) uniform sampler2D slice1;
-layout(set = 1, binding = 5) uniform sampler2D slice2;
-layout(set = 1, binding = 6) uniform sampler2D slice3;
+#ifndef AE_BINDLESS_SET
+#define AE_BINDLESS_SET 3
+#endif
+#include "bindless.glsl"
+#define slice0 AE_S2D(3, 0)
+#define slice1 AE_S2D(4, 0)
+#define slice2 AE_S2D(5, 0)
+#define slice3 AE_S2D(6, 0)
 
 layout(location = 0) out vec4 outColor;
 

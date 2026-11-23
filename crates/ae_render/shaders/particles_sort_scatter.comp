@@ -52,7 +52,7 @@ void main() {
         uint binOffset = 0u;
         if (elementId < n) {
             key_in = keyIn(elementId);
-            binID = (key_in >> push.shift) & uint(RADIX_SORT_BINS - 1);
+            binID = (key_in >> ae.shift) & uint(RADIX_SORT_BINS - 1);
             binOffset = global_offsets[binID];
             atomicAdd(bin_flags[binID].flags[flags_bin], flags_bit);
         }

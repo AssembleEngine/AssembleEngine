@@ -7,10 +7,12 @@
 // sorted draw's per-particle glow. The depth is the blend's (half or full).
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_ballot : require
+// The push words (bindless.glsl's block): the target's size, the bins.
+#define AE_PUSH_WORDS uint width; uint height; uint bin_size; uint bins_x; uint summary_words; uint mask_words; uint pushPad0; uint pushPad1;
 #include "particles_common.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
-layout(set = 1, binding = 1) uniform sampler2D puffTex;
+#define depthTex AE_S2D(0, 0)
+#define puffTex AE_S2D(1, 1)
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D outColorImg;
 layout(set = 1, binding = 3, rgba16f) uniform writeonly image2D outGlowImg;
 layout(set = 1, binding = 4, std430) readonly buffer TileMasks { uint masks[]; };
@@ -21,14 +23,6 @@ struct PackedPuff {
 };
 layout(set = 1, binding = 5, std430) readonly buffer PackedPuffs { PackedPuff puffs[]; };
 
-layout(push_constant) uniform Push {
-    uint width;
-    uint height;
-    uint bin_size;
-    uint bins_x;
-    uint summary_words;
-    uint mask_words;
-} push;
 
 // One 16x16 tile a workgroup, as eight 32-lane subgroups (the pipeline
 // pins the subgroup size to 32 with full subgroups, which needs the X
@@ -45,12 +39,12 @@ uvec2 tileOrigin() {
 }
 
 uint binBase(uvec2 tile) {
-    uvec2 bin = tile / push.bin_size;
-    return (bin.y * push.bins_x + bin.x) * (push.summary_words + push.mask_words);
+    uvec2 bin = tile / ae.bin_size;
+    return (bin.y * ae.bins_x + bin.x) * (ae.summary_words + ae.mask_words);
 }
 
 void main() {
-    vec2 size = vec2(push.width, push.height);
+    vec2 size = vec2(ae.width, ae.height);
     vec4 pr = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camRight.xyz, 1.0);
     vec4 pu = u.viewProj * vec4(u.camPos.xyz + u.camForward.xyz + u.camUp.xyz, 1.0);
     vec2 proj = vec2(pr.x / pr.w, pu.y / pu.w);
@@ -66,7 +60,7 @@ void main() {
     vec2 ndc = (vec2(px) + 0.5) / size * 2.0 - 1.0;
     vec2 ray = ndc / proj;
 
-    bool live = px.x < push.width && px.y < push.height;
+    bool live = px.x < ae.width && px.y < ae.height;
     vec3 color = vec3(0.0);
     vec3 glow = vec3(0.0);
     float transmittance = 1.0;
@@ -74,17 +68,17 @@ void main() {
     // The packet's pixel centres bound its rays; a candidate outside that
     // rectangle in local puff space cannot hit any of its pixels.
     vec2 a = (vec2(origin) + 0.5) / size * 2.0 - 1.0;
-    vec2 b = (vec2(min(origin + uvec2(PACKET_W - 1u, PACKET_H - 1u), uvec2(push.width, push.height) - 1u)) + 0.5) / size * 2.0 - 1.0;
+    vec2 b = (vec2(min(origin + uvec2(PACKET_W - 1u, PACKET_H - 1u), uvec2(ae.width, ae.height) - 1u)) + 0.5) / size * 2.0 - 1.0;
     vec2 ray_lo = min(a / proj, b / proj);
     vec2 ray_hi = max(a / proj, b / proj);
     uint base = binBase(tile);
 
-    for (uint i = 0u; i < push.summary_words; ++i) {
+    for (uint i = 0u; i < ae.summary_words; ++i) {
         uint summary = masks[base + i];
         while (summary != 0u) {
             uint word = i * 32u + uint(findLSB(summary));
             summary &= summary - 1u;
-            uint mask = masks[base + push.summary_words + word];
+            uint mask = masks[base + ae.summary_words + word];
             // One lane classifies one candidate rank against the packet,
             // whether or not its own pixel is still live (or on the
             // screen): the loop breaks once no lane is, so here some pixel
@@ -153,7 +147,7 @@ void main() {
         }
     }
 
-    if (px.x < push.width && px.y < push.height) {
+    if (px.x < ae.width && px.y < ae.height) {
         imageStore(outColorImg, ivec2(px), vec4(color, 1.0 - transmittance));
         imageStore(outGlowImg, ivec2(px), vec4(glow, 1.0));
     }

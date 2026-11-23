@@ -11,6 +11,7 @@
 // gamut, not black). Both clamp at the display's peak, so nothing encodes
 // above what the display shows.
 #include "gamut.glsl"
+#include "bindless.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
@@ -21,7 +22,8 @@ layout(set = 0, binding = 0) uniform Encode {
     mat3 toContainer; // the output gamut to BT.2020 (HDR10) or BT.709 (scRGB)
     vec4 luma;       // xyz: the output gamut's luminance row (the compression's grey)
 } e;
-layout(set = 0, binding = 1) uniform sampler2D display;
+// Bindless handle: display 0; sampler 0.
+#define display AE_S2D(0, 0)
 
 // ST.2084's OETF (SMPTE ST 2084), nits normalised to 10000.
 vec3 pq(vec3 nits) {

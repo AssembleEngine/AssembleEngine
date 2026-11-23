@@ -7,7 +7,7 @@
 // binning, so both see the same puff. After particles_common.glsl.
 #include "photometry.glsl"
 
-layout(set = 0, binding = 7) uniform sampler2D sunShadowTex;
+#define sunShadowTex AE_S2D(7, 2)
 
 float sunAt(vec3 p) {
     if ((u.flags.x & 1u) == 0u) {

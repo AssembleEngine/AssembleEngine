@@ -44,8 +44,16 @@ pub trait RenderApp: Send + 'static {
     type Pass: Send + Sync + 'static;
 
     /// (Re)create format-dependent GPU objects (pipelines). Called once and
-    /// whenever the swapchain's (format, colour space) pair changes.
-    fn create(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<()>;
+    /// whenever the swapchain's (format, colour space) pair changes. The
+    /// registry is the executor's global set; register sampled images and
+    /// samplers here (the device is idle and no frame has begun).
+    fn create(
+        &mut self,
+        gpu: &Arc<GpuDevice>,
+        bindless: &mut crate::bindless::Bindless,
+        target: TargetInfo,
+        frames_in_flight: usize,
+    ) -> Result<()>;
 
     /// The swapchain's (format, colour space) pair changed after the first
     /// `create` (device idle). Returns whether objects the app binds as
@@ -53,9 +61,15 @@ pub trait RenderApp: Send + 'static {
     /// The default destroys and creates everything; an app that keeps its
     /// format-independent objects (state that builds up over frames)
     /// rebuilds only the rest and returns `false`.
-    fn retarget(&mut self, gpu: &Arc<GpuDevice>, target: TargetInfo, frames_in_flight: usize) -> Result<bool> {
+    fn retarget(
+        &mut self,
+        gpu: &Arc<GpuDevice>,
+        bindless: &mut crate::bindless::Bindless,
+        target: TargetInfo,
+        frames_in_flight: usize,
+    ) -> Result<bool> {
         self.destroy(gpu);
-        self.create(gpu, target, frames_in_flight)?;
+        self.create(gpu, bindless, target, frames_in_flight)?;
         Ok(true)
     }
 
@@ -79,8 +93,11 @@ pub trait RenderApp: Send + 'static {
     fn frame_stats(&mut self, _stats: &ExecutorStats) {}
 
     /// Fill per-slot data (staging, instance data). `slot`'s previous
-    /// submission has completed.
-    fn prepare(&mut self, slot: usize) -> Result<()>;
+    /// submission has completed and its global set is idle: handles
+    /// registered here, and slotted updates for `slot`, are flushed at the
+    /// top of `Executor::execute`, before anything records, so they are
+    /// usable in this frame.
+    fn prepare(&mut self, bindless: &mut crate::bindless::Bindless, slot: usize) -> Result<()>;
 
     /// Bind an app-owned external resource for `slot`.
     fn external(&self, resource: ResourceId, slot: usize) -> Option<Binding>;
@@ -315,7 +332,7 @@ fn render_main<A: RenderApp>(
         format: swapchain.format.format,
         color_space: swapchain.format.color_space,
     };
-    app.create(&gpu, target, config.frames_in_flight)?;
+    app.create(&gpu, executor.bindless_mut(), target, config.frames_in_flight)?;
     if let Some((levels, gamut)) = app.hdr_metadata() {
         swapchain.set_hdr_metadata(&gpu, levels, gamut)?;
     }
@@ -399,7 +416,7 @@ fn render_main<A: RenderApp>(
                     // When the app replaced what it binds (the recreate
                     // waited for the device), no external image keeps the
                     // old one's layout under its reused identity.
-                    if app.retarget(&gpu, target, config.frames_in_flight)? {
+                    if app.retarget(&gpu, executor.bindless_mut(), target, config.frames_in_flight)? {
                         executor.forget_external_states();
                     }
                 }
@@ -436,7 +453,7 @@ fn render_main<A: RenderApp>(
             stats.acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
             dirty |= suboptimal;
             app.frame_stats(&stats.executor);
-            app.prepare(token.slot)?;
+            app.prepare(executor.bindless_mut(), token.slot)?;
             if metadata_pending {
                 if let Some((levels, gamut)) = app.hdr_metadata() {
                     swapchain.set_hdr_metadata(&gpu, levels, gamut)?;
@@ -554,8 +571,8 @@ impl<P: Sync> Headless<P> {
         target: TargetInfo,
         config: ExecutorConfig,
     ) -> Result<Self> {
-        let executor = Executor::new(gpu.clone(), config)?;
-        app.create(gpu, target, config.frames_in_flight)?;
+        let mut executor = Executor::new(gpu.clone(), config)?;
+        app.create(gpu, executor.bindless_mut(), target, config.frames_in_flight)?;
         Ok(Self {
             gpu: gpu.clone(),
             executor,
@@ -574,7 +591,7 @@ impl<P: Sync> Headless<P> {
             }
             let token = self.executor.begin_frame()?;
             app.frame_stats(&self.executor.stats());
-            app.prepare(token.slot)?;
+            app.prepare(self.executor.bindless_mut(), token.slot)?;
             let externals: Vec<Option<Binding>> = (0..self.executor.graph().resources.len() as u32)
                 .map(|index| app.external(ResourceId(index), token.slot))
                 .collect();

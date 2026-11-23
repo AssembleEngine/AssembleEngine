@@ -40,6 +40,7 @@
 //! replaces anything outside 0..64 with the reference EV, so a capture's
 //! first frame is stable.
 
+use crate::bindless::{Bindless, Sampled2D};
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, ImageBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -111,13 +112,6 @@ struct Settings {
 
 /// The meter's push constant: whether the graph binds the depth (with the
 /// vision planes) and the glow.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MeterPush {
-    depth: u32,
-    glow: u32,
-}
-
 pub struct Exposure {
     image: OwnedImage,
     histogram: OwnedBuffer,
@@ -127,15 +121,18 @@ pub struct Exposure {
     meter_sets: Vec<vk::DescriptorSet>,
     adapt_sets: Vec<vk::DescriptorSet>,
     set_layout: vk::DescriptorSetLayout,
+    empty_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pool: vk::DescriptorPool,
     sampler: vk::Sampler,
+    sampler_index: u32,
+    sampled: Sampled2D,
     meter: vk::Pipeline,
     adapt: vk::Pipeline,
 }
 
 impl Exposure {
-    pub fn new(gpu: &GpuDevice, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, frames_in_flight: usize) -> Result<Self> {
         let device = &gpu.device;
         let image_desc = ImageDesc::color_2d(
             vk::Format::from_raw(ae_render_abi::module::EXPOSURE_FORMAT as i32),
@@ -167,7 +164,7 @@ impl Exposure {
             )?);
         }
         let all = vk::ShaderStageFlags::COMPUTE;
-        let (set_layout, layout, pool, meter_sets, adapt_sets, sampler) = unsafe {
+        let (set_layout, empty_layout, layout, pool, meter_sets, adapt_sets, sampler) = unsafe {
             let bindings = [
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(0)
@@ -180,31 +177,15 @@ impl Exposure {
                     .descriptor_count(1)
                     .stage_flags(all),
                 vk::DescriptorSetLayoutBinding::default()
-                    .binding(2)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-                vk::DescriptorSetLayoutBinding::default()
                     .binding(3)
                     .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                     .descriptor_count(1)
                     .stage_flags(all),
-                // The meter's depth and the terrain's vision planes (bound
-                // per frame; the adapt pass leaves them unwritten).
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(4)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
+                // The terrain's vision planes (bound per frame; the adapt
+                // pass leaves them unwritten).
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(5)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(all),
-                // The meter's glow (the light the bloom shows).
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(6)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .descriptor_count(1)
                     .stage_flags(all),
             ];
@@ -212,10 +193,12 @@ impl Exposure {
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
             )?;
+            let empty_layout =
+                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None)?;
             let layout = pipeline::pipeline_layout(
                 device,
-                &[set_layout],
-                size_of::<MeterPush>() as u32,
+                &[set_layout, empty_layout, bindless.set_layout()],
+                size_of::<crate::bindless::Push>() as u32,
                 vk::ShaderStageFlags::COMPUTE,
             )?;
             let n = frames_in_flight as u32;
@@ -227,12 +210,6 @@ impl Exposure {
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     descriptor_count: 4 * n,
-                },
-                // Every set has the layout's three samplers (scene, depth,
-                // glow), whether its pass reads them or not.
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: 6 * n,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -304,12 +281,14 @@ impl Exposure {
             }
             let meter_sets = (0..frames_in_flight).map(|slot| sets[2 * slot]).collect();
             let adapt_sets = (0..frames_in_flight).map(|slot| sets[2 * slot + 1]).collect();
-            (set_layout, layout, pool, meter_sets, adapt_sets, sampler)
+            (set_layout, empty_layout, layout, pool, meter_sets, adapt_sets, sampler)
         };
         let meter = pipeline::compute_pipeline(device, spirv!("exposure_meter.comp"), layout)
             .context("exposure meter pipeline")?;
         let adapt = pipeline::compute_pipeline(device, spirv!("exposure_adapt.comp"), layout)
             .context("exposure adapt pipeline")?;
+        let sampler_index = bindless.sampler(sampler)?.index;
+        let sampled = bindless.sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         Ok(Self {
             image,
             histogram,
@@ -317,9 +296,12 @@ impl Exposure {
             meter_sets,
             adapt_sets,
             set_layout,
+            empty_layout,
             layout,
             pool,
             sampler,
+            sampler_index,
+            sampled,
             meter,
             adapt,
         })
@@ -334,7 +316,7 @@ impl Exposure {
             extent: vk::Extent2D { width: 1, height: 1 },
             range: self.image.range(),
             identity: IDENTITY_EXPOSURE,
-            sampled: None,
+            sampled: Some(self.sampled.0.index),
             storage: None,
         }
     }
@@ -419,53 +401,28 @@ impl Exposure {
         vision: Option<vk::Buffer>,
     ) -> Result<()> {
         let set = self.meter_sets[ctx.slot];
-        let image = |view| {
-            [vk::DescriptorImageInfo {
-                sampler: self.sampler,
-                image_view: view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            }]
-        };
-        // Stand-ins, unread: the scene for a missing depth, the histogram
-        // for missing vision planes.
-        let (scene_info, depth_info, glow_info) = (
-            image(scene.view),
-            image(depth.unwrap_or(scene).view),
-            image(glow.unwrap_or(scene).view),
-        );
+        // The histogram and vision buffer stay in set 0 until step D; the
+        // three sampled inputs are handles in the global set.
         let vision_info = [vk::DescriptorBufferInfo {
             buffer: vision.unwrap_or(self.histogram.buffer),
             offset: 0,
             range: vk::WHOLE_SIZE,
         }];
-        let push = MeterPush {
-            depth: u32::from(depth.is_some() && vision.is_some()),
-            glow: u32::from(glow.is_some()),
-        };
+        let mut push = crate::bindless::Push::default();
+        push.words[0] = u32::from(depth.is_some() && vision.is_some());
+        push.words[1] = u32::from(glow.is_some());
+        push.image(0, scene.sampled.unwrap_or(0));
+        push.image(1, depth.unwrap_or(scene).sampled.unwrap_or(0));
+        push.image(2, glow.unwrap_or(scene).sampled.unwrap_or(0));
+        push.sampler(0, self.sampler_index);
         unsafe {
+            // The vision buffer is per frame and still an old binding here.
             ctx.device.update_descriptor_sets(
-                &[
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(2)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&scene_info),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(4)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&depth_info),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(5)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(&vision_info),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(6)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&glow_info),
-                ],
+                &[vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&vision_info)],
                 &[],
             );
             ctx.device.cmd_push_constants(
@@ -479,6 +436,14 @@ impl Exposure {
                 .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.meter);
             ctx.device
                 .cmd_bind_descriptor_sets(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
+            ctx.device.cmd_bind_descriptor_sets(
+                ctx.cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.layout,
+                2,
+                &[ctx.global_set],
+                &[],
+            );
             let groups = (
                 scene.extent.width.div_ceil(4).div_ceil(8),
                 scene.extent.height.div_ceil(4).div_ceil(8),
@@ -509,6 +474,7 @@ impl Exposure {
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_pool(self.pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_set_layout(self.empty_layout, None);
             device.destroy_sampler(self.sampler, None);
         }
         self.image.destroy(gpu);

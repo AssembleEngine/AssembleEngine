@@ -1,7 +1,11 @@
 #version 460
 // Reference, pass 2: sort the pixel's fragments far to near and blend
 // them premultiplied. More fragments than the list holds: magenta.
-layout(set = 1, binding = 0) uniform sampler2D depthTex;
+#ifndef AE_BINDLESS_SET
+#define AE_BINDLESS_SET 3
+#endif
+#include "bindless.glsl"
+#define depthTex AE_S2D(0, 0)
 #include "particles_reference.glsl"
 
 layout(location = 0) out vec4 outColor;
