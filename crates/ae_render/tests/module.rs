@@ -214,9 +214,10 @@ fn broken_modules_are_rejected() {
     // An old-ABI module is refused by number, before any other export is
     // read (its `declare` has the old signature).
     let e = load(&wat_v1()).unwrap_err();
-    assert_eq!(e, "render module ABI version 1; this host runs 2 (rebuild the module)");
+    assert_eq!(e, "render module ABI version 1; this host runs 3 (rebuild the module)");
     let e = load(&wat(7, "i32.const 0", "i32.const 0", "")).unwrap_err();
-    assert!(e.contains("version 7") && e.contains("runs 2"), "{e}");
+    assert!(e.contains("version 7") && e.contains("runs 3"), "{e}");
+    // Version 2 is still accepted while its per-pass programs work.
     let e =
         load(r#"(module (memory (export "memory") 1) (func (export "ae_render_version") (result i32) i32.const 2))"#)
             .unwrap_err();

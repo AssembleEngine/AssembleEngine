@@ -73,7 +73,7 @@ const UNIFORM_BYTES: u32 = 16 + 48 + 16;
 
 impl Tonemap {
     /// For an output of `format`.
-    pub fn new(gpu: &GpuDevice, bindless: &Bindless, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, format: vk::Format, frames_in_flight: usize) -> Result<Self> {
         // Three samplers: the scene, the bloom and the 1×1 exposure image.
         // A graph without a bloom or an exposure pass binds the scene to
         // the missing one and the uniform switches it off.
@@ -84,6 +84,7 @@ impl Tonemap {
                 "post.tonemap",
                 spirv!("tonemap.frag"),
                 UNIFORM_BYTES,
+                3,
                 &[format],
                 frames_in_flight,
             )?,
@@ -156,6 +157,11 @@ impl Tonemap {
             ],
             &[sampler],
         )
+    }
+
+    /// Give the program's global-set handles back (the registry is alive).
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        self.program.retire(bindless);
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

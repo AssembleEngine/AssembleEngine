@@ -465,7 +465,11 @@ mod gpu {
             Ok(())
         }
 
-        fn declare(&mut self, target: crate::thread::TargetInfo) -> Result<(FrameGraph<DemoPass>, Option<ResourceId>)> {
+        fn declare(
+            &mut self,
+            target: crate::thread::TargetInfo,
+            _bindless: &mut crate::bindless::Bindless,
+        ) -> Result<(FrameGraph<DemoPass>, Option<ResourceId>)> {
             let (graph, resources) = build_demo_graph(target.extent, DemoOutput::Present { format: target.format });
             self.params_staging = Some(resources.params_staging);
             Ok((graph, Some(resources.target)))

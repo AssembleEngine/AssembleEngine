@@ -13,16 +13,16 @@
 // otherwise bloom into a large blob.
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(set = 0, binding = 0) uniform Bloom {
-    vec4 params; // x: the EV100 the scene was stored at, y: 1 when the graph has the exposure image
-} b;
-// Step E keeps this program's set-0 uniform block; the global set is still
-// at 2 until step F moves the block into it.
-#define AE_BINDLESS_SET 2
+#define AE_DECLARE_PUSH 0
 #include "bindless.glsl"
-// Bindless handles: glow 0, exposure 1; sampler 0.
-#define glow AE_S2D(0, 0)
-#define exposureTex AE_S2D(1, 0)
+#include "program.glsl"
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Bloom {
+    vec4 params; // x: the EV100 the scene was stored at, y: 1 when the graph has the exposure image
+} ae_uniforms[];
+// Sampled images, in the pass's order: glow 0, exposure 1.
+#define b AE_UNIFORMS
+#define glow AE_PROGRAM_IMAGE(0)
+#define exposureTex AE_PROGRAM_IMAGE(1)
 
 const float BLOOM_CLAMP = 4.0;
 

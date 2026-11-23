@@ -39,12 +39,20 @@ pub struct Bloom {
 }
 
 impl Bloom {
-    pub fn new(gpu: &GpuDevice, bindless: &Bindless, frames_in_flight: usize) -> Result<Self> {
+    pub fn new(gpu: &GpuDevice, bindless: &mut Bindless, frames_in_flight: usize) -> Result<Self> {
         let format = vk::Format::from_raw(ae_render_abi::module::BLOOM_FORMAT as i32);
-        let make = |label: &str, shader: &[u8], uniforms: u32, sampled: usize| {
-            let _ = sampled;
-            BindlessProgram::new(gpu, bindless, label, shader, uniforms, &[format], frames_in_flight)
-                .with_context(|| format!("{label} program"))
+        let mut make = |label: &str, shader: &[u8], uniforms: u32, sampled: usize| {
+            BindlessProgram::new(
+                gpu,
+                bindless,
+                label,
+                shader,
+                uniforms,
+                sampled,
+                &[format],
+                frames_in_flight,
+            )
+            .with_context(|| format!("{label} program"))
         };
         Ok(Self {
             passes: [
@@ -86,6 +94,13 @@ impl Bloom {
         };
         let count = if pass == BloomPass::Downsample { 2 } else { 1 };
         self.passes[pass as usize].record(ctx, &images[..count], &[sampler])
+    }
+
+    /// Give the programs' global-set handles back (the registry is alive).
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        for program in &mut self.passes {
+            program.retire(bindless);
+        }
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

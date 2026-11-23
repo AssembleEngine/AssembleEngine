@@ -7,11 +7,18 @@
 // display to the output and the peak).
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(set = 0, binding = 0) uniform Grade {
+// A bindless fullscreen program (contract version 3): its block and its
+// sampled image are in the engine's global set, reached through the
+// program's handle table.
+#define AE_DECLARE_PUSH 0
+#include "bindless.glsl"
+#include "program.glsl"
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Grade {
     vec4 tint;    // rgb multiplier
     vec4 params;  // contrast, saturation, unused, unused
-} g;
-layout(set = 0, binding = 1) uniform sampler2D scene;
+} ae_uniforms[];
+#define g AE_UNIFORMS
+#define scene AE_PROGRAM_IMAGE(0)
 
 void main() {
     vec3 c = texture(scene, uv).rgb;

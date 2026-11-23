@@ -738,11 +738,15 @@ pub fn inline(path: &Path) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&value)?)
 }
 
-/// `glslc` a fragment shader as the in-repo modules' build scripts do.
+/// `glslc` a fragment shader as the in-repo modules' build scripts do, with
+/// the engine's program interface headers (`bindless.glsl`,
+/// `program.glsl`) on the include path.
 fn compile(file: &Path) -> Result<Vec<u8>> {
     let glslc = std::env::var("GLSLC").unwrap_or_else(|_| "glslc".into());
+    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
     let output = std::process::Command::new(&glslc)
-        .args(["--target-env=vulkan1.3", "-O", "-Werror"])
+        .args(["--target-env=vulkan1.3", "-O", "-Werror", "-I"])
+        .arg(&include)
         .arg(file)
         .args(["-o", "-"])
         .output()

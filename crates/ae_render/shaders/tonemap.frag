@@ -9,14 +9,15 @@
 // (RGBA16F, paper-white units) and post.encode encodes it, clipping at the
 // display's peak.
 #include "gamut.glsl"
-// Step E keeps this program's set-0 uniform block; the global set is still
-// at 2 until step F moves the block into it.
-#define AE_BINDLESS_SET 2
+// A fullscreen program (M15 F): its block and its three sampled images are
+// in the global set, reached through its handle table.
+#define AE_DECLARE_PUSH 0
 #include "bindless.glsl"
+#include "program.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
-layout(set = 0, binding = 0) uniform Tonemap {
+layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Tonemap {
     vec4 params;   // x: bloom strength, y: 1 when the graph has a bloom,
                    // z: 1 when it has the exposure image, w: the EV100 the
                    // scene was stored at
@@ -24,11 +25,12 @@ layout(set = 0, binding = 0) uniform Tonemap {
                    // or in HDR the working space itself (the identity)
     vec4 outLuma;  // xyz: the written gamut's luminance row (the compression);
                    // w: 1 when it is narrower than the working space
-} t;
-// Bindless handles: scene 0, bloom 1, exposure 2; sampler 0.
-#define scene AE_S2D(0, 0)
-#define bloom AE_S2D(1, 0)
-#define exposureTex AE_S2D(2, 0)
+} ae_uniforms[];
+// Sampled images, in the pass's order: scene 0, bloom 1, exposure 2.
+#define t AE_UNIFORMS
+#define scene AE_PROGRAM_IMAGE(0)
+#define bloom AE_PROGRAM_IMAGE(1)
+#define exposureTex AE_PROGRAM_IMAGE(2)
 
 void main() {
     vec3 c = max(texelFetch(scene, ivec2(gl_FragCoord.xy), 0).rgb, vec3(0.0));

@@ -1,10 +1,10 @@
 // The global bindless set's shader side (M15). Include after `#version` and
 // before any declaration that samples a texture.
 //
-// `AE_BINDLESS_SET` is 0: the per-pass sets are gone (M15 step E). The
-// engine fullscreen programs (tonemap, bloom, encode) still keep a set-0
-// uniform block, so their shaders pin this to 2 before including this file;
-// step F moves them into the global set.
+// `AE_BINDLESS_SET` is 0: the per-pass sets are gone (M15 step E). A
+// fullscreen program (a module's or the engine's tonemap, bloom and encode)
+// includes `program.glsl` after this file instead of declaring its own set:
+// its block and sampled images are reached through its handle table.
 //
 // The four arrays are one binding each. Sampled images and separate
 // samplers are combined at the use site, so a handle cannot carry a sampler
@@ -61,12 +61,15 @@ layout(push_constant) uniform AePush {
 // blocks (their offsets unchanged), and reaches it through its handle
 // table: `AE_BUF(k)` is the k-th global index in the pass's table, whose
 // own index is push word 8 (`AE_TABLE`). A pass that names its push words
-// names the eighth `aeTable` and defines AE_TABLE as `ae.aeTable`.
+// names the eighth `aeTable` and defines AE_TABLE as `ae.aeTable`; a
+// fullscreen program gets it from `program.glsl`.
 #define AE_BUFFERS 3
 #define AE_STORAGE_IMAGES 2
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer AeTable { uint aeHandle[]; } ae_tables[];
+#if AE_DECLARE_PUSH
 #ifndef AE_TABLE
 #define AE_TABLE ae.words2.w
+#endif
 #endif
 #define AE_BUF(k) ae_tables[AE_TABLE].aeHandle[k]
 

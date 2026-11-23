@@ -39,6 +39,49 @@
 //! Antialiasing and effects that need range should work in the display's
 //! units and leave the encode to the end; a pass must not clamp at paper
 //! white, or the values the curve put above it are lost.
+//!
+//! # Fullscreen programs
+//!
+//! [`Program::Fullscreen`] is one fragment shader drawn as a fullscreen
+//! triangle into its pass's colour attachments. It has two forms, and a
+//! shader uses exactly one (the host reflects the SPIR-V and refuses a mix):
+//!
+//! * **Per-pass** (contract version 2, accepted by 3 for one version): set
+//!   0, binding 0 is the `uniform` block (`uniform_bytes` long, std140),
+//!   bindings 1.. are one combined image sampler per `Sampled` intent of the
+//!   pass, in intent order.
+//! * **Bindless** (contract version 3): only the engine's global set.
+//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`,
+//!   binding 3 the storage buffers: a `std140` block per program and the
+//!   program's `uint handles[]` table. The push block is at most 16 bytes:
+//!   `uniforms` (the block's index), `samplerIndex`, `handles` (the table's
+//!   index) and a pad word.
+//!
+//! A bindless shader includes the engine's interface headers
+//! (`crates/ae_render/shaders/bindless.glsl` and `program.glsl`; add that
+//! directory to `glslc`'s include path) with `AE_DECLARE_PUSH 0`, declares
+//! its block as `ae_uniforms[]`, then uses `AE_UNIFORMS` and
+//! `AE_PROGRAM_IMAGE(k)` (its k-th sampled image, in the pass's order):
+//!
+//! ```glsl
+//! #define AE_DECLARE_PUSH 0
+//! #include "bindless.glsl"
+//! #include "program.glsl"
+//! layout(std140, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Grade {
+//!     vec4 tint;
+//! } ae_uniforms[];
+//! #define g AE_UNIFORMS
+//! #define scene AE_PROGRAM_IMAGE(0)
+//! ```
+//!
+//! The host writes the program's table with the pass's sampled-image
+//! indices before the pass records; the indices are the same in every frame
+//! slot. `FrameOutput::uniforms` still carries each program's block in
+//! program order, `uniform_bytes` long.
+//!
+//! `RenderModule::VERSION` pins the contract version a module is built for
+//! (the SDK's current one by default); `render/legacy` is a contract-2
+//! fixture.
 
 pub use ae_render_abi as abi;
 pub use ae_render_abi::module::{
@@ -159,6 +202,12 @@ impl FrameOutput {
 }
 
 pub trait RenderModule: Default {
+    /// The contract version this module is built for: the SDK's current one
+    /// ([`abi::module::MODULE_VERSION`]), unless a module pins an older one
+    /// it still wants to run under (a contract-2 module keeps the per-pass
+    /// fullscreen form).
+    const VERSION: u32 = abi::module::MODULE_VERSION;
+
     /// The graph for this target, or `None` if the module cannot render it.
     fn declare(&mut self, env: &DeclareEnv) -> Option<Declaration>;
 
@@ -258,7 +307,7 @@ macro_rules! render_module {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn ae_render_version() -> u32 {
-            $crate::abi::module::MODULE_VERSION
+            <$ty as $crate::RenderModule>::VERSION
         }
 
         #[unsafe(no_mangle)]

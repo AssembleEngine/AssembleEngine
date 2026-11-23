@@ -2,22 +2,30 @@
 //! SPIR-V from its program table) drawn as one fullscreen triangle into
 //! its pass's colour attachments, with the engine's `fullscreen.vert`.
 //!
-//! The interface is fixed by the pass declaration, and the shader is
-//! reflected ([`reflect`]) and checked against it ([`check`]) before a
-//! pipeline is made:
-//! * set 0, binding 0: the uniform block when the program declares
-//!   `uniform_bytes > 0`: from the end of its last member up to that
-//!   rounded to 16 bytes (std140), so a module may send the bare struct or
-//!   it padded;
-//! * set 0, bindings 1..=n: a combined image sampler (2D) per `Sampled`
-//!   intent of the pass, in intent order (sampled linearly, clamped);
-//! * nothing else: no storage buffers or images (the pass declares no
-//!   storage access), no push constants;
-//! * one fragment output per colour attachment, locations 0..n.
+//! The shader is reflected ([`reflect`]) and checked against the pass
+//! ([`check`]) before a pipeline is made. Two forms exist, and a shader
+//! uses exactly one (contract version 3 accepts both; version 2 modules
+//! may only use the first, and the next version drops it):
 //!
-//! Colour attachments blend with straight alpha (`src_alpha,
-//! one_minus_src_alpha`), so a shader writing alpha 1 replaces and an
-//! overlay writing less blends over what the target holds.
+//! * **Per-pass** ([`Form::Legacy`]): set 0, binding 0 is the uniform block
+//!   when the program declares `uniform_bytes > 0`: from the end of its
+//!   last member up to that rounded to 16 bytes (std140), so a module may
+//!   send the bare struct or it padded; set 0, bindings 1..=n are one
+//!   combined image sampler (2D) per `Sampled` intent of the pass, in
+//!   intent order (sampled linearly, clamped). Nothing else: no storage
+//!   buffers or images, no push constants.
+//! * **Bindless** ([`Form::Bindless`]): only the global set (M15 F).
+//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`,
+//!   binding 3 the storage buffers (a `std140` block per program and the
+//!   program's `uint handles[]` table). The push block is at most 16 bytes:
+//!   `uniforms` (the block's index), `sampler` (the sampler's index),
+//!   `handles` (the table's index) and a pad word. The table holds the
+//!   pass's sampled-image indices, in intent order.
+//!
+//! Either form writes one fragment output per colour attachment, at
+//! locations 0..n. Colour attachments blend with straight alpha
+//! (`src_alpha, one_minus_src_alpha`), so a shader writing alpha 1 replaces
+//! and an overlay writing less blends over what the target holds.
 
 use crate::device::GpuDevice;
 use crate::executor::{ImageBinding, PassContext};
@@ -31,6 +39,18 @@ use rspirv::dr::{Instruction, Operand};
 use rspirv::spirv::{Decoration, Op, StorageClass};
 use std::collections::HashMap;
 
+/// Which interface a checked program's shader uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Form {
+    /// Set 0: the uniform block at binding 0 and a combined image sampler
+    /// per sampled intent at 1.. (contract version 2).
+    Legacy,
+    /// Only the global set: sampled images at 0, samplers at 1, the std140
+    /// blocks and the handle table at 3, and a push block (contract
+    /// version 3).
+    Bindless,
+}
+
 /// A descriptor binding the shader declares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingKind {
@@ -39,6 +59,14 @@ pub enum BindingKind {
     CombinedImageSampler,
     StorageBuffer,
     StorageImage,
+    /// A runtime array of sampled images (`texture2D x[]`), binding 0 of
+    /// the bindless form.
+    SampledImageArray,
+    /// A runtime array of separate samplers (`sampler x[]`), binding 1.
+    SamplerArray,
+    /// A runtime array of storage buffers, binding 3: the std140 blocks and
+    /// the handle table.
+    StorageBufferArray,
     /// Anything else (separate samplers or images, texel buffers, ...).
     Other(String),
 }
@@ -49,7 +77,8 @@ pub struct Reflection {
     pub bindings: Vec<(u32, u32, BindingKind)>,
     /// Locations of the fragment outputs, sorted.
     pub outputs: Vec<u32>,
-    pub push_constants: bool,
+    /// The push block's byte size; 0 when there is none.
+    pub push_bytes: u32,
     /// Has a `Fragment` entry point named `main`.
     pub fragment_main: bool,
 }
@@ -134,6 +163,7 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
                     .context("array without ArrayStride")?;
                 stride * constant(operand(1)?).context("array length is not a constant")?
             }
+            Op::TypeRuntimeArray => bail!("a runtime array inside a block has no size"),
             Op::TypeStruct => {
                 let mut end = 0;
                 for (m, member) in t.operands.iter().enumerate() {
@@ -179,27 +209,45 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
             .get(&var.result_type.context("variable without type")?)
             .context("unknown pointer type")?;
         let pointee = pointer.operands.get(1).and_then(word).context("malformed pointer")?;
-        let pointee_op = types.get(&pointee).map(|t| t.class.opcode);
+        let pointee_type = types.get(&pointee).context("unknown pointee type")?;
+        let pointee_op = Some(pointee_type.class.opcode);
         match class {
             StorageClass::Output => {
                 if let Some(Some(location)) = decoration(id, Decoration::Location) {
                     out.outputs.push(location);
                 }
             }
-            StorageClass::PushConstant => out.push_constants = true,
+            StorageClass::PushConstant => {
+                out.push_bytes = size(
+                    pointee,
+                    &types,
+                    &member_offsets,
+                    &member_matrix_stride,
+                    &decoration,
+                    &constant,
+                )?;
+            }
             StorageClass::Uniform | StorageClass::UniformConstant | StorageClass::StorageBuffer => {
                 let set = decoration(id, Decoration::DescriptorSet).flatten().unwrap_or(0);
                 let binding = decoration(id, Decoration::Binding)
                     .flatten()
                     .context("a resource without a binding")?;
-                let kind = match (class, pointee_op) {
-                    (StorageClass::StorageBuffer, _) => BindingKind::StorageBuffer,
-                    (StorageClass::Uniform, Some(Op::TypeStruct))
+                // The element type of a runtime array (a bindless array).
+                let element = (pointee_op == Some(Op::TypeRuntimeArray))
+                    .then(|| pointee_type.operands.first().and_then(word))
+                    .flatten();
+                let element_op = element.and_then(|e| types.get(&e)).map(|t| t.class.opcode);
+                let kind = match (*class, pointee_op, element_op) {
+                    (_, Some(Op::TypeRuntimeArray), Some(Op::TypeImage)) => BindingKind::SampledImageArray,
+                    (_, Some(Op::TypeRuntimeArray), Some(Op::TypeSampler)) => BindingKind::SamplerArray,
+                    (_, Some(Op::TypeRuntimeArray), _) => BindingKind::StorageBufferArray,
+                    (StorageClass::StorageBuffer, _, _) => BindingKind::StorageBuffer,
+                    (StorageClass::Uniform, Some(Op::TypeStruct), _)
                         if decoration(pointee, Decoration::BufferBlock).is_some() =>
                     {
                         BindingKind::StorageBuffer
                     }
-                    (StorageClass::Uniform, Some(Op::TypeStruct)) => BindingKind::UniformBuffer(size(
+                    (StorageClass::Uniform, Some(Op::TypeStruct), _) => BindingKind::UniformBuffer(size(
                         pointee,
                         &types,
                         &member_offsets,
@@ -207,8 +255,8 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
                         &decoration,
                         &constant,
                     )?),
-                    (StorageClass::UniformConstant, Some(Op::TypeSampledImage)) => BindingKind::CombinedImageSampler,
-                    (StorageClass::UniformConstant, Some(Op::TypeImage)) => {
+                    (StorageClass::UniformConstant, Some(Op::TypeSampledImage), _) => BindingKind::CombinedImageSampler,
+                    (StorageClass::UniformConstant, Some(Op::TypeImage), _) => {
                         // Operand 6: 1 = sampled, 2 = storage.
                         let sampled = types[&pointee].operands.get(6).and_then(word);
                         if sampled == Some(2) {
@@ -217,7 +265,7 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
                             BindingKind::Other("separate image".into())
                         }
                     }
-                    (_, op) => BindingKind::Other(format!("{op:?}")),
+                    (_, op, _) => BindingKind::Other(format!("{op:?}")),
                 };
                 out.bindings.push((set, binding, kind));
             }
@@ -225,18 +273,111 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
         }
     }
     out.bindings.sort_by_key(|b| (b.0, b.1));
+    // Blocks alias one binding (the handle table and the std140 blocks all
+    // live at binding 3), so the same declaration appears more than once.
+    out.bindings.dedup();
     out.outputs.sort_unstable();
     Ok(out)
 }
 
+/// The push block the bindless form takes: `uniforms`, `sampler`, `handles`,
+/// pad.
+pub const PUSH_BYTES: u32 = 16;
+
 /// Check a reflected shader against its pass: `uniform_bytes` declared,
-/// `sampled` inputs, `colors` attachments. The error says what differs.
-pub fn check(r: &Reflection, uniform_bytes: u32, sampled: usize, colors: usize) -> Result<(), String> {
+/// `sampled` inputs, `colors` attachments. The form is detected and the
+/// two cannot be mixed. `legacy_only` is set for a contract-2 module, whose
+/// programs must use the per-pass form.
+pub fn check(
+    r: &Reflection,
+    uniform_bytes: u32,
+    sampled: usize,
+    colors: usize,
+    legacy_only: bool,
+) -> Result<Form, String> {
     if !r.fragment_main {
         return Err("no fragment entry point `main`".into());
     }
-    if r.push_constants {
-        return Err("uses push constants; fullscreen programs take a uniform block at binding 0".into());
+    let expected: Vec<u32> = (0..colors as u32).collect();
+    if r.outputs != expected {
+        return Err(format!(
+            "writes outputs at locations {:?}; the pass has {colors} colour attachment(s)",
+            r.outputs
+        ));
+    }
+    // A mix of the two forms names the binding that starts it.
+    let bindless_kind = |kind: &BindingKind| {
+        matches!(
+            kind,
+            BindingKind::SampledImageArray | BindingKind::SamplerArray | BindingKind::StorageBufferArray
+        )
+    };
+    let any_bindless = r.bindings.iter().any(|(_, _, kind)| bindless_kind(kind));
+    let any_per_pass = r
+        .bindings
+        .iter()
+        .any(|(_, _, kind)| matches!(kind, BindingKind::UniformBuffer(_) | BindingKind::CombinedImageSampler));
+    if any_bindless && any_per_pass {
+        let (set, binding, kind) = r
+            .bindings
+            .iter()
+            .find(|(_, _, kind)| bindless_kind(kind))
+            .expect("a bindless binding");
+        return Err(format!(
+            "set {set} binding {binding} ({kind:?}) mixes the bindless arrays with the per-pass form"
+        ));
+    }
+    // The bindless form: the global set's arrays and a small push block.
+    let bindless = r.bindings.iter().all(|(set, binding, kind)| {
+        *set == 0
+            && matches!(
+                (binding, kind),
+                (0, BindingKind::SampledImageArray)
+                    | (1, BindingKind::SamplerArray)
+                    | (3, BindingKind::StorageBufferArray)
+            )
+    });
+    if bindless && !r.bindings.is_empty() {
+        if legacy_only {
+            return Err("uses the bindless form; a contract-2 module's programs take the per-pass one".into());
+        }
+        if r.push_bytes > PUSH_BYTES {
+            return Err(format!(
+                "the push block is {} bytes; the bindless form takes at most {PUSH_BYTES}",
+                r.push_bytes
+            ));
+        }
+        let has = |binding: u32, want: &BindingKind| {
+            r.bindings
+                .iter()
+                .any(|(set, b, kind)| *set == 0 && *b == binding && kind == want)
+        };
+        if sampled > 0 {
+            for (binding, want) in [(0, BindingKind::SampledImageArray), (1, BindingKind::SamplerArray)] {
+                if !has(binding, &want) {
+                    return Err(format!(
+                        "the pass samples {sampled} image(s); the bindless form declares set 0 binding {binding} ({want:?})"
+                    ));
+                }
+            }
+        }
+        if (sampled > 0 || uniform_bytes > 0) && !has(3, &BindingKind::StorageBufferArray) {
+            return Err("the bindless form declares its std140 block and handle table at set 0 binding 3".into());
+        }
+        if r.push_bytes == 0 && (sampled > 0 || uniform_bytes > 0) {
+            return Err(format!(
+                "declares no push block; the bindless form takes up to {PUSH_BYTES} bytes (uniforms, sampler, handles)"
+            ));
+        }
+        return Ok(Form::Bindless);
+    }
+    // The per-pass form (contract version 2): set 0, the block then the
+    // samplers.
+    if r.push_bytes > 0 {
+        return Err(format!(
+            "uses a {}-byte push block; the per-pass form takes a uniform block at binding 0",
+            r.push_bytes
+        ));
     }
     let mut want: Vec<(u32, u32, BindingKind)> = Vec::new();
     if uniform_bytes > 0 {
@@ -269,6 +410,9 @@ pub fn check(r: &Reflection, uniform_bytes: u32, sampled: usize, colors: usize) 
             None => {
                 let declared = match b.2 {
                     BindingKind::StorageBuffer | BindingKind::StorageImage => " (the pass declares no storage access)",
+                    BindingKind::SampledImageArray | BindingKind::SamplerArray | BindingKind::StorageBufferArray => {
+                        " (the bindless arrays cannot be mixed with the per-pass form)"
+                    }
                     _ => "",
                 };
                 return Err(format!(
@@ -278,35 +422,203 @@ pub fn check(r: &Reflection, uniform_bytes: u32, sampled: usize, colors: usize) 
             }
         }
     }
-    let expected: Vec<u32> = (0..colors as u32).collect();
-    if r.outputs != expected {
-        return Err(format!(
-            "writes outputs at locations {:?}; the pass has {colors} colour attachment(s)",
-            r.outputs
-        ));
-    }
-    Ok(())
+    Ok(Form::Legacy)
 }
 
-/// A checked fullscreen program: pipeline, per-slot uniform buffers and
-/// descriptor sets.
+/// The pass's sampler as each form needs it: the object for a per-pass
+/// program's combined image sampler, the global index for a bindless one.
+#[derive(Clone, Copy, Debug)]
+pub struct Sampler {
+    pub object: vk::Sampler,
+    pub index: u32,
+}
+
+/// A checked fullscreen program: its pipeline and, by form, the per-pass
+/// sets or the global-set handles.
 pub struct FullscreenProgram {
     pub label: String,
     pub uniform_bytes: u32,
-    sampled: u32,
+    form: Form,
+    /// The pass's sampled intents (the bindless form's table size).
+    sampled: usize,
+    pipeline: vk::Pipeline,
+    legacy: Option<Legacy>,
+    bindless: Option<BindlessState>,
+}
+
+/// The per-pass form: a layout, a set per frame slot and a uniform buffer
+/// per slot.
+struct Legacy {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     ubos: Vec<OwnedBuffer>,
-    pipeline: vk::Pipeline,
+}
+
+/// The bindless form's state, shared by a module's program and the engine's
+/// ([`BindlessProgram`]): a std140 block and a handle table per frame slot
+/// (one slotted index each), and the group that owns both.
+struct BindlessState {
+    /// The shared pipeline layout (the global set at 0, the push block).
+    layout: vk::PipelineLayout,
+    ubos: Vec<OwnedBuffer>,
+    tables: Vec<OwnedBuffer>,
+    /// The std140 block's slotted index and the handle table's.
+    uniforms: crate::bindless::BufferHandle,
+    handles: crate::bindless::BufferHandle,
+    group: Option<crate::bindless::GroupId>,
 }
 
 impl FullscreenProgram {
-    /// Reflect and check `spirv`, then build the program.
+    /// Reflect and check `spirv`, then build the program for its form.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
+        label: &str,
+        spirv: &[u8],
+        uniform_bytes: u32,
+        sampled: usize,
+        color_formats: &[vk::Format],
+        frames_in_flight: usize,
+        legacy_only: bool,
+    ) -> Result<Self> {
+        let reflection = reflect(spirv).with_context(|| format!("program `{label}`"))?;
+        let form = check(&reflection, uniform_bytes, sampled, color_formats.len(), legacy_only)
+            .map_err(|e| anyhow::anyhow!("program `{label}`: {e}"))?;
+        let device = &gpu.device;
+        let (mut this, group) = bindless.group(|bindless| -> Result<Self> {
+            let (legacy, bindless_state) = match form {
+                Form::Legacy => (Some(Legacy::new(gpu, uniform_bytes, sampled, frames_in_flight)?), None),
+                Form::Bindless => (
+                    None,
+                    Some(BindlessState::new(
+                        gpu,
+                        bindless,
+                        label,
+                        uniform_bytes,
+                        sampled.max(1),
+                        frames_in_flight,
+                    )?),
+                ),
+            };
+            let layout = match (&legacy, &bindless_state) {
+                (Some(legacy), _) => legacy.layout,
+                _ => bindless.pipeline_layout(),
+            };
+            let pipeline = pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex: spirv!("fullscreen.vert"),
+                    fragment: spirv,
+                    layout,
+                    color_formats,
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Straight,
+                    glow_blend: Blend::Off,
+                },
+            )
+            .with_context(|| format!("program `{label}` pipeline"))?;
+            Ok(Self {
+                label: label.into(),
+                uniform_bytes,
+                form,
+                sampled,
+                pipeline,
+                legacy,
+                bindless: bindless_state,
+            })
+        })?;
+        match this.bindless.as_mut() {
+            Some(state) => state.group = Some(group),
+            // Nothing to retire: the group is empty.
+            None => bindless.retire_group(group),
+        }
+        Ok(this)
+    }
+
+    /// The form the shader was checked against.
+    pub fn form(&self) -> Form {
+        self.form
+    }
+
+    /// This frame's uniform block for `slot` (its previous use completed).
+    pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
+        let ubos = match (&mut self.legacy, &mut self.bindless) {
+            (Some(legacy), _) => &mut legacy.ubos,
+            (_, Some(state)) => &mut state.ubos,
+            _ => return,
+        };
+        if let Some(mapped) = ubos.get_mut(slot).and_then(|u| u.mapped()) {
+            let n = bytes.len().min(self.uniform_bytes as usize);
+            mapped[..n].copy_from_slice(&bytes[..n]);
+        }
+    }
+
+    /// Draw, sampling `images` (the pass's sampled inputs in order) with
+    /// `sampler`. Records inside the pass's graphics scope.
+    pub fn record(&self, ctx: &PassContext<'_>, images: &[ImageBinding], sampler: Sampler) -> Result<()> {
+        anyhow::ensure!(
+            images.len() == self.sampled,
+            "program `{}` samples {} images, given {}",
+            self.label,
+            self.sampled,
+            images.len()
+        );
+        match &self.legacy {
+            Some(legacy) => {
+                legacy.record(ctx, self.pipeline, images, sampler.object);
+                Ok(())
+            }
+            None => {
+                let state = self.bindless.as_ref().expect("a checked program has a form");
+                let indices: Vec<u32> = images.iter().map(|image| image.sampled.unwrap_or(0)).collect();
+                state.record(ctx, self.pipeline, &indices, sampler.index);
+                Ok(())
+            }
+        }
+    }
+
+    /// Give the bindless form's handles back; the device objects stay until
+    /// [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(state) = self.bindless.as_mut() {
+            state.retire(bindless);
+        }
+    }
+
+    pub fn destroy(&mut self, gpu: &GpuDevice) {
+        unsafe {
+            gpu.device.destroy_pipeline(self.pipeline, None);
+        }
+        if let Some(mut legacy) = self.legacy.take() {
+            legacy.destroy(gpu);
+        }
+        if let Some(mut state) = self.bindless.take() {
+            state.destroy(gpu);
+        }
+    }
+}
+
+/// An engine-owned fullscreen program on the global set (M15 F): tonemap,
+/// bloom and encode. It takes its sampled images as global indices when it
+/// records, writes its handle table for the slot and pushes `uniforms`,
+/// `sampler` and `handles`.
+pub struct BindlessProgram {
+    pub label: String,
+    pub uniform_bytes: u32,
+    state: BindlessState,
+    pipeline: vk::Pipeline,
+}
+
+impl BindlessProgram {
+    /// `sampled`: how many images the shader samples (its table's size).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
         label: &str,
         spirv: &[u8],
         uniform_bytes: u32,
@@ -314,9 +626,70 @@ impl FullscreenProgram {
         color_formats: &[vk::Format],
         frames_in_flight: usize,
     ) -> Result<Self> {
-        let reflection = reflect(spirv).with_context(|| format!("program `{label}`"))?;
-        check(&reflection, uniform_bytes, sampled, color_formats.len())
-            .map_err(|e| anyhow::anyhow!("program `{label}`: {e}"))?;
+        let (mut this, group) = bindless.group(|bindless| -> Result<Self> {
+            let state = BindlessState::new(gpu, bindless, label, uniform_bytes, sampled, frames_in_flight)?;
+            let pipeline = pipeline::graphics_pipeline(
+                &gpu.device,
+                &GraphicsDesc {
+                    vertex: spirv!("fullscreen.vert"),
+                    fragment: spirv,
+                    layout: state.layout,
+                    color_formats,
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Straight,
+                    glow_blend: Blend::Off,
+                },
+            )
+            .with_context(|| format!("program `{label}` pipeline"))?;
+            Ok(Self {
+                label: label.into(),
+                uniform_bytes,
+                state,
+                pipeline,
+            })
+        })?;
+        this.state.group = Some(group);
+        Ok(this)
+    }
+
+    pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
+        if let Some(mapped) = self.state.ubos.get_mut(slot).and_then(|u| u.mapped()) {
+            let n = bytes.len().min(self.uniform_bytes as usize);
+            mapped[..n].copy_from_slice(&bytes[..n]);
+        }
+    }
+
+    /// Draw, sampling the images at `images` with `samplers` (indices into
+    /// the global arrays; one sampler serves the shader). Records inside the
+    /// pass's graphics scope.
+    pub fn record(&self, ctx: &PassContext<'_>, images: &[u32], samplers: &[u32]) -> Result<()> {
+        anyhow::ensure!(
+            images.len() <= 16,
+            "program `{}` needs more than 16 sampled images",
+            self.label
+        );
+        let sampler = samplers.first().copied().unwrap_or(0);
+        self.state.record(ctx, self.pipeline, images, sampler);
+        Ok(())
+    }
+
+    /// Give the global-set handles back; the device objects stay until
+    /// [`Self::destroy`].
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        self.state.retire(bindless);
+    }
+
+    pub fn destroy(&mut self, gpu: &GpuDevice) {
+        unsafe {
+            gpu.device.destroy_pipeline(self.pipeline, None);
+        }
+        self.state.destroy(gpu);
+    }
+}
+
+impl Legacy {
+    fn new(gpu: &GpuDevice, uniform_bytes: u32, sampled: usize, frames_in_flight: usize) -> Result<Self> {
         let device = &gpu.device;
         let stages = vk::ShaderStageFlags::FRAGMENT;
         let mut kinds = Vec::new();
@@ -371,7 +744,7 @@ impl FullscreenProgram {
                                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                             },
                             MemoryLocation::CpuToGpu,
-                            label,
+                            "fullscreen program",
                         )
                     })
                     .collect::<Result<Vec<_>>>()?
@@ -395,52 +768,17 @@ impl FullscreenProgram {
                     );
                 }
             }
-            let pipeline = pipeline::graphics_pipeline(
-                device,
-                &GraphicsDesc {
-                    vertex: spirv!("fullscreen.vert"),
-                    fragment: spirv,
-                    layout,
-                    color_formats,
-                    depth: None,
-                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                    blend: Blend::Straight,
-                    glow_blend: Blend::Off,
-                },
-            )
-            .with_context(|| format!("program `{label}` pipeline"))?;
             Ok(Self {
-                label: label.into(),
-                uniform_bytes,
-                sampled: sampled as u32,
                 set_layout,
                 layout,
                 pool,
                 sets,
                 ubos,
-                pipeline,
             })
         }
     }
 
-    /// This frame's uniform block for `slot` (its previous use completed).
-    pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
-        if let Some(mapped) = self.ubos.get_mut(slot).and_then(|u| u.mapped()) {
-            let n = bytes.len().min(self.uniform_bytes as usize);
-            mapped[..n].copy_from_slice(&bytes[..n]);
-        }
-    }
-
-    /// Draw, sampling `images` (the pass's sampled inputs in order) with
-    /// `sampler`. Records inside the pass's graphics scope.
-    pub fn record(&self, ctx: &PassContext<'_>, images: &[ImageBinding], sampler: vk::Sampler) -> Result<()> {
-        anyhow::ensure!(
-            images.len() == self.sampled as usize,
-            "program `{}` samples {} images, given {}",
-            self.label,
-            self.sampled,
-            images.len()
-        );
+    fn record(&self, ctx: &PassContext<'_>, pipeline: vk::Pipeline, images: &[ImageBinding], sampler: vk::Sampler) {
         let set = self.sets[ctx.slot];
         let infos: Vec<[vk::DescriptorImageInfo; 1]> = images
             .iter()
@@ -469,8 +807,8 @@ impl FullscreenProgram {
                 ctx.device.update_descriptor_sets(&writes, &[]);
             }
             ctx.device
-                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            if self.uniform_bytes > 0 || self.sampled > 0 {
+                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            if !self.sets.is_empty() {
                 ctx.device.cmd_bind_descriptor_sets(
                     ctx.cmd,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -482,221 +820,121 @@ impl FullscreenProgram {
             }
             ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
         }
-        Ok(())
     }
 
-    pub fn destroy(&mut self, gpu: &GpuDevice) {
+    fn destroy(&mut self, gpu: &GpuDevice) {
         unsafe {
-            gpu.device.destroy_pipeline(self.pipeline, None);
             gpu.device.destroy_pipeline_layout(self.layout, None);
             gpu.device.destroy_descriptor_pool(self.pool, None);
             gpu.device.destroy_descriptor_set_layout(self.set_layout, None);
         }
-        for u in &mut self.ubos {
-            u.destroy(gpu);
+        for ubo in &mut self.ubos {
+            ubo.destroy(gpu);
         }
     }
 }
 
-/// A library-owned fullscreen program on the global bindless set (M15
-/// step C). Its uniform block stays set 0 (the module contract is untouched;
-/// step F moves modules), the global set is set 2, and the pass's sampled
-/// handles and sampler index arrive in the 128-byte push block from
-/// `bindless.glsl`.
-pub struct BindlessProgram {
-    pub label: String,
-    pub uniform_bytes: u32,
-    set_layout: vk::DescriptorSetLayout,
-    empty_layout: vk::DescriptorSetLayout,
-    layout: vk::PipelineLayout,
-    pool: Option<vk::DescriptorPool>,
-    sets: Vec<vk::DescriptorSet>,
-    ubos: Vec<OwnedBuffer>,
-    pipeline: vk::Pipeline,
-}
-
-impl BindlessProgram {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+impl BindlessState {
+    fn new(
         gpu: &GpuDevice,
-        bindless: &crate::bindless::Bindless,
+        bindless: &mut crate::bindless::Bindless,
         label: &str,
-        spirv: &[u8],
         uniform_bytes: u32,
-        color_formats: &[vk::Format],
+        sampled: usize,
         frames_in_flight: usize,
     ) -> Result<Self> {
-        let reflection = reflect(spirv).with_context(|| format!("program `{label}`"))?;
-        if !reflection.fragment_main {
-            bail!("program `{label}`: no fragment entry point `main`");
-        }
-        let device = &gpu.device;
-        let stages = vk::ShaderStageFlags::FRAGMENT;
-        unsafe {
-            let empty_layout =
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None)?;
-            let (set_layout, pool, sets, ubos) = if uniform_bytes > 0 {
-                let binding = vk::DescriptorSetLayoutBinding::default()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(stages);
-                let set_layout = device.create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&[binding]),
-                    None,
-                )?;
-                let n = frames_in_flight as u32;
-                let pool = device.create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(n)
-                        .pool_sizes(&[vk::DescriptorPoolSize {
-                            ty: vk::DescriptorType::UNIFORM_BUFFER,
-                            descriptor_count: n,
-                        }]),
-                    None,
-                )?;
-                let layouts = vec![set_layout; frames_in_flight];
-                let sets = device.allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(pool)
-                        .set_layouts(&layouts),
-                )?;
-                let ubos: Vec<OwnedBuffer> = (0..frames_in_flight)
-                    .map(|_| {
-                        OwnedBuffer::new(
-                            gpu,
-                            BufferDesc {
-                                size: uniform_bytes as u64,
-                                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                            },
-                            MemoryLocation::CpuToGpu,
-                            label,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                for (slot, &set) in sets.iter().enumerate() {
-                    let info = [vk::DescriptorBufferInfo {
-                        buffer: ubos[slot].buffer,
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }];
-                    device.update_descriptor_sets(
-                        &[vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(0)
-                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                            .buffer_info(&info)],
-                        &[],
-                    );
-                }
-                (set_layout, Some(pool), sets, ubos)
-            } else {
-                (empty_layout, None, Vec::new(), Vec::new())
-            };
-            let layout =
-                pipeline::pipeline_layout(device, &[set_layout, empty_layout, bindless.set_layout()], 128, stages)?;
-            let pipeline = pipeline::graphics_pipeline(
-                device,
-                &GraphicsDesc {
-                    vertex: spirv!("fullscreen.vert"),
-                    fragment: spirv,
-                    layout,
-                    color_formats,
-                    depth: None,
-                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                    blend: Blend::Straight,
-                    glow_blend: Blend::Off,
-                },
-            )
-            .with_context(|| format!("program `{label}` pipeline"))?;
-            Ok(Self {
-                label: label.into(),
-                uniform_bytes,
-                set_layout,
-                empty_layout,
-                layout,
-                pool,
-                sets,
-                ubos,
-                pipeline,
+        let ubos = (0..frames_in_flight)
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: uniform_bytes.max(16) as u64,
+                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    label,
+                )
             })
+            .collect::<Result<Vec<_>>>()?;
+        let tables = (0..frames_in_flight)
+            .map(|_| {
+                OwnedBuffer::new(
+                    gpu,
+                    BufferDesc {
+                        size: (sampled * 4) as u64,
+                        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                    },
+                    MemoryLocation::CpuToGpu,
+                    "program handles",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let uniforms = bindless.slotted_buffer()?;
+        for (slot, ubo) in ubos.iter().enumerate() {
+            bindless.update_slotted_buffer(uniforms, slot, ubo.buffer, 0, ubo.size);
         }
+        let handles = bindless.slotted_buffer()?;
+        for (slot, table) in tables.iter().enumerate() {
+            bindless.update_slotted_buffer(handles, slot, table.buffer, 0, table.size);
+        }
+        Ok(Self {
+            layout: bindless.pipeline_layout(),
+            ubos,
+            tables,
+            uniforms,
+            handles,
+            group: None,
+        })
     }
 
-    pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
-        if let Some(mapped) = self.ubos.get_mut(slot).and_then(|u| u.mapped()) {
-            let n = bytes.len().min(self.uniform_bytes as usize);
-            mapped[..n].copy_from_slice(&bytes[..n]);
+    /// Record the pass: the slot's handle table gets `images`, then the
+    /// push block names the block, the sampler and the table.
+    fn record(&self, ctx: &PassContext<'_>, pipeline: vk::Pipeline, images: &[u32], sampler: u32) {
+        let table = &self.tables[ctx.slot];
+        let bytes: Vec<u8> = images.iter().flat_map(|index| index.to_le_bytes()).collect();
+        // The indices are the same every frame, so this writes once per
+        // bake; the compare is a few bytes. The slot's previous frame has
+        // completed: only this slot reads the buffer.
+        if table.mapped_read(0, bytes.len()) != Some(&bytes[..]) {
+            table.write_mapped(0, &bytes);
         }
-    }
-
-    /// Draw, sampling the images at `images` with `samplers` (indices into
-    /// the global arrays). Records inside the pass's graphics scope.
-    pub fn record(&self, ctx: &PassContext<'_>, images: &[u32], samplers: &[u32]) -> Result<()> {
-        anyhow::ensure!(
-            images.len() <= 16,
-            "program `{}` needs more than 16 sampled images",
-            self.label
-        );
-        anyhow::ensure!(
-            samplers.len() <= 8,
-            "program `{}` needs more than 8 samplers",
-            self.label
-        );
-        let mut push = crate::bindless::Push::default();
-        for (i, &index) in images.iter().enumerate() {
-            push.image(i, index);
-        }
-        for (i, &index) in samplers.iter().enumerate() {
-            push.sampler(i, index);
-        }
+        let push = [self.uniforms.index, sampler, self.handles.index, 0];
         unsafe {
+            ctx.device
+                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            // The shared layout's push range covers every stage; a push
+            // must name all of them.
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.layout,
-                vk::ShaderStageFlags::FRAGMENT,
+                crate::bindless::PUSH_STAGES,
                 0,
                 pipeline::push_bytes(&push),
             );
-            if !self.ubos.is_empty() {
-                ctx.device.cmd_bind_descriptor_sets(
-                    ctx.cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[self.sets[ctx.slot]],
-                    &[],
-                );
-            }
             ctx.device.cmd_bind_descriptor_sets(
                 ctx.cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );
-            ctx.device
-                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
         }
-        Ok(())
     }
 
-    pub fn destroy(&mut self, gpu: &GpuDevice) {
-        unsafe {
-            gpu.device.destroy_pipeline(self.pipeline, None);
-            gpu.device.destroy_pipeline_layout(self.layout, None);
-            if let Some(pool) = self.pool.take() {
-                gpu.device.destroy_descriptor_pool(pool, None);
-            }
-            if self.set_layout != self.empty_layout {
-                gpu.device.destroy_descriptor_set_layout(self.set_layout, None);
-            }
-            gpu.device.destroy_descriptor_set_layout(self.empty_layout, None);
+    fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(group) = self.group.take() {
+            bindless.retire_group(group);
         }
-        for u in &mut self.ubos {
-            u.destroy(gpu);
+    }
+
+    fn destroy(&mut self, gpu: &GpuDevice) {
+        for ubo in &mut self.ubos {
+            ubo.destroy(gpu);
+        }
+        for table in &mut self.tables {
+            table.destroy(gpu);
         }
     }
 }
@@ -705,11 +943,11 @@ impl BindlessProgram {
 mod tests {
     use super::*;
 
-    /// The interface of `test_post.frag` (a uniform block of 28 bytes,
+    /// The per-pass form of `test_post.frag` (a uniform block of 28 bytes,
     /// two sampled inputs, one output) passes; every difference from what
     /// a pass declares is named.
     #[test]
-    fn shaders_are_checked_against_their_pass() {
+    fn the_per_pass_form_is_checked_against_its_pass() {
         let ok = reflect(spirv!("test_post.frag")).unwrap();
         assert_eq!(
             ok.bindings,
@@ -720,26 +958,73 @@ mod tests {
             ]
         );
         assert_eq!(ok.outputs, [0]);
-        assert!(ok.fragment_main && !ok.push_constants);
-        check(&ok, 32, 2, 1).unwrap();
-        check(&ok, 28, 2, 1).unwrap();
-        let e = check(&ok, 48, 2, 1).unwrap_err();
+        assert!(ok.fragment_main && ok.push_bytes == 0);
+        assert_eq!(check(&ok, 32, 2, 1, false).unwrap(), Form::Legacy);
+        check(&ok, 28, 2, 1, false).unwrap();
+        let e = check(&ok, 48, 2, 1, false).unwrap_err();
         assert!(e.contains("28 bytes (32 padded)") && e.contains("declares 48"), "{e}");
-        assert!(check(&ok, 24, 2, 1).is_err());
-        assert!(check(&ok, 32, 1, 1).unwrap_err().contains("binding 2"));
-        assert!(check(&ok, 32, 3, 1).is_ok(), "an unused declared input is allowed");
-        assert!(check(&ok, 32, 2, 2).unwrap_err().contains("colour attachment"));
-        assert!(check(&ok, 0, 2, 1).unwrap_err().contains("binding 0"));
+        assert!(check(&ok, 24, 2, 1, false).is_err());
+        assert!(check(&ok, 32, 1, 1, false).unwrap_err().contains("binding 2"));
+        assert!(
+            check(&ok, 32, 3, 1, false).is_ok(),
+            "an unused declared input is allowed"
+        );
+        assert!(check(&ok, 32, 2, 2, false).unwrap_err().contains("colour attachment"));
+        assert!(check(&ok, 0, 2, 1, false).unwrap_err().contains("binding 0"));
 
         let storage = reflect(spirv!("test_post_storage.frag")).unwrap();
-        let e = check(&storage, 0, 1, 1).unwrap_err();
+        let e = check(&storage, 0, 1, 1, false).unwrap_err();
         assert!(e.contains("no storage access"), "{e}");
 
         let pushes = reflect(spirv!("test_post_push.frag")).unwrap();
-        assert!(check(&pushes, 0, 0, 1).unwrap_err().contains("push constants"));
+        assert_eq!(pushes.push_bytes, 16);
+        assert!(check(&pushes, 0, 0, 1, false).unwrap_err().contains("push block"));
 
         assert!(reflect(&[1, 2, 3, 4]).is_err());
         let vertex = reflect(spirv!("fullscreen.vert")).unwrap();
-        assert!(check(&vertex, 0, 0, 0).unwrap_err().contains("fragment"));
+        assert!(check(&vertex, 0, 0, 0, false).unwrap_err().contains("fragment"));
+    }
+
+    /// The bindless form: the global set's three arrays and a 16-byte push
+    /// block. A mix of the two forms, or a bindless shader in a contract-2
+    /// module, is refused with the binding named.
+    #[test]
+    fn the_bindless_form_is_checked_and_forms_do_not_mix() {
+        let program = reflect(spirv!("test_program.frag")).unwrap();
+        assert_eq!(program.push_bytes, PUSH_BYTES);
+        assert_eq!(
+            program.bindings,
+            [
+                (0, 0, BindingKind::SampledImageArray),
+                (0, 1, BindingKind::SamplerArray),
+                (0, 3, BindingKind::StorageBufferArray),
+            ]
+        );
+        assert_eq!(check(&program, 32, 2, 1, false).unwrap(), Form::Bindless);
+        assert!(check(&program, 32, 2, 1, true).unwrap_err().contains("contract-2"));
+
+        // A contract-2 module keeps the per-pass form; a version-3 module
+        // may still use it.
+        let legacy = reflect(spirv!("test_post.frag")).unwrap();
+        assert_eq!(check(&legacy, 32, 2, 1, false).unwrap(), Form::Legacy);
+        assert_eq!(check(&legacy, 32, 2, 1, true).unwrap(), Form::Legacy);
+
+        // A shader that mixes the two forms names the bindless binding.
+        let mut mixed = program.clone();
+        mixed.bindings.push((0, 2, BindingKind::CombinedImageSampler));
+        mixed.bindings.sort_by_key(|b| (b.0, b.1));
+        let e = check(&mixed, 32, 2, 1, false).unwrap_err();
+        assert!(e.contains("mixes") && e.contains("binding 0"), "{e}");
+
+        // A bindless shader that declares no table cannot reach its images.
+        let mut missing = program.clone();
+        missing.bindings.retain(|(_, binding, _)| *binding != 3);
+        let e = check(&missing, 32, 2, 1, false).unwrap_err();
+        assert!(e.contains("binding 3"), "{e}");
+
+        // The push block is at most 16 bytes.
+        let mut wide = program.clone();
+        wide.push_bytes = 32;
+        assert!(check(&wide, 32, 2, 1, false).unwrap_err().contains("at most 16"));
     }
 }

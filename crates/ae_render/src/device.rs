@@ -84,6 +84,9 @@ pub struct GpuInstance {
     pub validation: bool,
     /// `VK_EXT_debug_utils` is enabled (object names, labels).
     pub debug_utils_enabled: bool,
+    /// GPU-assisted validation is on (`AE_VK_GPU_AV=1`; the layer and its
+    /// features must be there). Test-only: it slows every shader down.
+    pub gpu_assisted: bool,
     pub counters: Arc<ValidationCounters>,
     debug_utils: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     pub surface_loader: ash::khr::surface::Instance,
@@ -124,6 +127,14 @@ impl GpuInstance {
             eprintln!("[vulkan] synchronization validation unavailable: the layer lacks VK_EXT_validation_features");
         }
         let sync_validation = want_sync && has_validation_features;
+        // GPU-assisted validation (M15 F): the layer runs shader-side checks
+        // (a descriptor read past what the set binds is reported). It is
+        // slow and is meant for one test at a time, not with sync validation.
+        let want_gpu_av = validation && env_flag("AE_VK_GPU_AV", false);
+        if want_gpu_av && !has_validation_features {
+            eprintln!("[vulkan] GPU-assisted validation unavailable: the layer lacks VK_EXT_validation_features");
+        }
+        let gpu_assisted = want_gpu_av && has_validation_features;
 
         let available = unsafe { entry.enumerate_instance_extension_properties(None) }?;
         let has_debug_utils = available
@@ -176,7 +187,14 @@ impl GpuInstance {
             )
             .pfn_user_callback(Some(debug_callback))
             .user_data(Arc::as_ptr(&counters) as *mut c_void);
-        let enabled_features = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+        let mut enabled_features = Vec::new();
+        if sync_validation {
+            enabled_features.push(vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION);
+        }
+        if gpu_assisted {
+            enabled_features.push(vk::ValidationFeatureEnableEXT::GPU_ASSISTED);
+            enabled_features.push(vk::ValidationFeatureEnableEXT::GPU_ASSISTED_RESERVE_BINDING_SLOT);
+        }
         let mut validation_features =
             vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_features);
         let mut create_info = vk::InstanceCreateInfo::default()
@@ -186,7 +204,7 @@ impl GpuInstance {
         if validation && has_debug_utils {
             create_info = create_info.push_next(&mut messenger_info);
         }
-        if sync_validation {
+        if !enabled_features.is_empty() {
             create_info = create_info.push_next(&mut validation_features);
         }
         let instance = unsafe { entry.create_instance(&create_info, None) }.context("vkCreateInstance")?;
@@ -207,6 +225,7 @@ impl GpuInstance {
             instance,
             validation,
             debug_utils_enabled: has_debug_utils,
+            gpu_assisted,
             counters,
             debug_utils,
             surface_loader,

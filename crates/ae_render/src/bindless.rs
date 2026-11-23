@@ -1350,6 +1350,12 @@ impl Bindless {
         writes.len() as u64
     }
 
+    /// How many distinct stale handles have been reported (each logs
+    /// once).
+    pub fn stale_warnings(&self) -> usize {
+        self.warned.len()
+    }
+
     /// Live entries per class, binding order.
     pub fn live(&self) -> [u32; CLASS_COUNT] {
         [

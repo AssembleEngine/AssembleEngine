@@ -933,12 +933,15 @@ impl RenderApp for TerrainApp {
         // before their device objects go (M15).
         self.retire_handles(bindless);
         if let Some(mut old) = self.tonemap.take() {
+            old.retire(bindless);
             old.destroy(gpu);
         }
         if let Some(mut old) = self.encode.take() {
+            old.retire(bindless);
             old.destroy(gpu);
         }
         if let Some(mut old) = self.bloom.take() {
+            old.retire(bindless);
             old.destroy(gpu);
         }
         if let Some(mut old) = self.exposure.take() {
@@ -1063,15 +1066,19 @@ impl RenderApp for TerrainApp {
         self.encoding.uses_display().then(|| (self.levels, self.gamut()))
     }
 
-    fn declare(&mut self, target: TargetInfo) -> Result<(FrameGraph<ScenePass>, Option<ResourceId>)> {
+    fn declare(
+        &mut self,
+        target: TargetInfo,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<(FrameGraph<ScenePass>, Option<ResourceId>)> {
         self.extent = target.extent;
         let env = self.env(target)?;
         let pending = self.pending_module.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(wasm) = pending {
-            match self.load_module(&wasm, &env) {
+            match self.load_module(&wasm, &env, bindless) {
                 Ok(state) => {
                     if let Some(old) = self.module.replace(state) {
-                        self.retire(old.programs);
+                        self.retire(old.programs, bindless);
                     }
                     let mut status = self.module_status.lock().unwrap_or_else(|p| p.into_inner());
                     status.loads += 1;
@@ -1089,11 +1096,11 @@ impl RenderApp for TerrainApp {
         let (graph, resources, glow) = match self.module.take() {
             Some(mut state) => {
                 if state.declared_for != Some(self.declare_key(&env)) {
-                    let declared = self.declare_module(&mut state.module, &env);
+                    let declared = self.declare_module(&mut state.module, &env, bindless);
                     match declared {
                         Ok(d) => {
                             let old = std::mem::replace(&mut state.programs, d.programs);
-                            self.retire(old);
+                            self.retire(old, bindless);
                             (state.graph, state.resources, state.uniform_bytes, state.declared_for) =
                                 (d.graph, d.resources, d.uniform_bytes, Some(self.declare_key(&env)));
                         }
@@ -1500,7 +1507,7 @@ impl RenderApp for TerrainApp {
         // refines a level per frame from its root and holds the sim's
         // ground edits, the particles and the exposure carry state too:
         // rebuilding them made the ground settle anew on every HDR toggle.
-        self.destroy_module_programs(gpu);
+        self.retire_module_programs(gpu, bindless);
         self.create_output(gpu, bindless, target, frames_in_flight)?;
         Ok(false)
     }
@@ -1571,14 +1578,16 @@ impl TerrainApp {
     fn create_output(
         &mut self,
         gpu: &Arc<GpuDevice>,
-        bindless: &crate::bindless::Bindless,
+        bindless: &mut crate::bindless::Bindless,
         target: TargetInfo,
         frames_in_flight: usize,
     ) -> Result<()> {
         if let Some(mut old) = self.tonemap.take() {
+            old.retire(bindless);
             old.destroy(gpu);
         }
         if let Some(mut old) = self.encode.take() {
+            old.retire(bindless);
             old.destroy(gpu);
         }
         // The client's present path follows the swapchain's colour space
@@ -1621,6 +1630,23 @@ impl TerrainApp {
     /// format-dependent programs go, its declaration is made again for the
     /// new target.
     fn destroy_module_programs(&mut self, gpu: &Arc<GpuDevice>) {
+        self.take_module_programs(gpu);
+    }
+
+    /// The same, giving the programs' global-set handles back first (the
+    /// registry is still alive).
+    fn retire_module_programs(&mut self, gpu: &Arc<GpuDevice>, bindless: &mut crate::bindless::Bindless) {
+        if let Some(state) = self.module.as_mut() {
+            gpu.wait_idle();
+            for (mut program, _) in std::mem::take(&mut state.programs).into_iter().flatten() {
+                program.retire(bindless);
+                program.destroy(gpu);
+            }
+            state.declared_for = None;
+        }
+    }
+
+    fn take_module_programs(&mut self, gpu: &Arc<GpuDevice>) {
         if let Some(state) = self.module.as_mut() {
             gpu.wait_idle();
             for (mut program, _) in std::mem::take(&mut state.programs).into_iter().flatten() {
@@ -1777,7 +1803,14 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     .and_then(Option::as_ref)
                     .context("fullscreen program missing")?;
                 let images = sampled.iter().map(|&r| ctx.image(r)).collect::<Result<Vec<_>>>()?;
-                program.record(ctx, &images, self.sampler)?;
+                program.record(
+                    ctx,
+                    &images,
+                    crate::fullscreen::Sampler {
+                        object: self.sampler,
+                        index: self.sampler_index,
+                    },
+                )?;
             }
             PassWork::Particles { color, depth, glow } => {
                 particles()?.record_draw(ctx, ctx.image(*color)?, ctx.image(*depth)?, ctx.image(*glow)?)?
@@ -2235,10 +2268,15 @@ pub fn library_particle_shadows<R>(graph: &mut FrameGraph<R>) -> ResourceId {
 
 impl TerrainApp {
     /// Load `wasm` and wire its declaration for `env`.
-    fn load_module(&mut self, wasm: &[u8], env: &LibraryEnv) -> Result<ModuleState> {
+    fn load_module(
+        &mut self,
+        wasm: &[u8],
+        env: &LibraryEnv,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<ModuleState> {
         let engine = self.engine.get_or_insert_with(crate::module::engine).clone();
         let mut module = RenderModule::load(&engine, wasm)?;
-        let d = self.declare_module(&mut module, env)?;
+        let d = self.declare_module(&mut module, env, bindless)?;
         Ok(ModuleState {
             module,
             declared_for: Some(self.declare_key(env)),
@@ -2252,9 +2290,10 @@ impl TerrainApp {
         })
     }
 
-    /// Destroy programs a replaced declaration used, once the GPU is done
-    /// with them (a reload or resize: waiting for idle is fine there).
-    fn retire(&self, programs: Vec<Option<(FullscreenProgram, usize)>>) {
+    /// Give back and destroy the programs a replaced declaration used, once
+    /// the GPU is done with them (a reload or resize: waiting for idle is
+    /// fine there).
+    fn retire(&self, programs: Vec<Option<(FullscreenProgram, usize)>>, bindless: &mut crate::bindless::Bindless) {
         let programs: Vec<_> = programs.into_iter().flatten().collect();
         if programs.is_empty() {
             return;
@@ -2262,6 +2301,7 @@ impl TerrainApp {
         if let Some(gpu) = &self.gpu {
             gpu.wait_idle();
             for (mut program, _) in programs {
+                program.retire(bindless);
                 program.destroy(gpu);
             }
         }
@@ -2269,7 +2309,14 @@ impl TerrainApp {
 
     /// The module's graph for `env`, decoded and wired, with its fullscreen
     /// programs reflected, checked and built.
-    fn declare_module(&self, module: &mut RenderModule, env: &LibraryEnv) -> Result<ModuleGraph> {
+    fn declare_module(
+        &self,
+        module: &mut RenderModule,
+        env: &LibraryEnv,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<ModuleGraph> {
+        // Contract 2 modules keep the per-pass form; 3 may use either.
+        let legacy_only = module.version() < 3;
         let flags = if env.units { DECLARE_UNITS } else { 0 }
             | if self.output == TerrainOutput::Readback {
                 DECLARE_READBACK
@@ -2358,12 +2405,14 @@ impl TerrainApp {
                 built[slot] = Some((
                     FullscreenProgram::new(
                         gpu,
+                        bindless,
                         label,
                         spirv,
                         uniform_bytes,
                         *sampled,
                         formats,
                         self.frames_in_flight,
+                        legacy_only,
                     )?,
                     offset,
                 ));
@@ -2380,6 +2429,7 @@ impl TerrainApp {
             }),
             Err(error) => {
                 for (mut program, _) in built.into_iter().flatten() {
+                    program.retire(bindless);
                     program.destroy(gpu);
                 }
                 Err(error)

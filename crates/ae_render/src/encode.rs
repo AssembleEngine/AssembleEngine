@@ -263,7 +263,7 @@ impl Encode {
     /// image is `format`.
     pub fn new(
         gpu: &GpuDevice,
-        bindless: &Bindless,
+        bindless: &mut Bindless,
         encoding: OutputEncoding,
         format: vk::Format,
         frames_in_flight: usize,
@@ -276,6 +276,7 @@ impl Encode {
                 "post.encode",
                 spirv!("encode.frag"),
                 UNIFORM_BYTES,
+                1,
                 &[format],
                 frames_in_flight,
             )?,
@@ -326,6 +327,11 @@ impl Encode {
     /// Record the display image to the pass's colour attachment.
     pub fn record(&self, ctx: &PassContext<'_>, display: ImageBinding, sampler: u32) -> Result<()> {
         self.program.record(ctx, &[display.sampled.unwrap_or(0)], &[sampler])
+    }
+
+    /// Give the program's global-set handles back (the registry is alive).
+    pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        self.program.retire(bindless);
     }
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {

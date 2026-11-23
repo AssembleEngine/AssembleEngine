@@ -50,8 +50,24 @@
 //! length, uniform bytes`, then the blob. A pass's payload indexes it.
 //! `kind` 0 is a library pass (name = its library name, no data); 1 is a
 //! fullscreen pass (name = a label, data = fragment shader SPIR-V;
-//! `uniform bytes` = size of its uniform block at binding 0, 0 for none;
-//! its sampled inputs are bindings 1.. in intent order).
+//! `uniform bytes` = the size of its std140 block, 0 for none).
+//!
+//! A fullscreen shader has one of two forms, and the host reflects which
+//! (they cannot be mixed):
+//!
+//! * **Per-pass** (contract version 2 only): set 0 binding 0 is the
+//!   uniform block, bindings 1.. are one combined image sampler per
+//!   `Sampled` intent, in intent order.
+//! * **Bindless** (contract version 3): only the global set. Binding 0 is
+//!   `texture2D images[]`, binding 1 `sampler samplers[]`, binding 3 the
+//!   storage buffers: a `std140` block per program and the program's handle
+//!   table (`uint handles[]`). A push block of at most 16 bytes carries
+//!   `uniforms` (the block's index in the array), `sampler` (the sampler's
+//!   index), `handles` (the table's index) and a pad word. The table holds
+//!   the pass's sampled-image indices in intent order, written by the host
+//!   once per bake: the indices are the same in every frame slot.
+//!
+//! The next contract version drops the per-pass form.
 
 pub const EXPORT_VERSION: &str = "ae_render_version";
 pub const EXPORT_DECLARE_INPUT: &str = "ae_render_declare_input";
@@ -59,9 +75,12 @@ pub const EXPORT_DECLARE: &str = "ae_render_declare";
 pub const EXPORT_INPUT: &str = "ae_render_input";
 pub const EXPORT_FRAME: &str = "ae_render_frame";
 /// The contract version: 2 adds [`DeclareInput`] (the display spec) and the
-/// display rule. A version 1 module (its `declare` took the four scalars)
-/// is refused at load, never called with the new signature.
-pub const MODULE_VERSION: u32 = 2;
+/// display rule; 3 moves a fullscreen program's resources into the global
+/// bindless set (the program table is unchanged; the shader's form is
+/// reflected, and either form is accepted for version 3 only). A version 1
+/// module (its `declare` took the four scalars) is refused at load, never
+/// called with the new signature.
+pub const MODULE_VERSION: u32 = 3;
 
 /// `declare` flag: the scene has units (`units.*` resources and passes exist).
 pub const DECLARE_UNITS: u32 = 1 << 0;

@@ -117,6 +117,15 @@ impl RenderModule {
         }
     }
 
+    /// The contract version the module was built for (a graph file is the
+    /// current one).
+    pub fn version(&self) -> u32 {
+        match self {
+            Self::Wasm(m) => m.version,
+            Self::File(_) => abi::MODULE_VERSION,
+        }
+    }
+
     /// When it was loaded.
     pub fn loaded(&self) -> Instant {
         match self {
@@ -129,6 +138,8 @@ impl RenderModule {
 pub struct WasmModule {
     store: Store<()>,
     memory: Memory,
+    /// The contract version the module exports.
+    version: u32,
     declare: TypedFunc<(), u32>,
     frame: TypedFunc<(), u32>,
     /// Where [`DeclareInput`] goes before each `declare`.
@@ -165,9 +176,11 @@ impl WasmModule {
             .map_err(anyhow::Error::from)
             .context("render module version")?;
         // The version comes first: a module built for another ABI is refused
-        // by number, never called with the wrong signature.
+        // by number, never called with the wrong signature. Version 2 is
+        // still accepted while its fullscreen programs keep the per-pass
+        // form; the next contract version drops it.
         ensure!(
-            v == abi::MODULE_VERSION,
+            (2..=abi::MODULE_VERSION).contains(&v),
             "render module ABI version {v}; this host runs {} (rebuild the module)",
             abi::MODULE_VERSION
         );
@@ -198,6 +211,7 @@ impl WasmModule {
         let mut m = Self {
             store,
             memory,
+            version: v,
             declare,
             frame,
             declare_input,

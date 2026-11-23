@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use ash::vk;
 
 /// SPIR-V compiled at build time (`OUT_DIR/<file>.spv`).
+#[macro_export]
 macro_rules! spirv {
     ($file:literal) => {
         include_bytes!(concat!(env!("OUT_DIR"), "/", $file, ".spv"))

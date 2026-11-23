@@ -1,0 +1,21 @@
+# A contract-2 render module: two fullscreen programs in the per-pass form
+# (set 0: the uniform block, then the sampled images), which version 3 still
+# accepts for one contract version. A test fixture; built for
+# wasm32-unknown-unknown; not part of the main workspace.
+[package]
+name = "ae_render_legacy"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-render-sdk = { path = "../../sdk/ae-render-sdk" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+
+[workspace]

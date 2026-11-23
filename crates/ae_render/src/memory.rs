@@ -179,6 +179,34 @@ impl OwnedBuffer {
             .map(|slice| &mut slice[..size])
     }
 
+    /// Read the mapping at `offset`, from a shared reference.
+    pub fn mapped_read(&self, offset: u64, len: usize) -> Option<&[u8]> {
+        let slice = self.allocation.as_ref()?.mapped_slice()?;
+        slice.get(offset as usize..offset as usize + len)
+    }
+
+    /// Copy `bytes` into the mapping at `offset`, from a shared reference.
+    /// For a host-visible buffer that a pass rewrites for its own frame
+    /// slot: no other thread writes that slot's buffer while it records.
+    pub fn write_mapped(&self, offset: u64, bytes: &[u8]) -> bool {
+        let Some(ptr) = self.allocation.as_ref().and_then(|allocation| allocation.mapped_ptr()) else {
+            return false;
+        };
+        if offset + bytes.len() as u64 > self.size {
+            return false;
+        }
+        // Safety: the allocation is host-visible, the range is inside it,
+        // and the caller owns the slot's buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                ptr.as_ptr().cast::<u8>().add(offset as usize),
+                bytes.len(),
+            )
+        };
+        true
+    }
+
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         unsafe { gpu.device.destroy_buffer(self.buffer, None) };
         if let (Some(allocation), Some(allocator)) = (self.allocation.take(), gpu.allocator().as_mut()) {

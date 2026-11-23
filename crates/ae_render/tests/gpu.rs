@@ -2628,6 +2628,39 @@ fn the_default_module_renders_like_the_native_graph() {
     assert_clean(&gpu);
 }
 
+/// A contract-2 module still loads and renders: its fullscreen programs use
+/// the per-pass form (set 0: the block, then the sampled images), which
+/// version 3 accepts for one contract version (M15 F).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_contract_2_module_renders_its_per_pass_programs() {
+    let gpu = gpu();
+    let wasm = ae_render::module::build("legacy").expect("build render/legacy");
+    let (pixels, _) = scene_pixels(&gpu, Some(wasm), 2);
+    // The fill's tint through the copy's gain, sRGB-encoded by the target.
+    let tint = [0.5f32, 0.25, 0.75];
+    let gain = [1.0f32, 0.5, 1.0];
+    let encode = |c: f32| {
+        if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let want: Vec<f32> = (0..3).map(|i| encode((tint[i] * gain[i]).min(1.0))).collect();
+    // Every pixel is the same colour: the middle one stands for them.
+    let middle = (SCENE_EXTENT.width * (SCENE_EXTENT.height / 2) + SCENE_EXTENT.width / 2) as usize * 4;
+    for (c, want) in pixels[middle..middle + 3].iter().zip(&want) {
+        assert!(
+            (*c as f32 / 255.0 - want).abs() < 0.02,
+            "pixel {c} vs {:.3} (want {:?})",
+            want * 255.0,
+            want
+        );
+    }
+    assert_clean(&gpu);
+}
+
 /// The default module's HDR10 readback is the native graph's: the same
 /// display intermediate and `post.encode` (M13 stage 6), within one PQ code
 /// per channel (the two paths bake the same plan, so the tolerance is for
@@ -2876,7 +2909,14 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             match *pass {
                 1 => {
                     self.program.write_uniforms(ctx.slot, &self.uniforms);
-                    self.program.record(ctx, &[ctx.image(self.display)?], self.sampler)?;
+                    self.program.record(
+                        ctx,
+                        &[ctx.image(self.display)?],
+                        ae_render::fullscreen::Sampler {
+                            object: self.sampler,
+                            index: self.sampler_index,
+                        },
+                    )?;
                 }
                 2 => {
                     self.encode.write(
@@ -3004,9 +3044,20 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         .min_filter(vk::Filter::NEAREST);
     let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
     let sampler = executor.bindless().sampler_object(sampler_handle);
-    let program = FullscreenProgram::new(gpu, "grade", grade, 32, 1, &[DISPLAY_FORMAT], 2).unwrap();
+    let program = FullscreenProgram::new(
+        gpu,
+        executor.bindless_mut(),
+        "grade",
+        grade,
+        32,
+        1,
+        &[DISPLAY_FORMAT],
+        2,
+        false,
+    )
+    .unwrap();
     let sampler_index = sampler_handle.index;
-    let encode = Encode::new(gpu, executor.bindless(), OutputEncoding::Hdr10Pq, format, 2).unwrap();
+    let encode = Encode::new(gpu, executor.bindless_mut(), OutputEncoding::Hdr10Pq, format, 2).unwrap();
     let uniforms: Vec<u8> = [1.04f32, 1.0, 0.94, 1.0, 1.12, 1.15, 0.0, 0.0]
         .iter()
         .flat_map(|v| v.to_le_bytes())
@@ -10165,7 +10216,7 @@ fn encode_values(
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST);
     let sampler_index = executor.bindless_mut().sampler(&sampler_info).unwrap().index;
-    let encode = Encode::new(gpu, executor.bindless(), encoding, format, 2).unwrap();
+    let encode = Encode::new(gpu, executor.bindless_mut(), encoding, format, 2).unwrap();
     let mut paint = Paint {
         display,
         target,
@@ -11158,4 +11209,583 @@ fn p3_authored_effect_survives_post_encode() {
     }
     assert!(back.iter().any(|v| *v < -0.01), "still outside BT.709: {back:?}");
     assert_clean(&gpu);
+}
+
+/// A shader that mixes the two program forms fails when its program is
+/// built, and the error names the binding (M15 F).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_mixed_program_form_fails_at_load() {
+    use ae_render::fullscreen::FullscreenProgram;
+
+    let gpu = gpu();
+    let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let error = match FullscreenProgram::new(
+        &gpu,
+        executor.bindless_mut(),
+        "mixed",
+        ae_render::spirv!("test_mixed.frag"),
+        16,
+        1,
+        &[vk::Format::R8G8B8A8_UNORM],
+        2,
+        false,
+    ) {
+        Ok(_) => panic!("a mixed form built a program"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("mixes") && error.contains("binding"), "{error}");
+    assert_clean(&gpu);
+}
+
+/// One fullscreen pass over 64 sampled images (M15 F): the bindless form's
+/// handle table has no per-image binding, so the count is not limited to the
+/// old layout's.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_program_samples_64_images() {
+    use ae_framegraph::{LoadOp, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder};
+    use ae_render::fullscreen::{FullscreenProgram, Sampler};
+
+    struct Sample {
+        images: Vec<ResourceId>,
+        target: ResourceId,
+        buffer: ResourceId,
+        program: FullscreenProgram,
+        sampler: Sampler,
+        uniforms: [u8; 32],
+    }
+    impl Recorder<u32> for Sample {
+        fn record(&mut self, pass: &u32, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                1 => {
+                    let images = self
+                        .images
+                        .iter()
+                        .map(|&r| ctx.image(r))
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    self.program.write_uniforms(ctx.slot, &self.uniforms);
+                    self.program.record(ctx, &images, self.sampler)?;
+                }
+                2 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let format = vk::Format::R8G8B8A8_UNORM;
+    let source_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size: extent.width as u64 * extent.height as u64 * 4,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    const COUNT: usize = 64;
+    let mut graph = FrameGraph::<u32>::new();
+    let images: Vec<ResourceId> = (0..COUNT)
+        .map(|i| graph.image(format!("src{i}"), source_desc, ResourceClass::External))
+        .collect();
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    let mut pass = graph.pass("sample", PassKind::Graphics, 1);
+    for &image in &images {
+        pass = pass.sampled(image, ShaderStage::Fragment);
+    }
+    pass.color(target, LoadOp::DontCare).id();
+    graph
+        .pass("copy", PassKind::Transfer, 2)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 3)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
+
+    // Every source is the same mid grey, so whichever slots the shader
+    // reads, the result is the same.
+    let grey = [128u8, 128, 128, 255];
+    let sources: Vec<OwnedImage> = (0..COUNT)
+        .map(|i| ae_render::upload::image(&gpu, format, 1, 1, &[&grey], &format!("source {i}")).unwrap())
+        .collect();
+    let out = OwnedImage::new(&gpu, target_desc, "target").unwrap();
+    let mut readback = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let handles: Vec<_> = sources
+        .iter()
+        .map(|image| {
+            executor
+                .bindless_mut()
+                .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .unwrap()
+        })
+        .collect();
+    let mut bindings: Vec<Option<Binding>> = sources
+        .iter()
+        .zip(&handles)
+        .enumerate()
+        .map(|(i, (image, handle))| {
+            Some(Binding::Image(ImageBinding {
+                image: image.image,
+                view: image.view,
+                format,
+                extent: vk::Extent2D { width: 1, height: 1 },
+                range: image.range(),
+                identity: (0x64 << 40) | i as u64,
+                sampled: Some(handle.0.index),
+                storage: None,
+            }))
+        })
+        .collect();
+    bindings.push(Some(Binding::Image(ImageBinding {
+        image: out.image,
+        view: out.view,
+        format,
+        extent,
+        range: out.range(),
+        identity: (0x64 << 40) | 100,
+        sampled: None,
+        storage: None,
+    })));
+    bindings.push(Some(Binding::Buffer(BufferBinding {
+        buffer: readback.buffer,
+        offset: 0,
+        size: buffer_desc.size,
+        identity: (0x64 << 40) | 101,
+        storage: None,
+    })));
+
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST);
+    let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
+    let sampler = Sampler {
+        object: executor.bindless().sampler_object(sampler_handle),
+        index: sampler_handle.index,
+    };
+    let program = FullscreenProgram::new(
+        &gpu,
+        executor.bindless_mut(),
+        "64 images",
+        ae_render::spirv!("test_program.frag"),
+        32,
+        COUNT,
+        &[format],
+        2,
+        false,
+    )
+    .unwrap();
+    // tint 0.5 (grey 0.502 becomes 0.753), no offset.
+    let uniforms: Vec<u8> = [0.5f32, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut sample = Sample {
+        images,
+        target,
+        buffer,
+        program,
+        sampler,
+        uniforms: uniforms.try_into().unwrap(),
+    };
+    executor.set_graph(graph).unwrap();
+    let token = executor.begin_frame().unwrap();
+    executor
+        .execute(
+            token,
+            &mut sample,
+            &|resource| bindings.get(resource.index()).copied().flatten(),
+            &[],
+            &[],
+        )
+        .unwrap();
+    executor.wait(token).unwrap();
+    let pixels = readback.mapped().unwrap().to_vec();
+    // 128/255 * 0.5 + 128/255 = 0.753, within one UNORM step.
+    let want = 128.0 / 255.0 * 1.5;
+    let got = pixels[0] as f32 / 255.0;
+    assert!((got - want).abs() < 0.01, "pixel {got} vs {want}");
+    assert_clean(&gpu);
+}
+
+/// A retired handle draws the fallback (the index names the white texel
+/// after every slot has flushed) and the registry logs once (M15 F).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_retired_handle_draws_the_fallback_and_logs_once() {
+    use ae_framegraph::{LoadOp, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder};
+    use ae_render::fullscreen::{FullscreenProgram, Sampler};
+
+    struct Sample {
+        source: ResourceId,
+        target: ResourceId,
+        buffer: ResourceId,
+        program: FullscreenProgram,
+        sampler: Sampler,
+        stale: u32,
+        uniforms: [u8; 32],
+    }
+    impl Recorder<u32> for Sample {
+        fn record(&mut self, pass: &u32, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                1 => {
+                    // The push names the retired index: the set's descriptor
+                    // there is the fallback by the time this records.
+                    let mut image = ctx.image(self.source)?;
+                    image.sampled = Some(self.stale);
+                    self.program.write_uniforms(ctx.slot, &self.uniforms);
+                    self.program.record(ctx, &[image, image], self.sampler)?;
+                }
+                2 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let format = vk::Format::R8G8B8A8_UNORM;
+    let source_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size: extent.width as u64 * extent.height as u64 * 4,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let mut graph = FrameGraph::<u32>::new();
+    let source = graph.image("source", source_desc, ResourceClass::External);
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    graph
+        .pass("sample", PassKind::Graphics, 1)
+        .sampled(source, ShaderStage::Fragment)
+        .color(target, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 2)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 3)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
+
+    let red = [255u8, 0, 0, 255];
+    let image = ae_render::upload::image(&gpu, format, 1, 1, &[&red], "red").unwrap();
+    let out = OwnedImage::new(&gpu, target_desc, "target").unwrap();
+    let mut readback = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let handle = executor
+        .bindless_mut()
+        .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST);
+    let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
+    let sampler = Sampler {
+        object: executor.bindless().sampler_object(sampler_handle),
+        index: sampler_handle.index,
+    };
+    let program = FullscreenProgram::new(
+        &gpu,
+        executor.bindless_mut(),
+        "fallback",
+        ae_render::spirv!("test_program.frag"),
+        32,
+        // The shader samples two images; both are the same index.
+        2,
+        &[format],
+        2,
+        false,
+    )
+    .unwrap();
+    // tint 0 and no offset: the result is the sampled texel alone.
+    let uniforms: Vec<u8> = [0.0f32; 8].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut sample = Sample {
+        source,
+        target,
+        buffer,
+        program,
+        sampler,
+        stale: handle.0.index,
+        uniforms: uniforms.try_into().unwrap(),
+    };
+    // Retired before anything records: every slot's descriptor for the
+    // index becomes the white fallback at its next frame.
+    executor.bindless_mut().retire_sampled(handle.0);
+    let bindings = [
+        Some(Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format,
+            extent: vk::Extent2D { width: 1, height: 1 },
+            range: image.range(),
+            identity: (0xF00 << 40) | 1,
+            sampled: Some(handle.0.index),
+            storage: None,
+        })),
+        Some(Binding::Image(ImageBinding {
+            image: out.image,
+            view: out.view,
+            format,
+            extent,
+            range: out.range(),
+            identity: (0xF00 << 40) | 2,
+            sampled: None,
+            storage: None,
+        })),
+        Some(Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            offset: 0,
+            size: buffer_desc.size,
+            identity: (0xF00 << 40) | 3,
+            storage: None,
+        })),
+    ];
+    executor.set_graph(graph).unwrap();
+    // Both slots flush the fallback, so the red texel can go.
+    for _ in 0..2 {
+        let token = executor.begin_frame().unwrap();
+        executor
+            .execute(
+                token,
+                &mut sample,
+                &|resource| bindings.get(resource.index()).copied().flatten(),
+                &[],
+                &[],
+            )
+            .unwrap();
+        executor.wait(token).unwrap();
+    }
+    let pixels = readback.mapped().unwrap().to_vec();
+    assert_eq!(
+        &pixels[..4],
+        &[255, 255, 255, 255],
+        "the white fallback, not the red image"
+    );
+    // The stale handle resolves to the fallback and is reported once.
+    let bindless = executor.bindless_mut();
+    assert_eq!(bindless.index_2d(ae_render::bindless::Sampled2D(handle.0)), 0);
+    assert_eq!(bindless.index_2d(ae_render::bindless::Sampled2D(handle.0)), 0);
+    assert_eq!(bindless.stale_warnings(), 1, "a stale handle logs once");
+    assert_clean(&gpu);
+}
+
+/// GPU-assisted validation (`AE_VK_GPU_AV=1`): a program that samples a
+/// descriptor the set never bound is reported, and the frames before it are
+/// clean. Skipped when the layer has no GPU-AV.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU and a validation layer with GPU-AV"]
+fn gpu_assisted_validation_reports_an_unbound_handle() {
+    use ae_framegraph::{LoadOp, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder};
+    use ae_render::fullscreen::{FullscreenProgram, Sampler};
+
+    struct Sample {
+        source: ResourceId,
+        target: ResourceId,
+        buffer: ResourceId,
+        program: FullscreenProgram,
+        sampler: Sampler,
+        index: u32,
+    }
+    impl Recorder<u32> for Sample {
+        fn record(&mut self, pass: &u32, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                1 => {
+                    let mut image = ctx.image(self.source)?;
+                    image.sampled = Some(self.index);
+                    self.program.record(ctx, &[image], self.sampler)?;
+                }
+                2 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    // The layer reads this when the instance is made; the test owns the
+    // process's device for its length (the GPU tests run one thread).
+    // Safety: this test owns the process's environment for its length (the
+    // GPU tests run one thread at a time); the previous values come back
+    // before it returns.
+    let previous = (
+        std::env::var("AE_VK_GPU_AV").ok(),
+        std::env::var("AE_VK_SYNC_VALIDATION").ok(),
+    );
+    let restore = |previous: &(Option<String>, Option<String>)| unsafe {
+        match &previous.0 {
+            Some(v) => std::env::set_var("AE_VK_GPU_AV", v),
+            None => std::env::remove_var("AE_VK_GPU_AV"),
+        }
+        match &previous.1 {
+            Some(v) => std::env::set_var("AE_VK_SYNC_VALIDATION", v),
+            None => std::env::remove_var("AE_VK_SYNC_VALIDATION"),
+        }
+    };
+    unsafe {
+        std::env::set_var("AE_VK_GPU_AV", "1");
+        std::env::set_var("AE_VK_SYNC_VALIDATION", "0");
+    }
+    let instance = Arc::new(GpuInstance::new(&[], Some(true)).expect("Vulkan instance"));
+    if !instance.gpu_assisted {
+        eprintln!("GPU-assisted validation is not available; skipping");
+        restore(&previous);
+        return;
+    }
+    let gpu = Arc::new(GpuDevice::new(instance, None).expect("Vulkan device"));
+
+    let extent = vk::Extent2D { width: 4, height: 4 };
+    let format = vk::Format::R8G8B8A8_UNORM;
+    let source_desc = ImageDesc::color_2d(format, extent.width, extent.height, vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size: extent.width as u64 * extent.height as u64 * 4,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let mut graph = FrameGraph::<u32>::new();
+    let source = graph.image("source", source_desc, ResourceClass::External);
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    graph
+        .pass("sample", PassKind::Graphics, 1)
+        .sampled(source, ShaderStage::Fragment)
+        .color(target, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 2)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 3)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
+
+    let white = [255u8; 4];
+    let image = ae_render::upload::image(&gpu, format, 1, 1, &[&white], "source").unwrap();
+    let out = OwnedImage::new(&gpu, target_desc, "target").unwrap();
+    let readback = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let handle = executor
+        .bindless_mut()
+        .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST);
+    let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
+    let sampler = Sampler {
+        object: executor.bindless().sampler_object(sampler_handle),
+        index: sampler_handle.index,
+    };
+    let program = FullscreenProgram::new(
+        &gpu,
+        executor.bindless_mut(),
+        "out of bounds",
+        ae_render::spirv!("test_oob.frag"),
+        0,
+        1,
+        &[format],
+        2,
+        false,
+    )
+    .unwrap();
+    let bindings = [
+        Some(Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format,
+            extent: vk::Extent2D { width: 1, height: 1 },
+            range: image.range(),
+            identity: (0x0B0 << 40) | 1,
+            sampled: Some(handle.0.index),
+            storage: None,
+        })),
+        Some(Binding::Image(ImageBinding {
+            image: out.image,
+            view: out.view,
+            format,
+            extent,
+            range: out.range(),
+            identity: (0x0B0 << 40) | 2,
+            sampled: None,
+            storage: None,
+        })),
+        Some(Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            offset: 0,
+            size: buffer_desc.size,
+            identity: (0x0B0 << 40) | 3,
+            storage: None,
+        })),
+    ];
+    let mut sample = Sample {
+        source,
+        target,
+        buffer,
+        program,
+        sampler,
+        index: handle.0.index,
+    };
+    executor.set_graph(graph).unwrap();
+    // A bound index first: the layer reports nothing.
+    for _ in 0..2 {
+        let token = executor.begin_frame().unwrap();
+        executor
+            .execute(
+                token,
+                &mut sample,
+                &|resource| bindings.get(resource.index()).copied().flatten(),
+                &[],
+                &[],
+            )
+            .unwrap();
+        executor.wait(token).unwrap();
+    }
+    assert_eq!(gpu.instance.counters.errors(), 0, "a bound handle is clean");
+    // Now an index nothing wrote: GPU-AV reports the read.
+    sample.index = 63;
+    let token = executor.begin_frame().unwrap();
+    executor
+        .execute(
+            token,
+            &mut sample,
+            &|resource| bindings.get(resource.index()).copied().flatten(),
+            &[],
+            &[],
+        )
+        .unwrap();
+    executor.wait(token).unwrap();
+    let errors = gpu.instance.counters.errors();
+    assert!(errors > 0, "GPU-assisted validation reported nothing");
+    restore(&previous);
 }

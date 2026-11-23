@@ -10,10 +10,10 @@
 //! distinct create info and shares it, so no other source creates or
 //! destroys a sampler (the mip generator's own, in `upload.rs`, stays).
 //!
-//! Still on their own sets, until the step that moves them:
-//! - `fullscreen.rs`: the module `FullscreenProgram` (the render-module
-//!   contract, step F) and the engine `BindlessProgram`'s uniform block at
-//!   set 0 (tonemap, bloom, encode; also step F), with their shaders;
+//! Still on their own sets, by design:
+//! - `fullscreen.rs`: the per-pass form a contract-2 module's program may
+//!   still use (M15 F keeps it for one version), and its reflection
+//!   fixtures (`test_post.frag`, `test_post_storage.frag`);
 //! - `upload.rs`'s mip generator, which stays as it is.
 
 use std::fs;
@@ -26,14 +26,10 @@ const SOURCE_EXCEPTIONS: &[&str] = &["bindless.rs", "pipeline.rs", "fullscreen.r
 /// Shaders still declaring numbered sets or pinning the global set off 0
 /// (see the module docs).
 const SHADER_EXCEPTIONS: &[&str] = &[
-    "bloom_blur_x.frag",
-    "bloom_blur_y.frag",
-    "bloom_downsample.frag",
-    "encode.frag",
     "mipgen.comp",
+    "test_mixed.frag",
     "test_post.frag",
     "test_post_storage.frag",
-    "tonemap.frag",
 ];
 
 fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
@@ -99,8 +95,7 @@ fn only_the_global_set_outside_the_exceptions() {
             if numbered(line) {
                 found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
             }
-            // The global set is 0 everywhere else; only the post chain's
-            // programs still pin it (they move in step F).
+            // The global set is 0 everywhere else.
             if let Some(rest) = line.trim().strip_prefix("#define AE_BINDLESS_SET ")
                 && rest.trim() != "0"
             {

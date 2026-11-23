@@ -81,7 +81,13 @@ pub trait RenderApp: Send + 'static {
 
     /// Declarations for this frame plus the backbuffer resource (`None`
     /// for offscreen-only graphs). Equal declarations keep the baked plan.
-    fn declare(&mut self, target: TargetInfo) -> Result<(FrameGraph<Self::Pass>, Option<ResourceId>)>;
+    /// The registry is here because a declaration may build a program's
+    /// global-set handles (M15 F).
+    fn declare(
+        &mut self,
+        target: TargetInfo,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<(FrameGraph<Self::Pass>, Option<ResourceId>)>;
 
     /// The plan was rebaked (physical resources replaced; device idle).
     fn on_rebake(&mut self) -> Result<()> {
@@ -430,7 +436,7 @@ fn render_main<A: RenderApp>(
             }
             last_frame = Instant::now();
 
-            let (graph, backbuffer) = app.declare(target)?;
+            let (graph, backbuffer) = app.declare(target, executor.bindless_mut())?;
             if executor.set_graph(graph)? {
                 app.on_rebake()?;
                 if trace {
@@ -584,7 +590,7 @@ impl<P: Sync> Headless<P> {
     /// Render `frames` frames.
     pub fn frames<A: RenderApp<Pass = P>>(&mut self, app: &mut A, frames: usize) -> Result<()> {
         for _ in 0..frames {
-            let (graph, backbuffer) = app.declare(self.target)?;
+            let (graph, backbuffer) = app.declare(self.target, self.executor.bindless_mut())?;
             anyhow::ensure!(backbuffer.is_none(), "headless graphs have no backbuffer");
             if self.executor.set_graph(graph)? {
                 app.on_rebake()?;
