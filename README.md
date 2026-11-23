@@ -109,6 +109,8 @@ samplers, buffers and storage images from one global descriptor set per frame sl
 - Buffers come from a per-pass handle table.
 - Per-slot resources use slotted handles, so no index changes between frames.
 - Models of every type draw in two multi-draws without rebinding textures.
+- Samplers are deduplicated by their settings and shared; a module's handles are retired when
+  it is destroyed, so a renderer rebuild does not use up the registry's indices.
 
 Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline binds the
 global set at 0; the demo moved there in step E. The fullscreen module programs (and the engine

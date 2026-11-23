@@ -5299,6 +5299,24 @@ set at index 2 next to their old sets. How handles reach a shader:
   `c872490`, 59/59 GPU tests, validation and sync validation silent. Each pass still binds
   set 0 itself; binding it once per command buffer is possible now but not built.
 
+  Handles are retired, and samplers deduplicated (2026-11-23, before step F). A module
+  registers the handles it makes inside a group (`Bindless::group`) and gives them back in its
+  teardown (`retire_group`), so a full rebuild no longer leaks indices: `TerrainApp::create`
+  retires the previous build's groups before it destroys their objects, and `retarget` does
+  the same on its full path. `Bindless::sampler` now takes a `SamplerCreateInfo` instead of a
+  created object: it creates one sampler per distinct create info, reference-counts the
+  handles, owns the object, and destroys it when the last holder gives it back (after every
+  slot has flushed the fallback). A sampler retired and asked for again before any slot has
+  flushed is revived in place, since every slot's descriptor already names it. The app's and
+  the exposure's linear clamp sampler is the fallback's own create info, so both take index 0.
+  `tests/bindless_only.rs` now also rejects `create_sampler`/`destroy_sampler` outside the
+  registry (and `upload.rs`'s mip generator). New GPU test
+  `rebuilding_the_renderer_does_not_leak_handles`: ten full rebuilds of the scene leave the
+  registry's live counts at the baseline, `[21, 6, 2, 24]` (sampled images, samplers, storage
+  images, storage buffers), where one rebuild used to add 13, 1 and 23; the scene registers
+  seven samplers per build, and deduplication serves them with six indices. 61/61 captures
+  identical to `c872490`, 60/60 GPU tests, validation and sync validation silent.
+
 **F. Module contract.**
 
 - `MODULE_VERSION` goes from 2 to 3. `PROGRAM_VERSION` (1) and the graph files' `"version": 1`
@@ -5472,20 +5490,6 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ## TODO (open, not a priority now)
 
-- M15: retire bindless handles when their owner is destroyed. Terrain, lights, units, models,
-  shadows, particles and exposure register at creation and never retire. Each full
-  `TerrainApp::create` therefore leaks:
-  - about 50 storage-buffer indices (capacity 1,024) and 3 storage images (256);
-  - about a dozen samplers plus the glTF ones (64), which runs out first, after roughly 5 cycles;
-  - the sampled images (4,096).
-
-  A full `create` runs at startup, when the frames in flight change, and for each readback app
-  (once per GPU test). A resize does not, because `create_output` only reads the registry. The
-  fix is to retire each module's handles in its `destroy`, which then needs `&mut Bindless`.
-  Deduplicating samplers by create info in the registry (below) would remove the sampler part.
-- M15: deduplicate samplers by create info in the registry. `Bindless::sampler` registers every
-  `vk::Sampler` it is given. The step C handoff asked for deduplication as `models.rs` does it,
-  but it was not built.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
