@@ -4832,7 +4832,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–D built, B without library-owned externals)
+#### M15 — design (2026-11-22; steps A–E built, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
@@ -5267,6 +5267,28 @@ set at index 2 next to their old sets. How handles reach a shader:
   a frame pass, and needs per-mip views. The doc comment says so.
 - `pipeline::set_layout` goes if nothing uses it.
 - Acceptance: `capture-diff` identical.
+
+  Built (2026-11-23, `ccba887`). The per-pass set layouts, pools and sets are gone.
+  `Bindless::layouts()` returns the one global set layout, every pipeline binds it at 0, and
+  `AE_BINDLESS_SET` defaults to 0. `bindless.rs` no longer creates the empty set layout that
+  padded the old indices. Verified against `f4ca7b3`:
+  - All 61 GPU-test captures are byte-identical.
+  - 59 of 59 GPU tests pass, with the validation and sync validation layers reporting nothing.
+  - The workspace tests, `fmt --check` and clippy are clean.
+  - `demo.rs` moved: the filter's two storage images and its parameter block and the
+    composite's two sampled images are push-constant indices, the demo's sampler is a global
+    sampler, and the parameter buffer is a `std140` buffer block with `STORAGE_BUFFER` usage
+    (its golden line now shows storage buffer 1). The demo's descriptor pool and per-(slot,
+    pass) set cache are deleted.
+  - `tests/bindless_only.rs` fails if a shader outside the post chain pins `AE_BINDLESS_SET`
+    off 0 as well as if a source outside its exceptions creates a set; its source exceptions
+    are now only `fullscreen.rs` and `upload.rs`.
+  - `gpu_driven` no longer includes `descriptorBindingPartiallyBound` (the global set requires
+    it), and `models`' error names only multiDrawIndirect and shaderDrawParameters.
+  - Still on their own sets, for step F: `fullscreen.rs`'s module `FullscreenProgram` and the
+    engine `BindlessProgram` (tonemap, bloom, encode), whose five shaders pin
+    `AE_BINDLESS_SET` to 2 so their set-0 uniform block stays. `upload.rs`'s mip generator
+    stays as designed, and `pipeline::set_layout` stays because it uses it.
 
 **F. Module contract.**
 
