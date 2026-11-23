@@ -5290,6 +5290,15 @@ set at index 2 next to their old sets. How handles reach a shader:
     `AE_BINDLESS_SET` to 2 so their set-0 uniform block stays. `upload.rs`'s mip generator
     stays as designed, and `pipeline::set_layout` stays because it uses it.
 
+  Review fix (2026-11-23, `14755ab`): the passes still made their own pipeline layouts (lights
+  and exposure with a compute-only push range), against the design's one shared layout.
+  `Bindless::pipeline_layout()` now owns it (the global set at 0, `Push` in
+  `bindless::PUSH_STAGES`: vertex, fragment and compute), every engine pass uses it and pushes
+  with the full stage mask, and only `Bindless::destroy` destroys it. The guard test also
+  rejects a pipeline layout created outside its exceptions. 61/61 captures identical to
+  `c872490`, 59/59 GPU tests, validation and sync validation silent. Each pass still binds
+  set 0 itself; binding it once per command buffer is possible now but not built.
+
 **F. Module contract.**
 
 - `MODULE_VERSION` goes from 2 to 3. `PROGRAM_VERSION` (1) and the graph files' `"version": 1`
