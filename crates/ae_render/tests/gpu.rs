@@ -887,6 +887,21 @@ fn rebuilding_the_renderer_does_not_leak_handles() {
             "rebuild {rebuild} leaked handles: {live:?}, baseline {baseline:?}"
         );
     }
+    // Retarget's full path (an offscreen app always takes it) destroys the
+    // post chain without its own retire; the shared retire covers it.
+    for retarget in 0..10 {
+        headless.wait().unwrap();
+        assert!(RenderApp::retarget(&mut app, &gpu, headless.bindless_mut(), target, 2).unwrap());
+        // The full path's destroy takes the offscreen target too.
+        app.create_offscreen(&gpu, SCENE_EXTENT).unwrap();
+        headless.forget_external_states();
+        headless.frames(&mut app, 2).unwrap();
+        let live = headless.stats().bindless_live;
+        assert_eq!(
+            live, baseline,
+            "retarget {retarget} leaked handles: {live:?}, baseline {baseline:?}"
+        );
+    }
     headless.wait().unwrap();
     RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);

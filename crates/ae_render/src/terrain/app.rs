@@ -1556,6 +1556,23 @@ impl TerrainApp {
         if let Some(handle) = self.sampler_handle.take() {
             bindless.retire_sampler(handle);
         }
+        // The post chain and the module's programs too: retarget's full
+        // path destroys them without a retire of its own. A program's
+        // retire is idempotent, so create's own retires are harmless.
+        if let Some(old) = self.tonemap.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.encode.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(old) = self.bloom.as_mut() {
+            old.retire(bindless);
+        }
+        if let Some(state) = self.module.as_mut() {
+            for (program, _) in state.programs.iter_mut().flatten() {
+                program.retire(bindless);
+            }
+        }
         if let Some(old) = self.exposure.as_mut() {
             old.retire(bindless);
         }

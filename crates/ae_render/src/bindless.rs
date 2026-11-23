@@ -387,7 +387,7 @@ impl Slab {
     }
 
     /// Make a retiring index live again for a new owner (a sampler whose
-    /// settings are already in every slot's set). Its generation advances,
+    /// object is still alive). Its generation advances,
     /// so handles of the previous owner stay stale.
     fn revive(&mut self, index: u32) -> u32 {
         let entry = &mut self.entries[index as usize];
@@ -422,12 +422,6 @@ impl Retirements {
             *done = true;
         }
         self.slots.iter().all(|done| *done)
-    }
-
-    /// Whether any slot has applied the fallback yet. Until one has, the
-    /// retiring index still names its old resource in every slot's set.
-    fn any_flushed(&self) -> bool {
-        self.slots.iter().any(|done| *done)
     }
 }
 
@@ -779,9 +773,9 @@ impl Bindless {
 
     /// A sampler for `info`, created once and shared: passes that ask for
     /// the same settings get the same index, and the registry owns the
-    /// object. A retired index whose fallback no slot has applied yet is
-    /// reused for the same settings: every slot's descriptor still names
-    /// that sampler, so the new owner needs no write.
+    /// object. A retiring index whose object is still alive (some slot has
+    /// not yet applied the fallback) is revived for the same settings, with
+    /// its object written to every slot again.
     pub fn sampler(&mut self, info: &vk::SamplerCreateInfo<'_>) -> Result<SamplerHandle> {
         let key = SamplerKey::new(info);
         if let Some(&index) = self.sampler_of.get(&key)
@@ -798,15 +792,24 @@ impl Bindless {
             let retiring = self
                 .retiring
                 .iter()
-                .position(|(slab, retiring, state)| *slab == 1 && *retiring == index && !state.any_flushed());
+                .position(|(slab, retiring, _)| *slab == 1 && *retiring == index);
             if let Some(at) = retiring {
+                // The object lives until the retirement completes, so it can
+                // serve again. A slot may already have applied the fallback
+                // (in `flush_open_slot`, which does not mark the retirement),
+                // and the sampler's own first write may still be queued: drop
+                // the index's queued writes and name the object again in
+                // every slot.
                 self.retiring.remove(at);
+                let mut sampler = vk::Sampler::null();
+                if let Some(entry) = self.sampler_objects[index as usize].as_mut() {
+                    entry.refs = 1;
+                    sampler = entry.sampler;
+                }
                 for pending in &mut self.pending {
                     pending.retain(|write| !matches!(write, Write::Sampler { index: i, .. } if *i == index));
                 }
-                if let Some(entry) = self.sampler_objects[index as usize].as_mut() {
-                    entry.refs = 1;
-                }
+                self.queue_all(Write::Sampler { index, sampler });
                 let generation = self.samplers.revive(index);
                 self.track(1, index, generation);
                 return Ok(SamplerHandle { index, generation });
@@ -1478,9 +1481,7 @@ mod tests {
     #[test]
     fn a_retirement_flushes_every_slot_once() {
         let mut retirements = Retirements::new(3);
-        assert!(!retirements.any_flushed(), "nothing applied the fallback yet");
         assert!(!retirements.flush(0));
-        assert!(retirements.any_flushed());
         assert!(!retirements.flush(0), "a repeated flush of a slot is harmless");
         assert!(!retirements.flush(1));
         assert!(retirements.flush(2));
