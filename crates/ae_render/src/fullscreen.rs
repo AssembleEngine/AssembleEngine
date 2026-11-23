@@ -1018,10 +1018,9 @@ mod tests {
         assert!(check(&vertex, 0, 0, 0, false).unwrap_err().contains("fragment"));
     }
 
-    /// The bindless form: the global set's arrays, the handle table at 3,
-    /// the std140 block at 4 and a 16-byte push block. A mix of the two
-    /// forms, a block or table at binding 3 or a bindless shader in a
-    /// contract-2
+    /// The bindless form: the global set's arrays, the std140 block and the
+    /// handle table at 4 and a 16-byte push block. A mix of the two forms, a
+    /// block or table at binding 3 or a bindless shader in a contract-2
     /// module is refused with the binding named.
     #[test]
     fn the_bindless_form_is_checked_and_forms_do_not_mix() {

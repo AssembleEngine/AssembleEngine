@@ -32,9 +32,9 @@ pub const SAMPLER_CAPACITY: u32 = 64;
 pub const STORAGE_IMAGE_CAPACITY: u32 = 256;
 pub const STORAGE_BUFFER_CAPACITY: u32 = 1024;
 /// `std140` blocks that were `uniform` buffers before M15 (the frame blocks,
-/// the tileset table, the engine programs' blocks). A storage buffer costs
-/// noticeably more per access on some drivers, so these keep their own
-/// binding (M15 G).
+/// the tileset table, the engine programs' blocks) and the passes' handle
+/// tables. A storage buffer costs noticeably more per access on some
+/// drivers, so these keep their own binding (M15 G).
 pub const UNIFORM_BUFFER_CAPACITY: u32 = 64;
 
 pub const BINDING_SAMPLED_IMAGE: u32 = 0;
@@ -1532,16 +1532,16 @@ impl Bindless {
     }
 }
 
-/// A pass's handle table (bindless.glsl `AE_BUF(k)`): a storage buffer of
-/// global buffer and storage-image indices, written once at creation. Every
-/// per-pass buffer is fixed or slotted, so its index never changes and the
-/// table needs no per-frame write. Its own index goes in push word 8
-/// ([`Push::table`]).
-/// The handle table's slots (`AE_HANDLES` in `bindless.glsl`).
-/// The handle table's slots: 64, the most sampled intents a fullscreen pass
-/// may declare (`a_program_samples_64_images`).
+/// The handle table's slots (`AE_HANDLES` in `bindless.glsl`): 64, the
+/// most sampled intents a fullscreen pass may declare
+/// (`a_program_samples_64_images`).
 pub const TABLE_SLOTS: usize = 64;
 
+/// A pass's handle table (bindless.glsl `AE_BUF(k)`): a `uvec4` uniform
+/// block (binding 4) of global buffer and storage-image indices, written
+/// once at creation. Every per-pass buffer is fixed or slotted, so its index
+/// never changes and the table needs no per-frame write. Its own index goes
+/// in push word 8 ([`Push::table`]).
 pub struct HandleTable {
     buffer: OwnedBuffer,
     pub index: u32,
