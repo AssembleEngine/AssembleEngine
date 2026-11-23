@@ -520,7 +520,7 @@ impl ModelSet {
     ) -> Result<Self> {
         ensure!(
             gpu.gpu_driven,
-            "the units' models need multiDrawIndirect, shaderDrawParameters and descriptorBindingPartiallyBound"
+            "the units' models need multiDrawIndirect and shaderDrawParameters"
         );
         let mut tex = Textures {
             gpu,

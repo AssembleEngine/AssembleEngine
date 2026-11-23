@@ -6,7 +6,6 @@
 // glTF's convention). It is placed as the unit's model is drawn (fitted
 // and turned by the unit's rotation and size); its range and colour are
 // the model's (metres, engine light units).
-#define AE_BINDLESS_SET 3
 #define AE_LIGHT_BASE 4
 #define LIGHTS_WRITE
 #include "lights.glsl"

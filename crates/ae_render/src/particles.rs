@@ -890,7 +890,7 @@ impl ParticleRenderer {
             .collect::<Result<Vec<_>>>()?;
         let packet_handles = [bindless.slotted_2d()?, bindless.slotted_2d()?];
 
-        // Every buffer and storage image is in the global set at 3 (M15
+        // Every buffer and storage image is in the global set at 0 (M15
         // step D), through the handle table (particles_common.glsl). The
         // per-slot targets' are slotted (ensure_half, ensure_packets).
         let reference_handles = [
@@ -915,7 +915,7 @@ impl ParticleRenderer {
         handles.extend(lights.handles());
         let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "particle handles")?;
         push.table(table.index);
-        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(3), PUSH_BYTES, PUSH_STAGES)?;
+        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(), PUSH_BYTES, PUSH_STAGES)?;
         let compute = |code: &[u8], what: &str| {
             pipeline::compute_pipeline(device, code, pipeline_layout)
                 .with_context(|| format!("particle {what} pipeline"))
@@ -1662,7 +1662,7 @@ impl ParticleRenderer {
     /// Spawn, move, cull, key and sort. Records inside a compute pass that
     /// writes [`Self::state`], [`Self::keys`] and [`Self::indirect`]; the
     /// barriers between its dispatches are its own.
-    /// Bind the global set at 3 of `layout` and push the handle table: the
+    /// Bind the global set at 0 of `layout` and push the handle table: the
     /// fixed part (slots 7..9, the samplers), `set1` in slots 0.., and the
     /// pass's words. Every particle layout has the same push range, so the
     /// block stays valid when the layout changes; the global set does not
@@ -1688,7 +1688,7 @@ impl ParticleRenderer {
         }
         unsafe {
             ctx.device
-                .cmd_bind_descriptor_sets(ctx.cmd, point, layout, 3, &[ctx.global_set], &[]);
+                .cmd_bind_descriptor_sets(ctx.cmd, point, layout, 0, &[ctx.global_set], &[]);
             ctx.device
                 .cmd_push_constants(ctx.cmd, layout, PUSH_STAGES, 0, pipeline::push_bytes(&block));
         }

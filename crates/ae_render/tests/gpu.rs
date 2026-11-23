@@ -146,7 +146,7 @@ fn run_demo(
     .unwrap();
     assert!(executor.set_graph(graph).unwrap());
     let physical = executor.baked().unwrap().physical.len();
-    let mut renderer = DemoRenderer::new(gpu.clone(), target_desc.format, 2).unwrap();
+    let mut renderer = DemoRenderer::new(gpu.clone(), executor.bindless_mut(), target_desc.format).unwrap();
     let target_binding = Binding::Image(ImageBinding {
         image: target.image,
         view: target.view,

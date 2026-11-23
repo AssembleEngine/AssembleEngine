@@ -429,10 +429,10 @@ impl LightRenderer {
             bindless.per_slot_buffer(&clusters)?.index,
         ];
         let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "light handles")?;
-        // The culls read the global set at 2 (lights_cull.glsl).
+        // The culls read the global set at 0 (lights_cull.glsl).
         let pipeline_layout = pipeline::pipeline_layout(
             device,
-            &bindless.layouts(2),
+            &bindless.layouts(),
             size_of::<crate::bindless::Push>() as u32,
             vk::ShaderStageFlags::COMPUTE,
         )?;
@@ -626,7 +626,7 @@ impl LightRenderer {
                 ctx.cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );

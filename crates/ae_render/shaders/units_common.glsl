@@ -5,7 +5,6 @@
 // on the ground plane (nav x, y = world x, z); the height comes from the
 // terrain's height texture, or the water surface for classes that float.
 
-#define AE_BINDLESS_SET 3
 #include "bindless.glsl"
 
 #define ATTR_X 0u

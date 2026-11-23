@@ -1,9 +1,6 @@
 #version 460
 // Slices, pass 3: front to back, each slice a homogeneous medium of its
 // summed optical depth and light.
-#ifndef AE_BINDLESS_SET
-#define AE_BINDLESS_SET 3
-#endif
 #include "bindless.glsl"
 #define slice0 AE_S2D(3, 0)
 #define slice1 AE_S2D(4, 0)

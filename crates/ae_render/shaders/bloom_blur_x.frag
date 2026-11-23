@@ -3,6 +3,9 @@
 // +-5 is the 4% tail) along the image's x, as RA3-graphics' second pass.
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
+// Step E keeps this program's set-0 uniform block; the global set is still
+// at 2 until step F moves the block into it.
+#define AE_BINDLESS_SET 2
 #include "bindless.glsl"
 // Bindless handle: bloom 0; sampler 0.
 #define bloom AE_S2D(0, 0)

@@ -9,6 +9,9 @@
 // (RGBA16F, paper-white units) and post.encode encodes it, clipping at the
 // display's peak.
 #include "gamut.glsl"
+// Step E keeps this program's set-0 uniform block; the global set is still
+// at 2 until step F moves the block into it.
+#define AE_BINDLESS_SET 2
 #include "bindless.glsl"
 
 layout(location = 0) in vec2 uv;

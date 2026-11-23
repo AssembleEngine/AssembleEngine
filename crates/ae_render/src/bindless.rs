@@ -21,10 +21,6 @@ use ash::vk;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-/// The set number of the global set while the per-pass layouts still use
-/// sets 0 and 1. Step E renumbers it to 0.
-pub const BINDLESS_SET: u32 = 2;
-
 pub const SAMPLED_IMAGE_CAPACITY: u32 = 4096;
 pub const SAMPLER_CAPACITY: u32 = 64;
 pub const STORAGE_IMAGE_CAPACITY: u32 = 256;
@@ -361,8 +357,6 @@ enum Write {
 pub struct Bindless {
     frames: usize,
     set_layout: vk::DescriptorSetLayout,
-    /// No bindings: the sets below the global one in a migrated layout.
-    empty_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     sampled: Slab,
@@ -413,8 +407,6 @@ impl Bindless {
             .bindings(&bindings)
             .push_next(&mut flags_info);
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
-        let empty_layout =
-            unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None) }?;
 
         let n = frames as u32;
         let sizes = [
@@ -525,7 +517,6 @@ impl Bindless {
         let mut this = Self {
             frames,
             set_layout,
-            empty_layout,
             pool,
             sets,
             sampled: Slab::new("sampled image", 3, SAMPLED_IMAGE_CAPACITY, SampledKind::Image2D as u32),
@@ -581,12 +572,9 @@ impl Bindless {
         Ok(this)
     }
 
-    /// A pipeline layout's sets with the global one at `at`: empty layouts
-    /// below it.
-    pub fn layouts(&self, at: usize) -> Vec<vk::DescriptorSetLayout> {
-        let mut layouts = vec![self.empty_layout; at];
-        layouts.push(self.set_layout);
-        layouts
+    /// The pipeline layout's sets: the global set at 0 (M15 step E).
+    pub fn layouts(&self) -> Vec<vk::DescriptorSetLayout> {
+        vec![self.set_layout]
     }
 
     pub fn set_layout(&self) -> vk::DescriptorSetLayout {
@@ -1128,7 +1116,6 @@ impl Bindless {
         unsafe {
             device.destroy_descriptor_pool(self.pool, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
-            device.destroy_descriptor_set_layout(self.empty_layout, None);
             device.destroy_sampler(self.sampler, None);
         }
         for image in &mut self.fallback_images {

@@ -755,7 +755,7 @@ impl TerrainRenderer {
         push.table(table.index);
         let pipeline_layout = pipeline::pipeline_layout(
             device,
-            &bindless.layouts(2),
+            &bindless.layouts(),
             size_of::<crate::bindless::Push>() as u32,
             all,
         )?;
@@ -1153,7 +1153,7 @@ impl TerrainRenderer {
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );
@@ -1222,7 +1222,7 @@ impl TerrainRenderer {
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );
@@ -1264,7 +1264,7 @@ impl TerrainRenderer {
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );

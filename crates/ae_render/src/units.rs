@@ -686,8 +686,8 @@ impl UnitRenderer {
         push.sampler(1, terrain.linear_sampler_index());
         push.sampler(3, terrain.shadow_color_sampler_index());
         push.sampler(4, terrain.shadow_compare_sampler_index());
-        // Every buffer is in the global set at 3 (M15 step D).
-        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(3), 128, all)?;
+        // Every buffer is in the global set at 0 (M15 step E).
+        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(), 128, all)?;
         let cull_code: &[u8] = if model_set.is_some() {
             spirv!("units_models_cull.comp")
         } else {
@@ -1352,7 +1352,7 @@ impl UnitRenderer {
         }
     }
 
-    /// Bind the global set at 3, and push the pass block (this pass's
+    /// Bind the global set at 0, and push the pass block (this pass's
     /// `words` plus the sampled handles).
     fn bind_global(
         &self,
@@ -1365,7 +1365,7 @@ impl UnitRenderer {
         block.words = words;
         unsafe {
             ctx.device
-                .cmd_bind_descriptor_sets(ctx.cmd, point, self.pipeline_layout, 3, &[ctx.global_set], &[]);
+                .cmd_bind_descriptor_sets(ctx.cmd, point, self.pipeline_layout, 0, &[ctx.global_set], &[]);
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.pipeline_layout,

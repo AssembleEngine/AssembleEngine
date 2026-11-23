@@ -16,6 +16,9 @@ layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform Bloom {
     vec4 params; // x: the EV100 the scene was stored at, y: 1 when the graph has the exposure image
 } b;
+// Step E keeps this program's set-0 uniform block; the global set is still
+// at 2 until step F moves the block into it.
+#define AE_BINDLESS_SET 2
 #include "bindless.glsl"
 // Bindless handles: glow 0, exposure 1; sampler 0.
 #define glow AE_S2D(0, 0)

@@ -2,7 +2,6 @@
 // Flat-shaded unit faces, lit like the terrain (sun + sky), with its fog.
 #include "units_common.glsl"
 #include "photometry.glsl"
-#define AE_BINDLESS_SET 3
 #define AE_LIGHT_BASE 4
 #include "lights.glsl"
 

@@ -123,7 +123,7 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
         "params",
         BufferDesc {
             size: PARAMS_BYTES,
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
         },
         ResourceClass::Transient,
     );
@@ -184,7 +184,7 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
             .pass(name, PassKind::Compute, DemoPass::Filter { mode, src, dst, params })
             .access(src, Role::StorageImageRead(ShaderStage::Compute))
             .discard(dst, Role::StorageImageWrite(ShaderStage::Compute))
-            .access(params, Role::UniformBuffer(ShaderStage::Compute))
+            .access(params, Role::StorageBufferRead(ShaderStage::Compute))
             .id();
     };
     filter(&mut graph, "blur_h", 0, scene, a1);
@@ -246,33 +246,29 @@ mod gpu {
     use crate::device::GpuDevice;
     use crate::executor::{PassContext, Recorder};
     use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
-    use ae_framegraph::PassId;
     use anyhow::Result;
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    /// Pipelines and descriptor sets for the demo passes. Descriptor sets are
-    /// per (slot, pass) and rewritten only when the bound views change,
-    /// which happens after a rebake (device idle) or for a slot whose fence
-    /// was just waited, so no set is updated while in flight.
+    /// Pipelines for the demo passes. Every descriptor is a global-set
+    /// handle (M15 step E): each pass pushes the graph's indices and the
+    /// demo's sampler index and binds the executor's set 0.
     pub struct DemoRenderer {
         gpu: Arc<GpuDevice>,
         sampler: vk::Sampler,
-        compute_set_layout: vk::DescriptorSetLayout,
-        composite_set_layout: vk::DescriptorSetLayout,
-        compute_layout: vk::PipelineLayout,
-        composite_layout: vk::PipelineLayout,
-        triangle_layout: vk::PipelineLayout,
+        sampler_index: u32,
+        layout: vk::PipelineLayout,
         triangle: vk::Pipeline,
         filter: vk::Pipeline,
         composite: vk::Pipeline,
         composite_format: vk::Format,
-        pool: vk::DescriptorPool,
-        sets: BTreeMap<(usize, PassId), (vk::DescriptorSet, [vk::ImageView; 2], vk::Buffer)>,
     }
 
     impl DemoRenderer {
-        pub fn new(gpu: Arc<GpuDevice>, target_format: vk::Format, frames_in_flight: usize) -> Result<Self> {
+        pub fn new(
+            gpu: Arc<GpuDevice>,
+            bindless: &mut crate::bindless::Bindless,
+            target_format: vk::Format,
+        ) -> Result<Self> {
             let device = &gpu.device;
             let sampler_info = vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::NEAREST)
@@ -281,38 +277,20 @@ mod gpu {
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
-            let compute_set_layout = pipeline::set_layout(
+            let sampler_index = bindless.sampler(sampler)?.index;
+            let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+            let layout = pipeline::pipeline_layout(
                 device,
-                &[
-                    (vk::DescriptorType::STORAGE_IMAGE, vk::ShaderStageFlags::COMPUTE),
-                    (vk::DescriptorType::STORAGE_IMAGE, vk::ShaderStageFlags::COMPUTE),
-                    (vk::DescriptorType::UNIFORM_BUFFER, vk::ShaderStageFlags::COMPUTE),
-                ],
+                &bindless.layouts(),
+                std::mem::size_of::<crate::bindless::Push>() as u32,
+                all,
             )?;
-            let composite_set_layout = pipeline::set_layout(
-                device,
-                &[
-                    (
-                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        vk::ShaderStageFlags::FRAGMENT,
-                    ),
-                    (
-                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        vk::ShaderStageFlags::FRAGMENT,
-                    ),
-                ],
-            )?;
-            let compute_layout =
-                pipeline::pipeline_layout(device, &[compute_set_layout], 4, vk::ShaderStageFlags::COMPUTE)?;
-            let composite_layout =
-                pipeline::pipeline_layout(device, &[composite_set_layout], 0, vk::ShaderStageFlags::empty())?;
-            let triangle_layout = pipeline::pipeline_layout(device, &[], 0, vk::ShaderStageFlags::empty())?;
             let triangle = pipeline::graphics_pipeline(
                 device,
                 &GraphicsDesc {
                     vertex: spirv!("triangle.vert"),
                     fragment: spirv!("triangle.frag"),
-                    layout: triangle_layout,
+                    layout,
                     color_formats: &[SCENE_FORMAT],
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
@@ -320,13 +298,13 @@ mod gpu {
                     glow_blend: Blend::Off,
                 },
             )?;
-            let filter = pipeline::compute_pipeline(device, spirv!("demo_filter.comp"), compute_layout)?;
+            let filter = pipeline::compute_pipeline(device, spirv!("demo_filter.comp"), layout)?;
             let composite = pipeline::graphics_pipeline(
                 device,
                 &GraphicsDesc {
                     vertex: spirv!("fullscreen.vert"),
                     fragment: spirv!("composite.frag"),
-                    layout: composite_layout,
+                    layout,
                     color_formats: &[target_format],
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
@@ -334,39 +312,15 @@ mod gpu {
                     glow_blend: Blend::Off,
                 },
             )?;
-            let sets_needed = (frames_in_flight * 5) as u32;
-            let sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_IMAGE,
-                    descriptor_count: sets_needed * 2,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: sets_needed * 2,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: sets_needed,
-                },
-            ];
-            let pool_info = vk::DescriptorPoolCreateInfo::default()
-                .max_sets(sets_needed)
-                .pool_sizes(&sizes);
-            let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }?;
             Ok(Self {
                 gpu,
                 sampler,
-                compute_set_layout,
-                composite_set_layout,
-                compute_layout,
-                composite_layout,
-                triangle_layout,
+                sampler_index,
+                layout,
                 triangle,
                 filter,
                 composite,
                 composite_format: target_format,
-                pool,
-                sets: BTreeMap::new(),
             })
         }
 
@@ -374,89 +328,15 @@ mod gpu {
             self.composite_format
         }
 
-        /// Forget cached descriptor sets (after a rebake the views change;
-        /// the device is idle then).
-        pub fn reset_descriptors(&mut self) -> Result<()> {
+        /// Bind the global set and push the pass's block.
+        fn bind(&self, ctx: &PassContext<'_>, point: vk::PipelineBindPoint, push: crate::bindless::Push) {
+            let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
             unsafe {
-                self.gpu
-                    .device
-                    .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
-            }?;
-            self.sets.clear();
-            Ok(())
-        }
-
-        fn set_for(
-            &mut self,
-            ctx: &PassContext<'_>,
-            layout: vk::DescriptorSetLayout,
-            views: [vk::ImageView; 2],
-            kind: vk::DescriptorType,
-            uniform: Option<crate::executor::BufferBinding>,
-        ) -> Result<vk::DescriptorSet> {
-            let device = &self.gpu.device;
-            let key = (ctx.slot, ctx.pass);
-            let uniform_handle = uniform.map(|binding| binding.buffer).unwrap_or_default();
-            if let Some((set, cached, buffer)) = self.sets.get(&key)
-                && *cached == views
-                && *buffer == uniform_handle
-            {
-                return Ok(*set);
+                ctx.device
+                    .cmd_bind_descriptor_sets(ctx.cmd, point, self.layout, 0, &[ctx.global_set], &[]);
+                ctx.device
+                    .cmd_push_constants(ctx.cmd, self.layout, all, 0, pipeline::push_bytes(&push));
             }
-            let set = match self.sets.get(&key) {
-                Some((set, _, _)) => *set,
-                None => {
-                    let layouts = [layout];
-                    let info = vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(self.pool)
-                        .set_layouts(&layouts);
-                    unsafe { device.allocate_descriptor_sets(&info) }?[0]
-                }
-            };
-            let layout_for = if kind == vk::DescriptorType::STORAGE_IMAGE {
-                vk::ImageLayout::GENERAL
-            } else {
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-            };
-            let infos: Vec<[vk::DescriptorImageInfo; 1]> = views
-                .iter()
-                .map(|view| {
-                    [vk::DescriptorImageInfo::default()
-                        .image_view(*view)
-                        .image_layout(layout_for)
-                        .sampler(self.sampler)]
-                })
-                .collect();
-            let mut writes: Vec<_> = infos
-                .iter()
-                .enumerate()
-                .map(|(binding, info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(binding as u32)
-                        .descriptor_type(kind)
-                        .image_info(info)
-                })
-                .collect();
-            let buffer_info = uniform.map(|binding| {
-                [vk::DescriptorBufferInfo {
-                    buffer: binding.buffer,
-                    offset: binding.offset,
-                    range: binding.size,
-                }]
-            });
-            if let Some(info) = &buffer_info {
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(set)
-                        .dst_binding(2)
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                        .buffer_info(info),
-                );
-            }
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-            self.sets.insert(key, (set, views, uniform_handle));
-            Ok(set)
         }
     }
 
@@ -483,52 +363,36 @@ mod gpu {
                 }
                 DemoPass::Filter { mode, src, dst, params } => {
                     let (src, dst, params) = (ctx.image(src)?, ctx.image(dst)?, ctx.buffer(params)?);
-                    let set = self.set_for(
-                        ctx,
-                        self.compute_set_layout,
-                        [src.view, dst.view],
-                        vk::DescriptorType::STORAGE_IMAGE,
-                        Some(params),
-                    )?;
+                    // Words: the filter, then the two storage images and the
+                    // parameter block, as global indices.
+                    let push = crate::bindless::Push {
+                        words: [
+                            mode as u32,
+                            src.storage.unwrap_or(0),
+                            dst.storage.unwrap_or(0),
+                            params.storage.unwrap_or(0),
+                        ],
+                        ..Default::default()
+                    };
                     unsafe {
                         device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.filter);
-                        device.cmd_bind_descriptor_sets(
-                            ctx.cmd,
-                            vk::PipelineBindPoint::COMPUTE,
-                            self.compute_layout,
-                            0,
-                            &[set],
-                            &[],
-                        );
-                        device.cmd_push_constants(
-                            ctx.cmd,
-                            self.compute_layout,
-                            vk::ShaderStageFlags::COMPUTE,
-                            0,
-                            &mode.to_le_bytes(),
-                        );
+                    }
+                    self.bind(ctx, vk::PipelineBindPoint::COMPUTE, push);
+                    unsafe {
                         device.cmd_dispatch(ctx.cmd, dst.extent.width.div_ceil(8), dst.extent.height.div_ceil(8), 1);
                     }
                 }
                 DemoPass::Composite { left, right } => {
-                    let views = [ctx.image(left)?.view, ctx.image(right)?.view];
-                    let set = self.set_for(
-                        ctx,
-                        self.composite_set_layout,
-                        views,
-                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        None,
-                    )?;
+                    let (left, right) = (ctx.image(left)?, ctx.image(right)?);
+                    let mut push = crate::bindless::Push::default();
+                    push.words[0] = left.sampled.unwrap_or(0);
+                    push.words[1] = right.sampled.unwrap_or(0);
+                    push.sampler(0, self.sampler_index);
                     unsafe {
                         device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, self.composite);
-                        device.cmd_bind_descriptor_sets(
-                            ctx.cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.composite_layout,
-                            0,
-                            &[set],
-                            &[],
-                        );
+                    }
+                    self.bind(ctx, vk::PipelineBindPoint::GRAPHICS, push);
+                    unsafe {
                         device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
                     }
                 }
@@ -588,12 +452,12 @@ mod gpu {
         fn create(
             &mut self,
             gpu: &Arc<GpuDevice>,
-            _bindless: &mut crate::bindless::Bindless,
+            bindless: &mut crate::bindless::Bindless,
             target: crate::thread::TargetInfo,
             frames_in_flight: usize,
         ) -> Result<()> {
             let format = target.format;
-            self.renderer = Some(DemoRenderer::new(gpu.clone(), format, frames_in_flight)?);
+            self.renderer = Some(DemoRenderer::new(gpu.clone(), bindless, format)?);
             self.staging = (0..frames_in_flight)
                 .map(|slot| {
                     crate::memory::OwnedBuffer::new(
@@ -614,13 +478,6 @@ mod gpu {
             let (graph, resources) = build_demo_graph(target.extent, DemoOutput::Present { format: target.format });
             self.params_staging = Some(resources.params_staging);
             Ok((graph, Some(resources.target)))
-        }
-
-        fn on_rebake(&mut self) -> Result<()> {
-            match &mut self.renderer {
-                Some(renderer) => renderer.reset_descriptors(),
-                None => Ok(()),
-            }
         }
 
         fn prepare(&mut self, _bindless: &mut crate::bindless::Bindless, slot: usize) -> Result<()> {
@@ -671,15 +528,10 @@ mod gpu {
             let device = &self.gpu.device;
             self.gpu.wait_idle();
             unsafe {
-                device.destroy_descriptor_pool(self.pool, None);
                 device.destroy_pipeline(self.triangle, None);
                 device.destroy_pipeline(self.filter, None);
                 device.destroy_pipeline(self.composite, None);
-                device.destroy_pipeline_layout(self.triangle_layout, None);
-                device.destroy_pipeline_layout(self.compute_layout, None);
-                device.destroy_pipeline_layout(self.composite_layout, None);
-                device.destroy_descriptor_set_layout(self.compute_set_layout, None);
-                device.destroy_descriptor_set_layout(self.composite_set_layout, None);
+                device.destroy_pipeline_layout(self.layout, None);
                 device.destroy_sampler(self.sampler, None);
             }
         }

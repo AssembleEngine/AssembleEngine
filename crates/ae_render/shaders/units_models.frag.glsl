@@ -6,7 +6,6 @@
 #include "photometry.glsl"
 #include "units_common.glsl"
 #include "units_models.glsl"
-#define AE_BINDLESS_SET 3
 #define AE_LIGHT_BASE 4
 #include "lights.glsl"
 

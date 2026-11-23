@@ -335,9 +335,9 @@ impl GpuDevice {
                 .push_next(&mut features11)
                 .push_next(&mut features12b);
             unsafe { vk_instance.get_physical_device_features2(physical, &mut more) };
-            let gpu_driven = base.multi_draw_indirect == vk::TRUE
-                && features11.shader_draw_parameters == vk::TRUE
-                && features12b.descriptor_binding_partially_bound == vk::TRUE;
+            // Partially bound is not here: the global set requires it (M15),
+            // so it is part of every candidate that gets this far.
+            let gpu_driven = base.multi_draw_indirect == vk::TRUE && features11.shader_draw_parameters == vk::TRUE;
             // M15: the global set's four arrays. Vulkan 1.3 makes the minimum
             // descriptor-indexing set mandatory (given the promoted
             // VK_EXT_descriptor_indexing), but not the storage-image

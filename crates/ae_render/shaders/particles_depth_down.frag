@@ -5,9 +5,6 @@
 // a block keeps the smoke behind the silhouette, and the composite gives
 // it only to the full-resolution pixels at that depth.
 
-#ifndef AE_BINDLESS_SET
-#define AE_BINDLESS_SET 3
-#endif
 #include "bindless.glsl"
 #define depthTex AE_S2D(0, 0)
 

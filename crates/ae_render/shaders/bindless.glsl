@@ -1,9 +1,10 @@
 // The global bindless set's shader side (M15). Include after `#version` and
 // before any declaration that samples a texture.
 //
-// `AE_BINDLESS_SET` is 2 while the per-pass layouts still use sets 0 and 1;
-// a pass whose old layout uses set 2 too (the units' lights) defines it to 3
-// before including this file. Step E renumbers it to 0.
+// `AE_BINDLESS_SET` is 0: the per-pass sets are gone (M15 step E). The
+// engine fullscreen programs (tonemap, bloom, encode) still keep a set-0
+// uniform block, so their shaders pin this to 2 before including this file;
+// step F moves them into the global set.
 //
 // The four arrays are one binding each. Sampled images and separate
 // samplers are combined at the use site, so a handle cannot carry a sampler
@@ -23,7 +24,7 @@
 #ifndef AE_BINDLESS_GLSL
 #define AE_BINDLESS_GLSL
 #ifndef AE_BINDLESS_SET
-#define AE_BINDLESS_SET 2
+#define AE_BINDLESS_SET 0
 #endif
 #extension GL_EXT_nonuniform_qualifier : require
 

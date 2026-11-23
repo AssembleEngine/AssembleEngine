@@ -1,13 +1,13 @@
-//! M15 step D's guard: outside the files that still own descriptor sets, no
-//! renderer source creates, allocates or writes a set of its own, and no
-//! shader declares a numbered set. Everything else reads the global set
-//! (`src/bindless.rs`, `shaders/bindless.glsl`).
+//! M15 step E's guard: outside the files that still own descriptor sets, no
+//! renderer source creates, allocates or writes a set of its own, no shader
+//! declares a numbered set, and no shader moves the global set off 0.
+//! Everything else reads the global set (`src/bindless.rs`,
+//! `shaders/bindless.glsl`) at set 0.
 //!
-//! Still on their own sets, until the steps that move them:
+//! Still on their own sets, until the step that moves them:
 //! - `fullscreen.rs`: the module `FullscreenProgram` (the render-module
 //!   contract, step F) and the engine `BindlessProgram`'s uniform block at
 //!   set 0 (tonemap, bloom, encode; also step F), with their shaders;
-//! - `demo.rs` and its shader (step E);
 //! - `upload.rs`'s mip generator, which stays as it is.
 
 use std::fs;
@@ -15,13 +15,14 @@ use std::path::Path;
 
 /// Sources allowed to own sets: the registry itself, the pipeline helpers,
 /// and the files listed above.
-const SOURCE_EXCEPTIONS: &[&str] = &["bindless.rs", "pipeline.rs", "fullscreen.rs", "demo.rs", "upload.rs"];
+const SOURCE_EXCEPTIONS: &[&str] = &["bindless.rs", "pipeline.rs", "fullscreen.rs", "upload.rs"];
 
-/// Shaders still declaring numbered sets (see the module docs).
+/// Shaders still declaring numbered sets or pinning the global set off 0
+/// (see the module docs).
 const SHADER_EXCEPTIONS: &[&str] = &[
+    "bloom_blur_x.frag",
+    "bloom_blur_y.frag",
     "bloom_downsample.frag",
-    "composite.frag",
-    "demo_filter.comp",
     "encode.frag",
     "mipgen.comp",
     "test_post.frag",
@@ -85,6 +86,18 @@ fn only_the_global_set_outside_the_exceptions() {
         for (n, line) in text.lines().enumerate() {
             if numbered(line) {
                 found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+            }
+            // The global set is 0 everywhere else; only the post chain's
+            // programs still pin it (they move in step F).
+            if let Some(rest) = line.trim().strip_prefix("#define AE_BINDLESS_SET ")
+                && rest.trim() != "0"
+            {
+                found.push(format!(
+                    "{}:{}: {} (the global set is 0 outside the post chain)",
+                    path.display(),
+                    n + 1,
+                    line.trim()
+                ));
             }
         }
     }

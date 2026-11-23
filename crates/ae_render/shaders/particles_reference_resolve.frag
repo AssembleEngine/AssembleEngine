@@ -1,9 +1,6 @@
 #version 460
 // Reference, pass 2: sort the pixel's fragments far to near and blend
 // them premultiplied. More fragments than the list holds: magenta.
-#ifndef AE_BINDLESS_SET
-#define AE_BINDLESS_SET 3
-#endif
 #include "bindless.glsl"
 #define depthTex AE_S2D(0, 0)
 #include "particles_reference.glsl"

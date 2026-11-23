@@ -161,7 +161,7 @@ impl Exposure {
         }
         let layout = pipeline::pipeline_layout(
             device,
-            &bindless.layouts(2),
+            &bindless.layouts(),
             size_of::<crate::bindless::Push>() as u32,
             vk::ShaderStageFlags::COMPUTE,
         )?;
@@ -320,7 +320,7 @@ impl Exposure {
                 ctx.cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );
@@ -344,7 +344,7 @@ impl Exposure {
                 ctx.cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.layout,
-                2,
+                0,
                 &[ctx.global_set],
                 &[],
             );

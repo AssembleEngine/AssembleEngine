@@ -1,14 +1,10 @@
 // Shared by the particle shaders (ae_render::particles).
 //
-// Sampled images are global (bindless.glsl, set 3: sets 0 to 2 are the
-// particles' own and the lights'). The handle table's slots follow the
-// old bindings: 0..6 the pass's images (its old set 1), 7 the hills' shadows, 8 the
-// heights, 9 the puff; samplers 0 nearest (depth and targets), 1 the
-// puff's, 2 the terrain's linear.
+// Sampled images are global (bindless.glsl, set 0). The handle table's
+// slots follow the old bindings: 0..6 the pass's images, 7 the hills'
+// shadows, 8 the heights, 9 the puff; samplers 0 nearest (depth and
+// targets), 1 the puff's, 2 the terrain's linear.
 
-#ifndef AE_BINDLESS_SET
-#define AE_BINDLESS_SET 3
-#endif
 #include "bindless.glsl"
 // Buffers (table slots): 0 the frame block, 1 state, 2 keys, 3 indirect,
 // 4 spawns, 5 keysTmp, 6 histograms, 7..9 the half targets' reference or
