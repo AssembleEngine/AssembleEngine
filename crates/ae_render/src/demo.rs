@@ -278,13 +278,7 @@ mod gpu {
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
             let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
             let sampler_index = bindless.sampler(sampler)?.index;
-            let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-            let layout = pipeline::pipeline_layout(
-                device,
-                &bindless.layouts(),
-                std::mem::size_of::<crate::bindless::Push>() as u32,
-                all,
-            )?;
+            let layout = bindless.pipeline_layout();
             let triangle = pipeline::graphics_pipeline(
                 device,
                 &GraphicsDesc {
@@ -531,7 +525,6 @@ mod gpu {
                 device.destroy_pipeline(self.triangle, None);
                 device.destroy_pipeline(self.filter, None);
                 device.destroy_pipeline(self.composite, None);
-                device.destroy_pipeline_layout(self.layout, None);
                 device.destroy_sampler(self.sampler, None);
             }
         }

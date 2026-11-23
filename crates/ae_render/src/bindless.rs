@@ -31,6 +31,15 @@ pub const BINDING_SAMPLER: u32 = 1;
 pub const BINDING_STORAGE_IMAGE: u32 = 2;
 pub const BINDING_STORAGE_BUFFER: u32 = 3;
 
+/// The stages of the shared pipeline layout's push range ([`Push`], 128
+/// bytes). Every `cmd_push_constants` on [`Bindless::pipeline_layout`] passes
+/// all of them.
+pub const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::VERTEX.as_raw()
+        | vk::ShaderStageFlags::FRAGMENT.as_raw()
+        | vk::ShaderStageFlags::COMPUTE.as_raw(),
+);
+
 /// The view type of a sampled handle, which selects its fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampledKind {
@@ -357,6 +366,9 @@ enum Write {
 pub struct Bindless {
     frames: usize,
     set_layout: vk::DescriptorSetLayout,
+    /// The one pipeline layout every engine pass uses: the global set at 0
+    /// and [`Push`] in [`PUSH_STAGES`].
+    pipeline_layout: vk::PipelineLayout,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     sampled: Slab,
@@ -407,6 +419,8 @@ impl Bindless {
             .bindings(&bindings)
             .push_next(&mut flags_info);
         let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }?;
+        let pipeline_layout =
+            crate::pipeline::pipeline_layout(device, &[set_layout], size_of::<Push>() as u32, PUSH_STAGES)?;
 
         let n = frames as u32;
         let sizes = [
@@ -517,6 +531,7 @@ impl Bindless {
         let mut this = Self {
             frames,
             set_layout,
+            pipeline_layout,
             pool,
             sets,
             sampled: Slab::new("sampled image", 3, SAMPLED_IMAGE_CAPACITY, SampledKind::Image2D as u32),
@@ -572,9 +587,12 @@ impl Bindless {
         Ok(this)
     }
 
-    /// The pipeline layout's sets: the global set at 0 (M15 step E).
-    pub fn layouts(&self) -> Vec<vk::DescriptorSetLayout> {
-        vec![self.set_layout]
+    /// The shared pipeline layout (M15 step E): the global set at 0 and the
+    /// 128-byte [`Push`] block in every stage. Passes bind with it and never
+    /// destroy it; [`Self::destroy`] does. Since every pass's layout is this
+    /// one, a pipeline switch keeps set 0 and the push block valid.
+    pub fn pipeline_layout(&self) -> vk::PipelineLayout {
+        self.pipeline_layout
     }
 
     pub fn set_layout(&self) -> vk::DescriptorSetLayout {
@@ -1115,6 +1133,7 @@ impl Bindless {
         let device = &gpu.device;
         unsafe {
             device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_sampler(self.sampler, None);
         }

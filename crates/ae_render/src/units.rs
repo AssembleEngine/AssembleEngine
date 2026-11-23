@@ -677,7 +677,6 @@ impl UnitRenderer {
             )?,
         };
 
-        let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let mut push = crate::bindless::Push::default();
         push.image(0, terrain.height_index());
         push.image(1, terrain.sun_shadow_index());
@@ -687,7 +686,7 @@ impl UnitRenderer {
         push.sampler(3, terrain.shadow_color_sampler_index());
         push.sampler(4, terrain.shadow_compare_sampler_index());
         // Every buffer is in the global set at 0 (M15 step E).
-        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(), 128, all)?;
+        let pipeline_layout = bindless.pipeline_layout();
         let cull_code: &[u8] = if model_set.is_some() {
             spirv!("units_models_cull.comp")
         } else {
@@ -1218,12 +1217,7 @@ impl UnitRenderer {
             );
             unsafe {
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.scatter);
-                self.bind_global(
-                    ctx,
-                    vk::PipelineBindPoint::COMPUTE,
-                    vk::ShaderStageFlags::COMPUTE,
-                    [0; 4],
-                );
+                self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
                 device.cmd_dispatch(cmd, writes.div_ceil(64), 1, 1);
             }
             barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
@@ -1233,10 +1227,9 @@ impl UnitRenderer {
         if self.rows(ctx.slot) == 0 || jobs == 0 {
             return;
         }
-        let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.pose);
-            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, all, [jobs, 0, 0, 0]);
+            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [jobs, 0, 0, 0]);
             device.cmd_dispatch(cmd, jobs.div_ceil(64), 1, 1);
         }
     }
@@ -1276,12 +1269,7 @@ impl UnitRenderer {
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
-            self.bind_global(
-                ctx,
-                vk::PipelineBindPoint::COMPUTE,
-                vk::ShaderStageFlags::COMPUTE,
-                [0; 4],
-            );
+            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.lights_append);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
@@ -1299,12 +1287,7 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull);
-            self.bind_global(
-                ctx,
-                vk::PipelineBindPoint::COMPUTE,
-                vk::ShaderStageFlags::COMPUTE,
-                [0; 4],
-            );
+            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
     }
@@ -1317,12 +1300,7 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            self.bind_global(
-                ctx,
-                vk::PipelineBindPoint::GRAPHICS,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
-                [0; 4],
-            );
+            self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0; 4]);
             device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
             if let Some(m) = &self.models {
                 // Every model command in two multi-draws: opaque, masked.
@@ -1333,12 +1311,7 @@ impl UnitRenderer {
                         continue;
                     }
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                    self.bind_global(
-                        ctx,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        [0, first, 0, 0],
-                    );
+                    self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0, first, 0, 0]);
                     let offset = models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
                     device.cmd_draw_indexed_indirect(
                         cmd,
@@ -1354,13 +1327,7 @@ impl UnitRenderer {
 
     /// Bind the global set at 0, and push the pass block (this pass's
     /// `words` plus the sampled handles).
-    fn bind_global(
-        &self,
-        ctx: &PassContext<'_>,
-        point: vk::PipelineBindPoint,
-        _stages: vk::ShaderStageFlags,
-        words: [u32; 4],
-    ) {
+    fn bind_global(&self, ctx: &PassContext<'_>, point: vk::PipelineBindPoint, words: [u32; 4]) {
         let mut block = self.push;
         block.words = words;
         unsafe {
@@ -1369,7 +1336,7 @@ impl UnitRenderer {
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                crate::bindless::PUSH_STAGES,
                 0,
                 crate::pipeline::push_bytes(&block),
             );
@@ -1390,18 +1357,7 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            self.bind_global(
-                ctx,
-                vk::PipelineBindPoint::GRAPHICS,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
-                [0; 4],
-            );
-            let push_stages = match self.models {
-                Some(_) => {
-                    vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
-                }
-                None => vk::ShaderStageFlags::VERTEX,
-            };
+            self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0; 4]);
             let model_caster = self
                 .models
                 .as_ref()
@@ -1435,7 +1391,7 @@ impl UnitRenderer {
                     }],
                 );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
-                self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, push_stages, [k, 0, 0, 0]);
+                self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [k, 0, 0, 0]);
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
                 // The model units the cull found in this cascade (the darts'
                 // caster skipped model classes), by this cascade's copy of
@@ -1452,7 +1408,7 @@ impl UnitRenderer {
                             continue;
                         }
                         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, push_stages, [k, first, 0, 0]);
+                        self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [k, first, 0, 0]);
                         device.cmd_draw_indexed_indirect(
                             cmd,
                             self.indirect.buffer,
@@ -1496,7 +1452,6 @@ impl UnitRenderer {
             }
             device.destroy_pipeline(self.cull, None);
             device.destroy_pipeline(self.draw, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
         self.table.destroy(gpu);
         for b in self

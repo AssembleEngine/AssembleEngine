@@ -55,6 +55,7 @@
 //! particle's depth kept by a max, and the terrain, the units and the
 //! water multiply their sunlight by what it lets through.
 
+use crate::bindless::PUSH_STAGES;
 use crate::colorspace::Gamut;
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, ImageBinding, PassContext};
@@ -683,14 +684,6 @@ pub struct ParticleRenderer {
     packet_storage: [crate::bindless::StorageImageHandle; 2],
 }
 
-/// Every particle layout's push range: bindless.glsl's 128-byte block, in
-/// every stage, so the block stays valid across the layouts.
-const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
-    vk::ShaderStageFlags::VERTEX.as_raw()
-        | vk::ShaderStageFlags::FRAGMENT.as_raw()
-        | vk::ShaderStageFlags::COMPUTE.as_raw(),
-);
-const PUSH_BYTES: u32 = size_of::<crate::bindless::Push>() as u32;
 /// The OIT targets the half draws sample (table slots 2..6).
 const HALF_TARGETS: usize = 5;
 
@@ -915,7 +908,7 @@ impl ParticleRenderer {
         handles.extend(lights.handles());
         let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "particle handles")?;
         push.table(table.index);
-        let pipeline_layout = pipeline::pipeline_layout(device, &bindless.layouts(), PUSH_BYTES, PUSH_STAGES)?;
+        let pipeline_layout = bindless.pipeline_layout();
         let compute = |code: &[u8], what: &str| {
             pipeline::compute_pipeline(device, code, pipeline_layout)
                 .with_context(|| format!("particle {what} pipeline"))
@@ -1664,9 +1657,8 @@ impl ParticleRenderer {
     /// barriers between its dispatches are its own.
     /// Bind the global set at 0 of `layout` and push the handle table: the
     /// fixed part (slots 7..9, the samplers), `set1` in slots 0.., and the
-    /// pass's words. Every particle layout has the same push range, so the
-    /// block stays valid when the layout changes; the global set does not
-    /// (sets 1 and 2 differ), so each bind site binds it again.
+    /// pass's words. `layout` is the shared one
+    /// ([`crate::bindless::Bindless::pipeline_layout`]).
     fn bind_global(
         &self,
         ctx: &PassContext<'_>,
@@ -2502,7 +2494,6 @@ impl ParticleRenderer {
             }
             device.destroy_sampler(self.depth_sampler, None);
             device.destroy_sampler(self.puff_sampler, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
         for half in self.half.iter_mut().filter_map(Option::take) {
             half.destroy(gpu);

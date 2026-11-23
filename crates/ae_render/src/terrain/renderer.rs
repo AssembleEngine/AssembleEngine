@@ -734,7 +734,6 @@ impl TerrainRenderer {
         push.sampler(3, unit_shadow_map.color_sampler_index());
         push.sampler(4, unit_shadow_map.sampler_index());
 
-        let all = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         // Every buffer is in the global set (M15 step D); the per-slot ones
         // are slotted, so the table is the same every frame.
         let vision_handle = bindless.per_slot_buffer(&vision_bufs)?.index;
@@ -753,12 +752,7 @@ impl TerrainRenderer {
         handles.extend(lights.handles());
         let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "terrain handles")?;
         push.table(table.index);
-        let pipeline_layout = pipeline::pipeline_layout(
-            device,
-            &bindless.layouts(),
-            size_of::<crate::bindless::Push>() as u32,
-            all,
-        )?;
+        let pipeline_layout = bindless.pipeline_layout();
 
         let prepare = pipeline::compute_pipeline(device, spirv!("cbt_prepare.comp"), pipeline_layout)?;
         let update = pipeline::compute_pipeline(device, spirv!("cbt_update.comp"), pipeline_layout)?;
@@ -1324,7 +1318,6 @@ impl TerrainRenderer {
             {
                 device.destroy_pipeline(p, None);
             }
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
             for s in self.samplers {
                 device.destroy_sampler(s, None);
             }

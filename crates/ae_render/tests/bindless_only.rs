@@ -1,6 +1,8 @@
 //! M15 step E's guard: outside the files that still own descriptor sets, no
 //! renderer source creates, allocates or writes a set of its own, no shader
 //! declares a numbered set, and no shader moves the global set off 0.
+//! No source outside them makes a pipeline layout either: every pass uses
+//! `Bindless::pipeline_layout`.
 //! Everything else reads the global set (`src/bindless.rs`,
 //! `shaders/bindless.glsl`) at set 0.
 //!
@@ -62,6 +64,9 @@ fn only_the_global_set_outside_the_exceptions() {
             "allocate_descriptor_sets",
             "update_descriptor_sets",
             "create_descriptor_pool",
+            // One shared pipeline layout (`Bindless::pipeline_layout`).
+            "pipeline::pipeline_layout(",
+            "create_pipeline_layout",
         ] {
             if text.contains(needle) {
                 found.push(format!("{}: {needle}", path.display()));

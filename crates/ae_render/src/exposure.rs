@@ -159,12 +159,7 @@ impl Exposure {
                 &format!("exposure settings {slot}"),
             )?);
         }
-        let layout = pipeline::pipeline_layout(
-            device,
-            &bindless.layouts(),
-            size_of::<crate::bindless::Push>() as u32,
-            vk::ShaderStageFlags::COMPUTE,
-        )?;
+        let layout = bindless.pipeline_layout();
         let sampler = unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -310,7 +305,7 @@ impl Exposure {
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.layout,
-                vk::ShaderStageFlags::COMPUTE,
+                crate::bindless::PUSH_STAGES,
                 0,
                 pipeline::push_bytes(&push),
             );
@@ -351,7 +346,7 @@ impl Exposure {
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.layout,
-                vk::ShaderStageFlags::COMPUTE,
+                crate::bindless::PUSH_STAGES,
                 0,
                 pipeline::push_bytes(&push),
             );
@@ -365,7 +360,6 @@ impl Exposure {
             for pipeline in [self.meter, self.adapt] {
                 device.destroy_pipeline(pipeline, None);
             }
-            device.destroy_pipeline_layout(self.layout, None);
             device.destroy_sampler(self.sampler, None);
         }
         self.image.destroy(gpu);

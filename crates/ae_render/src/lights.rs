@@ -430,12 +430,7 @@ impl LightRenderer {
         ];
         let table = crate::bindless::HandleTable::new(gpu, bindless, &handles, "light handles")?;
         // The culls read the global set at 0 (lights_cull.glsl).
-        let pipeline_layout = pipeline::pipeline_layout(
-            device,
-            &bindless.layouts(),
-            size_of::<crate::bindless::Push>() as u32,
-            vk::ShaderStageFlags::COMPUTE,
-        )?;
+        let pipeline_layout = bindless.pipeline_layout();
         let bounds = pipeline::compute_pipeline(device, spirv!("lights_bounds.comp"), pipeline_layout)
             .context("light bounds pipeline")?;
         let tiles = pipeline::compute_pipeline(device, spirv!("lights_tiles.comp"), pipeline_layout)
@@ -635,7 +630,7 @@ impl LightRenderer {
             ctx.device.cmd_push_constants(
                 ctx.cmd,
                 self.pipeline_layout,
-                vk::ShaderStageFlags::COMPUTE,
+                crate::bindless::PUSH_STAGES,
                 0,
                 pipeline::push_bytes(&push),
             );
@@ -685,7 +680,6 @@ impl LightRenderer {
             gpu.device.destroy_pipeline(self.bounds, None);
             gpu.device.destroy_pipeline(self.tiles, None);
             gpu.device.destroy_pipeline(self.cull, None);
-            gpu.device.destroy_pipeline_layout(self.pipeline_layout, None);
         }
         self.table.destroy(gpu);
         for b in self
