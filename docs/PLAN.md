@@ -5197,7 +5197,8 @@ set at index 2 next to their old sets. How handles reach a shader:
   - The per-frame image writes in `record_draw` and `record_meter` are gone. Still written while
     recording: exposure's vision buffer (step D) and the module `FullscreenProgram` (step F).
   - Differences from the design: the set-0 and set-1 sampled bindings of the particles stay in
-    their layouts, unwritten and unused by the shaders, until step D removes those sets.
+    their layouts, unwritten and unused by the shaders, until step D removes those sets (done in
+    D). Samplers are not deduplicated by create info: each module registers its own (TODO).
   - The step B unit test pinning descriptor layouts against `barriers.rs` is still not built.
 
 **D. Buffers, storage images, uniform blocks.**
@@ -5440,11 +5441,20 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ## TODO (open, not a priority now)
 
-- M15: retire bindless handles when their owner is destroyed. Terrain, units, models, shadows,
-  particles, exposure and the post passes register at creation and never retire, so each
-  `RenderApp::create`/`retarget` that rebuilds them leaks indices (4,096 sampled, 64 samplers),
-  and the old entries keep pointing at destroyed views. Those views are not read, but the slots
-  are never freed.
+- M15: retire bindless handles when their owner is destroyed. Terrain, lights, units, models,
+  shadows, particles and exposure register at creation and never retire. Each full
+  `TerrainApp::create` therefore leaks:
+  - about 50 storage-buffer indices (capacity 1,024) and 3 storage images (256);
+  - about a dozen samplers plus the glTF ones (64), which runs out first, after roughly 5 cycles;
+  - the sampled images (4,096).
+
+  A full `create` runs at startup, when the frames in flight change, and for each readback app
+  (once per GPU test). A resize does not, because `create_output` only reads the registry. The
+  fix is to retire each module's handles in its `destroy`, which then needs `&mut Bindless`.
+  Deduplicating samplers by create info in the registry (below) would remove the sampler part.
+- M15: deduplicate samplers by create info in the registry. `Bindless::sampler` registers every
+  `vk::Sampler` it is given. The step C handoff asked for deduplication as `models.rs` does it,
+  but it was not built.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
