@@ -848,15 +848,25 @@ fn terrain_renders_offscreen() {
 }
 
 /// A rebuild of the whole renderer gives its global-set handles back
-/// (M15): ten full rebuilds do not grow the registry's live counts, which
-/// would otherwise exhaust the 64 samplers after about five.
+/// (M15): ten full rebuilds and ten full retargets do not grow the
+/// registry's live counts, which would otherwise exhaust the 64 samplers
+/// after about five, with no module and with `render/post` (whose programs
+/// are declared again after each rebuild and still draw the same frame).
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn rebuilding_the_renderer_does_not_leak_handles() {
+    let gpu = gpu();
+    rebuild_cycle(&gpu, None);
+    let post = ae_render::module::build("post").expect("build render/post");
+    rebuild_cycle(&gpu, Some(post));
+    assert_clean(&gpu);
+}
+
+fn rebuild_cycle(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) {
     use ae_render::thread::{Headless, RenderApp, TargetInfo};
 
-    let gpu = gpu();
-    let mut app = scene_app(&gpu, None);
+    let label = if module.is_some() { "post" } else { "no module" };
+    let mut app = scene_app(gpu, module);
     let target = TargetInfo {
         extent: SCENE_EXTENT,
         format: vk::Format::R8G8B8A8_SRGB,
@@ -868,43 +878,42 @@ fn rebuilding_the_renderer_does_not_leak_handles() {
         bake: BakeOptions::default(),
         record_threads: 1,
     };
-    let mut headless = Headless::new(&gpu, &mut app, target, config).unwrap();
+    let mut headless = Headless::new(gpu, &mut app, target, config).unwrap();
     // A running scene first: the baseline counts the graph's own handles.
     headless.frames(&mut app, 4).unwrap();
+    headless.wait().unwrap();
     let baseline = headless.stats().bindless_live;
-    for rebuild in 0..10 {
+    let first = app.readback().unwrap();
+    for (step, full_retarget) in (0..20).map(|step| (step, step >= 10)) {
         headless.wait().unwrap();
-        // A rebuild of the whole renderer, as the client does when the
-        // frames in flight change: every module is destroyed and created
-        // again (the offscreen output stays).
-        RenderApp::create(&mut app, &gpu, headless.bindless_mut(), target, 2).unwrap();
+        if full_retarget {
+            // Retarget's full path (an offscreen app always takes it)
+            // destroys the post chain and the module's programs; its destroy
+            // takes the offscreen target too.
+            assert!(RenderApp::retarget(&mut app, gpu, headless.bindless_mut(), target, 2).unwrap());
+            app.create_offscreen(gpu, SCENE_EXTENT).unwrap();
+        } else {
+            // A rebuild of the whole renderer over the running one: every
+            // module is destroyed and created again (the offscreen output
+            // stays).
+            RenderApp::create(&mut app, gpu, headless.bindless_mut(), target, 2).unwrap();
+        }
         // Every module's images are new objects under reused identities.
         headless.forget_external_states();
-        headless.frames(&mut app, 2).unwrap();
-        let live = headless.stats().bindless_live;
-        assert_eq!(
-            live, baseline,
-            "rebuild {rebuild} leaked handles: {live:?}, baseline {baseline:?}"
-        );
-    }
-    // Retarget's full path (an offscreen app always takes it) destroys the
-    // post chain without its own retire; the shared retire covers it.
-    for retarget in 0..10 {
+        headless.frames(&mut app, 4).unwrap();
         headless.wait().unwrap();
-        assert!(RenderApp::retarget(&mut app, &gpu, headless.bindless_mut(), target, 2).unwrap());
-        // The full path's destroy takes the offscreen target too.
-        app.create_offscreen(&gpu, SCENE_EXTENT).unwrap();
-        headless.forget_external_states();
-        headless.frames(&mut app, 2).unwrap();
         let live = headless.stats().bindless_live;
         assert_eq!(
             live, baseline,
-            "retarget {retarget} leaked handles: {live:?}, baseline {baseline:?}"
+            "{label}: step {step} leaked handles: {live:?}, baseline {baseline:?}"
+        );
+        assert!(
+            app.readback().unwrap() == first,
+            "{label}: step {step} draws a different frame"
         );
     }
     headless.wait().unwrap();
-    RenderApp::destroy(&mut app, &gpu);
-    assert_clean(&gpu);
+    RenderApp::destroy(&mut app, gpu);
 }
 
 /// Units over the terrain: an instance stream of four units, reset + cull +
@@ -11604,6 +11613,183 @@ fn a_retired_handle_draws_the_fallback_and_logs_once() {
     assert_eq!(bindless.index_2d(ae_render::bindless::Sampled2D(handle.0)), 0);
     assert_eq!(bindless.index_2d(ae_render::bindless::Sampled2D(handle.0)), 0);
     assert_eq!(bindless.stale_warnings(), 1, "a stale handle logs once");
+    assert_clean(&gpu);
+}
+
+/// A sampler retired and asked for again while its object is alive is
+/// revived under its index and samples with its own settings, not the
+/// fallback's (M15): once when no frame applied its first write, and once
+/// when both slots had applied the fallback through `flush_open_slot`. The
+/// source is red|blue; at the second pixel NEAREST gives pure red, the
+/// fallback's LINEAR a quarter of blue.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_revived_sampler_keeps_its_settings() {
+    use ae_framegraph::{LoadOp, ResourceId, Role};
+    use ae_render::executor::{PassContext, Recorder};
+    use ae_render::fullscreen::{FullscreenProgram, Sampler};
+
+    struct Sample {
+        source: ResourceId,
+        target: ResourceId,
+        buffer: ResourceId,
+        program: FullscreenProgram,
+        sampler: Sampler,
+        uniforms: [u8; 32],
+    }
+    impl Recorder<u32> for Sample {
+        fn record(&mut self, pass: &u32, ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            match *pass {
+                1 => {
+                    let image = ctx.image(self.source)?;
+                    self.program.write_uniforms(ctx.slot, &self.uniforms);
+                    self.program.record(ctx, &[image, image], self.sampler)?;
+                }
+                2 => ae_render::demo::record_readback(ctx, ctx.image(self.target)?, ctx.buffer(self.buffer)?),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 4, height: 1 };
+    let format = vk::Format::R8G8B8A8_UNORM;
+    let source_desc = ImageDesc::color_2d(format, 2, 1, vk::ImageUsageFlags::SAMPLED);
+    let target_desc = ImageDesc::color_2d(
+        format,
+        extent.width,
+        extent.height,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+    );
+    let buffer_desc = BufferDesc {
+        size: extent.width as u64 * extent.height as u64 * 4,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let mut graph = FrameGraph::<u32>::new();
+    let source = graph.image("source", source_desc, ResourceClass::External);
+    let target = graph.image("target", target_desc, ResourceClass::External);
+    let buffer = graph.buffer("readback", buffer_desc, ResourceClass::External);
+    graph
+        .pass("sample", PassKind::Graphics, 1)
+        .sampled(source, ShaderStage::Fragment)
+        .color(target, LoadOp::DontCare)
+        .id();
+    graph
+        .pass("copy", PassKind::Transfer, 2)
+        .access(target, Role::TransferSrc)
+        .access(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, 3)
+        .access(buffer, Role::HostRead)
+        .root()
+        .id();
+
+    let texels = [255u8, 0, 0, 255, 0, 0, 255, 255];
+    let image = ae_render::upload::image(&gpu, format, 2, 1, &[&texels], "red|blue").unwrap();
+    let out = OwnedImage::new(&gpu, target_desc, "target").unwrap();
+    let mut readback = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
+
+    let mut executor = Executor::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let handle = executor
+        .bindless_mut()
+        .sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap();
+    let nearest = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+    // Retired before any frame applied its write, then asked for again.
+    let first = executor.bindless_mut().sampler(&nearest).unwrap();
+    executor.bindless_mut().retire_sampler(first);
+    let revived = executor.bindless_mut().sampler(&nearest).unwrap();
+    assert_eq!(revived.index, first.index, "the retiring index is revived");
+    let program = FullscreenProgram::new(
+        &gpu,
+        executor.bindless_mut(),
+        "revive",
+        ae_render::spirv!("test_program.frag"),
+        32,
+        2,
+        &[format],
+        2,
+        false,
+    )
+    .unwrap();
+    // tint 0 and no offset: the result is the sampled texel alone.
+    let uniforms: Vec<u8> = [0.0f32; 8].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut sample = Sample {
+        source,
+        target,
+        buffer,
+        program,
+        sampler: Sampler {
+            object: executor.bindless().sampler_object(revived),
+            index: revived.index,
+        },
+        uniforms: uniforms.try_into().unwrap(),
+    };
+    let bindings = [
+        Some(Binding::Image(ImageBinding {
+            image: image.image,
+            view: image.view,
+            format,
+            extent: vk::Extent2D { width: 2, height: 1 },
+            range: image.range(),
+            identity: (0xF01 << 40) | 1,
+            sampled: Some(handle.0.index),
+            storage: None,
+        })),
+        Some(Binding::Image(ImageBinding {
+            image: out.image,
+            view: out.view,
+            format,
+            extent,
+            range: out.range(),
+            identity: (0xF01 << 40) | 2,
+            sampled: None,
+            storage: None,
+        })),
+        Some(Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            offset: 0,
+            size: buffer_desc.size,
+            identity: (0xF01 << 40) | 3,
+            storage: None,
+        })),
+    ];
+    executor.set_graph(graph).unwrap();
+    let mut frames = |executor: &mut Executor<u32>, sample: &mut Sample| {
+        // One frame per slot, so both slots' sets are checked.
+        for _ in 0..2 {
+            let token = executor.begin_frame().unwrap();
+            executor
+                .execute(
+                    token,
+                    sample,
+                    &|resource| bindings.get(resource.index()).copied().flatten(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+            executor.wait(token).unwrap();
+            let pixels = readback.mapped().unwrap().to_vec();
+            assert_eq!(&pixels[4..8], &[255, 0, 0, 255], "NEAREST, not the fallback's LINEAR");
+        }
+    };
+    frames(&mut executor, &mut sample);
+    // Retired again, and both slots apply the fallback before it is asked
+    // for again (flush_open_slot does not mark the retirement).
+    executor.bindless_mut().retire_sampler(revived);
+    for slot in 0..2 {
+        executor.bindless_mut().flush_open_slot(&gpu.device, slot);
+    }
+    let again = executor.bindless_mut().sampler(&nearest).unwrap();
+    assert_eq!(again.index, revived.index, "the retiring index is revived again");
+    frames(&mut executor, &mut sample);
     assert_clean(&gpu);
 }
 

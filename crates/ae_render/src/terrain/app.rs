@@ -932,6 +932,10 @@ impl RenderApp for TerrainApp {
         // A rebuild gives the previous build's global-set handles back
         // before their device objects go (M15).
         self.retire_handles(bindless);
+        // A module's programs are declared again on the next frame; an app
+        // created over a running one must not keep programs whose buffers
+        // it just gave back.
+        self.retire_module_programs(gpu, bindless);
         if let Some(mut old) = self.tonemap.take() {
             old.retire(bindless);
             old.destroy(gpu);
@@ -1499,6 +1503,7 @@ impl RenderApp for TerrainApp {
         if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight
         {
             self.retire_handles(bindless);
+            self.retire_module_programs(gpu, bindless);
             self.destroy(gpu);
             self.create(gpu, bindless, target, frames_in_flight)?;
             return Ok(true);
@@ -1556,9 +1561,9 @@ impl TerrainApp {
         if let Some(handle) = self.sampler_handle.take() {
             bindless.retire_sampler(handle);
         }
-        // The post chain and the module's programs too: retarget's full
-        // path destroys them without a retire of its own. A program's
-        // retire is idempotent, so create's own retires are harmless.
+        // The post chain too: retarget's full path destroys it without a
+        // retire of its own. A program's retire is idempotent, so create's
+        // own retires are harmless.
         if let Some(old) = self.tonemap.as_mut() {
             old.retire(bindless);
         }
@@ -1567,11 +1572,6 @@ impl TerrainApp {
         }
         if let Some(old) = self.bloom.as_mut() {
             old.retire(bindless);
-        }
-        if let Some(state) = self.module.as_mut() {
-            for (program, _) in state.programs.iter_mut().flatten() {
-                program.retire(bindless);
-            }
         }
         if let Some(old) = self.exposure.as_mut() {
             old.retire(bindless);
