@@ -5320,14 +5320,20 @@ set at index 2 next to their old sets. How handles reach a shader:
 
   Review fix (2026-11-23, `984e620`). `retarget`'s full path called `destroy`, which tore down
   tonemap, encode, bloom and the module's programs without a retire, so each full retarget
-  leaked their slotted buffers (8 storage buffers in the test scene); `retire_handles` now
-  retires them too. A revived sampler used to keep whatever its slots held, which was wrong
+  leaked their slotted buffers (8 storage buffers in the test scene). `retire_handles` now
+  retires the post chain, and `create` and the full path take the module's programs (retired,
+  destroyed, declared again on the next frame), so an app created over a running one keeps no
+  program whose buffers it gave back. A revived sampler used to keep whatever its slots held, which was wrong
   when `flush_open_slot` had already applied the fallback (it does not mark the retirement) or
   when no frame had applied the sampler's own first write; the revive now rewrites the object
-  in every slot. The rebuild test also runs ten full retargets, live counts `[21, 6, 2, 32]`
-  after step F; without the fix the first retarget reaches 40 storage buffers. 61/61 captures
-  identical to the step E captures, 65/65 GPU tests, validation and sync validation silent
-  apart from the GPU-AV test's intended messages.
+  in every slot. The rebuild test runs with no module and with `render/post`, ten rebuilds and
+  ten full retargets each, and checks each frame matches the first build's; with no module the
+  live counts stay at `[21, 6, 2, 32]` after step F, where the first retarget used to reach 40
+  storage buffers. New GPU test `a_revived_sampler_keeps_its_settings`: a NEAREST sampler
+  revived before its first write, and again after both slots flushed the fallback, still
+  samples NEAREST (the earlier registry gave LINEAR's `[191, 0, 64]`). Commits `984e620`,
+  `2732e1d`. 61/61 captures identical to the step E captures, 66/66 GPU tests, validation and
+  sync validation silent apart from the GPU-AV test's intended messages.
 
 **F. Module contract.**
 
