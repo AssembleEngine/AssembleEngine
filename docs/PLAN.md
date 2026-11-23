@@ -5636,6 +5636,26 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
   `test_post.frag`/`test_post_storage.frag` and `render/legacy`, and refuse version-2 modules.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
+- **Units: interpolate rotation (required).** The instance stream carries `prev_x`/`prev_y` but
+  only the latest `rot`, so a unit's heading jumps once per tick (30 Hz) while its position moves
+  smoothly. Add `prev_rot` (4 columns, filled by `stream_rows` from the matched previous row, the
+  rotation itself for a new unit) and nlerp it by the same alpha in `units_common.glsl`, in the
+  darts', the models' and the shadow casters' vertex paths.
+- Shared frame constants (borrowed from Recoil's `UniformConstants`): one per-slot std140 block,
+  written once per frame at a fixed reserved uniform-array index that every shader reads through a
+  common include without a handle-table lookup. Contents: the camera's view, projection and
+  view-projection and their inverses, the camera position, the viewport size, the shadow cascades,
+  the sun, fog and photometry, time (sim tick, drawn sim seconds, the interpolation alpha, wall
+  seconds), the mouse (screen position, buttons, world position) and wind. The terrain, units,
+  particles and lights `FrameUbo`s keep only their own fields; the render module's per-frame
+  uniforms stay as they are.
+- Generate the GLSL declaration of the shared block (above) from its Rust struct at build time
+  (as Recoil's `GetGLSLDefinition` does from creg), so the two layouts cannot drift; the other
+  blocks stay hand-written and keep their `offset_of!` tests.
+- Units: upload rarely changing per-unit data (Recoil's `UpdateList`) as dirty ranges in a buffer
+  apart from the per-tick positions. This needs a stable per-entity slot (stream rows are rebuilt
+  in entity order every tick, so a row index is good for one tick only), allocated and freed as
+  `poser.rs` already does for the animation table, with the slot index as an instance attribute.
 - **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
   pre-commit hook is local (see `### M17 progress` for what it gates and its measured times), and
   several notes above wait on it (the `glslc`/SDL3 gating of `cargo test --workspace`, clippy on
