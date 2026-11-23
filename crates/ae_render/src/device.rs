@@ -357,10 +357,13 @@ impl GpuDevice {
             // Partially bound is not here: the global set requires it (M15),
             // so it is part of every candidate that gets this far.
             let gpu_driven = base.multi_draw_indirect == vk::TRUE && features11.shader_draw_parameters == vk::TRUE;
-            // M15: the global set's four arrays. Vulkan 1.3 makes the minimum
+            // M15: the global set's arrays. Vulkan 1.3 makes the minimum
             // descriptor-indexing set mandatory (given the promoted
             // VK_EXT_descriptor_indexing), but not the storage-image
-            // dynamic/non-uniform flags, so they are checked here too.
+            // dynamic/non-uniform flags, so they are checked here too. The
+            // uniform array (binding 4) is indexed only with dynamically
+            // uniform values (push words and handle-table words), so it
+            // needs dynamic indexing and not the non-uniform flag.
             let bindless = features12b.descriptor_indexing == vk::TRUE
                 && features12b.runtime_descriptor_array == vk::TRUE
                 && features12b.descriptor_binding_partially_bound == vk::TRUE
@@ -369,7 +372,8 @@ impl GpuDevice {
                 && features12b.shader_storage_image_array_non_uniform_indexing == vk::TRUE
                 && base.shader_sampled_image_array_dynamic_indexing == vk::TRUE
                 && base.shader_storage_buffer_array_dynamic_indexing == vk::TRUE
-                && base.shader_storage_image_array_dynamic_indexing == vk::TRUE;
+                && base.shader_storage_image_array_dynamic_indexing == vk::TRUE
+                && base.shader_uniform_buffer_array_dynamic_indexing == vk::TRUE;
             if !bindless {
                 let name = properties
                     .device_name_as_c_str()
@@ -379,7 +383,7 @@ impl GpuDevice {
                     format!(
                         "{name} lacks the descriptor-indexing feature subset M15 needs \
                          (runtimeDescriptorArray, partially bound, and dynamic/non-uniform \
-                         sampled-image, storage-image and storage-buffer arrays)"
+                         sampled-image, storage-image and storage-buffer arrays, dynamic uniform-buffer arrays)"
                     )
                 });
                 continue;
@@ -478,7 +482,8 @@ impl GpuDevice {
             .multi_draw_indirect(gpu_driven)
             .shader_sampled_image_array_dynamic_indexing(true)
             .shader_storage_buffer_array_dynamic_indexing(true)
-            .shader_storage_image_array_dynamic_indexing(true);
+            .shader_storage_image_array_dynamic_indexing(true)
+            .shader_uniform_buffer_array_dynamic_indexing(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&extensions)

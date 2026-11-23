@@ -31,11 +31,33 @@ pub const SAMPLED_IMAGE_CAPACITY: u32 = 4096;
 pub const SAMPLER_CAPACITY: u32 = 64;
 pub const STORAGE_IMAGE_CAPACITY: u32 = 256;
 pub const STORAGE_BUFFER_CAPACITY: u32 = 1024;
-/// `std140` blocks that were `uniform` buffers before M15 (the frame blocks,
-/// the tileset table, the engine programs' blocks) and the passes' handle
-/// tables. A storage buffer costs noticeably more per access on some
-/// drivers, so these keep their own binding (M15 G).
-pub const UNIFORM_BUFFER_CAPACITY: u32 = 64;
+/// The uniform-buffer array (binding 4) holds the `std140` blocks that were
+/// `uniform` buffers before M15 (the frame blocks, the tileset table, the
+/// engine programs' blocks) and the passes' handle tables. A storage buffer
+/// costs noticeably more per access on some drivers, so these keep their own
+/// binding (M15 G). Its size comes from the device
+/// ([`uniform_buffer_capacity`]): at least this many entries, or the device
+/// is refused. With `render/post` loaded 22 are live, and a rebuild holds the
+/// old and the new set until the retired ones flush.
+pub const UNIFORM_BUFFER_MIN: u32 = 64;
+/// The most uniform-buffer entries the array takes when the device allows
+/// more: each fullscreen program holds two (its block and its table).
+pub const UNIFORM_BUFFER_MAX: u32 = 1024;
+
+/// The fixed classes' descriptors, all stages.
+const FIXED_DESCRIPTORS: u32 =
+    SAMPLED_IMAGE_CAPACITY + SAMPLER_CAPACITY + STORAGE_IMAGE_CAPACITY + STORAGE_BUFFER_CAPACITY;
+
+/// The uniform-buffer array's size on a device: the device's per-stage and
+/// per-set uniform-buffer limits and what `maxPerStageResources` leaves after
+/// the fixed classes, capped at [`UNIFORM_BUFFER_MAX`]. [`check_limits`]
+/// refuses a device where this is below [`UNIFORM_BUFFER_MIN`].
+pub fn uniform_buffer_capacity(limits: &vk::PhysicalDeviceLimits) -> u32 {
+    UNIFORM_BUFFER_MAX
+        .min(limits.max_per_stage_descriptor_uniform_buffers)
+        .min(limits.max_descriptor_set_uniform_buffers)
+        .min(limits.max_per_stage_resources.saturating_sub(FIXED_DESCRIPTORS))
+}
 
 pub const BINDING_SAMPLED_IMAGE: u32 = 0;
 pub const BINDING_SAMPLER: u32 = 1;
@@ -245,7 +267,7 @@ pub fn check_limits(limits: &vk::PhysicalDeviceLimits) -> Result<(), String> {
         ),
         (
             "uniform buffers",
-            UNIFORM_BUFFER_CAPACITY,
+            UNIFORM_BUFFER_MIN,
             limits.max_per_stage_descriptor_uniform_buffers,
             limits.max_descriptor_set_uniform_buffers,
         ),
@@ -258,11 +280,7 @@ pub fn check_limits(limits: &vk::PhysicalDeviceLimits) -> Result<(), String> {
             ));
         }
     }
-    let total = SAMPLED_IMAGE_CAPACITY
-        + SAMPLER_CAPACITY
-        + STORAGE_IMAGE_CAPACITY
-        + STORAGE_BUFFER_CAPACITY
-        + UNIFORM_BUFFER_CAPACITY;
+    let total = FIXED_DESCRIPTORS + UNIFORM_BUFFER_MIN;
     if limits.max_per_stage_resources < total {
         return Err(format!(
             "the bindless set's {total} descriptors exceed the device's maxPerStageResources {}",
@@ -518,6 +536,7 @@ impl Bindless {
         anyhow::ensure!(frames > 0, "frames_in_flight must be positive");
         let properties = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) };
         check_limits(&properties.limits).map_err(|err| anyhow::anyhow!("{err}"))?;
+        let uniform_capacity = uniform_buffer_capacity(&properties.limits);
         let device = &gpu.device;
         let stages = vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE;
         let bindings = [
@@ -544,7 +563,7 @@ impl Bindless {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(BINDING_UNIFORM_BUFFER)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(UNIFORM_BUFFER_CAPACITY)
+                .descriptor_count(uniform_capacity)
                 .stage_flags(stages),
         ];
         let flags = [vk::DescriptorBindingFlags::PARTIALLY_BOUND; 5];
@@ -576,7 +595,7 @@ impl Bindless {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: UNIFORM_BUFFER_CAPACITY * n,
+                descriptor_count: uniform_capacity * n,
             },
         ];
         let pool = unsafe {
@@ -683,7 +702,7 @@ impl Bindless {
             samplers: Slab::new("sampler", 1, SAMPLER_CAPACITY, 0),
             storage_images: Slab::new("storage image", 1, STORAGE_IMAGE_CAPACITY, 0),
             storage_buffers: Slab::new("storage buffer", 1, STORAGE_BUFFER_CAPACITY, 0),
-            uniform_buffers: Slab::new("uniform buffer", 1, UNIFORM_BUFFER_CAPACITY, 0),
+            uniform_buffers: Slab::new("uniform buffer", 1, uniform_capacity, 0),
             pending: (0..frames).map(|_| Vec::new()).collect(),
             retiring: Vec::new(),
             groups: Vec::new(),
@@ -1513,6 +1532,12 @@ impl Bindless {
         ]
     }
 
+    /// The uniform-buffer array's size on this device
+    /// ([`uniform_buffer_capacity`]).
+    pub fn uniform_buffer_capacity(&self) -> u32 {
+        self.uniform_buffers.capacity
+    }
+
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
         unsafe {
@@ -1685,8 +1710,8 @@ mod tests {
             max_descriptor_set_storage_images: STORAGE_IMAGE_CAPACITY,
             max_per_stage_descriptor_storage_buffers: STORAGE_BUFFER_CAPACITY,
             max_descriptor_set_storage_buffers: STORAGE_BUFFER_CAPACITY,
-            max_per_stage_descriptor_uniform_buffers: UNIFORM_BUFFER_CAPACITY,
-            max_descriptor_set_uniform_buffers: UNIFORM_BUFFER_CAPACITY,
+            max_per_stage_descriptor_uniform_buffers: UNIFORM_BUFFER_MIN,
+            max_descriptor_set_uniform_buffers: UNIFORM_BUFFER_MIN,
             max_per_stage_resources: u32::MAX,
             ..Default::default()
         };
@@ -1695,8 +1720,28 @@ mod tests {
         let err = check_limits(&limits).unwrap_err();
         assert!(err.contains("storage buffers"), "{err}");
         limits.max_descriptor_set_storage_buffers = STORAGE_BUFFER_CAPACITY;
-        limits.max_per_stage_descriptor_uniform_buffers = UNIFORM_BUFFER_CAPACITY - 1;
+        limits.max_per_stage_descriptor_uniform_buffers = UNIFORM_BUFFER_MIN - 1;
         let err = check_limits(&limits).unwrap_err();
         assert!(err.contains("uniform buffers") && err.contains("64"), "{err}");
+    }
+
+    /// The uniform array takes what the device allows, between the floor
+    /// [`check_limits`] enforces and [`UNIFORM_BUFFER_MAX`].
+    #[test]
+    fn the_uniform_array_is_sized_from_the_device() {
+        let mut limits = vk::PhysicalDeviceLimits {
+            max_per_stage_descriptor_uniform_buffers: 1_048_576,
+            max_descriptor_set_uniform_buffers: 1_048_576,
+            max_per_stage_resources: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(uniform_buffer_capacity(&limits), UNIFORM_BUFFER_MAX);
+        limits.max_per_stage_descriptor_uniform_buffers = 90;
+        assert_eq!(uniform_buffer_capacity(&limits), 90);
+        limits.max_descriptor_set_uniform_buffers = 72;
+        assert_eq!(uniform_buffer_capacity(&limits), 72);
+        // maxPerStageResources is shared with the fixed classes.
+        limits.max_per_stage_resources = FIXED_DESCRIPTORS + 70;
+        assert_eq!(uniform_buffer_capacity(&limits), 70);
     }
 }

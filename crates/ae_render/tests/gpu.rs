@@ -852,6 +852,7 @@ fn terrain_renders_offscreen() {
 /// registry's live counts, which would otherwise exhaust the 64 samplers
 /// after about five, with no module and with `render/post` (whose programs
 /// are declared again after each rebuild and still draw the same frame).
+/// Then the uniform array is filled to the device's capacity.
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn rebuilding_the_renderer_does_not_leak_handles() {
@@ -912,8 +913,73 @@ fn rebuild_cycle(gpu: &Arc<GpuDevice>, module: Option<Vec<u8>>) {
             "{label}: step {step} draws a different frame"
         );
     }
+    fill_the_uniform_array(gpu, &mut headless, &mut app, target, baseline);
     headless.wait().unwrap();
     RenderApp::destroy(&mut app, gpu);
+}
+
+/// The uniform array (binding 4) is sized from the device, at least
+/// `UNIFORM_BUFFER_MIN` and at most `UNIFORM_BUFFER_MAX`: every entry the
+/// device gives can be written and used under a running scene, the next one
+/// is refused with the class named, and giving them back restores the
+/// counts and the frame.
+fn fill_the_uniform_array(
+    gpu: &Arc<GpuDevice>,
+    headless: &mut ae_render::thread::Headless<
+        <ae_render::terrain::app::TerrainApp as ae_render::thread::RenderApp>::Pass,
+    >,
+    app: &mut ae_render::terrain::app::TerrainApp,
+    target: ae_render::thread::TargetInfo,
+    baseline: [u32; ae_render::bindless::CLASS_COUNT],
+) {
+    use ae_render::bindless::{UNIFORM_BUFFER_MAX, UNIFORM_BUFFER_MIN, uniform_buffer_capacity};
+
+    let properties = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) };
+    let capacity = headless.bindless_mut().uniform_buffer_capacity();
+    assert_eq!(capacity, uniform_buffer_capacity(&properties.limits));
+    assert!(
+        (UNIFORM_BUFFER_MIN..=UNIFORM_BUFFER_MAX).contains(&capacity),
+        "{capacity}"
+    );
+    let first = app.readback().unwrap();
+    let mut block =
+        ae_render::upload::buffer(gpu, &[0u8; 256], vk::BufferUsageFlags::UNIFORM_BUFFER, "uniform fill").unwrap();
+    let free = capacity - baseline[4];
+    let ((), group) = headless
+        .bindless_mut()
+        .group(|bindless| {
+            for _ in 0..free {
+                bindless.whole_uniform_buffer(&block)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let err = headless
+        .bindless_mut()
+        .whole_uniform_buffer(&block)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("uniform buffer") && err.contains(&format!("capacity {capacity}")),
+        "{err}"
+    );
+    // A frame with every entry written, the highest index included.
+    headless.frames(app, 2).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(headless.stats().bindless_live[4], capacity);
+    headless.bindless_mut().retire_group(group);
+    // Retired indices come back once every frame slot has dropped them.
+    headless.frames(app, 2).unwrap();
+    headless.wait().unwrap();
+    // The frame adapts over frames (exposure), so compare after a rebuild,
+    // as the rebuild steps do.
+    ae_render::thread::RenderApp::create(app, gpu, headless.bindless_mut(), target, 2).unwrap();
+    headless.forget_external_states();
+    headless.frames(app, 4).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(headless.stats().bindless_live, baseline);
+    assert!(app.readback().unwrap() == first, "the frame after the fill");
+    block.destroy(gpu);
 }
 
 /// Units over the terrain: an instance stream of four units, reset + cull +
