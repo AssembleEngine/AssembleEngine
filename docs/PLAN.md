@@ -4832,7 +4832,7 @@ require `VK_EXT_descriptor_buffer`; whether modules move to handles immediately 
 per-sampler bindings for a version; how the editor and the frame-graph visualiser name
 handles. The design below proposes an answer to each.
 
-#### M15 — design (2026-11-22; steps A–C built, B without library-owned externals)
+#### M15 — design (2026-11-22; steps A–D built, B without library-owned externals)
 
 This design is for the agent that implements M15. It turns the outline above into steps A–G. Do
 them in order and commit each step with its own `docs:` commit. Where this section differs from
@@ -5211,6 +5211,51 @@ set at index 2 next to their old sets. How handles reach a shader:
 - Storage images through binding 2.
 - Acceptance: `capture-diff` identical. No `update_descriptor_sets` call is left in any `record*`
   function; a grep in the step's checks shows it.
+
+  Built (2026-11-23, `e2086b7`). The terrain, water, CBT compute, the lights' culls, the units and
+  models, every particle pass and exposure keep no descriptor sets of their own. Verified against
+  `5635522`:
+  - All 61 GPU-test captures are byte-identical.
+  - 59 of 59 GPU tests pass, with the validation and sync validation layers reporting nothing.
+  - The workspace tests, `fmt --check` and clippy are clean.
+  - Handle tables (`bindless::HandleTable`): each pass has one storage buffer of global indices,
+    written once at creation. Its own index is push word 8 (`AE_TABLE`), and
+    `AE_BUF(k)` is the k-th index in it. Every per-pass buffer is either fixed or a slotted
+    handle (`Bindless::per_slot_buffer`, one index whose slot-k descriptor is the slot's
+    buffer), so no index changes from frame to frame and no table is rewritten. This departs
+    from the design's "fixed handles in the pass's existing uniform data": a separate table
+    leaves every CPU uniform struct untouched and gives every pass, including the passes without
+    a uniform block, the same mechanism. The cost is one extra dynamically uniform load per
+    buffer access, not yet measured (step G).
+  - The table slots are listed in each shader family's include: `terrain_common.glsl`,
+    `units_common.glsl` (the models' at 7–20), `particles_common.glsl` and
+    `exposure_meter.comp`.
+  - Former uniform blocks are `std140` buffer blocks aliasing binding 3, so their offsets are
+    unchanged (checked with `spirv-dis`). Their buffers have `STORAGE_BUFFER` usage instead of
+    `UNIFORM_BUFFER`.
+  - Shaders keep their identifiers. Each block is an array (`ae_<Block>[]`), and a macro maps
+    each old member or instance name to `ae_<Block>[AE_BUF(k)].member`. Three names collided
+    with other members, so their buffer side is renamed: the terrain's vision planes are
+    `visionPlanes` (the frame block has `vision`), the models' animation table is `animTable`
+    (`u.anim`), and a local `u` in `blackBody` is `cu`.
+  - Lights: `lights.glsl` takes its three handles (the frame block, the list, the clusters)
+    from the including pass's table at `AE_LIGHT_BASE`: terrain 10, units 4, particles 14, and
+    the culls themselves 0. The shared set 1 is gone from every layout.
+  - Exposure: the meter takes terrain's vision planes as a slotted index in push word 2, so its
+    last per-frame write is gone. The exposure image is a storage image at binding 2.
+  - Particles: the four pipeline layouts are now one. The half targets' reference and froxel
+    buffers, and the packets' masks, puffs and targets, are slotted and updated in
+    `ensure_half`/`ensure_packets`.
+  - Pipeline layouts are `Bindless::layouts(at)`: empty set layouts below the global one, at 2
+    for terrain, exposure and the lights, at 3 for units and particles. Step E renumbers them.
+  - `tests/bindless_only.rs` (no GPU) fails if a source outside `bindless.rs`, `pipeline.rs`,
+    `fullscreen.rs`, `demo.rs` and `upload.rs` creates, allocates or writes a descriptor set, or
+    if a shader outside its list declares a numbered set.
+  - Still on their own sets: the module `FullscreenProgram` and the engine `BindlessProgram`'s
+    set-0 uniform block (tonemap, bloom, encode). Both are the module contract's shape and move
+    in step F, so the design's "fullscreen UBOs, engine side" item moved there. Also
+    `demo.rs` (step E) and `upload.rs`'s mip generator (stays). The only descriptor write left
+    in a `record*` function is `FullscreenProgram::record`'s (step F).
 
 **E. Retire the per-pass layouts.**
 
