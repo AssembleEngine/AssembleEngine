@@ -57,6 +57,8 @@ pub enum Blend {
     /// can also add light (`a` 0 with a colour adds it), which straight
     /// alpha cannot do in a UNORM target (sources clamp to 1).
     Premultiplied,
+    /// Premultiplied over RGB with an unchanged attachment alpha.
+    PremultipliedRgb,
     /// `src + dst` (colour and alpha): sums in any order.
     Additive,
     /// Colour `src + dst`, alpha `max(src, dst)`: both in any order.
@@ -66,6 +68,14 @@ pub enum Blend {
 }
 
 pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Result<vk::Pipeline> {
+    graphics_pipeline_with_front_face(device, desc, false)
+}
+
+pub(crate) fn graphics_pipeline_with_front_face(
+    device: &ash::Device,
+    desc: &GraphicsDesc<'_>,
+    dynamic_front_face: bool,
+) -> Result<vk::Pipeline> {
     let vertex = shader_module(device, desc.vertex)?;
     let fragment = shader_module(device, desc.fragment)?;
     let stages = [
@@ -94,7 +104,10 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(blend != Blend::Off)
             .src_color_blend_factor(
-                if matches!(blend, Blend::Premultiplied | Blend::Additive | Blend::AdditiveMaxAlpha) {
+                if matches!(
+                    blend,
+                    Blend::Premultiplied | Blend::PremultipliedRgb | Blend::Additive | Blend::AdditiveMaxAlpha
+                ) {
                     vk::BlendFactor::ONE
                 } else {
                     vk::BlendFactor::SRC_ALPHA
@@ -121,7 +134,11 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
             } else {
                 vk::BlendOp::ADD
             })
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .color_write_mask(if blend == Blend::PremultipliedRgb {
+                vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B
+            } else {
+                vk::ColorComponentFlags::RGBA
+            })
     };
     let glow_slot = desc.color_formats.get(1) == Some(&vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32));
     let attachment: Vec<_> = desc
@@ -137,8 +154,13 @@ pub fn graphics_pipeline(device: &ash::Device, desc: &GraphicsDesc<'_>) -> Resul
         })
         .collect();
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::FRONT_FACE,
+    ];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&dynamic_states[..2 + usize::from(dynamic_front_face)]);
     let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(desc.color_formats);
     let depth_stencil = match desc.depth {
         Some(depth) => {

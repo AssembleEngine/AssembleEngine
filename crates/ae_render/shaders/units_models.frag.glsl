@@ -16,8 +16,13 @@ layout(location = 3) in vec4 inUv;
 layout(location = 4) in vec4 inColor;
 layout(location = 5) flat in uint inMaterial;
 
+#ifdef SUB
+layout(location = 6) flat in float inSceneAlpha;
+#endif
 layout(location = 0) out vec4 outColor;
+#ifndef MIRROR
 layout(location = 1) out vec4 outGlow;
+#endif
 
 // Texture k of the material (0 base colour, 1 normal, 2 occlusion,
 // 3 emissive) at its UV set, through its KHR_texture_transform.
@@ -66,7 +71,7 @@ void main() {
     base.rgb = aeToWorking(base.rgb, wide);
     vec3 n = normalize(inNormal);
     vec3 t = inTangent.xyz;
-    if (m.params.z > 0.5 && dot(n, u.camPos.xyz - inWorld) < 0.0) {
+    if (m.params.z > 0.5 && dot(n, UNIT_VIEW_POS - inWorld) < 0.0) {
         n = -n;
         t = -t;
     }
@@ -92,7 +97,7 @@ void main() {
     }
     roughness = max(roughness, 0.04);
 
-    vec3 v = normalize(u.camPos.xyz - inWorld);
+    vec3 v = normalize(UNIT_VIEW_POS - inWorld);
     vec3 tint;
     float units = unitSunAt(inWorld, n, tint);
     // Illuminance (lux) before the cosine; the particles' tint colours the
@@ -107,13 +112,20 @@ void main() {
     // it as luminance in cd/m² at this scale (documented in lighting.md).
     vec3 emitted = emissive * 19660.8;
     color += emitted;
+#ifndef MIRROR
     if (lightsOn()) {
         color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, n, v, s);
     }
-    float dist = distance(inWorld, u.camPos.xyz);
+#endif
+    float dist = distance(inWorld, UNIT_VIEW_POS);
     float fog = 1.0 - exp(-pow(dist * u.fog.w, 1.5));
     outColor = vec4(mix(color, u.fog.rgb, fog) * u.photometry.x, 1.0);
+#ifdef SUB
+    outColor.a = inSceneAlpha;
+#endif
     // The bloom's light sources: the material's emission, after the same
     // fog the scene sees (a fogged model's emission is not a light source).
+#ifndef MIRROR
     outGlow = vec4(emitted * (1.0 - fog) * u.photometry.x, 1.0);
+#endif
 }

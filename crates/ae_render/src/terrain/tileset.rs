@@ -601,6 +601,27 @@ fn layer(
     }
 }
 
+pub(crate) const SEABED_SIZE: u32 = 128;
+
+/// Mipped albedo layers for refractive terrain. Sand carries both the
+/// ripple pattern and fine grain, with separate weed and pebble patches.
+pub(crate) fn seabed_layers() -> [Vec<u8>; 3] {
+    [
+        Recipe::Sand {
+            light: [0.48, 0.43, 0.28],
+            dark: [0.23, 0.19, 0.12],
+            ripples: 0.0,
+        },
+        Recipe::Forest,
+        Recipe::Pebbles {
+            stone: [0.36, 0.33, 0.28],
+            fill: [0.17, 0.15, 0.11],
+            cells: 9,
+        },
+    ]
+    .map(|recipe| generate(recipe, SEABED_SIZE, 1934, 0.0).0)
+}
+
 /// The per-layer roughness of a tileset, in its layer order (the sets below
 /// give each surface a plausible specular response: grass and scrub matte,
 /// sand a little sheen, rock smoother, wet beds and mud glossy).

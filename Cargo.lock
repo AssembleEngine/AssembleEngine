@@ -26,6 +26,7 @@ dependencies = [
  "ae_bench",
  "ae_bot",
  "ae_catalog",
+ "ae_framegraph",
  "ae_map",
  "ae_model",
  "ae_nav",
@@ -39,6 +40,7 @@ dependencies = [
  "ash",
  "embed-resource",
  "glam",
+ "gpu-allocator",
  "rayon",
 ]
 
@@ -256,6 +258,7 @@ dependencies = [
  "ae_framegraph",
  "ae_gltf",
  "ae_model",
+ "ae_nav",
  "ae_render_abi",
  "anyhow",
  "ash",

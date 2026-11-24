@@ -39,6 +39,7 @@ use crate::models::{self, ModelSet};
 use crate::pipeline::{self, Blend, DepthState, GraphicsDesc, spirv};
 use crate::terrain::renderer::{TerrainInfo, TerrainRenderer, frustum_planes};
 use crate::upload;
+use crate::water::reflect::{self, MirrorFrame};
 use ae_framegraph::BufferDesc;
 use anyhow::{Context as _, Result, ensure};
 use ash::vk;
@@ -57,15 +58,32 @@ use std::time::Instant;
 /// finds its two animation records in the animation table (what the
 /// streams' [`InstanceStream::anim`] wrote; see [`RECORD_CELLS`]), with
 /// [`POSE_MANUAL`] set when either record shows a manual joint, or
-/// [`NO_POSE`] for the rest pose. Every other attribute is an `f32`.
-pub const ATTRIBUTES: [&str; 11] = [
-    "x", "y", "prev_x", "prev_y", "rot_x", "rot_y", "rot_z", "rot_w", "radius", "class", "pose",
+/// [`NO_POSE`] for the rest pose. `water` is depth in metres below the
+/// surface (zero on land or at the surface). `view` is the `u32` observer
+/// state: Own=0, Seen=1, Blip=2, Ghost=3. Unfiltered streams use Own.
+/// All attributes other than `class`, `pose` and `view` are `f32`.
+pub const ATTRIBUTES: [&str; 13] = [
+    "x", "y", "prev_x", "prev_y", "rot_x", "rot_y", "rot_z", "rot_w", "radius", "class", "pose", "water", "view",
 ];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
+/// The position's columns (`x`, `y`), the previous tick's (`prev_x`,
+/// `prev_y`), and the `radius` column.
+pub const ATTR_X: usize = 0;
+pub const ATTR_Y: usize = 1;
+pub const ATTR_PREV_X: usize = 2;
+pub const ATTR_PREV_Y: usize = 3;
+pub const ATTR_RADIUS: usize = 8;
 /// The `class` attribute's column.
 pub const ATTR_CLASS: usize = 9;
 /// The `pose` attribute's column.
 pub const ATTR_POSE: usize = 10;
+/// The `water` attribute's column.
+pub const ATTR_WATER: usize = 11;
+/// The `view` attribute's column.
+pub const ATTR_VIEW: usize = 12;
+/// The highest `view` state whose position is current (Own=0, Seen=1).
+/// `units_common.glsl`'s `eligible` accepts the states up to it.
+pub const VIEW_SEEN: u32 = 1;
 /// The `pose` of a unit drawn at its model's rest pose.
 pub const NO_POSE: u32 = u32::MAX;
 /// Set in a `pose` other than [`NO_POSE`] when either of the unit's
@@ -448,6 +466,25 @@ struct Models {
     caster: Option<(vk::Pipeline, vk::Pipeline)>,
 }
 
+struct UnitReflection {
+    cull: vk::Pipeline,
+    darts: vk::Pipeline,
+    models: Option<[vk::Pipeline; 2]>,
+    /// The same with floating hulls riding the full tier's waves.
+    riding: [vk::Pipeline; 3],
+}
+
+struct UnitRefraction {
+    cull: vk::Pipeline,
+    lights: Option<vk::Pipeline>,
+    darts: vk::Pipeline,
+    models: Option<[vk::Pipeline; 2]>,
+    /// The shadow casters, placing submerged rows at their depth as the
+    /// draws do (`None` where the base renderer has no caster).
+    caster: Option<vk::Pipeline>,
+    model_casters: Option<(vk::Pipeline, vk::Pipeline)>,
+}
+
 pub struct UnitRenderer {
     capacity: u32,
     /// With models: their GPU side (the darts' pipelines then use the
@@ -467,6 +504,13 @@ pub struct UnitRenderer {
     table: crate::bindless::HandleTable,
     cull: vk::Pipeline,
     draw: vk::Pipeline,
+    reflection: Option<UnitReflection>,
+    refraction: Option<UnitRefraction>,
+    wave_draws: Option<[[vk::Pipeline; 3]; 2]>,
+    /// The shadow casters with floating hulls riding the waves (dart,
+    /// opaque, masked; without and with refraction; null where the base
+    /// renderer has no caster).
+    wave_casters: Option<[[vk::Pipeline; 3]; 2]>,
     /// Into the units' shadow map (`None` when the terrain renderer has
     /// only its stand-in).
     caster: Option<vk::Pipeline>,
@@ -474,8 +518,8 @@ pub struct UnitRenderer {
     casting: Vec<bool>,
     /// Per slot: the stream's columns, `capacity` words each.
     instances: Vec<OwnedBuffer>,
-    /// Per slot: `(tick, rows)` of the stream in `instances`.
-    uploaded: Vec<Option<(u64, u32)>>,
+    /// Per slot: `(tick, rows, refract)` of the stream in `instances`.
+    uploaded: Vec<Option<(u64, u32, bool)>>,
     /// The skinning palettes (`units.palette`): with models, each class's
     /// rest palette at its head; `units.pose` writes the rest.
     palette: OwnedBuffer,
@@ -515,7 +559,7 @@ impl Models {
     /// `slot`'s rows: each row's palette offset (its model's rest palette,
     /// or a range of its own when it has records in the table: a pose
     /// job), the pose jobs (rows with records, their scratch offsets).
-    fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize) {
+    fn write_rows(&mut self, slot: usize, stream: &InstanceStream, rows: usize, capacity: usize, refract: bool) {
         let class_of = |r: usize| (stream.columns[ATTR_CLASS][r] as usize).min(MAX_CLASSES - 1);
         let mut words = vec![0u32; 3 * capacity];
         // Model light offsets, in row order (the appended lights keep the
@@ -527,7 +571,7 @@ impl Models {
         let fit = self.table_cells;
         for r in 0..rows {
             let n = self.set.class_lights[class_of(r)][1];
-            if n > 0 {
+            if n > 0 && (!refract || stream.columns[ATTR_VIEW][r] <= VIEW_SEEN) {
                 offsets[r] = lights;
                 lights = lights.saturating_add(n);
             }
@@ -645,7 +689,9 @@ impl UnitRenderer {
                 OwnedBuffer::new(
                     gpu,
                     BufferDesc {
-                        size: size_of::<FrameUbo>() as u64,
+                        size: (size_of::<FrameUbo>()
+                            + usize::from(terrain.info().water_level.is_some()) * size_of::<MirrorFrame>())
+                            as u64,
                         usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
@@ -815,6 +861,10 @@ impl UnitRenderer {
             table,
             cull,
             draw,
+            reflection: None,
+            refraction: None,
+            wave_draws: None,
+            wave_casters: None,
             caster,
             casting: vec![false; frames_in_flight],
             instances,
@@ -1120,13 +1170,24 @@ impl UnitRenderer {
 
     /// Rows of `slot`'s stream (after [`Self::write_frame`]).
     pub fn rows(&self, slot: usize) -> u32 {
-        self.uploaded[slot].map_or(0, |(_, rows)| rows)
+        self.uploaded[slot].map_or(0, |(_, rows, _)| rows)
     }
 
     /// Uniforms for `slot`, the latest stream's columns from `feed` when it
     /// is newer than the slot's copy, and the cells the animation table
     /// lacks (the slot's previous submission has completed).
     pub fn write_frame(&mut self, slot: usize, frame: &UnitFrame, feed: &UnitFeed, now: Instant) {
+        self.write_frame_with_water(slot, frame, feed, now, false);
+    }
+
+    pub(crate) fn write_frame_with_water(
+        &mut self,
+        slot: usize,
+        frame: &UnitFrame,
+        feed: &UnitFeed,
+        now: Instant,
+        refract: bool,
+    ) {
         let stream = match &mut self.models {
             Some(m) => m.take(slot, feed),
             None => feed.latest(),
@@ -1137,7 +1198,7 @@ impl UnitRenderer {
             Some(stream) => {
                 alpha = stream.alpha(now);
                 let rows = stream.len().min(self.capacity as usize) as u32;
-                if self.uploaded[slot] != Some((stream.tick, rows)) {
+                if self.uploaded[slot] != Some((stream.tick, rows, refract)) {
                     let capacity = self.capacity as usize;
                     if let Some(bytes) = self.instances[slot].mapped() {
                         for (a, column) in stream.columns.iter().enumerate() {
@@ -1147,9 +1208,9 @@ impl UnitRenderer {
                         }
                     }
                     if let Some(m) = &mut self.models {
-                        m.write_rows(slot, stream, rows as usize, self.capacity as usize);
+                        m.write_rows(slot, stream, rows as usize, self.capacity as usize, refract);
                     }
-                    self.uploaded[slot] = Some((stream.tick, rows));
+                    self.uploaded[slot] = Some((stream.tick, rows, refract));
                 }
             }
             None => self.uploaded[slot] = None,
@@ -1194,7 +1255,394 @@ impl UnitRenderer {
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
+            if self.reflection.is_some()
+                && let Some(level) = i.water_level
+            {
+                MirrorFrame::new(frame.view_proj, frame.cam_pos, level).write(bytes, size_of::<FrameUbo>());
+            }
         }
+    }
+
+    pub(crate) fn prepare_reflection(
+        &mut self,
+        device: &ash::Device,
+        color: vk::Format,
+        depth: vk::Format,
+    ) -> Result<()> {
+        if self.reflection.is_some() {
+            return Ok(());
+        }
+        let graphics = |vertex: &[u8], fragment: &[u8]| {
+            pipeline::graphics_pipeline_with_front_face(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: self.pipeline_layout,
+                    color_formats: &[color],
+                    depth: Some(DepthState {
+                        format: depth,
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                    glow_blend: Blend::Off,
+                },
+                true,
+            )
+        };
+        let create = |i| match i {
+            0 => pipeline::compute_pipeline(
+                device,
+                if self.models.is_some() {
+                    spirv!("units_models_cull_mirror.comp")
+                } else {
+                    spirv!("units_cull_mirror.comp")
+                },
+                self.pipeline_layout,
+            ),
+            1 => graphics(spirv!("units_mirror.vert"), spirv!("units_mirror.frag")),
+            2 => graphics(
+                spirv!("units_models_mirror.vert"),
+                spirv!("units_models_opaque_mirror.frag"),
+            ),
+            _ => graphics(
+                spirv!("units_models_mirror.vert"),
+                spirv!("units_models_masked_mirror.frag"),
+            ),
+        };
+        let (cull, darts, models) = if self.models.is_some() {
+            let [cull, darts, opaque, masked] = reflect::pipelines(device, create)?;
+            (cull, darts, Some([opaque, masked]))
+        } else {
+            let [cull, darts] = reflect::pipelines(device, create)?;
+            (cull, darts, None)
+        };
+        let has_models = self.models.is_some();
+        let riding = reflect::pipelines(device, |i| match i {
+            0 => graphics(spirv!("units_mirror_wave.vert"), spirv!("units_mirror.frag")),
+            1 if has_models => graphics(
+                spirv!("units_models_mirror_wave.vert"),
+                spirv!("units_models_opaque_mirror.frag"),
+            ),
+            2 if has_models => graphics(
+                spirv!("units_models_mirror_wave.vert"),
+                spirv!("units_models_masked_mirror.frag"),
+            ),
+            _ => Ok(vk::Pipeline::null()),
+        });
+        let riding = match riding {
+            Ok(riding) => riding,
+            Err(err) => {
+                for pipeline in [cull, darts].into_iter().chain(models.into_iter().flatten()) {
+                    unsafe { device.destroy_pipeline(pipeline, None) };
+                }
+                return Err(err);
+            }
+        };
+        self.reflection = Some(UnitReflection {
+            cull,
+            darts,
+            models,
+            riding,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn prepare_refraction(
+        &mut self,
+        device: &ash::Device,
+        color: vk::Format,
+        depth: vk::Format,
+    ) -> Result<()> {
+        if self.refraction.is_some() {
+            return Ok(());
+        }
+        let graphics = |vertex: &[u8], fragment: &[u8]| {
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: self.pipeline_layout,
+                    color_formats: &[color, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)],
+                    depth: Some(DepthState {
+                        format: depth,
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                    glow_blend: Blend::Off,
+                },
+            )
+        };
+        let cull_shader: &[u8] = if self.models.is_some() {
+            spirv!("units_models_cull_sub.comp")
+        } else {
+            spirv!("units_cull_sub.comp")
+        };
+        let create = |i| match i {
+            0 => pipeline::compute_pipeline(device, cull_shader, self.pipeline_layout),
+            1 => graphics(spirv!("units_sub.vert"), spirv!("units_sub.frag")),
+            2 => graphics(spirv!("units_models_sub.vert"), spirv!("units_models_opaque_sub.frag")),
+            3 => graphics(spirv!("units_models_sub.vert"), spirv!("units_models_masked_sub.frag")),
+            _ => pipeline::compute_pipeline(device, spirv!("units_lights_sub.comp"), self.pipeline_layout),
+        };
+        let (cull, darts, models, lights) = if self.models.is_some() {
+            let [cull, darts, opaque, masked, lights] = reflect::pipelines(device, create)?;
+            (cull, darts, Some([opaque, masked]), Some(lights))
+        } else {
+            let [cull, darts] = reflect::pipelines(device, create)?;
+            (cull, darts, None, None)
+        };
+        // Depth-only, into the units' shadow map, like the base casters.
+        let shadow = |vertex: &[u8], fragment: &[u8]| {
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: self.pipeline_layout,
+                    color_formats: &[],
+                    depth: Some(DepthState {
+                        format: crate::shadow::format(),
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                    glow_blend: Blend::Off,
+                },
+            )
+        };
+        let dart_casts = self.caster.is_some();
+        let model_casts = self.models.as_ref().is_some_and(|m| m.caster.is_some());
+        // A caster the base renderer lacks stays null (destroying it is a no-op).
+        let casters = reflect::pipelines(device, |i| match i {
+            0 if dart_casts => shadow(spirv!("units_shadow_sub.vert"), spirv!("units_shadow.frag")),
+            1 if model_casts => shadow(spirv!("units_models_shadow_sub.vert"), spirv!("units_shadow.frag")),
+            2 if model_casts => shadow(
+                spirv!("units_models_shadow_masked_sub.vert"),
+                spirv!("units_models_shadow_masked.frag"),
+            ),
+            _ => Ok(vk::Pipeline::null()),
+        });
+        let [caster, opaque_caster, masked_caster] = match casters {
+            Ok(casters) => casters,
+            Err(err) => {
+                for pipeline in [cull, darts]
+                    .into_iter()
+                    .chain(lights)
+                    .chain(models.into_iter().flatten())
+                {
+                    unsafe { device.destroy_pipeline(pipeline, None) };
+                }
+                return Err(err);
+            }
+        };
+        self.refraction = Some(UnitRefraction {
+            cull,
+            darts,
+            models,
+            lights,
+            caster: dart_casts.then_some(caster),
+            model_casters: model_casts.then_some((opaque_caster, masked_caster)),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn prepare_waves(&mut self, device: &ash::Device, color: vk::Format, depth: vk::Format) -> Result<()> {
+        if self.wave_draws.is_some() {
+            return Ok(());
+        }
+        let variants: [[(&[u8], &[u8]); 3]; 2] = [
+            [
+                (spirv!("units_wave.vert"), spirv!("units.frag")),
+                (spirv!("units_models_wave.vert"), spirv!("units_models_opaque.frag")),
+                (spirv!("units_models_wave.vert"), spirv!("units_models_masked.frag")),
+            ],
+            [
+                (spirv!("units_wave_sub.vert"), spirv!("units_sub.frag")),
+                (
+                    spirv!("units_models_wave_sub.vert"),
+                    spirv!("units_models_opaque_sub.frag"),
+                ),
+                (
+                    spirv!("units_models_wave_sub.vert"),
+                    spirv!("units_models_masked_sub.frag"),
+                ),
+            ],
+        ];
+        let built = reflect::pipelines(device, |i| {
+            let (vertex, fragment) = variants[i / 3][i % 3];
+            if i % 3 != 0 && self.models.is_none() {
+                return Ok(vk::Pipeline::null());
+            }
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: self.pipeline_layout,
+                    color_formats: &[color, vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32)],
+                    depth: Some(DepthState {
+                        format: depth,
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                    glow_blend: Blend::Off,
+                },
+            )
+        })?;
+        let [dart, opaque, masked, sub_dart, sub_opaque, sub_masked] = built;
+        self.wave_draws = Some([[dart, opaque, masked], [sub_dart, sub_opaque, sub_masked]]);
+        // The casters, depth-only into the units' shadow map like the base
+        // ones; one the base renderer lacks stays null.
+        let dart_casts = self.caster.is_some();
+        let model_casts = self.models.as_ref().is_some_and(|m| m.caster.is_some());
+        let casters: [(&[u8], &[u8]); 6] = [
+            (spirv!("units_shadow_wave.vert"), spirv!("units_shadow.frag")),
+            (spirv!("units_models_shadow_wave.vert"), spirv!("units_shadow.frag")),
+            (
+                spirv!("units_models_shadow_masked_wave.vert"),
+                spirv!("units_models_shadow_masked.frag"),
+            ),
+            (spirv!("units_shadow_wave_sub.vert"), spirv!("units_shadow.frag")),
+            (spirv!("units_models_shadow_wave_sub.vert"), spirv!("units_shadow.frag")),
+            (
+                spirv!("units_models_shadow_masked_wave_sub.vert"),
+                spirv!("units_models_shadow_masked.frag"),
+            ),
+        ];
+        let built = reflect::pipelines(device, |i| {
+            if !(if i % 3 == 0 { dart_casts } else { model_casts }) {
+                return Ok(vk::Pipeline::null());
+            }
+            let (vertex, fragment) = casters[i];
+            pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex,
+                    fragment,
+                    layout: self.pipeline_layout,
+                    color_formats: &[],
+                    depth: Some(DepthState {
+                        format: crate::shadow::format(),
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
+                    }),
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::Off,
+                    glow_blend: Blend::Off,
+                },
+            )
+        })?;
+        let [dart, opaque, masked, sub_dart, sub_opaque, sub_masked] = built;
+        self.wave_casters = Some([[dart, opaque, masked], [sub_dart, sub_opaque, sub_masked]]);
+        Ok(())
+    }
+
+    pub(crate) fn record_draw_waves(
+        &self,
+        ctx: &PassContext<'_>,
+        refract: bool,
+        patch: crate::water::waves::WavePatch,
+        waves: u32,
+    ) -> Result<()> {
+        let [darts, opaque, masked] = self.wave_draws.context("riding hull pipelines")?[usize::from(refract)];
+        let mut push = self.push;
+        patch.push(&mut push);
+        push.image(14, waves);
+        self.draw_units(
+            ctx,
+            self.indirect(),
+            push,
+            darts,
+            self.models.as_ref().map(|_| [opaque, masked]),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn record_draw_refract(&self, ctx: &PassContext<'_>, overlay: bool) -> Result<()> {
+        let refract = self.refraction.as_ref().context("unit refraction pipelines")?;
+        let mut push = self.push;
+        push.words[0] = u32::from(overlay);
+        self.draw_units(ctx, self.indirect(), push, refract.darts, refract.models);
+        Ok(())
+    }
+
+    pub(crate) fn record_reset_reflect(&self, ctx: &PassContext<'_>, indirect: BufferBinding) {
+        unsafe {
+            if let Some(m) = &self.models {
+                ctx.device.cmd_copy_buffer(
+                    ctx.cmd,
+                    m.template.buffer,
+                    indirect.buffer,
+                    &[vk::BufferCopy::default()
+                        .dst_offset(indirect.offset)
+                        .size(indirect.size)],
+                );
+            } else {
+                ctx.device.cmd_update_buffer(
+                    ctx.cmd,
+                    indirect.buffer,
+                    indirect.offset,
+                    pipeline::push_bytes(&[UNIT_VERTICES, 0, 0, 0]),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn record_cull_reflect(
+        &self,
+        ctx: &PassContext<'_>,
+        visible: BufferBinding,
+        indirect: BufferBinding,
+    ) -> Result<()> {
+        let rows = self.rows(ctx.slot);
+        if rows == 0 {
+            return Ok(());
+        }
+        let mirror = self.reflection.as_ref().context("unit reflection pipelines")?;
+        let mut push = self.push;
+        reflect::push_buffers(&mut push, visible, indirect)?;
+        unsafe {
+            ctx.device
+                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, mirror.cull);
+            self.bind_push(ctx, vk::PipelineBindPoint::COMPUTE, &push);
+            ctx.device.cmd_dispatch(ctx.cmd, rows.div_ceil(64), 1, 1);
+        }
+        Ok(())
+    }
+
+    /// The mirrored units; with `waves` (the full tier's patch and its
+    /// sampled index), floating hulls ride the waves as the draw has them.
+    pub(crate) fn record_draw_reflect(
+        &self,
+        ctx: &PassContext<'_>,
+        visible: BufferBinding,
+        indirect: BufferBinding,
+        waves: Option<(crate::water::waves::WavePatch, u32)>,
+    ) -> Result<()> {
+        let mirror = self.reflection.as_ref().context("unit reflection pipelines")?;
+        let mut push = self.push;
+        reflect::push_buffers(&mut push, visible, indirect)?;
+        let (darts, models) = match waves {
+            Some((patch, image)) => {
+                patch.push(&mut push);
+                push.image(14, image);
+                let [darts, opaque, masked] = mirror.riding;
+                (darts, mirror.models.map(|_| [opaque, masked]))
+            }
+            None => (mirror.darts, mirror.models),
+        };
+        unsafe { ctx.device.cmd_set_front_face(ctx.cmd, vk::FrontFace::CLOCKWISE) };
+        self.draw_units(ctx, indirect, push, darts, models);
+        Ok(())
     }
 
     /// Zero the instance count. Records inside a transfer pass that
@@ -1310,7 +1758,11 @@ impl UnitRenderer {
                 .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
             device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory));
             self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, m.lights_append);
+            let lights = self
+                .active_refraction(ctx.slot)
+                .and_then(|r| r.lights)
+                .unwrap_or(m.lights_append);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, lights);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
         true
@@ -1319,6 +1771,11 @@ impl UnitRenderer {
     /// Frustum culling. Records inside a compute pass that reads
     /// [`Self::instances`] and writes [`Self::visible`] and
     /// [`Self::indirect`].
+    fn active_refraction(&self, slot: usize) -> Option<&UnitRefraction> {
+        self.uploaded[slot].filter(|&(_, _, enabled)| enabled)?;
+        self.refraction.as_ref()
+    }
+
     pub fn record_cull(&self, ctx: &PassContext<'_>) {
         let rows = self.rows(ctx.slot);
         if rows == 0 {
@@ -1326,7 +1783,8 @@ impl UnitRenderer {
         }
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull);
+            let cull = self.active_refraction(ctx.slot).map_or(self.cull, |r| r.cull);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull);
             self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
@@ -1337,29 +1795,43 @@ impl UnitRenderer {
     /// [`Self::indirect`] as an indirect buffer, with a colour attachment
     /// and a reverse-Z depth attachment.
     pub fn record_draw(&self, ctx: &PassContext<'_>) {
+        self.draw_units(
+            ctx,
+            self.indirect(),
+            self.push,
+            self.draw,
+            self.models.as_ref().map(|m| [m.opaque, m.masked]),
+        );
+    }
+
+    fn draw_units(
+        &self,
+        ctx: &PassContext<'_>,
+        indirect: BufferBinding,
+        mut push: crate::bindless::Push,
+        darts: vk::Pipeline,
+        models: Option<[vk::Pipeline; 2]>,
+    ) {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.draw);
-            self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0; 4]);
-            device.cmd_draw_indirect(cmd, self.indirect.buffer, 0, 1, 0);
-            if let Some(m) = &self.models {
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, darts);
+            self.bind_push(ctx, vk::PipelineBindPoint::GRAPHICS, &push);
+            device.cmd_draw_indirect(cmd, indirect.buffer, indirect.offset, 1, 0);
+            if let (Some(m), Some([opaque_pipeline, masked_pipeline])) = (&self.models, models) {
                 // Every model command in two multi-draws: opaque, masked.
                 device.cmd_bind_index_buffer(cmd, m.set.geometry.buffer, m.set.index_offset, vk::IndexType::UINT32);
                 let (opaque, total) = (m.set.opaque, m.set.commands());
-                for (pipeline, first, count) in [(m.opaque, 0, opaque), (m.masked, opaque, total - opaque)] {
+                for (pipeline, first, count) in
+                    [(opaque_pipeline, 0, opaque), (masked_pipeline, opaque, total - opaque)]
+                {
                     if count == 0 {
                         continue;
                     }
                     device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                    self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0, first, 0, 0]);
-                    let offset = models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
-                    device.cmd_draw_indexed_indirect(
-                        cmd,
-                        self.indirect.buffer,
-                        offset,
-                        count,
-                        models::COMMAND_BYTES as u32,
-                    );
+                    push.words[1] = first;
+                    self.bind_push(ctx, vk::PipelineBindPoint::GRAPHICS, &push);
+                    let offset = indirect.offset + models::DART_COMMAND_BYTES + first as u64 * models::COMMAND_BYTES;
+                    device.cmd_draw_indexed_indirect(cmd, indirect.buffer, offset, count, models::COMMAND_BYTES as u32);
                 }
             }
         }
@@ -1370,6 +1842,10 @@ impl UnitRenderer {
     fn bind_global(&self, ctx: &PassContext<'_>, point: vk::PipelineBindPoint, words: [u32; 4]) {
         let mut block = self.push;
         block.words = words;
+        self.bind_push(ctx, point, &block);
+    }
+
+    fn bind_push(&self, ctx: &PassContext<'_>, point: vk::PipelineBindPoint, block: &crate::bindless::Push) {
         unsafe {
             ctx.device
                 .cmd_bind_descriptor_sets(ctx.cmd, point, self.pipeline_layout, 0, &[ctx.global_set], &[]);
@@ -1378,7 +1854,7 @@ impl UnitRenderer {
                 self.pipeline_layout,
                 crate::bindless::PUSH_STAGES,
                 0,
-                crate::pipeline::push_bytes(&block),
+                crate::pipeline::push_bytes(block),
             );
         }
     }
@@ -1390,18 +1866,56 @@ impl UnitRenderer {
     /// [`Self::visible`] and [`Self::palette`] in the vertex stage and
     /// [`Self::indirect`] as an indirect buffer, and writes the map.
     pub fn record_shadows(&self, ctx: &PassContext<'_>) {
+        self.record_shadows_riding(ctx, None);
+    }
+
+    /// [`Self::record_shadows`]; with `waves` (the full tier's patch and its
+    /// sampled index), floating hulls cast from where they ride the waves.
+    pub(crate) fn record_shadows_riding(
+        &self,
+        ctx: &PassContext<'_>,
+        waves: Option<(crate::water::waves::WavePatch, u32)>,
+    ) {
         let rows = self.rows(ctx.slot);
         let Some(caster) = self.caster.filter(|_| self.casting[ctx.slot] && rows > 0) else {
             return;
         };
+        // With refraction, submerged rows cast from their depth, where the
+        // draws and the cull place them.
+        let refract = self.active_refraction(ctx.slot);
+        let riding = waves
+            .zip(self.wave_casters)
+            .map(|(w, c)| (w, c[usize::from(refract.is_some())]));
+        let caster = match riding {
+            Some((_, [dart, ..])) => dart,
+            None => refract.and_then(|r| r.caster).unwrap_or(caster),
+        };
+        let mut block = self.push;
+        if let Some(((patch, image), _)) = riding {
+            patch.push(&mut block);
+            block.image(14, image);
+        }
+        let bind = |words: [u32; 4]| {
+            let mut b = block;
+            b.words = words;
+            self.bind_push(ctx, vk::PipelineBindPoint::GRAPHICS, &b);
+        };
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [0; 4]);
+            bind([0; 4]);
             let model_caster = self
                 .models
                 .as_ref()
-                .and_then(|m| m.caster.map(|c| (m, c)))
+                .and_then(|m| {
+                    m.caster.map(|c| {
+                        let casters = match riding {
+                            Some((_, [_, opaque, masked])) => (opaque, masked),
+                            None => refract.and_then(|r| r.model_casters).unwrap_or(c),
+                        };
+                        (m, casters)
+                    })
+                })
                 .filter(|(m, _)| m.set.commands() > 0);
             if let Some((m, _)) = model_caster {
                 device.cmd_bind_index_buffer(cmd, m.set.geometry.buffer, m.set.index_offset, vk::IndexType::UINT32);
@@ -1431,7 +1945,7 @@ impl UnitRenderer {
                     }],
                 );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
-                self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [k, 0, 0, 0]);
+                bind([k, 0, 0, 0]);
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
                 // The model units the cull found in this cascade (the darts'
                 // caster skipped model classes), by this cascade's copy of
@@ -1448,7 +1962,7 @@ impl UnitRenderer {
                             continue;
                         }
                         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        self.bind_global(ctx, vk::PipelineBindPoint::GRAPHICS, [k, first, 0, 0]);
+                        bind([k, first, 0, 0]);
                         device.cmd_draw_indexed_indirect(
                             cmd,
                             self.indirect.buffer,
@@ -1492,6 +2006,36 @@ impl UnitRenderer {
             }
             device.destroy_pipeline(self.cull, None);
             device.destroy_pipeline(self.draw, None);
+            for waves in [self.wave_draws.take(), self.wave_casters.take()].into_iter().flatten() {
+                for pipeline in waves.into_iter().flatten() {
+                    device.destroy_pipeline(pipeline, None);
+                }
+            }
+            if let Some(refract) = self.refraction.take() {
+                for pipeline in [refract.darts, refract.cull]
+                    .into_iter()
+                    .chain(refract.lights)
+                    .chain(refract.models.into_iter().flatten())
+                    .chain(refract.caster)
+                    .chain(
+                        refract
+                            .model_casters
+                            .into_iter()
+                            .flat_map(|(opaque, masked)| [opaque, masked]),
+                    )
+                {
+                    device.destroy_pipeline(pipeline, None);
+                }
+            }
+            if let Some(mirror) = self.reflection.take() {
+                for pipeline in [mirror.darts, mirror.cull]
+                    .into_iter()
+                    .chain(mirror.models.into_iter().flatten())
+                    .chain(mirror.riding)
+                {
+                    device.destroy_pipeline(pipeline, None);
+                }
+            }
         }
         self.table.destroy(gpu);
         for b in self
@@ -1551,7 +2095,61 @@ pub fn cull_margins(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_attribute_columns_are_named_where_the_layout_has_them() {
+        for (column, name) in [
+            (ATTR_X, "x"),
+            (ATTR_Y, "y"),
+            (ATTR_PREV_X, "prev_x"),
+            (ATTR_PREV_Y, "prev_y"),
+            (ATTR_RADIUS, "radius"),
+            (ATTR_CLASS, "class"),
+            (ATTR_POSE, "pose"),
+            (ATTR_WATER, "water"),
+            (ATTR_VIEW, "view"),
+        ] {
+            assert_eq!(ATTRIBUTES[column], name);
+        }
+    }
+
     use super::*;
+
+    /// The shaders copy the column numbers and the view states by hand:
+    /// each `ATTR_*` define and `VIEW_SEEN` must match its Rust constant.
+    #[test]
+    fn shader_defines_match_the_attribute_columns() {
+        let glsl = include_str!("../shaders/units_common.glsl");
+        let define = |name: &str| -> u32 {
+            let line = glsl
+                .lines()
+                .find(|l| l.split_whitespace().take(2).eq(["#define", name]))
+                .unwrap_or_else(|| panic!("units_common.glsl defines no `{name}`"));
+            let value = line.split_whitespace().nth(2).unwrap();
+            let value = value.strip_suffix('u').unwrap_or(value);
+            match value.strip_prefix("0x") {
+                Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                None => value.parse().unwrap(),
+            }
+        };
+        for (column, name) in ATTRIBUTES.iter().enumerate() {
+            assert_eq!(
+                define(&format!("ATTR_{}", name.to_uppercase())),
+                column as u32,
+                "{name}"
+            );
+        }
+        for (column, name) in [
+            (ATTR_CLASS, "class"),
+            (ATTR_POSE, "pose"),
+            (ATTR_WATER, "water"),
+            (ATTR_VIEW, "view"),
+        ] {
+            assert_eq!(ATTRIBUTES[column], name);
+        }
+        assert_eq!(define("VIEW_SEEN"), VIEW_SEEN);
+        assert_eq!(define("NO_POSE"), NO_POSE);
+        assert_eq!(define("POSE_MANUAL"), POSE_MANUAL);
+    }
 
     #[test]
     fn sim_time_follows_the_sim() {

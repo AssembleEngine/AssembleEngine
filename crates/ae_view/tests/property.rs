@@ -199,6 +199,7 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
         fields,
         x: X,
         y: Y,
+        submerged: None,
         wobble: WOBBLE,
         wobble_ticks: 10,
     };
@@ -221,6 +222,7 @@ fn run(seed: u64, ghosting: bool) -> (usize, usize, usize) {
                 ally: &allies,
                 los: &los,
                 radar: &radar,
+                sonar: None,
             },
             false,
         );

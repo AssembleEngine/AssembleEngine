@@ -70,6 +70,9 @@ layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) PARTICLES_ACCESS buf
     uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance;
     uint depthMin; uint depthMax; uint pad0; uint pad1;
     uint casterVertexCount; uint casterCount; uint casterFirstVertex; uint casterFirstInstance;
+#ifdef WATER_SPLIT
+    uint belowVertices; uint belowCount; uint belowFirstVertex; uint belowFirstInstance;
+#endif
 } ae_Indirect[];
 #define cmd ae_Indirect[AE_BUF(3)]
 

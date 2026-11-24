@@ -1,0 +1,30 @@
+#version 460
+#define PARTICLES_WRITE
+#define WATER_SPLIT
+#include "particles_common.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (ae.words.x == 0u) {
+        if (i < cmd.instanceCount) keysTmp[i] = keys[i];
+        return;
+    }
+    uint below = cmd.belowCount;
+    uint above = cmd.instanceCount;
+    // Below particles are first in the sorted list. Write a compact list
+    // for each draw, preserving the order within each layer.
+    if (ae.words.x == 1u && i < above) {
+        if (i < below) keys[u.pool.x * 2u + i] = keysTmp[i];
+        else keys[i - below] = keysTmp[i];
+    }
+    // Publish the counts in a separate dispatch to avoid a read/write
+    // race against the workgroups that partitioned the list.
+    if (ae.words.x == 2u && i == 0u) {
+        cmd.instanceCount = above - below;
+        cmd.belowVertices = 6u;
+        cmd.belowFirstVertex = 0u;
+        cmd.belowFirstInstance = 0u;
+    }
+}

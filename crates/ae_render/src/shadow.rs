@@ -185,6 +185,7 @@ impl ShadowMap {
     fn bind(image: &OwnedImage, identity: u64) -> ImageBinding {
         let d = &image.desc;
         ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format: d.format,

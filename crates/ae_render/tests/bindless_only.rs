@@ -18,7 +18,9 @@
 //! Still on their own sets, by design:
 //! - `fullscreen.rs`: the per-pass form a contract-2 module's program may
 //!   still use (M15 F keeps it for one version), and its reflection
-//!   fixtures (`test_post.frag`, `test_post_storage.frag`);
+//!   fixtures (`test_post.frag`, `test_post_storage.frag`), plus M16.5's
+//!   fullscreen shore reader (`test_sample_shore.frag`), which exercises
+//!   that form with one sampled intent;
 //! - `upload.rs`'s mip generator, which stays as it is.
 
 use std::fs;
@@ -35,6 +37,7 @@ const SHADER_EXCEPTIONS: &[&str] = &[
     "test_mixed.frag",
     "test_post.frag",
     "test_post_storage.frag",
+    "test_sample_shore.frag",
 ];
 
 fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {

@@ -12,7 +12,11 @@ layout(location = 1) flat out uint outDepth;
 
 out gl_PerVertex {
     vec4 gl_Position;
+#ifdef MIRROR
+    float gl_ClipDistance[5];
+#else
     float gl_ClipDistance[4];
+#endif
 };
 
 void main() {
@@ -24,7 +28,12 @@ void main() {
     float h = sampleHeight(cell);
     vec3 world = vec3(cell.x * u.map.w, h, cell.y * u.map.w);
 
+#ifdef MIRROR
+    gl_Position = u.mirrorProj * vec4(world, 1.0);
+    gl_ClipDistance[4] = h - u.water.x;
+#else
     gl_Position = u.viewProj * vec4(world, 1.0);
+#endif
     // The LEB square is padded to a power of two: clip against the real map rectangle.
     gl_ClipDistance[0] = cell.x;
     gl_ClipDistance[1] = u.map.x - cell.x;

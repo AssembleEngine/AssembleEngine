@@ -37,6 +37,26 @@ pub struct AccessState {
     pub visible_access: vk::AccessFlags2,
 }
 
+impl AccessState {
+    /// An image that already holds contents in `layout` (its writer — an
+    /// upload, say — made them visible to all commands): the first read
+    /// needs no barrier and must not discard them. `UNDEFINED` is the
+    /// ordinary uninitialized start.
+    pub fn initialized(layout: vk::ImageLayout) -> Self {
+        if layout == vk::ImageLayout::UNDEFINED {
+            return Self::default();
+        }
+        Self {
+            layout,
+            write_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+            write_access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+            visible_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+            visible_access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for AccessState {
     fn default() -> Self {
         Self {

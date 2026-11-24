@@ -32,6 +32,7 @@ pub fn map_name(m: Map) -> &'static str {
     match m {
         Map::WaterCrossing => "water",
         Map::LandCrossing => "land",
+        Map::Coast => "coast",
         Map::Loaded => "package",
     }
 }
@@ -40,6 +41,7 @@ pub fn map_of(name: &str) -> Result<Map> {
     Ok(match name {
         "water" => Map::WaterCrossing,
         "land" => Map::LandCrossing,
+        "coast" => Map::Coast,
         "package" => Map::Loaded,
         other => bail!("unknown map {other}"),
     })

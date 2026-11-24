@@ -70,6 +70,7 @@ use glam::{Mat4, Vec3};
 use gpu_allocator::MemoryLocation;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Most slots a pool can have (the sort key's slot bits).
@@ -86,6 +87,7 @@ const SORT_BINS: u64 = 256;
 const VERTICES: u32 = 6;
 /// Byte offset of the coloured shadows' draw in the indirect buffer.
 const CASTER_DRAW: u64 = 32;
+const UNDERWATER_DRAW: u64 = 48;
 /// The puff texture's side (texels).
 const PUFF: usize = 128;
 
@@ -197,6 +199,11 @@ pub mod effect {
     pub const SPARKS: u32 = 2;
     pub const SMOKE: u32 = 3;
     pub const DUST: u32 = 4;
+    pub const BUBBLE: u32 = 5;
+    pub const SPLASH: u32 = 6;
+    pub const BOW_SPRAY: u32 = 7;
+    /// A shell or bomb landing in the water: the column of spray thrown up.
+    pub const WATER_COLUMN: u32 = 8;
 }
 
 /// The engine's effects, indexed by [`effect`], from the bundled catalogue
@@ -209,7 +216,17 @@ pub fn default_effects() -> Vec<EffectDef> {
 }
 
 /// The catalogue's effect names, in [`effect`] index order.
-pub const EFFECT_NAMES: [&str; 5] = ["flash", "fire", "sparks", "smoke", "dust"];
+pub const EFFECT_NAMES: [&str; 9] = [
+    "flash",
+    "fire",
+    "sparks",
+    "smoke",
+    "dust",
+    "bubble",
+    "splash",
+    "bow_spray",
+    "water_column",
+];
 
 /// The effects catalogue's file version.
 pub const EFFECTS_VERSION: u32 = 1;
@@ -227,8 +244,10 @@ struct EffectsFile {
 }
 
 /// Parse an effects catalogue into the engine's effect table, in
-/// [`EFFECT_NAMES`] order. Every name must be present and the file must have
-/// no other effects; an unknown `gamut` tag is an error (not a silent
+/// [`EFFECT_NAMES`] order. The water effects may be omitted together by
+/// catalogues written before surface dynamics, and `water_column` alone by
+/// those written before it (it then takes `splash`'s definition). An
+/// unknown `gamut` tag is an error (not a silent
 /// BT.709 default), so a typo cannot quietly author a colour in the wrong
 /// space.
 pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
@@ -238,23 +257,32 @@ pub fn parse_effects(text: &str) -> Result<Vec<EffectDef>> {
         "effects catalogue version {}; this engine reads {EFFECTS_VERSION}",
         file.version
     );
-    ensure!(
-        file.effects.len() == EFFECT_NAMES.len(),
-        "the effects catalogue has {} effects; the engine's table has {} ({})",
-        file.effects.len(),
-        EFFECT_NAMES.len(),
-        EFFECT_NAMES.join(", ")
-    );
-    let effects: Vec<EffectDef> = EFFECT_NAMES
+    let land_count = effect::BUBBLE as usize;
+    let required = if file.effects.len() == land_count
+        && EFFECT_NAMES[..land_count]
+            .iter()
+            .all(|&name| file.effects.contains_key(name))
+    {
+        &EFFECT_NAMES[..land_count]
+    } else {
+        &EFFECT_NAMES
+    };
+    let effects: Vec<EffectDef> = required
         .iter()
         .map(|name| {
             file.effects
                 .get(*name)
+                .or_else(|| (*name == "water_column").then(|| file.effects.get("splash")).flatten())
                 .copied()
                 .with_context(|| format!("the effects catalogue has no `{name}`"))
         })
         .collect::<Result<_>>()?;
-    for (name, def) in EFFECT_NAMES.iter().zip(&effects) {
+    let column = usize::from(required.len() == EFFECT_NAMES.len() && !file.effects.contains_key("water_column"));
+    ensure!(
+        file.effects.len() + column == required.len(),
+        "the effects catalogue defines an unknown effect"
+    );
+    for (name, def) in required.iter().zip(&effects) {
         ensure!(
             (0.0..=1.0).contains(&def.cover),
             "effect `{name}`: cover {} is outside 0..1",
@@ -325,32 +353,45 @@ pub fn explosion(pos: [f32; 3], ground: bool, scale: f32, seed: u32) -> [Burst; 
 
 /// Where bursts are queued for the render thread (taken every frame).
 #[derive(Debug, Default)]
+struct BurstQueue {
+    bursts: Vec<Burst>,
+    generation: u64,
+}
+
+#[derive(Debug, Default)]
 pub struct ParticleFeed {
-    queued: Mutex<Vec<Burst>>,
+    queued: Mutex<BurstQueue>,
 }
 
 impl ParticleFeed {
     pub fn emit(&self, burst: Burst) {
-        self.queued.lock().unwrap_or_else(|p| p.into_inner()).push(burst);
+        self.emit_all(&[burst]);
     }
 
     pub fn emit_all(&self, bursts: &[Burst]) {
         self.queued
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .bursts
             .extend_from_slice(bursts);
     }
 
     /// Every queued burst, oldest first.
     pub fn take_all(&self) -> Vec<Burst> {
-        std::mem::take(&mut *self.queued.lock().unwrap_or_else(|p| p.into_inner()))
+        self.take(usize::MAX).1
     }
 
-    /// Up to `max` queued bursts, oldest first; the rest stay queued.
-    fn take(&self, max: usize) -> Vec<Burst> {
+    /// Drop queued bursts and retire live particles on the render thread.
+    pub fn clear(&self) {
         let mut queued = self.queued.lock().unwrap_or_else(|p| p.into_inner());
-        let n = queued.len().min(max);
-        queued.drain(..n).collect()
+        queued.bursts.clear();
+        queued.generation = queued.generation.wrapping_add(1);
+    }
+
+    fn take(&self, max: usize) -> (u64, Vec<Burst>) {
+        let mut queued = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+        let n = queued.bursts.len().min(max);
+        (queued.generation, queued.bursts.drain(..n).collect())
     }
 }
 
@@ -610,6 +651,13 @@ struct SpawnRecord {
     info: [u32; 4],
 }
 
+struct WaterSplit {
+    spawn: vk::Pipeline,
+    sim: vk::Pipeline,
+    partition: vk::Pipeline,
+    draw: vk::Pipeline,
+}
+
 pub struct ParticleRenderer {
     capacity: u32,
     info: TerrainInfo,
@@ -620,7 +668,9 @@ pub struct ParticleRenderer {
     /// Every particle's shape: a soft ball broken up by noise (mipmapped).
     puff: OwnedImage,
     spawn: vk::Pipeline,
+    clear: vk::Pipeline,
     sim: vk::Pipeline,
+    water_split: Option<WaterSplit>,
     histogram: vk::Pipeline,
     scatter: vk::Pipeline,
     draw: vk::Pipeline,
@@ -635,6 +685,8 @@ pub struct ParticleRenderer {
     spawned: Vec<(u32, u32)>,
     /// Per slot: the frame has live particles (it simulates and draws).
     active: Vec<bool>,
+    clear_slot: Vec<Option<u64>>,
+    feed_generation: AtomicU64,
     head: u32,
     last_time: Option<f32>,
     /// The bursts whose effects give light, with when they spawned (sim
@@ -804,7 +856,7 @@ impl ParticleRenderer {
         let keys = OwnedBuffer::new(
             gpu,
             BufferDesc {
-                size: capacity as u64 * 8,
+                size: capacity as u64 * 12,
                 usage: storage,
             },
             MemoryLocation::GpuOnly,
@@ -831,7 +883,7 @@ impl ParticleRenderer {
         )?;
         let indirect = upload::buffer(
             gpu,
-            pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0, 4, 0, 0, 0]),
+            pipeline::push_bytes(&[VERTICES, 0, 0, 0, 0x7f7f_ffff, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]),
             Self::indirect_usage(),
             "particle indirect",
         )?;
@@ -931,6 +983,7 @@ impl ParticleRenderer {
                 .with_context(|| format!("particle {what} pipeline"))
         };
         let spawn = compute(spirv!("particles_spawn.comp"), "spawn")?;
+        let clear = compute(spirv!("particles_clear.comp"), "clear")?;
         let sim = compute(spirv!("particles_sim.comp"), "sim")?;
         let histogram = compute(spirv!("particles_sort_histogram.comp"), "sort histogram")?;
         let scatter = compute(spirv!("particles_sort_scatter.comp"), "sort scatter")?;
@@ -1158,7 +1211,9 @@ impl ParticleRenderer {
             pipeline_layout,
             puff,
             spawn,
+            clear,
             sim,
+            water_split: None,
             histogram,
             scatter,
             draw,
@@ -1171,6 +1226,8 @@ impl ParticleRenderer {
             spawns,
             spawned: vec![(0, 0); frames_in_flight],
             active: vec![false; frames_in_flight],
+            clear_slot: vec![None; frames_in_flight],
+            feed_generation: AtomicU64::new(0),
             head: 0,
             last_time: None,
             burst_lights: Vec::new(),
@@ -1461,6 +1518,7 @@ impl ParticleRenderer {
         vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::INDIRECT_BUFFER
             | vk::BufferUsageFlags::TRANSFER_DST
+            | vk::BufferUsageFlags::TRANSFER_SRC
     }
 
     /// The lights of the bursts still glowing (after [`Self::write_frame`]:
@@ -1586,7 +1644,14 @@ impl ParticleRenderer {
         let dt = self.last_time.map_or(0.0, |last| (frame.time - last).clamp(0.0, 0.1));
         self.last_time = Some(frame.time);
         self.sim_time += dt;
-        let bursts = self.feed.take(MAX_BURSTS);
+        let (generation, bursts) = self.feed.take(MAX_BURSTS);
+        let clear = self.feed_generation.load(Ordering::Relaxed) != generation;
+        self.clear_slot[slot] = clear.then_some(generation);
+        if clear {
+            self.burst_lights.clear();
+            self.alive_until = f32::NEG_INFINITY;
+            self.head = 0;
+        }
         let mut records = Vec::with_capacity(bursts.len());
         let mut total = 0u32;
         for b in &bursts {
@@ -1616,7 +1681,7 @@ impl ParticleRenderer {
         self.spawned[slot] = (records.len() as u32, total);
         // Simulate while anything spawned may live (and one frame after,
         // so the last dead particles leave the list).
-        self.active[slot] = total > 0 || self.sim_time <= self.alive_until + 0.2;
+        self.active[slot] = clear || total > 0 || self.sim_time <= self.alive_until + 0.2;
         let i = &self.info;
         let mut effects = [[[0.0; 4]; 6]; MAX_EFFECTS];
         for (slot, def) in effects.iter_mut().zip(&self.effects) {
@@ -1702,20 +1767,103 @@ impl ParticleRenderer {
                 block.words2[at - 4] = word;
             }
         }
+        self.bind_push(ctx, point, layout, &block);
+    }
+
+    fn bind_push(
+        &self,
+        ctx: &PassContext<'_>,
+        point: vk::PipelineBindPoint,
+        layout: vk::PipelineLayout,
+        push: &crate::bindless::Push,
+    ) {
         unsafe {
             ctx.device
                 .cmd_bind_descriptor_sets(ctx.cmd, point, layout, 0, &[ctx.global_set], &[]);
             ctx.device
-                .cmd_push_constants(ctx.cmd, layout, PUSH_STAGES, 0, pipeline::push_bytes(&block));
+                .cmd_push_constants(ctx.cmd, layout, PUSH_STAGES, 0, pipeline::push_bytes(push));
         }
     }
 
+    /// Sorted and packets use the radix list for both layers. The other
+    /// blends retain their single above-water pass.
+    pub(crate) fn prepare_water_split(&mut self, device: &ash::Device, color: vk::Format) -> Result<()> {
+        if self.water_split.is_some() || !matches!(self.blend, ParticleBlend::Sorted | ParticleBlend::Packets) {
+            return Ok(());
+        }
+        let layout = self.pipeline_layout;
+        let [spawn, sim, partition, draw] = crate::water::reflect::pipelines(device, |i| match i {
+            0 => pipeline::compute_pipeline(device, spirv!("particles_spawn_water.comp"), layout),
+            1 => pipeline::compute_pipeline(device, spirv!("particles_sim_water.comp"), layout),
+            2 => pipeline::compute_pipeline(device, spirv!("particles_water_partition.comp"), layout),
+            _ => pipeline::graphics_pipeline(
+                device,
+                &GraphicsDesc {
+                    vertex: spirv!("particles_underwater.vert"),
+                    fragment: spirv!("particles_underwater.frag"),
+                    layout,
+                    color_formats: &[color],
+                    depth: None,
+                    topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+                    blend: Blend::PremultipliedRgb,
+                    glow_blend: Blend::Off,
+                },
+            ),
+        })?;
+        self.water_split = Some(WaterSplit {
+            spawn,
+            sim,
+            partition,
+            draw,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn record_underwater(
+        &self,
+        ctx: &PassContext<'_>,
+        depth: ImageBinding,
+        patch: crate::water::waves::WavePatch,
+        waves: u32,
+    ) -> Result<()> {
+        let Some(split) = self.water_split.as_ref().filter(|_| self.active[ctx.slot]) else {
+            return Ok(());
+        };
+        let mut push = self.push;
+        patch.push(&mut push);
+        push.image(0, depth.sampled.context("underwater particle depth")?);
+        push.image(1, self.puff_index);
+        push.image(14, waves);
+        unsafe {
+            ctx.device
+                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, split.draw);
+            self.bind_push(ctx, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, &push);
+            ctx.device
+                .cmd_draw_indirect(ctx.cmd, self.indirect.buffer, UNDERWATER_DRAW, 1, 0);
+        }
+        Ok(())
+    }
+
     pub fn record_sim(&self, ctx: &PassContext<'_>) {
+        self.record_sim_with_water(ctx, None);
+    }
+
+    pub(crate) fn record_sim_with_water(
+        &self,
+        ctx: &PassContext<'_>,
+        water: Option<(crate::water::waves::WavePatch, u32)>,
+    ) {
         if !self.active[ctx.slot] {
             return;
         }
         let (device, cmd) = (ctx.device, ctx.cmd);
         let (_, total) = self.spawned[ctx.slot];
+        let split = water.zip(self.water_split.as_ref());
+        let mut sim_push = self.push;
+        if let Some(((patch, waves), _)) = split {
+            patch.push(&mut sim_push);
+            sim_push.image(14, waves);
+        }
         let barrier = || {
             let memory = [vk::MemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -1725,12 +1873,26 @@ impl ParticleRenderer {
             unsafe { device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&memory)) };
         };
         unsafe {
-            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, &[], &[]);
+            self.bind_push(ctx, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, &sim_push);
+            if let Some(generation) = self.clear_slot[ctx.slot] {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.clear);
+                device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
+                barrier();
+                self.feed_generation.store(generation, Ordering::Relaxed);
+            }
             // Spawn (its first invocation also zeroes the instance count).
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.spawn);
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                split.map_or(self.spawn, |(_, split)| split.spawn),
+            );
             device.cmd_dispatch(cmd, total.div_ceil(64).max(1), 1, 1);
             barrier();
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.sim);
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                split.map_or(self.sim, |(_, split)| split.sim),
+            );
             device.cmd_dispatch(cmd, self.capacity.div_ceil(64), 1, 1);
             barrier();
             if !self.blend.needs_sort() {
@@ -1755,6 +1917,14 @@ impl ParticleRenderer {
                 device.cmd_dispatch(cmd, groups, 1, 1);
                 barrier();
             }
+            if let Some((_, split)) = split {
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, split.partition);
+                for phase in 0..3 {
+                    self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, self.pipeline_layout, &[], &[phase]);
+                    device.cmd_dispatch(cmd, if phase == 2 { 1 } else { self.capacity.div_ceil(64) }, 1, 1);
+                    barrier();
+                }
+            }
         }
     }
 
@@ -1766,7 +1936,7 @@ impl ParticleRenderer {
     /// indirect buffer, and has `shadows.color` as its one colour
     /// attachment, cleared to 0.
     pub fn record_shadows(&self, ctx: &PassContext<'_>) {
-        if !self.active[ctx.slot] || !self.casting[ctx.slot] {
+        if !self.active[ctx.slot] || !self.casting[ctx.slot] || self.clear_slot[ctx.slot].is_some() {
             return;
         }
         let (device, cmd) = (ctx.device, ctx.cmd);
@@ -2497,9 +2667,15 @@ impl ParticleRenderer {
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
+        if let Some(split) = self.water_split.take() {
+            for pipeline in [split.spawn, split.sim, split.partition, split.draw] {
+                unsafe { device.destroy_pipeline(pipeline, None) };
+            }
+        }
         unsafe {
             for &p in [
                 self.spawn,
+                self.clear,
                 self.sim,
                 self.histogram,
                 self.scatter,

@@ -103,6 +103,8 @@ pub struct ViewSpec {
     /// Indices into `fields` of the world x and y (`f32` bits).
     pub x: usize,
     pub y: usize,
+    /// Optional depth field (positive metres below the surface).
+    pub submerged: Option<usize>,
     /// Radar wobble amplitude, world units, and the ticks it drifts over.
     pub wobble: f32,
     pub wobble_ticks: u32,
@@ -287,6 +289,10 @@ impl Observer {
         assert_eq!(frame.columns.len(), spec.fields.len(), "frame columns vs spec fields");
         let ally = self.ally as usize;
         let cov = frame.coverage;
+        let submerged = |r| {
+            spec.submerged
+                .is_some_and(|f| f32::from_bits(frame.columns[f][r]) > 0.0)
+        };
         let state_of = |r: usize| -> Option<RowState> {
             if frame.ally[r] == self.ally {
                 return Some(RowState::Own);
@@ -295,6 +301,16 @@ impl Observer {
                 f32::from_bits(frame.columns[spec.x][r]),
                 f32::from_bits(frame.columns[spec.y][r]),
             );
+            if submerged(r) {
+                return cov
+                    .sonar
+                    .get(ally)
+                    .filter(|bits| {
+                        let (cx, cy) = cov.grid.cell(x, y);
+                        bits.get(cx, cy)
+                    })
+                    .map(|_| RowState::Seen);
+            }
             let (los, radar) = if ally < cov.allies() {
                 cov.sees(ally, x, y)
             } else {
@@ -357,7 +373,7 @@ impl Observer {
             }
             self.last_seen = visible
                 .iter()
-                .filter(|v| v.1 == RowState::Seen)
+                .filter(|v| v.1 == RowState::Seen && !submerged(v.0 as usize))
                 .map(|v| {
                     let r = v.0 as usize;
                     let (x, y) = (
@@ -436,6 +452,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn submerged_rows_require_sonar_and_leave_no_ghost() {
+        use ae_sensors::SensorGrid;
+
+        let spec = ViewSpec {
+            fields: vec![
+                ("x".into(), ViewClass::RadarDegraded),
+                ("y".into(), ViewClass::RadarDegraded),
+                ("depth".into(), ViewClass::Los),
+                ("silhouette".into(), ViewClass::Ghost),
+            ],
+            x: 0,
+            y: 1,
+            submerged: Some(2),
+            wobble: 1.0,
+            wobble_ticks: 1,
+        };
+        let mut cov = Coverage::new(SensorGrid::new(64.0, 64.0, 32.0), 2);
+        let mut observer = Observer::new(0, 0);
+        let build = |observer: &mut Observer, cov: &Coverage, depth: f32| {
+            let xy = [1.0f32.to_bits(); 2];
+            let depths = [depth.to_bits(); 2];
+            let columns: [&[u32]; 4] = [&xy, &xy, &depths, &[1, 1]];
+            let frame = Frame::new(0, &[10, 20], &columns, &[0, 1], cov);
+            let mut states = observer.build(&spec, &frame).state;
+            states.sort_by_key(|s| *s as u8);
+            states
+        };
+        cov.los[0].set(0, 0);
+        assert_eq!(build(&mut observer, &cov, 0.0), [RowState::Own, RowState::Seen]);
+        cov.los[0].clear();
+        assert_eq!(build(&mut observer, &cov, 0.0), [RowState::Own, RowState::Ghost]);
+        cov.los[0].set(0, 0);
+        cov.radar[0].set(0, 0);
+        assert_eq!(build(&mut observer, &cov, 4.0), [RowState::Own]);
+        cov.los[0].clear();
+        cov.sonar[0].set(0, 0);
+        assert_eq!(build(&mut observer, &cov, 4.0), [RowState::Own, RowState::Seen]);
+        cov.sonar[0].clear();
+        assert_eq!(build(&mut observer, &cov, 4.0), [RowState::Own]);
+    }
+
+    #[test]
     fn wobble_is_bounded_smooth_and_keyed_by_observer_and_id() {
         let spec = ViewSpec {
             fields: vec![
@@ -444,6 +502,7 @@ mod tests {
             ],
             x: 0,
             y: 1,
+            submerged: None,
             wobble: 40.0,
             wobble_ticks: 30,
         };

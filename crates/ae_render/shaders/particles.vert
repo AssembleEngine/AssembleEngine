@@ -9,15 +9,25 @@ layout(location = 1) out vec4 outColor;   // premultiplied
 // Centre's view depth, radius, and 1 for an emissive particle (a bloom
 // source); the same at every corner.
 layout(location = 2) out vec3 outDepth;
+#ifdef WATER_SPLIT
+layout(location = 3) out vec3 outWorld;
+#endif
 
 const vec2 CORNERS[6] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(1, 1), vec2(-1, -1), vec2(1, 1), vec2(-1, 1));
 
 void main() {
+#ifdef WATER_SPLIT
+    Puff f = puffOf(keys[u.pool.x * 2u + gl_InstanceIndex] & 0xffffu);
+#else
     Puff f = puffOf(keys[gl_InstanceIndex] & 0xffffu);
+#endif
     vec2 c = CORNERS[gl_VertexIndex];
     vec2 r = vec2(c.x * cos(f.angle) - c.y * sin(f.angle), c.x * sin(f.angle) + c.y * cos(f.angle));
     vec3 world = f.centre + (u.camRight.xyz * r.x + u.camUp.xyz * r.y) * f.radius;
     gl_Position = u.viewProj * vec4(world, 1.0);
+#ifdef WATER_SPLIT
+    outWorld = world;
+#endif
     outColor = f.color;
     outCorner = c;
     outDepth = vec3(dot(f.centre - u.camPos.xyz, u.camForward.xyz), f.radius, f.emissive ? 1.0 : 0.0);

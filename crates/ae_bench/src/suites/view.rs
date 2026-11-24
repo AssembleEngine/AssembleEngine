@@ -97,6 +97,7 @@ fn spec(ghosting: bool) -> ViewSpec {
         ],
         x: 0,
         y: 1,
+        submerged: None,
         wobble: 60.0,
         wobble_ticks: 30,
     }
@@ -136,6 +137,7 @@ pub fn run(options: &Options) -> Result<Report> {
                     ally: &a.ally,
                     los: &a.los,
                     radar: &a.radar,
+                    sonar: None,
                 },
                 true,
             );

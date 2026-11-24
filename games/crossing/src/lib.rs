@@ -41,6 +41,7 @@ use ae_sdk::nav::{
     ANY_DEPTH, Body, CELL_SIZE, CostOverlay, Goal, MoveOrder, MovementClass, NavAgent, OrderPoint, TerrainChanged,
     TerrainEdit, terrain,
 };
+use ae_sdk::water::{Dive, Sonar, step_dive};
 use ae_sdk::{Component, Entity, Run, Spawn, add, despawn, emit, schedule, spatial_radius, system};
 
 /// Neighbours within four body radii, as of tick `tick`.
@@ -71,9 +72,7 @@ pub struct Landed {
     pub flags: u32,
 }
 
-// The game's movement classes: the water map's five (scout, heavy, ship,
-// hovercraft, amphibious), declared here as a game would, with the same
-// values as `ae_nav::nav::water_profiles`.
+// The five water-map profiles plus the coast submarine, which sails on the ship profile.
 ae_sdk::movement_classes![
     MovementClass {
         name: "Scout",
@@ -125,7 +124,43 @@ ae_sdk::movement_classes![
         max_depth: ANY_DEPTH,
         hover: false
     },
+    MovementClass {
+        name: "Sub",
+        clearance_cells: 2,
+        max_slope: 60,
+        radius: CELL_SIZE * 0.62,
+        speed: CELL_SIZE * 9.0,
+        min_depth: 30,
+        max_depth: ANY_DEPTH,
+        hover: false
+    },
 ];
+
+const SHIP: u32 = 2;
+const SUB: u32 = 5;
+
+#[system(read(NavAgent), without(Sonar))]
+fn fit_sonar(run: &Run) {
+    for (&entity, agent) in run.entities().iter().zip(run.read::<NavAgent>()) {
+        if matches!(agent.profile, SHIP | SUB) {
+            add(entity, &Sonar { radius: 520.0 });
+            if agent.profile == SUB {
+                add(entity, &Dive::default());
+            }
+        }
+    }
+}
+
+#[system(write(Dive))]
+fn dive(run: &Run) {
+    // Cycle between cruising at depth and surfacing, with a phase per hull.
+    let tick = run.tick();
+    for (&entity, dive) in run.entities().iter().zip(run.write::<Dive>()) {
+        let phase = (tick + u64::from(entity.index() % 90)) % 360;
+        dive.target = if phase < 255 { 4.0 } else { 0.0 };
+        step_dive(dive, 0.2);
+    }
+}
 
 const NEIGHBOUR_RADII: f32 = 4.0;
 
@@ -383,6 +418,8 @@ schedule!(
     zones,
     host(nav),
     host(spatial),
+    fit_sonar,
+    dive,
     crowding,
     churn,
     landed

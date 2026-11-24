@@ -89,8 +89,10 @@ pub use ae_render_abi::module::{
     BLOOM_FORMAT, BLOOM_NAME, BLOOM_SCRATCH_NAME, DISPLAY_FORMAT, DISPLAY_NAME, DeclareInput, EXPOSURE_FORMAT,
     EXPOSURE_HISTOGRAM_NAME, EXPOSURE_LOG2_MAX, EXPOSURE_LOG2_MIN, EXPOSURE_NAME, FrameInput, GLOW_FORMAT, GLOW_NAME,
     Gamut, OutputEncoding, PARTICLE_SHADOW_NAME, Program, ProgramTable, SCENE_FORMAT, SCENE_NAME, SHADOW_MAP_NAME,
-    WorkingSpace, bloom_size, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, scene_spec,
-    shadow_map_spec,
+    TERRAIN_INDIRECT_REFLECT_NAME, TERRAIN_LEAVES_REFLECT_NAME, UNITS_INDIRECT_REFLECT_NAME,
+    UNITS_VISIBLE_REFLECT_NAME, WATER_CHURN_NAME, WATER_PARTICLES_NAME, WATER_RAW_NAME, WATER_REFLECTION_DEPTH_NAME,
+    WATER_REFLECTION_NAME, WATER_REFRACTION_NAME, WATER_VOLUME_OUT_NAME, WATER_WAVES_NAME, WorkingSpace, bloom_size,
+    bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, scene_spec, shadow_map_spec,
 };
 pub use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, PassWriter, ResourceRef, Role, ShaderStage};
 
@@ -137,6 +139,11 @@ pub struct DeclareEnv {
     pub readback: bool,
     /// The scene draws water: the `water.draw` library pass exists.
     pub water: bool,
+    /// Requested water tiers. The module declares the ones it supports.
+    pub water_reflect: bool,
+    pub water_refract: bool,
+    pub water_waves: bool,
+    pub water_volume: bool,
     /// The units cast shadows (only with `units`): the `shadows.draw`
     /// library pass and the `shadows.map` library image
     /// ([`shadow_map_spec`], `External`) exist. Declaring the map, the
@@ -267,6 +274,10 @@ pub mod rt {
                 units: input.flags & abi::module::DECLARE_UNITS != 0,
                 readback: input.flags & abi::module::DECLARE_READBACK != 0,
                 water: input.flags & abi::module::DECLARE_WATER != 0,
+                water_reflect: input.flags & abi::module::DECLARE_WATER_REFLECT != 0,
+                water_refract: input.flags & abi::module::DECLARE_WATER_REFRACT != 0,
+                water_waves: input.flags & abi::module::DECLARE_WATER_WAVES != 0,
+                water_volume: input.flags & abi::module::DECLARE_WATER_VOLUME != 0,
                 shadows: input.flags & abi::module::DECLARE_SHADOWS != 0,
                 particles: input.flags & abi::module::DECLARE_PARTICLES != 0,
             };

@@ -57,7 +57,7 @@ fn reorder_points(kind: u64, x: f32, y: f32) -> [(f32, f32); 2] {
 
 /// Final world digest (low 64 bits), identical in dev and release builds and
 /// at every worker count. Regenerate deliberately: run with `--nocapture`.
-const EXPECTED: u64 = 0x2869_18c1_cede_d4be;
+const EXPECTED: u64 = 0x9a4c_fa11_87b4_b156;
 
 fn decode<T: Copy>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
@@ -131,11 +131,11 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     assert_eq!(
         layers,
         [
-            vec!["nav_spawn", "zones"],
+            vec!["nav_spawn", "zones", "dive"],
             vec!["orders", "quake"],
             vec!["reorder"],
             vec!["nav"],
-            vec!["spatial", "churn", "landed"],
+            vec!["spatial", "fit_sonar", "churn", "landed"],
             vec!["crowding"]
         ]
     );
@@ -143,7 +143,14 @@ fn nav_runs_in_the_sim_like_the_standalone_service() -> Result<()> {
     // The game declares its movement classes: the water map's five, so
     // the standalone service (which uses the map's) applies.
     let declared = classes(&rt.schema)?.expect("crossing declares movement classes");
-    ensure!(declared == water_profiles(CELL_SIZE), "declared classes {declared:#?}");
+    let profiles = water_profiles(CELL_SIZE);
+    let mut sub = profiles[2].clone();
+    sub.name = "Sub".into();
+    sub.id = 5;
+    ensure!(
+        declared == [profiles, vec![sub]].concat(),
+        "declared classes {declared:#?}"
+    );
 
     // ..and they drive the service: with the scouts' slope limit cut to 1
     // (data the module declared, patched before the world is made), the

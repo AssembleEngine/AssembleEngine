@@ -16,6 +16,8 @@ libm = { version = "0.2.16", optional = true }
 # schema record for every type it compiles, and a module's components are
 # registered (and take entity ids) whether its systems use them or not.
 nav = []
+# Submerged movement and sonar components.
+water = []
 # Catalogue spawning (`ae_sdk::catalog`): spawn requests and def ids. Needs nav.
 catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`

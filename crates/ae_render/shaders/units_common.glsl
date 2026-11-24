@@ -22,6 +22,9 @@
 // The unit's first animation record cell (ae_render::units::NO_POSE: at rest),
 // POSE_MANUAL set when either record shows a manual joint.
 #define ATTR_POSE 10u
+#define ATTR_WATER 11u
+#define ATTR_VIEW 12u
+#define VIEW_SEEN 1u
 #define NO_POSE 0xffffffffu
 #define POSE_MANUAL 0x80000000u
 #define MAX_CLASSES 16u
@@ -46,29 +49,46 @@ layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: animation table writes
     vec4 photometry;          // x: exposure, y: unused, z: sun lux, w: sky lux
+#ifdef MIRROR
+    mat4 mirrorProj;
+    vec4 mirrorCamera;
+    vec4 mirrorPlanes[6];
+#endif
 } ae_Frame[];
 #define u ae_Frame[AE_BUF(0)]
 
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Instances { uint words[]; } ae_Instances[];
 #define inst ae_Instances[AE_BUF(1)]
 
+#ifdef MIRROR
+#define UNIT_VIEW_POS u.mirrorCamera.xyz
+#define UNIT_VIEW_PLANES u.mirrorPlanes
+#define UNIT_VISIBLE_INDEX ae.words.z
+#define UNIT_INDIRECT_INDEX ae.words.w
+#else
+#define UNIT_VIEW_POS u.camPos.xyz
+#define UNIT_VIEW_PLANES u.frustum
+#define UNIT_VISIBLE_INDEX AE_BUF(2)
+#define UNIT_INDIRECT_INDEX AE_BUF(3)
+#endif
+
 #ifdef CULL
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Visible { uint visible[]; } ae_Visible[];
-#define visible ae_Visible[AE_BUF(2)].visible
+#define visible ae_Visible[UNIT_VISIBLE_INDEX].visible
 #ifdef MODELS
 // The darts' VkDrawIndirectCommand (words 0..3), then one
 // VkDrawIndexedIndirectCommand (5 words) per model primitive and class
 // (counts.w of them), then the same commands again for each shadow
 // cascade.
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint cmdWords[]; } ae_Indirect[];
-#define cmdWords ae_Indirect[AE_BUF(3)].cmdWords
+#define cmdWords ae_Indirect[UNIT_INDIRECT_INDEX].cmdWords
 #else
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } ae_Indirect[];
-#define cmd ae_Indirect[AE_BUF(3)]
+#define cmd ae_Indirect[UNIT_INDIRECT_INDEX]
 #endif
 #else
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Visible { uint visible[]; } ae_Visible[];
-#define visible ae_Visible[AE_BUF(2)].visible
+#define visible ae_Visible[UNIT_VISIBLE_INDEX].visible
 #endif
 
 #define heightTex AE_S2D(0, 1)
@@ -98,6 +118,14 @@ float sunAt(vec3 p) {
 float attrf(uint a, uint i) { return uintBitsToFloat(inst.words[a * u.counts.y + i]); }
 uint attru(uint a, uint i) { return inst.words[a * u.counts.y + i]; }
 
+// Own and Seen rows have current positions that auxiliary passes may use.
+bool eligible(uint i) { return attru(ATTR_VIEW, i) <= VIEW_SEEN; }
+
+#ifdef RIDE_WAVES
+#define WAVE_SAMPLE 14
+#include "water_patch.glsl"
+#endif
+
 struct Unit {
     vec3 pos;      // on the ground (or water surface)
     vec4 rot;      // unit frame (forward +x, up +y, right +z) to the world, normalised
@@ -116,15 +144,49 @@ Unit loadUnit(uint i) {
     vec2 p = mix(vec2(attrf(ATTR_PREV_X, i), attrf(ATTR_PREV_Y, i)), vec2(attrf(ATTR_X, i), attrf(ATTR_Y, i)), u.map.w);
     vec2 uv = (p / u.map.x + 0.5) * u.map.yz;
     float h = textureLod(heightTex, uv, 0.0).r * u.height.x + u.height.y;
+#if defined(SUB) || defined(RIDE_WAVES)
+    float ground = h;
+#endif
     unit.cls = min(attru(ATTR_CLASS, i), MAX_CLASSES - 1u);
     if (u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
         h = max(h, u.height.z);
     }
+#ifdef MIRROR
+    h -= max(attrf(ATTR_WATER, i), 0.0);
+#elif defined(SUB)
+    if (u.height.w > 0.5 && attrf(ATTR_WATER, i) > 0.0) {
+        h = max(ground, u.height.z - attrf(ATTR_WATER, i));
+    }
+#endif
     unit.pos = vec3(p.x, h, p.y);
     vec4 rot = vec4(attrf(ATTR_ROT_X, i), attrf(ATTR_ROT_Y, i), attrf(ATTR_ROT_Z, i), attrf(ATTR_ROT_W, i));
     unit.rot = dot(rot, rot) > 1e-12 ? normalize(rot) : vec4(0.0, 0.0, 0.0, 1.0);
+
+#ifdef RIDE_WAVES
+    if (eligible(i) && u.height.w > 0.5 && ground < u.height.z && attrf(ATTR_WATER, i) <= 0.0
+        && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
+        vec4 wave = waterWave(p);
+        float weight = patchWeight(patchUV(p));
+        vec2 slope = wave.xy * weight;
+        vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
+        vec4 tilt = normalize(vec4(normal.z, 0.0, -normal.x, 1.0 + normal.y));
+        unit.rot = vec4(tilt.w * unit.rot.xyz + unit.rot.w * tilt.xyz + cross(tilt.xyz, unit.rot.xyz),
+            tilt.w * unit.rot.w - dot(tilt.xyz, unit.rot.xyz));
+        // Check the surface under the hull's ends. A local nonlinear
+        // crest can rise above the tangent plane used to tilt the hull.
+        float height = wave.z * weight;
+        vec2 axis = rotate(unit.rot, vec3(1.0, 0.0, 0.0)).xz * attrf(ATTR_RADIUS, i);
+        vec2 side = vec2(-axis.y, axis.x) * 0.8;
+        float lift = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            vec2 offset = (k < 2 ? axis : -axis) + ((k & 1) == 0 ? side : -side);
+            lift = max(lift, waterDisplacement(p + offset) - (height + dot(slope, offset)));
+        }
+        unit.pos.y = max(ground, u.height.z + height + min(lift, 0.2) + 0.06 * weight);
+    }
+#endif
     float radius = attrf(ATTR_RADIUS, i);
-    float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, u.camPos.xyz), 1e-3);
+    float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, UNIT_VIEW_POS), 1e-3);
     unit.size = radius * max(1.0, u.sun.w / max(pixels, 1e-6));
     return unit;
 }

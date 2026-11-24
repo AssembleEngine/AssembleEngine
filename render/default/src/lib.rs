@@ -13,8 +13,9 @@
 use ae_render_sdk::{
     BLOOM_NAME, BLOOM_SCRATCH_NAME, Class, DISPLAY_NAME, Declaration, DeclareEnv, EXPOSURE_HISTOGRAM_NAME,
     EXPOSURE_NAME, GLOW_NAME, GraphBuilder, ImageSpec, LoadOp, PARTICLE_SHADOW_NAME, PassKind, PassWriter,
-    ProgramTable, RenderModule, ResourceRef, Role, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, bloom_spec, display_spec,
-    exposure_spec, glow_spec, particle_shadow_spec, render_module, scene_spec, shadow_map_spec, vk,
+    ProgramTable, RenderModule, ResourceRef, Role, SCENE_NAME, SHADOW_MAP_NAME, ShaderStage, WATER_REFRACTION_NAME,
+    WATER_VOLUME_OUT_NAME, bloom_spec, display_spec, exposure_spec, glow_spec, particle_shadow_spec, render_module,
+    scene_spec, shadow_map_spec, vk,
 };
 
 #[derive(Default)]
@@ -97,6 +98,108 @@ impl RenderModule for Scene {
         // slots: the executor derives the cross-frame barriers).
         let exposure = g.image(EXPOSURE_NAME, exposure_spec(), Class::External);
         let histogram = library(&mut g, EXPOSURE_HISTOGRAM_NAME);
+        let reflection = (env.water && env.water_reflect).then(|| {
+            use ae_render_sdk::{
+                TERRAIN_INDIRECT_REFLECT_NAME, TERRAIN_LEAVES_REFLECT_NAME, UNITS_INDIRECT_REFLECT_NAME,
+                UNITS_VISIBLE_REFLECT_NAME, WATER_REFLECTION_DEPTH_NAME, WATER_REFLECTION_NAME,
+            };
+            let (w, h) = (w.div_ceil(2), h.div_ceil(2));
+            let color = g.image(
+                WATER_REFLECTION_NAME,
+                ImageSpec::color_2d(
+                    vk::FORMAT_R16G16B16A16_SFLOAT,
+                    w,
+                    h,
+                    vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED | vk::USAGE_TRANSFER_SRC,
+                ),
+                Class::Transient,
+            );
+            let depth = g.image(
+                WATER_REFLECTION_DEPTH_NAME,
+                ImageSpec::depth_2d(vk::FORMAT_D32_SFLOAT, w, h, vk::USAGE_DEPTH_STENCIL_ATTACHMENT),
+                Class::Transient,
+            );
+            let [leaves, indirect] = [TERRAIN_LEAVES_REFLECT_NAME, TERRAIN_INDIRECT_REFLECT_NAME]
+                .map(|name| g.buffer(name, 0, 0, Class::Transient));
+            let unit_buffers = env.units.then(|| {
+                [UNITS_VISIBLE_REFLECT_NAME, UNITS_INDIRECT_REFLECT_NAME]
+                    .map(|name| g.buffer(name, 0, 0, Class::Transient))
+            });
+            (color, depth, leaves, indirect, unit_buffers)
+        });
+
+        let refraction = (env.water && env.water_refract).then(|| {
+            let color = g.image(
+                WATER_REFRACTION_NAME,
+                ImageSpec::color_2d(
+                    vk::FORMAT_R16G16B16A16_SFLOAT,
+                    w,
+                    h,
+                    vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED | vk::USAGE_TRANSFER_SRC,
+                ),
+                Class::Transient,
+            );
+            (color, library(&mut g, "water.caustics"))
+        });
+
+        let volume = (refraction.is_some() && env.water_volume).then(|| {
+            g.image(
+                WATER_VOLUME_OUT_NAME,
+                ImageSpec::color_2d(
+                    vk::FORMAT_R16G16B16A16_SFLOAT,
+                    w,
+                    h,
+                    vk::USAGE_COLOR_ATTACHMENT | vk::USAGE_SAMPLED | vk::USAGE_TRANSFER_SRC,
+                ),
+                Class::Transient,
+            )
+        });
+
+        let waves = (env.water && env.water_waves).then(|| {
+            let [raw, churn, waves, particles, leaves, indirect] = [
+                "water.raw",
+                "water.churn",
+                "water.waves",
+                "water.particles",
+                "water.mesh.leaves",
+                "water.mesh.indirect",
+            ]
+            .map(|name| g.buffer(name, 0, 0, Class::Transient));
+            let emit = p.library("water.emit");
+            g.pass("water emit", PassKind::Compute, emit)
+                .discard(particles, Role::StorageBufferWrite(ShaderStage::Compute))
+                .id();
+            for (name, key, target) in [
+                ("water splat", "water.splat", raw),
+                ("water churn", "water.churn", churn),
+            ] {
+                let pass = p.library(key);
+                g.pass(name, PassKind::Graphics, pass)
+                    .access(particles, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .color(target, LoadOp::Clear)
+                    .id();
+            }
+            let blur = p.library("water.blur");
+            g.pass("water blur", PassKind::Compute, blur)
+                .sampled(raw, ShaderStage::Compute)
+                .sampled(churn, ShaderStage::Compute)
+                .discard(waves, Role::StorageImageWrite(ShaderStage::Compute))
+                .id();
+            let lod = p.library("water.lod");
+            g.pass("water lod", PassKind::Compute, lod)
+                .sampled(waves, ShaderStage::Compute)
+                .discard(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
+                .discard(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
+                .id();
+            // The surface times its breakers by the shore field; the host
+            // bakes it once and again after a ground edit.
+            let shore = library(&mut g, "water.shore");
+            let bake = p.library("water.shore");
+            g.pass("shore bake", PassKind::Compute, bake)
+                .access(shore, Role::StorageImageWrite(ShaderStage::Compute))
+                .root();
+            (waves, leaves, indirect, churn, shore)
+        });
         let lod = p.library("terrain.lod");
         g.pass("terrain lod", PassKind::Compute, lod)
             .access(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
@@ -132,13 +235,17 @@ impl RenderModule for Scene {
         // passes that sample the map.
         if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
             let shadows = p.library("shadows.draw");
-            g.pass("shadows", PassKind::Graphics, shadows)
+            // Floating hulls cast from where they ride the waves.
+            let mut shadows = g
+                .pass("shadows", PassKind::Graphics, shadows)
                 .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
-                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                .depth(map, LoadOp::Clear)
-                .id();
+                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex));
+            if let Some((waves, ..)) = waves {
+                shadows = shadows.sampled(waves, ShaderStage::Vertex);
+            }
+            shadows.depth(map, LoadOp::Clear).id();
         }
         // The particles' coloured shadows: this frame's particles (the
         // simulation, declared later, is their state's only writer).
@@ -150,6 +257,59 @@ impl RenderModule for Scene {
                 .access(draws, Role::IndirectBuffer)
                 .color(tint, LoadOp::Clear)
                 .id();
+        }
+        if let Some((color, depth, leaves, reflect_indirect, unit_buffers)) = reflection {
+            use ShaderStage::{Compute, Fragment, Vertex};
+            g.pass(
+                "terrain cull reflect",
+                PassKind::Compute,
+                p.library("terrain.cull_reflect"),
+            )
+            .access(indirect, Role::StorageBufferRead(Compute))
+            .discard(leaves, Role::StorageBufferWrite(Compute))
+            .discard(reflect_indirect, Role::StorageBufferWrite(Compute))
+            .id();
+            if let (Some([instances, _, _, _, _]), Some([visible, draws])) = (units, unit_buffers) {
+                g.pass(
+                    "units reset reflect",
+                    PassKind::Transfer,
+                    p.library("units.reset_reflect"),
+                )
+                .discard(draws, Role::TransferDst)
+                .id();
+                g.pass("units cull reflect", PassKind::Compute, p.library("units.cull_reflect"))
+                    .access(instances, Role::StorageBufferRead(Compute))
+                    .discard(visible, Role::StorageBufferWrite(Compute))
+                    .access(draws, Role::StorageBufferWrite(Compute))
+                    .id();
+            }
+            let mut terrain = g
+                .pass("terrain reflect", PassKind::Graphics, p.library("terrain.reflect"))
+                .access(leaves, Role::StorageBufferRead(Vertex))
+                .access(reflect_indirect, Role::IndirectBuffer)
+                .color(color, LoadOp::Clear)
+                .depth(depth, LoadOp::Clear);
+            for map in maps.into_iter().flatten() {
+                terrain = terrain.sampled(map, Fragment);
+            }
+            terrain.id();
+            if let (Some([instances, _, _, _, palette]), Some([visible, draws])) = (units, unit_buffers) {
+                let mut units = g
+                    .pass("units reflect", PassKind::Graphics, p.library("units.reflect"))
+                    .access(instances, Role::StorageBufferRead(Vertex))
+                    .access(visible, Role::StorageBufferRead(Vertex))
+                    .access(draws, Role::IndirectBuffer)
+                    .access(palette, Role::StorageBufferRead(Vertex));
+                // Floating hulls are mirrored where they ride the waves.
+                if let Some((waves, ..)) = waves {
+                    units = units.sampled(waves, Vertex);
+                }
+                let mut units = units.color(color, LoadOp::Load).depth(depth, LoadOp::Load);
+                for map in maps.into_iter().flatten() {
+                    units = units.sampled(map, Fragment);
+                }
+                units.id();
+            }
         }
         let draw = p.library("terrain.draw");
         receive(
@@ -165,19 +325,19 @@ impl RenderModule for Scene {
         .id();
         if let Some([instances, visible, draws, counts, palette]) = units {
             let units = p.library("units.draw");
-            receive(
-                g.pass("units", PassKind::Graphics, units)
-                    .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
-                    .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
-                    .access(draws, Role::IndirectBuffer)
-                    .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                    .color(scene, LoadOp::Load)
-                    .color(glow, LoadOp::Load)
-                    .depth(depth, LoadOp::Load),
-                maps,
-                lights,
-            )
-            .id();
+            let mut draw = g
+                .pass("units", PassKind::Graphics, units)
+                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
+                .color(scene, LoadOp::Load)
+                .color(glow, LoadOp::Load)
+                .depth(depth, LoadOp::Load);
+            if let Some((waves, ..)) = waves {
+                draw = draw.sampled(waves, ShaderStage::Vertex);
+            }
+            receive(draw, maps, lights).id();
             let count = p.library("units.count");
             g.pass("units count", PassKind::Transfer, count)
                 .access(draws, Role::TransferSrc)
@@ -189,13 +349,82 @@ impl RenderModule for Scene {
                 .root()
                 .id();
         }
+        let particle_sim = |g: &mut GraphBuilder, p: &mut ProgramTable, [state, keys, draws]: [ResourceRef; 3]| {
+            let sim = p.library("particles.sim");
+            let mut pass = g
+                .pass("particles sim", PassKind::Compute, sim)
+                .access(state, write)
+                .access(keys, write)
+                .access(draws, write);
+            if let (Some(_), Some((waves, ..))) = (refraction, waves) {
+                pass = pass.sampled(waves, ShaderStage::Compute);
+            }
+            lit(pass, lights, ShaderStage::Compute).id();
+        };
+        if let Some((color, caustics)) = refraction {
+            if let Some(particles) = particles {
+                particle_sim(&mut g, &mut p, particles);
+            }
+            let underwater = p.library("water.underwater");
+            let mut underwater = g
+                .pass("water underwater", PassKind::Graphics, underwater)
+                .color(color, LoadOp::Clear)
+                .sampled(scene, ShaderStage::Fragment)
+                .sampled(depth, ShaderStage::Fragment)
+                .sampled(caustics, ShaderStage::Fragment);
+            for map in maps.into_iter().flatten() {
+                underwater = underwater.sampled(map, ShaderStage::Fragment);
+            }
+            if let Some((waves, ..)) = waves {
+                underwater = underwater.sampled(waves, ShaderStage::Fragment);
+            }
+            underwater.id();
+            if let (Some([state, keys, indirect]), Some((waves, ..))) = (particles, waves) {
+                let pass = p.library("particles.underwater");
+                g.pass("particles underwater", PassKind::Graphics, pass)
+                    .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(indirect, Role::IndirectBuffer)
+                    .color(color, LoadOp::Load)
+                    .sampled(depth, ShaderStage::Fragment)
+                    .sampled(waves, ShaderStage::Fragment)
+                    .id();
+            }
+        }
         if env.water {
             let water = p.library("water.draw");
+            let mut water = g
+                .pass("water", PassKind::Graphics, water)
+                .color(scene, LoadOp::Load)
+                .color(glow, LoadOp::Load)
+                .depth_read(depth);
+            if let Some((color, ..)) = reflection {
+                water = water.sampled(color, ShaderStage::Fragment);
+            }
+            if let Some((color, _)) = refraction {
+                water = water.sampled(color, ShaderStage::Fragment);
+            }
+            if let Some((waves, leaves, indirect, churn, shore)) = waves {
+                water = water
+                    .sampled(waves, ShaderStage::Graphics)
+                    .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(indirect, Role::IndirectBuffer)
+                    .sampled(churn, ShaderStage::Fragment)
+                    .sampled(shore, ShaderStage::Fragment);
+            }
+            receive(water, maps, lights).id();
+        }
+        if let (Some(_), Some([instances, visible, draws, _, palette])) = (refraction, units) {
+            let overlay = p.library("units.water_overlay");
             receive(
-                g.pass("water", PassKind::Graphics, water)
+                g.pass("units water overlay", PassKind::Graphics, overlay)
+                    .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                    .access(draws, Role::IndirectBuffer)
+                    .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
                     .color(scene, LoadOp::Load)
                     .color(glow, LoadOp::Load)
-                    .depth_read(depth),
+                    .depth(depth, LoadOp::Load),
                 maps,
                 lights,
             )
@@ -203,16 +432,9 @@ impl RenderModule for Scene {
         }
         // The particles over everything, sampling the depth the scene left.
         if let Some([state, keys, draws]) = particles {
-            let sim = p.library("particles.sim");
-            lit(
-                g.pass("particles sim", PassKind::Compute, sim)
-                    .access(state, write)
-                    .access(keys, write)
-                    .access(draws, write),
-                lights,
-                ShaderStage::Compute,
-            )
-            .id();
+            if refraction.is_none() {
+                particle_sim(&mut g, &mut p, [state, keys, draws]);
+            }
             let draw = p.library("particles.draw");
             g.pass("particles", PassKind::Graphics, draw)
                 .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
@@ -223,6 +445,19 @@ impl RenderModule for Scene {
                 .sampled(depth, ShaderStage::Fragment)
                 .id();
         }
+        if let Some(output) = volume {
+            let volume = p.library("water.volume");
+            let mut pass = g
+                .pass("water volume", PassKind::Graphics, volume)
+                .sampled(scene, ShaderStage::Fragment)
+                .sampled(depth, ShaderStage::Fragment)
+                .sampled(refraction.unwrap().0, ShaderStage::Fragment);
+            if let Some((wave_image, ..)) = waves {
+                pass = pass.sampled(wave_image, ShaderStage::Fragment);
+            }
+            pass.color(output, LoadOp::DontCare).id();
+        }
+        let post_scene = volume.unwrap_or(scene);
         // The meter (the scene, the glow the bloom shows, and the depth to
         // undo the fog of war's dimming), after every scene writer and before
         // the bloom and the tonemap.
@@ -232,7 +467,7 @@ impl RenderModule for Scene {
             .id();
         let meter = p.library("exposure.meter");
         g.pass("exposure meter", PassKind::Compute, meter)
-            .sampled(scene, ShaderStage::Compute)
+            .sampled(post_scene, ShaderStage::Compute)
             .sampled(depth, ShaderStage::Compute)
             .sampled(glow, ShaderStage::Compute)
             .access(histogram, Role::StorageBufferReadWrite(ShaderStage::Compute))
@@ -260,7 +495,7 @@ impl RenderModule for Scene {
             .id();
         let tonemap = p.library("post.tonemap");
         g.pass("tonemap", PassKind::Graphics, tonemap)
-            .sampled(scene, ShaderStage::Fragment)
+            .sampled(post_scene, ShaderStage::Fragment)
             .sampled(bloom0, ShaderStage::Fragment)
             .sampled(exposure, ShaderStage::Fragment)
             .color(display.unwrap_or(target), LoadOp::DontCare)

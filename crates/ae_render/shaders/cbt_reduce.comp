@@ -12,7 +12,7 @@ shared uint s[512];
 
 void main() {
     uint j = gl_GlobalInvocationID.x;
-    uint t = u.cfg.y;
+    uint t = CBT_TREE_DEPTH;
     if (ae.words.x == 0u) {
         if (j < (1u << t)) tree[(1u << t) + j] = bitCount(bits[j]);
     } else if (ae.words.x == 1u) {

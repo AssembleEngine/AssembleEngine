@@ -8,8 +8,23 @@ layout(location = 0) flat out vec3 outNormal;
 layout(location = 1) flat out vec3 outColor;
 layout(location = 2) out vec3 outWorld;
 
+#ifdef SUB
+layout(location = 3) flat out float outSceneAlpha;
+#endif
+
 void main() {
+#ifdef SUB
+    uint row = visible[gl_InstanceIndex];
+    bool overlay = ae.words.x != 0u;
+    if (eligible(row) == overlay) {
+        gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    outSceneAlpha = attrf(ATTR_WATER, row) > 0.0 ? 0.5 : 1.0;
+    Unit unit = loadUnit(row);
+#else
     Unit unit = loadUnit(visible[gl_InstanceIndex]);
+#endif
     uint face = uint(gl_VertexIndex) / 3u;
     vec3 a = place(unit, CORNERS[FACES[face * 3u]]);
     vec3 b = place(unit, CORNERS[FACES[face * 3u + 1u]]);
@@ -21,5 +36,10 @@ void main() {
     outNormal = dot(n, (a + b + c) / 3.0 - centre) < 0.0 ? -n : n;
     outColor = u.classes[unit.cls].rgb;
     outWorld = world;
+#ifdef MIRROR
+    gl_Position = u.mirrorProj * vec4(world, 1.0);
+    gl_ClipDistance[0] = world.y - u.height.z;
+#else
     gl_Position = u.viewProj * vec4(world, 1.0);
+#endif
 }

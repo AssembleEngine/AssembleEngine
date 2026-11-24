@@ -9,7 +9,7 @@ use ae_render::demo::{DemoOutput, DemoRenderer, build_demo_graph};
 use ae_render::device::{GpuDevice, GpuInstance};
 use ae_render::executor::{Binding, BufferBinding, Executor, ExecutorConfig, ImageBinding};
 use ae_render::memory::{OwnedBuffer, OwnedImage};
-use ae_render::units::ATTRIBUTE_COUNT;
+use ae_render::units::{ATTR_POSE, ATTR_VIEW, ATTR_WATER, ATTRIBUTE_COUNT};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use std::sync::Arc;
@@ -20,13 +20,12 @@ fn gpu() -> Arc<GpuDevice> {
     Arc::new(GpuDevice::new(instance, None).expect("Vulkan device"))
 }
 
-/// `columns` with the pose column filled to the others' length: every row
-/// at rest.
+/// Fill omitted poses, water depths and view states with their defaults.
 fn at_rest(mut columns: [Vec<u32>; ATTRIBUTE_COUNT]) -> [Vec<u32>; ATTRIBUTE_COUNT] {
     let n = columns[0].len();
-    for c in &mut columns[8..] {
-        c.resize(n, ae_render::units::NO_POSE);
-    }
+    columns[ATTR_POSE].resize(n, ae_render::units::NO_POSE);
+    columns[ATTR_WATER].resize(n, 0);
+    columns[ATTR_VIEW].resize(n, 0);
     columns
 }
 
@@ -148,6 +147,7 @@ fn run_demo(
     let physical = executor.baked().unwrap().physical.len();
     let mut renderer = DemoRenderer::new(gpu.clone(), executor.bindless_mut(), target_desc.format).unwrap();
     let target_binding = Binding::Image(ImageBinding {
+        initial: vk::ImageLayout::UNDEFINED,
         image: target.image,
         view: target.view,
         format: target_desc.format,
@@ -389,6 +389,7 @@ fn first_use_load_becomes_a_clear() {
     let mut buffer = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
     let bindings = [
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format: desc.format,
@@ -651,6 +652,7 @@ fn depth_and_multiple_targets_with(depth_format: vk::Format, record_threads: usi
     let mut buffer = OwnedBuffer::new(&gpu, buffer_desc, MemoryLocation::GpuToCpu, "readback").unwrap();
     let image_binding = |image: &OwnedImage, identity| {
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format: FORMAT,
@@ -2647,6 +2649,8 @@ fn units_cull_matches_the_cpu_reference() {
                         r.to_bits(),
                         c,
                         ae_render::units::NO_POSE,
+                        0, // Surfaced.
+                        0, // Unfiltered.
                     ][a]
                 })
                 .collect()
@@ -3092,6 +3096,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         .unwrap();
     let bindings = [
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format: display_desc.format,
@@ -3102,6 +3107,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             storage: None,
         }),
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: graded_image.image,
             view: graded_image.view,
             format: display_desc.format,
@@ -3112,6 +3118,7 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
             storage: None,
         }),
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: out.image,
             view: out.view,
             format: target_desc.format,
@@ -3782,6 +3789,7 @@ fn parallel_recording_matches_serial() {
         };
         let bindings = [
             Binding::Image(ImageBinding {
+                initial: vk::ImageLayout::UNDEFINED,
                 image: image.image,
                 view: image.view,
                 format: FORMAT,
@@ -4830,8 +4838,9 @@ fn units_cast_shadows() {
     let shaded = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, sun_dir, t)));
     let hidden = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, eye - p, t)));
 
-    let render = |shadows: bool, view_shadows: bool| -> Vec<u8> {
+    let render = |shadows: bool, view_shadows: bool, states: [u32; 3]| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+        columns[ATTR_VIEW].extend(states);
         for &(x, z, hx, hz, r) in &units {
             for (k, word) in [x, z, x, z]
                 .map(f32::to_bits)
@@ -4904,9 +4913,11 @@ fn units_cast_shadows() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let plain = render(false, true);
-    let switched_off = render(true, false);
-    let on = render(true, true);
+    let plain = render(false, true, [0; 3]);
+    let switched_off = render(true, false, [0; 3]);
+    let on = render(true, true, [0; 3]);
+    let blip = render(true, true, [0, 2, 0]);
+    let ghost = render(true, true, [0, 3, 0]);
 
     // The ground on a 0.5 m grid: deep in a dart's shadow (and its
     // neighbours 0.75 m away), or lit with no shadow within 2 m; visible
@@ -4956,6 +4967,15 @@ fn units_cast_shadows() {
 
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
+    assert_eq!(blip, ghost, "blip and ghost both skip the shadow pass");
+    assert!(
+        deep_a.iter().all(|&i| rgb(&blip, i) == rgb(&on, i)),
+        "A still casts its shadow"
+    );
+    assert!(
+        deep_b.iter().all(|&i| rgb(&blip, i) == rgb(&plain, i)),
+        "B's shadow is gone"
+    );
     assert_eq!(
         plain.iter().zip(&switched_off).filter(|(x, y)| x != y).count(),
         0,
@@ -8439,14 +8459,16 @@ fn units_model_shadows_culled() {
         2
     ];
     let models = vec![Some(pillar.clone()), Some(pillar.clone())];
-    let render = |shadows: bool| -> Frames {
+    let render = |shadows: bool, state: u32| -> Frames {
         let feed = Arc::new(UnitFeed::default());
+        let mut columns = at_rest(columns.clone());
+        columns[ATTR_VIEW][0] = state;
         feed.publish(Arc::new(InstanceStream {
             tick: 1,
             published: std::time::Instant::now(),
             tick_seconds: 0.0,
             sim_seconds: 0.0,
-            columns: at_rest(columns.clone()),
+            columns,
             anim: AnimWrites::default(),
         }));
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
@@ -8495,8 +8517,10 @@ fn units_model_shadows_culled() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         (pixels, counts, cascades)
     };
-    let (lit, lit_counts, lit_cascades) = render(false);
-    let (shaded, counts, cascades) = render(true);
+    let (lit, lit_counts, lit_cascades) = render(false, 0);
+    let (shaded, counts, cascades) = render(true, 0);
+    let (filtered, _, _) = render(true, 2);
+    assert_eq!(filtered, lit, "the off-screen blip casts no model shadow");
     assert_eq!(lit_counts, Some((2, 0)), "both pillars off screen");
     assert_eq!(counts, Some((2, 0)));
     assert_eq!(lit_cascades, vec![[0; 3]; 2], "no shadow map: no cascade lists");
@@ -8979,6 +9003,8 @@ fn units_pose_models() {
             radius.to_bits(),
             *class,
             pose,
+            0, // Surfaced.
+            0, // Unfiltered.
         ]
         .into_iter()
         .enumerate()
@@ -10275,6 +10301,7 @@ fn encode_values(
         .unwrap();
     let bindings = [
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format: display_desc.format,
@@ -10285,6 +10312,7 @@ fn encode_values(
             storage: None,
         }),
         Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: out.image,
             view: out.view,
             format: target_desc.format,
@@ -11427,6 +11455,7 @@ fn a_program_samples_64_images() {
         .enumerate()
         .map(|(i, (image, handle))| {
             Some(Binding::Image(ImageBinding {
+                initial: vk::ImageLayout::UNDEFINED,
                 image: image.image,
                 view: image.view,
                 format,
@@ -11439,6 +11468,7 @@ fn a_program_samples_64_images() {
         })
         .collect();
     bindings.push(Some(Binding::Image(ImageBinding {
+        initial: vk::ImageLayout::UNDEFINED,
         image: out.image,
         view: out.view,
         format,
@@ -11626,6 +11656,7 @@ fn a_retired_handle_draws_the_fallback_and_logs_once() {
     executor.bindless_mut().retire_sampled(handle.0);
     let bindings = [
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format,
@@ -11636,6 +11667,7 @@ fn a_retired_handle_draws_the_fallback_and_logs_once() {
             storage: None,
         })),
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: out.image,
             view: out.view,
             format,
@@ -11800,6 +11832,7 @@ fn a_revived_sampler_keeps_its_settings() {
     };
     let bindings = [
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format,
@@ -11810,6 +11843,7 @@ fn a_revived_sampler_keeps_its_settings() {
             storage: None,
         })),
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: out.image,
             view: out.view,
             format,
@@ -11988,6 +12022,7 @@ fn gpu_assisted_validation_reports_an_unbound_handle() {
     .unwrap();
     let bindings = [
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: image.image,
             view: image.view,
             format,
@@ -11998,6 +12033,7 @@ fn gpu_assisted_validation_reports_an_unbound_handle() {
             storage: None,
         })),
         Some(Binding::Image(ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: out.image,
             view: out.view,
             format,
@@ -12055,4 +12091,2768 @@ fn gpu_assisted_validation_reports_an_unbound_handle() {
     let errors = gpu.instance.counters.errors();
     assert!(errors > 0, "GPU-assisted validation reported nothing");
     restore(&previous);
+}
+
+// ---- M16.1 baseline gates (docs/PLAN.md, M16) -------------------------------
+//
+// Before any M16 shader or pass changes, these pin what "unchanged" means:
+// one frame hash per pre-M16 fixture, keyed by device and driver in
+// `tests/data/m16_baseline.txt`. The frame identity is the binding gate
+// (the advisory SPIR-V gate is `tests/spirv.rs`). A hash changes only in a
+// commit whose message gives the reason; M16.7's "blips and ghosts cast no
+// shadow" is the planned one, and it re-pins `observer` alone.
+//
+// On an unknown device the tests print the hashes they measured and skip:
+// frames compare only on the same GPU and driver.
+
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+/// The pinned hashes, as committed.
+const M16_PINNED: &str = include_str!("data/m16_baseline.txt");
+
+/// The baseline fixtures' extent (M16.1: 320x180).
+const M16_EXTENT: vk::Extent2D = vk::Extent2D {
+    width: 320,
+    height: 180,
+};
+
+/// Frames drawn per fixture: at 1/60 s each, the last is a fixed animation
+/// time (8/60 s) with the water, decals and particles all moving.
+const M16_FRAMES: usize = 8;
+
+/// `device | driver`, the key `tests/data/m16_baseline.txt` sections use.
+/// The driver is `VkPhysicalDeviceProperties::driverVersion` as the driver
+/// reports it (hexadecimal: vendor-specific encodings decode differently).
+fn m16_device_key(gpu: &GpuDevice) -> String {
+    let properties = unsafe { gpu.instance.instance.get_physical_device_properties(gpu.physical) };
+    format!("{} | {:#010x}", gpu.device_name, properties.driver_version)
+}
+
+/// The pinned hashes: device key -> fixture -> hash.
+fn m16_pinned() -> &'static BTreeMap<String, BTreeMap<String, u64>> {
+    static PARSED: OnceLock<BTreeMap<String, BTreeMap<String, u64>>> = OnceLock::new();
+    PARSED.get_or_init(|| {
+        let mut out: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+        let mut key = String::new();
+        for line in M16_PINNED.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("# ") {
+                key = rest.trim().to_string();
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            let (name, hash) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("m16_baseline.txt: line without a hash: {line:?}"));
+            assert!(!key.is_empty(), "m16_baseline.txt: {name} before a device line");
+            let hash = u64::from_str_radix(hash, 16).unwrap_or_else(|_| panic!("bad hash {hash:?}"));
+            out.entry(key.clone()).or_default().insert(name.to_string(), hash);
+        }
+        out
+    })
+}
+
+/// One pre-M16 fixture's frame: [`M16_EXTENT`], a fixed camera and time on
+/// the crossing maps (the land crossing when `wet` is false, the water
+/// crossing otherwise), their units, and, with `observer`, the observer's
+/// looks (own, enemy, blip and selection/ghost) so a blip's shadow is in
+/// frame.
+fn m16_frame(gpu: &Arc<GpuDevice>, wet: bool, observer: bool, surface: bool) -> Vec<u8> {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, VisionFeed, VisionFrame};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::{TerrainInfo, VisionGrid};
+    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+
+    let terrain = if wet {
+        ae_nav::scenario::water_crossing_terrain(512)
+    } else {
+        ae_nav::scenario::land_crossing_terrain(512)
+    };
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let (heightmap, scale, offset) =
+        Heightmap::from_cells(cells, |x, y| terrain.ground_height(y * cells.0 + x) as f32 * 0.1, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let level = terrain.has_water().then_some(terrain.water_level as f32 * 0.1);
+    let info = TerrainInfo::new(&heightmap, &pyramid, terrain.geom.cell_size, scale, offset, level);
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: Some(terrain.material.clone()),
+    });
+    let side = terrain.geom.world_width();
+    // The water crossing's big lake; the land crossing's middle.
+    let target = if wet {
+        glam::Vec2::new(side * 0.52, side * 0.63)
+    } else {
+        glam::Vec2::new(side * 0.5, side * 0.5)
+    };
+    // The looks: three plain classes, or the observer's own, enemy, blip
+    // and selection classes (the client's order and count for two real
+    // classes).
+    let colors: Vec<[f32; 3]> = if observer {
+        vec![
+            [0.95, 0.75, 0.10],
+            [0.80, 0.12, 0.08],
+            [0.88, 0.55, 0.14],
+            [0.55, 0.20, 0.10],
+            [0.6, 0.6, 0.6],
+            [1.0, 1.0, 1.0],
+        ]
+    } else {
+        vec![[1.0, 0.8, 0.1], [0.9, 0.9, 0.95], [0.8, 0.1, 0.1]]
+    };
+    let classes: Vec<UnitClass> = colors
+        .iter()
+        .enumerate()
+        .map(|(i, &color)| UnitClass {
+            gamut: ae_render::colorspace::Gamut::Bt709,
+            color,
+            floats: i % 2 == 1,
+        })
+        .collect();
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for i in 0..400u32 {
+        let (x, y) = (
+            target.x - 665.0 + (i % 20) as f32 * 70.0,
+            target.y - 665.0 + (i / 20) as f32 * 70.0,
+        );
+        let class = i % classes.len() as u32;
+        for (a, word) in [
+            x.to_bits(),
+            y.to_bits(),
+            x.to_bits(),
+            y.to_bits(),
+            0.0f32.to_bits(),
+            (-0.5f32 / (1.25f32).sqrt()).to_bits(),
+            0.0f32.to_bits(),
+            (1.0f32 / (1.25f32).sqrt()).to_bits(),
+            6.0f32.to_bits(),
+            class,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            columns[a].push(word);
+        }
+        columns[ATTR_VIEW].push(match (observer, class) {
+            (true, 2 | 3) => 1, // Seen.
+            (true, 4) => 2,     // Blip.
+            _ => 0,             // Own or unfiltered.
+        });
+    }
+    let feed = Arc::new(UnitFeed::default());
+    feed.publish(Arc::new(InstanceStream {
+        tick: 1,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns: at_rest(columns),
+        anim: AnimWrites::default(),
+    }));
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_shadows()
+        .with_units(UnitsSetup {
+            feed,
+            capacity: 512,
+            classes,
+            min_pixels: 5.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
+    if observer {
+        // The observer's vision, as the client attaches it: a fixed feed of
+        // line of sight and explored cells, so the water's fog-of-war branch
+        // is in frame (the lake straddles the sight boundary and the river
+        // beyond it is never seen). A regression that draws every water
+        // pixel as seen changes the frame.
+        let grid = VisionGrid {
+            width: 32,
+            height: 32,
+            cell_size: side / 32.0,
+        };
+        let (stride, words) = (grid.stride(), grid.words());
+        let (mut los, mut explored) = (vec![0u64; words], vec![0u64; words]);
+        for row in 0..grid.height as usize {
+            for col in 0..grid.width as usize {
+                let bit = 1u64 << (col % 64);
+                if col < 17 {
+                    los[row * stride + col / 64] |= bit;
+                }
+                if col < 19 {
+                    explored[row * stride + col / 64] |= bit;
+                }
+            }
+        }
+        let feed = Arc::new(VisionFeed::new(grid));
+        feed.publish(Arc::new(VisionFrame { tick: 1, los, explored }));
+        app = app.with_vision(feed);
+    }
+    {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = target;
+        view.camera.pitch = 0.6;
+        view.camera.distance = 1600.0;
+        // A fixed heading, so the frame does not depend on the default.
+        view.camera.yaw = 0.35;
+        view.water = surface;
+    }
+    app.create_offscreen(gpu, M16_EXTENT).unwrap();
+    let target = TargetInfo {
+        extent: M16_EXTENT,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
+    run_headless(gpu, &mut app, target, M16_FRAMES, config).unwrap();
+    let pixels = app.readback().unwrap();
+    assert_clean(gpu);
+    ae_render::thread::RenderApp::destroy(&mut app, gpu);
+    pixels
+}
+
+/// Render `name`'s fixture and compare its frame hash with the pinned one,
+/// or print the hashes and skip on an unknown device.
+fn m16_check(gpu: &Arc<GpuDevice>, name: &str, water: bool, observer: bool, surface: bool) {
+    let key = m16_device_key(gpu);
+    let pinned = m16_pinned();
+    let pixels = m16_frame(gpu, water, observer, surface);
+    let hash = fnv(&pixels);
+    let Some(section) = pinned.get(&key) else {
+        eprintln!(
+            "M16 baseline skipped on an unknown device; paste into tests/data/m16_baseline.txt:\n\
+             # {key}\ndry {dry:016x}\nwet {wet:016x}\nobserver {observer:016x}\noff {off:016x}",
+            dry = fnv(&m16_frame(gpu, false, false, true)),
+            wet = fnv(&m16_frame(gpu, true, false, true)),
+            observer = fnv(&m16_frame(gpu, true, true, true)),
+            off = fnv(&m16_frame(gpu, true, false, false)),
+        );
+        return;
+    };
+    let Some(&want) = section.get(name) else {
+        panic!("tests/data/m16_baseline.txt has no {name} for {key}");
+    };
+    assert_eq!(
+        hash, want,
+        "the {name} frame changed ({hash:016x}, pinned {want:016x}). Frames change only in a \
+         commit whose message gives the reason, which also re-pins this hash."
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m16_baseline_dry_frame_is_unchanged() {
+    m16_check(&gpu(), "dry", false, false, true);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m16_baseline_wet_frame_is_unchanged() {
+    m16_check(&gpu(), "wet", true, false, true);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m16_baseline_observer_frame_is_unchanged() {
+    m16_check(&gpu(), "observer", true, true, true);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m16_baseline_water_off_frame_is_unchanged() {
+    m16_check(&gpu(), "off", true, false, false);
+}
+
+/// The M16.2 coast fixture renders (criterion 4): the map the client's
+/// `--map coast` builds, at 512 cells, from the navigation crate's own
+/// generator, with its water surface. The seaward half reads blue under the
+/// water and the landward half green, and the surface changes the frame.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn coast_fixture_renders() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let terrain = ae_nav::scenario::coast_terrain(512);
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let (heightmap, scale, offset) =
+        Heightmap::from_cells(cells, |x, y| terrain.ground_height(y * cells.0 + x) as f32 * 0.1, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let water = Some(terrain.water_level as f32 * 0.1);
+    let info = TerrainInfo::new(&heightmap, &pyramid, terrain.geom.cell_size, scale, offset, water);
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: Some(terrain.material.clone()),
+    });
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 240,
+    };
+    let side = terrain.geom.world_width();
+    let render = |surface: bool| -> Vec<u8> {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water();
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.camera.target = Vec2::new(side * 0.5, side * 0.5);
+            view.camera.distance = 2400.0;
+            view.camera.pitch = 0.6;
+            view.fog = false;
+            view.water = surface;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let config = ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 1,
+        };
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let wet = render(true);
+    let dry = render(false);
+    let differing = wet.iter().zip(&dry).filter(|(a, b)| a != b).count();
+    assert!(
+        differing > wet.len() / 10,
+        "the water covers the shelf: {differing} of {} bytes differ",
+        wet.len()
+    );
+    // The bottom third avoids the sky; the left is land, the right is sea.
+    let mean = |pixels: &[u8], x0: u32, x1: u32| -> [f64; 3] {
+        let mut sum = [0.0; 3];
+        let mut n = 0.0;
+        for y in (extent.height * 2 / 3)..extent.height {
+            for x in x0..x1 {
+                let i = ((y * extent.width + x) * 4) as usize;
+                for c in 0..3 {
+                    sum[c] += pixels[i + c] as f64;
+                }
+                n += 1.0;
+            }
+        }
+        sum.map(|v| v / n)
+    };
+    let sea = mean(&wet, extent.width * 2 / 3, extent.width);
+    let land = mean(&wet, 0, extent.width / 3);
+    assert!(sea[2] > sea[1], "the sea reads blue: {sea:?}");
+    assert!(land[1] > land[2], "the land reads green: {land:?}");
+    assert_clean(&gpu);
+}
+
+// ---- M16.5: the shore field and the caustic web -----------------------------
+
+/// A ground height texture for `terrain` in metres (one texel per corner),
+/// and its values.
+fn shore_ground(gpu: &Arc<GpuDevice>, terrain: &ae_nav::terrain::Terrain) -> (OwnedImage, Vec<f32>, u32, u32) {
+    use ae_render::terrain::heightmap::Heightmap;
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let ground = |x: usize, y: usize| terrain.ground_height(y * cells.0 + x) as f32 * 0.1;
+    let (hm, _, _) = Heightmap::from_cells(cells, ground, Some((1.0, 0.0)));
+    let bytes: Vec<u8> = hm.data.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let image = ae_render::upload::image(
+        gpu,
+        vk::Format::R32_SFLOAT,
+        hm.width as u32,
+        hm.height as u32,
+        &[&bytes],
+        "shore test ground",
+    )
+    .expect("the ground texture");
+    (image, hm.data, hm.width as u32, hm.height as u32)
+}
+
+/// The shore pass's recorder: the water data and the ground texture's
+/// bindless handles.
+struct ShoreRecorder {
+    /// `None` only once the test has taken it to destroy its objects.
+    water: Option<ae_render::water::WaterRenderer>,
+    ground: u32,
+    sampler: u32,
+}
+
+impl ae_render::executor::Recorder<ae_render::library::LibraryPass> for ShoreRecorder {
+    fn skip(&self, pass: &ae_render::library::LibraryPass) -> bool {
+        matches!(pass, ae_render::library::LibraryPass::WaterShore)
+            && self.water.as_ref().is_none_or(|w| !w.shore_dirty())
+    }
+
+    fn record(
+        &mut self,
+        pass: &ae_render::library::LibraryPass,
+        ctx: &ae_render::executor::PassContext<'_>,
+    ) -> anyhow::Result<()> {
+        match pass {
+            ae_render::library::LibraryPass::WaterShore => {
+                self.water
+                    .as_ref()
+                    .expect("the water data")
+                    .record_shore(ctx, self.ground, self.sampler)
+            }
+            other => anyhow::bail!("the shore test's graph has {other:?}"),
+        }
+    }
+}
+
+/// A one-pass graph writing `water.shore`, with the library's checks.
+fn shore_graph(env: &ae_render::library::LibraryEnv, desc: ImageDesc) -> FrameGraph<ae_render::library::LibraryPass> {
+    use ae_framegraph::Role;
+    use ae_render::library::{LibraryPass, LibraryResource};
+    let mut graph = FrameGraph::<LibraryPass>::new();
+    let shore = graph.image(LibraryResource::WaterShore.name(), desc, ResourceClass::External);
+    graph
+        .pass(
+            LibraryPass::WaterShore.name(),
+            PassKind::Compute,
+            LibraryPass::WaterShore,
+        )
+        .access(shore, Role::StorageImageWrite(ShaderStage::Compute))
+        .conditional()
+        .root();
+    let map = ae_render::library::resolve(&mut graph, env, |_| None).expect("the library resolves");
+    for (index, pass) in graph.passes.iter().enumerate() {
+        if pass.record == LibraryPass::WaterShore {
+            ae_render::library::check(&graph, index, LibraryPass::WaterShore, &map, env)
+                .expect("the shore pass is wired as the library needs");
+        }
+    }
+    graph
+}
+
+/// The environment for a water-only library graph at `(w, h)` ground samples.
+fn shore_env((w, h): (u32, u32)) -> ae_render::library::LibraryEnv {
+    ae_render::library::LibraryEnv {
+        color_format: vk::Format::R8G8B8A8_SRGB,
+        scene_format: vk::Format::R16G16B16A16_SFLOAT,
+        depth_format: vk::Format::D32_SFLOAT,
+        extent: vk::Extent2D {
+            width: 320,
+            height: 240,
+        },
+        units: false,
+        water: false,
+        shadows: false,
+        particles: false,
+        ground: Some((w, h)),
+        bake_water: false,
+        encoding: ae_render::encode::OutputEncoding::Sdr,
+        levels: ae_render::encode::DisplayLevels::default(),
+        working: Default::default(),
+        gamut: Default::default(),
+    }
+}
+
+/// M16.5: the shore travel-time field on the coast fixture. Zero at the
+/// waterline, rising seaward (monotone along a probe line), a real time in
+/// deep water, and a terrain edit changes it only around the edit (the
+/// pass is skipped while the ground is unchanged).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn the_shore_field_starts_at_the_waterline_and_rises_seaward() {
+    use ae_framegraph::ResourceId;
+    use ae_render::library::LibraryPass;
+
+    let gpu = gpu();
+    let terrain = ae_nav::scenario::coast_terrain(256);
+    let (mut ground_img, heights, w, h) = shore_ground(&gpu, &terrain);
+    let level = terrain.water_level as f32 * 0.1;
+    let mut executor = Executor::<LibraryPass>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let water = ae_render::water::WaterRenderer::new(
+        &gpu,
+        executor.bindless_mut(),
+        w,
+        h,
+        level,
+        terrain.geom.cell_size,
+        true,
+        false,
+    )
+    .expect("the water data");
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+    let sampler = executor.bindless_mut().sampler(&sampler_info).unwrap();
+    let ground_index = executor
+        .bindless_mut()
+        .sampled_2d(ground_img.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap()
+        .0
+        .index;
+    let mut recorder = ShoreRecorder {
+        water: Some(water),
+        ground: ground_index,
+        sampler: sampler.index,
+    };
+    let env = shore_env((w, h));
+    let graph = shore_graph(&env, recorder.water.as_ref().unwrap().shore().unwrap().desc());
+    let shore = ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == "water.shore")
+            .expect("the graph declares water.shore") as u32,
+    );
+    executor.set_graph(graph).unwrap();
+    let binding = Binding::Image(recorder.water.as_ref().unwrap().shore_binding().unwrap());
+    let run = |recorder: &mut ShoreRecorder, executor: &mut Executor<LibraryPass>| {
+        let token = executor.begin_frame().unwrap();
+        executor
+            .execute(
+                token,
+                recorder,
+                &|resource| (resource == shore).then_some(binding),
+                &[],
+                &[],
+            )
+            .unwrap();
+        executor.wait(token).unwrap();
+    };
+    run(&mut recorder, &mut executor);
+    let field = recorder
+        .water
+        .as_ref()
+        .unwrap()
+        .shore()
+        .unwrap()
+        .read(&gpu)
+        .expect("the field reads back");
+    assert_eq!(field.len(), (w * h) as usize);
+    let at = |x: u32, y: u32| field[(y * w + x) as usize];
+
+    // The probe: a row south of the river's mouth (so the first water is the
+    // sea, not the river channel), from the first water texel seaward.
+    let row = (h as f32 * 0.9) as u32;
+    let first_water = (1..w)
+        .find(|&x| heights[(row * w + x) as usize] < level)
+        .expect("the coast has water on the middle row");
+    assert!(
+        heights[(row * w + first_water - 1) as usize] >= level,
+        "the probe starts at the waterline"
+    );
+    assert!(
+        at(first_water, row) < 1e-3,
+        "zero at the waterline: {}",
+        at(first_water, row)
+    );
+    let mut last = 0.0f32;
+    let mut far = 0.0f32;
+    for x in first_water..(first_water + 60).min(w) {
+        let t = at(x, row);
+        assert!(
+            t + 1e-3 >= last,
+            "the travel time rises seaward along the probe: {last} then {t} at x {x}"
+        );
+        assert!(t.is_finite() && t < 60000.0);
+        last = t;
+        far = t;
+    }
+    assert!(far > 1.0, "a minute seaward the swell takes a while: {far}");
+    // Deep water: tens of seconds. Land: zero (nothing to travel).
+    let deep_x = (w as f32 * 0.9) as u32;
+    assert!(at(deep_x, row) > 20.0, "deep water: {}", at(deep_x, row));
+    let land_x = (w as f32 * 0.1) as u32;
+    assert!(heights[(row * w + land_x) as usize] >= level);
+    assert_eq!(at(land_x, row), 0.0);
+
+    // A ground edit (raising a small island in the river's narrow channel)
+    // changes the field only around it: the channel's banks are the nearest
+    // shore on both sides, so no far texel's nearest shore moves. The pass
+    // runs again only because the edit marked it dirty.
+    let river_row = (h as f32 * 0.4) as u32;
+    let river_x = w / 4; // the channel runs near a quarter of the width
+    let (x0, y0, side) = (river_x, river_row, 4u32);
+    let raised: Vec<u8> = (0..side * side).flat_map(|_| (level + 20.0).to_le_bytes()).collect();
+    ae_render::upload::update_images(
+        &gpu,
+        &[(
+            &ground_img,
+            &[ae_render::upload::Region {
+                mip: 0,
+                x: x0,
+                y: y0,
+                width: side,
+                height: side,
+                bytes: raised,
+            }],
+        )],
+    )
+    .expect("the edit lands");
+    recorder
+        .water
+        .as_ref()
+        .unwrap()
+        .mark_dirty(Some((x0, y0, x0 + side, y0 + side)));
+    assert_eq!(
+        recorder.water.as_ref().unwrap().shore().unwrap().last_rect(),
+        Some((x0, y0, x0 + side, y0 + side))
+    );
+    run(&mut recorder, &mut executor);
+    let edited = recorder
+        .water
+        .as_ref()
+        .unwrap()
+        .shore()
+        .unwrap()
+        .read(&gpu)
+        .expect("the field reads back");
+    let mut changed = 0;
+    let radius = 24u32;
+    for y in 0..h {
+        for x in 0..w {
+            let (a, b) = (at(x, y), edited[(y * w + x) as usize]);
+            if (a - b).abs() > 1e-3 {
+                changed += 1;
+                assert!(
+                    x + radius >= x0 && x <= x0 + side + radius && y + radius >= y0 && y <= y0 + side + radius,
+                    "the field changed at ({x}, {y}), outside the edit rect plus {radius} cells"
+                );
+            }
+        }
+    }
+    assert!(changed > 0, "raising an island changes the field around it");
+    let new_at = |x: u32, y: u32| edited[(y * w + x) as usize];
+    assert_eq!(new_at(x0 + 1, y0 + 1), 0.0, "the island itself is dry");
+
+    // The recorder's skip: clean now, so the next frame records nothing.
+    assert!(!recorder.water.as_ref().unwrap().shore_dirty());
+    let mut water = recorder.water.take().expect("the water data");
+    water.retire(executor.bindless_mut());
+    water.destroy(&gpu);
+    drop(recorder);
+    drop(executor);
+    ground_img.destroy(&gpu);
+    assert_clean(&gpu);
+}
+
+/// M16.5: the seed coordinates are exact at a wide map's edge. A half-float
+/// centre cannot represent x >= 1024 texels, so a waterline at x 2048 used
+/// to start at 1.06 s; the integer seed image keeps the first wet texel at
+/// exactly zero and the adjacent step at one texel over the break-depth
+/// speed (the default map is 2560 cells, archives reach 8192).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn the_shore_field_is_exact_on_a_wide_map() {
+    use ae_render::library::LibraryPass;
+
+    let gpu = gpu();
+    let (w, h) = (2561u32, 8u32);
+    let coast = 2048u32;
+    let level = 0.5f32;
+    let cell = 4.0f32;
+    let bytes: Vec<u8> = (0..h)
+        .flat_map(|_| (0..w).flat_map(|x| (if x < coast { 1.0f32 } else { 0.0 }).to_le_bytes()))
+        .collect();
+    let mut ground = ae_render::upload::image(&gpu, vk::Format::R32_SFLOAT, w, h, &[&bytes], "wide map ground")
+        .expect("the ground texture");
+    let mut executor = Executor::<LibraryPass>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let water = ae_render::water::WaterRenderer::new(&gpu, executor.bindless_mut(), w, h, level, cell, true, false)
+        .expect("the water data");
+    let sampler = executor
+        .bindless_mut()
+        .sampler(&vk::SamplerCreateInfo::default())
+        .unwrap();
+    let ground_index = executor
+        .bindless_mut()
+        .sampled_2d(ground.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .unwrap()
+        .0
+        .index;
+    let mut recorder = ShoreRecorder {
+        water: Some(water),
+        ground: ground_index,
+        sampler: sampler.index,
+    };
+    let graph = shore_graph(
+        &shore_env((w, h)),
+        recorder.water.as_ref().unwrap().shore().unwrap().desc(),
+    );
+    let shore = ae_framegraph::ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == "water.shore")
+            .expect("the graph declares water.shore") as u32,
+    );
+    executor.set_graph(graph).unwrap();
+    let binding = Binding::Image(recorder.water.as_ref().unwrap().shore_binding().unwrap());
+    let token = executor.begin_frame().unwrap();
+    executor
+        .execute(
+            token,
+            &mut recorder,
+            &|resource| (resource == shore).then_some(binding),
+            &[],
+            &[],
+        )
+        .unwrap();
+    executor.wait(token).unwrap();
+    let field = recorder
+        .water
+        .as_ref()
+        .unwrap()
+        .shore()
+        .unwrap()
+        .read(&gpu)
+        .expect("the field reads back");
+    let row = 3u32;
+    let at = |x: u32| field[(row * w + x) as usize];
+    let step = cell / (0.6 * (9.81 * 1.0f32).sqrt());
+    assert_eq!(at(coast - 1), 0.0, "land before the waterline");
+    assert_eq!(at(coast), 0.0, "the first wet texel is exactly zero");
+    assert!(
+        (at(coast + 1) - step).abs() < 0.01,
+        "one texel seaward is {step} s: {}",
+        at(coast + 1)
+    );
+    assert!(
+        (at(coast + 2) - 2.0 * step).abs() < 0.01,
+        "two texels: {}",
+        at(coast + 2)
+    );
+    let mut water = recorder.water.take().expect("the water data");
+    water.retire(executor.bindless_mut());
+    water.destroy(&gpu);
+    drop(recorder);
+    drop(executor);
+    ground.destroy(&gpu);
+    assert_clean(&gpu);
+}
+
+/// M16.5: the caustic web is the deterministic tileable pattern, uploaded
+/// with its full GPU mip chain (256² down to 1).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn the_caustic_web_is_tileable_and_mipped() {
+    let gpu = gpu();
+    let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let mut water = ae_render::water::WaterRenderer::new(&gpu, executor.bindless_mut(), 8, 8, 0.5, 8.0, false, true)
+        .expect("the water data");
+    let mips = water.caustics().unwrap().read(&gpu).expect("the web reads back");
+    assert_eq!(mips.len(), 9, "256² has nine mips");
+    assert_eq!(
+        mips[0],
+        ae_render::water::caustics::base(ae_render::water::caustics::SIZE)
+    );
+    assert_eq!(mips[1].len(), (128 * 128 * 4) as usize);
+    assert_eq!(mips[8].len(), 4, "the last mip is one texel");
+    assert!(mips[0].chunks(4).any(|t| t[0] > 128), "the web has bright threads");
+    assert!(mips[0].chunks(4).any(|t| t[0] < 32), "and dark cells");
+    water.retire(executor.bindless_mut());
+    water.destroy(&gpu);
+    drop(executor);
+    assert_clean(&gpu);
+}
+
+// ---- M16.5 review: the bake path, allocation gating and cleanup ------------
+
+/// The coast terrain as a render source, with `water` from `terrain`.
+fn coast_source(terrain: &ae_nav::terrain::Terrain) -> (Arc<ae_render::terrain::app::TerrainSource>, Option<f32>) {
+    use ae_render::terrain::app::TerrainSource;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let ground = |x: usize, y: usize| terrain.ground_height(y * cells.0 + x) as f32 * 0.1;
+    let (heightmap, scale, offset) = Heightmap::from_cells(cells, ground, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let water = (terrain.water_level > ae_nav::terrain::NO_WATER).then_some(terrain.water_level as f32 * 0.1);
+    let info = TerrainInfo::new(&heightmap, &pyramid, terrain.geom.cell_size, scale, offset, water);
+    (
+        Arc::new(TerrainSource {
+            heightmap,
+            pyramid,
+            info,
+            materials: Some(terrain.material.clone()),
+        }),
+        water,
+    )
+}
+
+/// M16.5 review: the app's own graph declares the water data, bakes it on
+/// the first frame, skips it while the ground is unchanged, and bakes again
+/// after a terrain edit lands through the real `TerrainApp` feed.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn the_app_bakes_the_water_data_and_refreshes_it_after_an_edit() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, TargetInfo};
+
+    let gpu = gpu();
+    let terrain = ae_nav::scenario::coast_terrain(128);
+    let (source, water) = coast_source(&terrain);
+    assert!(water.is_some());
+    let extent = vk::Extent2D {
+        width: 320,
+        height: 180,
+    };
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_water_data();
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
+    let mut headless = Headless::new(&gpu, &mut app, target, config).unwrap();
+    headless.frames(&mut app, 1).unwrap();
+    assert!(app.has_water_data(), "the opt-in graph allocated the water data");
+    assert_eq!(app.water_bakes(), 1, "the first frame bakes");
+    headless.frames(&mut app, 1).unwrap();
+    assert_eq!(app.water_bakes(), 1, "a clean frame skips the bake");
+    // An edit lands through the app's feed (the client's path): the next
+    // frame bakes once more, then the field is clean again.
+    let bytes: Vec<u8> = (0..4 * 4).flat_map(|_| 0.5f32.to_le_bytes()).collect();
+    app.terrain_edits()
+        .lock()
+        .unwrap()
+        .pending
+        .push(ae_render::terrain::renderer::TerrainUpdate {
+            version: 1,
+            heights: vec![ae_render::upload::Region {
+                mip: 0,
+                x: 64,
+                y: 64,
+                width: 4,
+                height: 4,
+                bytes,
+            }],
+            ..Default::default()
+        });
+    headless.frames(&mut app, 1).unwrap();
+    assert_eq!(app.water_bakes(), 2, "the edit bakes again");
+    headless.frames(&mut app, 1).unwrap();
+    assert_eq!(app.water_bakes(), 2, "and once more clean");
+    headless.finish().unwrap();
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}
+
+/// A v3 module that ignores the new bits still renders its M7 graph.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m16_post_module_keeps_m7_with_all_water_tiers_requested() {
+    use ae_render::library::WaterTiers;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{RenderApp, TargetInfo, run_headless};
+
+    let gpu = gpu();
+    let module = ae_render::module::build("post").expect("build render/post");
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let (source, _) = coast_source(&wet);
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        profile: false,
+        ..ExecutorConfig::default()
+    };
+    let render = |request, surface| {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_water()
+            .with_water_tiers(request)
+            .with_module(module.clone());
+        app.view().lock().unwrap().water = surface;
+        app.create_offscreen(&gpu, extent).unwrap();
+        run_headless(&gpu, &mut app, target, 8, config).unwrap();
+        assert_eq!(app.water_tiers(), WaterTiers::default());
+        assert!(!app.has_water_data());
+        let pixels = app.readback().unwrap();
+        RenderApp::destroy(&mut app, &gpu);
+        pixels
+    };
+    let m7 = render(WaterTiers::default(), true);
+    let requested = render(
+        WaterTiers {
+            reflect: true,
+            refract: true,
+            waves: true,
+            volume: true,
+        },
+        true,
+    );
+    assert!(m7 == requested, "the extra flags changed the v3 module's M7 frame");
+    assert!(m7 != render(WaterTiers::default(), false), "the M7 surface is visible");
+    assert_clean(&gpu);
+}
+
+/// M16.5 review: M7, water-off and dry maps allocate no water data (the
+/// shell of the finding was ~60-640 MiB of unused scratch), and no bake
+/// runs.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn m7_off_and_dry_allocate_no_water_data() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{TargetInfo, run_headless};
+
+    let gpu = gpu();
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let dry = ae_nav::scenario::land_crossing_terrain(128);
+    for (name, terrain, water, surface) in [
+        ("m7", &wet, true, true),
+        ("off", &wet, true, false),
+        ("dry", &dry, false, true),
+    ] {
+        let (source, level) = coast_source(terrain);
+        assert_eq!(level.is_some(), water, "{name}");
+        let mut app = TerrainApp::new(source, TerrainOutput::Readback);
+        if water {
+            app = app.with_water();
+        }
+        {
+            let view = app.view();
+            let mut view = view.lock().unwrap();
+            view.water = surface;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        run_headless(&gpu, &mut app, target, 2, config).unwrap();
+        assert!(!app.has_water_data(), "{name}: no water data");
+        assert_eq!(app.water_bakes(), 0, "{name}: no bake");
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    }
+    assert_clean(&gpu);
+}
+
+/// M16.5 review: the caustic web is uploaded once, so a graph's first *real*
+/// read must keep it. The executor starts a new external image at the
+/// binding's initial layout (the upload's SHADER_READ_ONLY), not UNDEFINED: a
+/// pass whose shader samples it reads the uploaded bytes. The water objects
+/// are retired and destroyed before the device, and the validation counters
+/// are checked after teardown.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_first_graph_read_keeps_the_uploaded_caustics() {
+    use ae_framegraph::Role;
+    use ae_render::bindless::{HandleTable, Push};
+    use ae_render::executor::{BufferBinding, PassContext, Recorder};
+    use gpu_allocator::MemoryLocation;
+
+    struct Sample {
+        pipeline: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        table: u32,
+        caustics: u32,
+        sampler: u32,
+    }
+    impl Recorder<()> for Sample {
+        fn record(&mut self, _: &(), ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            let mut push = Push {
+                words: [0, 0, 0, 0],
+                ..Push::default()
+            };
+            push.table(self.table);
+            push.image(0, self.caustics);
+            push.sampler(0, self.sampler);
+            unsafe {
+                ctx.device
+                    .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+                ctx.device.cmd_bind_descriptor_sets(
+                    ctx.cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.layout,
+                    0,
+                    &[ctx.global_set],
+                    &[],
+                );
+                ctx.device.cmd_push_constants(
+                    ctx.cmd,
+                    self.layout,
+                    ae_render::bindless::PUSH_STAGES,
+                    0,
+                    ae_render::pipeline::push_bytes(&push),
+                );
+                ctx.device.cmd_dispatch(ctx.cmd, 1, 1, 1);
+            }
+            Ok(())
+        }
+    }
+
+    let gpu = gpu();
+    let instance = gpu.instance.clone();
+    let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let mut water = ae_render::water::WaterRenderer::new(&gpu, executor.bindless_mut(), 8, 8, 0.5, 8.0, true, true)
+        .expect("the water data");
+    assert!(
+        water.shore_binding().unwrap().sampled.is_some(),
+        "the shore field has a bindless sampled handle for a graph consumer"
+    );
+    let before = water.caustics().unwrap().read(&gpu).expect("the web reads back");
+    let sampled = water.caustics_binding().unwrap().sampled.unwrap();
+    let mut out = OwnedBuffer::new(
+        &gpu,
+        BufferDesc {
+            size: 4,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+        },
+        MemoryLocation::GpuToCpu,
+        "caustic sample",
+    )
+    .unwrap();
+    let out_handle = executor.bindless_mut().whole_buffer(&out).unwrap().index;
+    let mut table = HandleTable::new(&gpu, executor.bindless_mut(), &[out_handle], "sample handles").unwrap();
+    let sampler = executor
+        .bindless_mut()
+        .sampler(
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::NEAREST)
+                .min_filter(vk::Filter::NEAREST)
+                .max_lod(vk::LOD_CLAMP_NONE),
+        )
+        .unwrap();
+    let pipeline = ae_render::pipeline::compute_pipeline(
+        &gpu.device,
+        ae_render::spirv!("test_sample_texel.comp"),
+        executor.bindless().pipeline_layout(),
+    )
+    .unwrap();
+    let mut graph = FrameGraph::<()>::new();
+    let caustics = graph.image(
+        "water.caustics",
+        water.caustics().unwrap().desc(),
+        ResourceClass::External,
+    );
+    let target = graph.buffer(
+        "sample.out",
+        BufferDesc {
+            size: 4,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        },
+        ResourceClass::External,
+    );
+    graph
+        .pass("sample", PassKind::Compute, ())
+        .sampled(caustics, ShaderStage::Compute)
+        .access(target, Role::StorageBufferWrite(ShaderStage::Compute))
+        .root();
+    executor.set_graph(graph).unwrap();
+    let caustics_binding = Binding::Image(water.caustics_binding().unwrap());
+    let out_binding = Binding::Buffer(BufferBinding {
+        buffer: out.buffer,
+        offset: 0,
+        size: 4,
+        identity: 0x5A11_0001,
+        storage: None,
+    });
+    let mut sample = Sample {
+        pipeline,
+        layout: executor.bindless().pipeline_layout(),
+        table: table.index,
+        caustics: sampled,
+        sampler: sampler.index,
+    };
+    let token = executor.begin_frame().unwrap();
+    executor
+        .execute(
+            token,
+            &mut sample,
+            &|resource| {
+                if resource == caustics {
+                    Some(caustics_binding)
+                } else if resource == target {
+                    Some(out_binding)
+                } else {
+                    None
+                }
+            },
+            &[],
+            &[],
+        )
+        .unwrap();
+    executor.wait(token).unwrap();
+    let word = u32::from_le_bytes(
+        ae_render::upload::read_buffer(&gpu, out.buffer, 0, 4)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let texel = &before[0][..4];
+    let want = texel[0] as u32 | (texel[1] as u32) << 8 | (texel[2] as u32) << 16 | (texel[3] as u32) << 24;
+    assert_eq!(word, want, "the shader read the uploaded caustic texel");
+    unsafe { gpu.device.destroy_pipeline(pipeline, None) };
+    table.destroy(&gpu);
+    water.retire(executor.bindless_mut());
+    water.destroy(&gpu);
+    drop(executor);
+    out.destroy(&gpu);
+    // Device teardown is where leaked objects are reported.
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// M16.5 review: a failure while making the water data (an exhausted
+/// storage-image registry) releases what it made; the device reports no
+/// leaked objects at teardown.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_failed_water_construction_releases_its_objects() {
+    let instance = Arc::new(GpuInstance::new(&[], Some(true)).unwrap());
+    let gpu = Arc::new(GpuDevice::new(instance.clone(), None).unwrap());
+    let mut executor = Executor::<()>::new(gpu.clone(), ExecutorConfig::default()).unwrap();
+    let desc = ImageDesc::color_2d(vk::Format::R16_SFLOAT, 8, 8, vk::ImageUsageFlags::STORAGE);
+    let mut image = OwnedImage::new(&gpu, desc, "descriptor exhaustion probe").unwrap();
+    while executor
+        .bindless_mut()
+        .storage_image(image.view, vk::ImageLayout::GENERAL)
+        .is_ok()
+    {}
+    let error = ae_render::water::WaterRenderer::new(&gpu, executor.bindless_mut(), 8, 8, 0.5, 8.0, true, true)
+        .err()
+        .expect("the storage-image registry is full");
+    eprintln!("{error:#}");
+    drop(executor);
+    image.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(
+        instance.counters.errors(),
+        0,
+        "no leaked objects (see the validation log)"
+    );
+}
+
+/// M16.5 review: each water input is allocated only when the graph declares
+/// it. A shore-only graph gets the field but no caustic web; a caustics-only
+/// graph gets the small web and none of the full-map shore images (which
+/// used to allocate ~62.5 MiB for a web-only graph).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_graph_allocates_only_the_water_inputs_it_declares() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{TargetInfo, run_headless};
+
+    let gpu = gpu();
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let default: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../render/default.graph.json"
+    )))
+    .unwrap();
+    let graph = |shore: bool, caustics: bool| -> Vec<u8> {
+        let mut g = without_shore(default.clone());
+        if shore {
+            g["resources"].as_array_mut().unwrap().push(serde_json::json!({
+                "name": "water.shore", "kind": "library", "when": "water"
+            }));
+            g["passes"].as_array_mut().unwrap().insert(
+                0,
+                serde_json::json!({
+                    "name": "shore bake", "kind": "compute", "library": "water.shore",
+                    "when": "water", "access": ["water.shore storage_image_write:compute"],
+                    "root": true
+                }),
+            );
+        }
+        if caustics {
+            let resource = g["resources"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|r| r["name"] == "water.caustics")
+                .unwrap();
+            resource["when"] = serde_json::json!("water");
+        }
+        serde_json::to_vec(&g).unwrap()
+    };
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        frames_in_flight: 2,
+        profile: false,
+        bake: BakeOptions::default(),
+        record_threads: 1,
+    };
+    for (shore, caustics) in [(true, false), (false, true)] {
+        let (source, _) = coast_source(&wet);
+        let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+            .with_water()
+            .with_module(graph(shore, caustics));
+        app.create_offscreen(&gpu, extent).unwrap();
+        run_headless(&gpu, &mut app, target, 1, config).unwrap();
+        assert_eq!(app.has_shore_data(), shore, "shore={shore} caustics={caustics}");
+        assert_eq!(app.has_caustics_data(), caustics, "shore={shore} caustics={caustics}");
+        assert_eq!(app.water_bakes(), u64::from(shore), "only a shore graph bakes");
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    }
+    assert_clean(&gpu);
+}
+
+// ---- M16.5 third review: acceptance gates and handle retirement -------------
+
+/// The stock default graph as JSON (the client's module graph).
+fn default_graph_json() -> serde_json::Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../render/default.graph.json"
+    )))
+    .unwrap()
+}
+
+/// The default graph without its own shore field (the waves tier declares
+/// and samples it), so a test can declare the field its own way.
+fn without_shore(mut graph: serde_json::Value) -> serde_json::Value {
+    graph["resources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| r["name"] != "water.shore");
+    let passes = graph["passes"].as_array_mut().unwrap();
+    passes.retain(|p| p["library"] != "water.shore");
+    for pass in passes {
+        if let Some(access) = pass["access"].as_array_mut() {
+            access.retain(|a| !a.as_str().is_some_and(|a| a.starts_with("water.shore ")));
+        }
+    }
+    graph
+}
+
+/// The default graph plus the water data: an optional shore bake (with an
+/// optional module flag) and/or a `water.shore` sample on `water.draw`.
+fn shore_json_graph(flag: Option<u32>, bake: bool, sample: bool) -> Vec<u8> {
+    let mut graph = without_shore(default_graph_json());
+    graph["resources"].as_array_mut().unwrap().push(serde_json::json!({
+        "name": "water.shore", "kind": "library", "when": "water"
+    }));
+    let passes = graph["passes"].as_array_mut().unwrap();
+    if bake {
+        let mut pass = serde_json::json!({
+            "name": "shore bake", "kind": "compute", "library": "water.shore",
+            "when": "water", "access": ["water.shore storage_image_write:compute"],
+            "root": true
+        });
+        if let Some(flag) = flag {
+            pass["flag"] = flag.into();
+        }
+        passes.insert(0, pass);
+    }
+    if sample {
+        passes.iter_mut().find(|p| p["library"] == "water.draw").unwrap()["access"]
+            .as_array_mut()
+            .unwrap()
+            .push("water.shore sampled:fragment".into());
+    }
+    serde_json::to_vec(&graph).unwrap()
+}
+
+/// M16.5 third review: a graph that passes the app's checks but fails the
+/// executor's frame-graph bake (here `depth` loses its sampled usage) must be
+/// rejected *before* the water data is committed or the module counted as
+/// loaded: the active module, its clean bake and its resources stay, and the
+/// frame is drawn with them.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn an_invalid_graph_reload_keeps_the_active_water() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, RenderApp, TargetInfo};
+
+    let instance = Arc::new(GpuInstance::new(&[], Some(true)).unwrap());
+    let gpu = Arc::new(GpuDevice::new(instance.clone(), None).unwrap());
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let (source, _) = coast_source(&wet);
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_module(shore_json_graph(None, true, true));
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut headless = Headless::new(&gpu, &mut app, target, ExecutorConfig::default()).unwrap();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(app.water_bakes(), 1);
+
+    // The stock graph, with the depth's sampled usage removed: the app's
+    // wiring accepts it, the frame-graph bake refuses it.
+    let mut broken = default_graph_json();
+    let depth = broken["resources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|r| r["name"] == "depth")
+        .unwrap();
+    depth["usage"] = serde_json::json!(["depth_stencil_attachment"]);
+    *app.module_reload().lock().unwrap() = Some(serde_json::to_vec(&broken).unwrap());
+    let result = headless.frames(&mut app, 1);
+    assert!(
+        result.is_ok(),
+        "the rejected reload must not break the frame: {result:?}"
+    );
+    assert!(app.has_shore_data(), "the active shore field stays");
+    assert_eq!(app.water_bakes(), 1, "its clean bake stays clean");
+    let status = app.module_status().lock().unwrap().clone();
+    assert_eq!(status.loads, 1, "the rejected graph is not counted as loaded");
+    assert_eq!(status.errors.len(), 1, "{:?}", status.errors);
+    assert!(status.errors[0].contains("frame graph bake"), "{:?}", status.errors);
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// M16.5 third review: a full retarget destroys the water data, so it must
+/// give its bindless handles back with the other recreated objects. The live
+/// registry stays flat through repeated same-executor rebuilds, and the
+/// recreated field bakes and is readable with validation clean.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_full_retarget_retires_the_water_handles() {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, RenderApp, TargetInfo};
+
+    let instance = Arc::new(GpuInstance::new(&[], Some(true)).unwrap());
+    let gpu = Arc::new(GpuDevice::new(instance.clone(), None).unwrap());
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let (source, _) = coast_source(&wet);
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_module(shore_json_graph(None, true, true));
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut headless = Headless::new(&gpu, &mut app, target, ExecutorConfig::default()).unwrap();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+    let live = headless.bindless_mut().live();
+    for round in 0..3 {
+        assert!(
+            app.retarget(&gpu, headless.bindless_mut(), target, 2).unwrap(),
+            "a full retarget rebuilds"
+        );
+        app.create_offscreen(&gpu, target.extent).unwrap();
+        headless.forget_external_states();
+        headless.frames(&mut app, 1).unwrap();
+        headless.wait().unwrap();
+        assert_eq!(
+            headless.bindless_mut().live(),
+            live,
+            "round {round}: live handles stay flat through a retarget"
+        );
+        assert!(app.has_shore_data(), "round {round}: the field is recreated");
+        assert_eq!(
+            app.water_bakes(),
+            1,
+            "round {round}: the new field bakes on its first frame"
+        );
+    }
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+// ---- M16.5 fourth review: explicit library descriptors ---------------------
+
+/// The stock default graph declared for the water fixture, as a WASM guest
+/// builds it, with the given edit applied; `wat_render_module` packs the
+/// encoded graph and program table into the module layout a real render
+/// module exports.
+fn stock_render_module(edit: impl FnOnce(&mut FrameGraph<u32>, &mut ae_render_abi::module::ProgramTable)) -> Vec<u8> {
+    use ae_render::encode::{DisplayLevels, OutputEncoding};
+    use ae_render::module::DeclareTarget;
+    use ae_render_abi::module::ProgramTable;
+
+    let base_json = serde_json::to_vec(&default_graph_json()).unwrap();
+    let mut file = ae_render::graph_file::GraphFile::parse(&base_json).unwrap();
+    let target = DeclareTarget {
+        width: 160,
+        height: 90,
+        color_format: vk::Format::R8G8B8A8_SRGB,
+        flags: ae_render_abi::module::DECLARE_READBACK | ae_render_abi::module::DECLARE_WATER,
+        encoding: OutputEncoding::Sdr,
+        levels: DisplayLevels::default(),
+        working: Default::default(),
+        gamut: Default::default(),
+    };
+    let declared = file.declare(&target).unwrap().unwrap();
+    let mut graph: FrameGraph<u32> = ae_framegraph::descriptor::decode(&declared.graph).unwrap();
+    let mut table = ProgramTable::new();
+    for program in ProgramTable::decode(&declared.programs).unwrap() {
+        table.push(program);
+    }
+    edit(&mut graph, &mut table);
+    let encoded = ae_framegraph::descriptor::encode(&graph, |id| *id);
+    wat_render_module(&encoded, &table.finish())
+}
+
+/// The module layout the sim and render guests export: graph and program
+/// blobs in linear memory behind `ae_render_declare`.
+fn wat_render_module(graph: &[u8], programs: &[u8]) -> Vec<u8> {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("\\{b:02x}")).collect::<String>();
+    let (g, p) = (4096u32, 4096 + graph.len() as u32);
+    let words: Vec<u8> = [g, graph.len() as u32, p, programs.len() as u32]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    format!(
+        r#"(module
+            (memory (export "memory") 2)
+            (data (i32.const 64) "{}")
+            (data (i32.const {g}) "{}")
+            (data (i32.const {p}) "{}")
+            (func (export "ae_render_version") (result i32) i32.const 3)
+            (func (export "ae_render_declare_input") (result i32) i32.const 512)
+            (func (export "ae_render_declare") (result i32) i32.const 64)
+            (func (export "ae_render_input") (result i32) i32.const 1024)
+            (func (export "ae_render_frame") (result i32) i32.const 128))"#,
+        hex(&words),
+        hex(graph),
+        hex(programs)
+    )
+    .into_bytes()
+}
+
+/// A wet app with a live, clean shore bake (the stock graph plus a JSON
+/// `water.shore` bake and sample) and a reload slot.
+fn module_app(
+    module: Vec<u8>,
+) -> (
+    Arc<GpuInstance>,
+    Arc<GpuDevice>,
+    ae_render::terrain::app::TerrainApp,
+    ae_render::thread::Headless<<ae_render::terrain::app::TerrainApp as ae_render::thread::RenderApp>::Pass>,
+) {
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, TargetInfo};
+
+    let instance = Arc::new(GpuInstance::new(&[], Some(true)).unwrap());
+    let gpu = Arc::new(GpuDevice::new(instance.clone(), None).unwrap());
+    let wet = ae_nav::scenario::coast_terrain(128);
+    let (source, _) = coast_source(&wet);
+    let extent = vk::Extent2D { width: 160, height: 90 };
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_module(module);
+    app.view().lock().unwrap().module_flags = ae_render_abi::module::DECLARE_WATER;
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let headless = Headless::new(&gpu, &mut app, target, ExecutorConfig::default()).unwrap();
+    (instance, gpu, app, headless)
+}
+
+fn water_reload_setup() -> (
+    Arc<GpuInstance>,
+    Arc<GpuDevice>,
+    ae_render::terrain::app::TerrainApp,
+    ae_render::thread::Headless<<ae_render::terrain::app::TerrainApp as ae_render::thread::RenderApp>::Pass>,
+) {
+    module_app(shore_json_graph(None, true, true))
+}
+
+/// M16.5 fourth review: a module that declares its own `water.caustics`
+/// descriptor may not add a usage the uploaded web lacks. The reload is
+/// rejected by name before it commits: the live graph (and its clean shore
+/// bake) keeps drawing, the load count stays, and validation is clean.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn an_explicit_caustics_attachment_usage_is_rejected() {
+    use ae_render::thread::RenderApp;
+    use ae_render::water::caustics;
+
+    let (instance, gpu, mut app, mut headless) = water_reload_setup();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(app.water_bakes(), 1);
+
+    let module = stock_render_module(|graph, _| {
+        graph.image(
+            "water.caustics",
+            ImageDesc {
+                mip_levels: ae_render::upload::mip_levels(caustics::SIZE, caustics::SIZE),
+                ..ImageDesc::color_2d(
+                    caustics::FORMAT,
+                    caustics::SIZE,
+                    caustics::SIZE,
+                    vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                )
+            },
+            ResourceClass::External,
+        );
+    });
+    *app.module_reload().lock().unwrap() = Some(module);
+    let result = headless.frames(&mut app, 1);
+    assert!(result.is_ok(), "the rejected reload keeps drawing: {result:?}");
+    let status = app.module_status().lock().unwrap().clone();
+    assert!(app.has_shore_data(), "the active shore data stays");
+    assert_eq!(app.water_bakes(), 1, "its clean bake stays clean");
+    assert_eq!(status.loads, 1, "the rejected graph is not counted as loaded");
+    assert_eq!(status.errors.len(), 1, "{:?}", status.errors);
+    assert!(
+        status.errors[0].contains("water.caustics") && status.errors[0].contains("COLOR_ATTACHMENT"),
+        "{:?}",
+        status.errors
+    );
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// M16.5 fourth review: the same for `water.shore`, whose bound field is
+/// storage, sampled and a transfer source, never a colour attachment. The
+/// module also declares the field's producer, so only the descriptor can be
+/// the reason the reload is refused.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn an_explicit_shore_attachment_usage_is_rejected() {
+    use ae_render::thread::RenderApp;
+    use ae_render::water::shore;
+
+    let (instance, gpu, mut app, mut headless) = water_reload_setup();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(app.water_bakes(), 1);
+
+    let module = stock_render_module(|graph, table| {
+        let bake = table.library("water.shore");
+        let field = graph.image(
+            "water.shore",
+            ImageDesc::color_2d(
+                shore::FIELD_FORMAT,
+                129,
+                129,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            ),
+            ResourceClass::External,
+        );
+        graph
+            .pass("shore bake", PassKind::Compute, bake)
+            .access(field, ae_framegraph::Role::StorageImageWrite(ShaderStage::Compute))
+            .root();
+    });
+    *app.module_reload().lock().unwrap() = Some(module);
+    let result = headless.frames(&mut app, 1);
+    assert!(result.is_ok(), "the rejected reload keeps drawing: {result:?}");
+    let status = app.module_status().lock().unwrap().clone();
+    assert!(app.has_shore_data(), "the active shore data stays");
+    assert_eq!(app.water_bakes(), 1, "its clean bake stays clean");
+    assert_eq!(status.loads, 1, "the rejected graph is not counted as loaded");
+    assert_eq!(status.errors.len(), 1, "{:?}", status.errors);
+    assert!(
+        status.errors[0].contains("water.shore") && status.errors[0].contains("COLOR_ATTACHMENT"),
+        "{:?}",
+        status.errors
+    );
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// M16.5 fourth review: the control. A module that declares the caustic web
+/// exactly as the host allocates it (256², the nine-mip chain, sampled only)
+/// and samples it from the water pass loads and draws with no messages.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn an_explicit_caustics_sampled_descriptor_is_accepted() {
+    use ae_render::thread::RenderApp;
+    use ae_render::water::caustics;
+
+    let (instance, gpu, mut app, mut headless) = water_reload_setup();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+
+    let module = stock_render_module(|graph, _| {
+        let web = graph.image(
+            "water.caustics",
+            ImageDesc {
+                mip_levels: ae_render::upload::mip_levels(caustics::SIZE, caustics::SIZE),
+                ..ImageDesc::color_2d(
+                    caustics::FORMAT,
+                    caustics::SIZE,
+                    caustics::SIZE,
+                    vk::ImageUsageFlags::SAMPLED,
+                )
+            },
+            ResourceClass::External,
+        );
+        let water = graph.passes.iter_mut().find(|p| p.name == "water").unwrap();
+        water.intents.push(ae_framegraph::Intent {
+            resource: web,
+            role: ae_framegraph::Role::Sampled(ShaderStage::Fragment),
+            discard: false,
+        });
+    });
+    *app.module_reload().lock().unwrap() = Some(module);
+    let result = headless.frames(&mut app, 1);
+    assert!(result.is_ok(), "{result:?}");
+    let status = app.module_status().lock().unwrap().clone();
+    assert!(status.errors.is_empty(), "{:?}", status.errors);
+    assert_eq!(status.loads, 2, "the accepted graph is loaded");
+    assert!(app.has_caustics_data(), "the graph's web is allocated");
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+// ---- M16.5 fifth review: one library resource, one id -----------------------
+
+/// A render module whose tonemap pass samples the shore field's travel time
+/// through a test fullscreen shader and writes it to the readback target.
+/// The shore bake is deliberately unrooted: only a reader of the *same*
+/// resource id keeps it alive. `duplicate` declares `water.shore` twice and
+/// samples the second id, which used to bind the same image without making
+/// the first writer a dependency (so the bake was pruned and the read zero).
+fn shore_consumer_module(duplicate: bool) -> Vec<u8> {
+    use ae_framegraph::{Intent, Role};
+
+    stock_render_module(|graph, table| {
+        let sample = table.push(ae_render_abi::module::Program::Fullscreen {
+            label: "shore probe",
+            spirv: include_bytes!(concat!(env!("OUT_DIR"), "/test_sample_shore.frag.spv")),
+            uniform_bytes: 0,
+        });
+        let spec = ImageDesc::color_2d(
+            vk::Format::R16_SFLOAT,
+            129,
+            129,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        );
+        let write = graph.image("water.shore", spec, ResourceClass::External);
+        let read = if duplicate {
+            graph.image("water.shore", spec, ResourceClass::External)
+        } else {
+            write
+        };
+        let bake = table.library("water.shore");
+        graph
+            .pass("shore bake", PassKind::Compute, bake)
+            .access(write, Role::StorageImageWrite(ShaderStage::Compute));
+        let tonemap = graph.passes.iter_mut().find(|pass| pass.name == "tonemap").unwrap();
+        tonemap.record = sample;
+        tonemap
+            .intents
+            .retain(|intent| matches!(intent.role, Role::ColorAttachment(_)));
+        tonemap.intents.push(Intent {
+            resource: read,
+            role: Role::Sampled(ShaderStage::Fragment),
+            discard: false,
+        });
+    })
+}
+
+/// M16.5 fifth review: two declarations of the singleton `water.shore`
+/// resource bind the same image under two ids, and the frame graph would let
+/// the second reader outlive the first writer's bake. The module is refused
+/// on its first declaration: no water data is committed, the frame reports
+/// the resource by name and validation stays clean.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_duplicate_water_shore_declaration_is_rejected_on_load() {
+    use ae_render::thread::RenderApp;
+
+    let (instance, gpu, mut app, mut headless) = module_app(shore_consumer_module(true));
+    let result = headless.frames(&mut app, 1);
+    let error = format!("{:#}", result.expect_err("the duplicate declaration is refused"));
+    assert!(
+        error.contains("water.shore") && error.contains("more than once"),
+        "{error}"
+    );
+    assert!(!app.has_water_data(), "a refused first declaration commits nothing");
+    app.destroy(&gpu);
+    drop(headless);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// The same duplicate module on a live reload: it is rejected by name, the
+/// running graph, its shore field and its clean bake stay, the load count
+/// stays, and the frame keeps drawing.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_duplicate_water_shore_declaration_is_rejected_on_reload() {
+    use ae_render::thread::RenderApp;
+
+    let (instance, gpu, mut app, mut headless) = water_reload_setup();
+    headless.frames(&mut app, 2).unwrap();
+    headless.wait().unwrap();
+    assert_eq!(app.water_bakes(), 1);
+
+    *app.module_reload().lock().unwrap() = Some(shore_consumer_module(true));
+    let result = headless.frames(&mut app, 1);
+    assert!(result.is_ok(), "the rejected reload keeps drawing: {result:?}");
+    let status = app.module_status().lock().unwrap().clone();
+    assert!(app.has_shore_data(), "the active shore field stays");
+    assert_eq!(app.water_bakes(), 1, "its clean bake stays clean");
+    assert_eq!(status.loads, 1, "the rejected graph is not counted as loaded");
+    assert_eq!(status.errors.len(), 1, "{:?}", status.errors);
+    assert!(
+        status.errors[0].contains("water.shore") && status.errors[0].contains("more than once"),
+        "{:?}",
+        status.errors
+    );
+    headless.finish().unwrap();
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// The control: one declaration, the same unrooted bake and sample shader.
+/// The producer is a dependency of the reader, so the bake runs once and the
+/// target's red carries the field's travel time (the shader scales 100 s).
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn a_unique_water_shore_consumer_keeps_its_bake_live() {
+    use ae_render::thread::RenderApp;
+
+    let (instance, gpu, mut app, mut headless) = module_app(shore_consumer_module(false));
+    let result = headless.frames(&mut app, 1);
+    headless.finish().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(app.water_bakes(), 1, "the sampled producer bakes");
+    let red = app.readback().unwrap()[0];
+    assert!(red > 0, "the target's red carries the shore travel time");
+    app.destroy(&gpu);
+    drop(gpu);
+    assert_eq!(instance.counters.errors(), 0, "validation errors after teardown");
+    assert_eq!(instance.counters.warnings(), 0, "validation warnings after teardown");
+}
+
+/// The coast's reflection target before the surface samples it. Draws a
+/// tower, and three darts that can be hidden independently by view state
+/// or the water plane.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn coast_planar_reflection_is_clipped_and_observer_safe() {
+    use ae_framegraph::{ResourceId, Role};
+    use ae_model::{Bone, Bounds, Joint, Material, Model};
+    use ae_render::library::{LibraryPass, WaterTiers};
+    use ae_render::terrain::app::{NATIVE, PassWork, ScenePass, TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{RenderApp, TargetInfo};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec3};
+
+    let gpu = gpu();
+    let terrain = ae_nav::scenario::coast_terrain(512);
+    let cells = (terrain.geom.cells_x as usize, terrain.geom.cells_y as usize);
+    let (heightmap, scale, offset) =
+        Heightmap::from_cells(cells, |x, z| terrain.ground_height(z * cells.0 + x) as f32 * 0.1, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let level = terrain.water_level as f32 * 0.1;
+    let info = TerrainInfo::new(&heightmap, &pyramid, terrain.geom.cell_size, scale, offset, Some(level));
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: Some(terrain.material),
+    });
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let mut tower = Model {
+        bones: vec![Bone {
+            name: "root".into(),
+            parent: None,
+            rest: identity,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }],
+        joints: vec![Joint {
+            bone: 0,
+            inverse_bind: identity,
+        }],
+        materials: vec![Material {
+            base_color: [1.0, 0.001, 0.001, 1.0],
+            ..Default::default()
+        }],
+        bounds: Bounds {
+            min: [-0.35, 0.0, -0.35],
+            max: [0.35, 1.6, 0.35],
+        },
+        ..Default::default()
+    };
+    model_box(&mut tower, [-0.35, 0.0, -0.35], [0.35, 1.6, 0.35], 0);
+    tower.validate().unwrap();
+    let feed = Arc::new(UnitFeed::default());
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .with_water()
+        .with_water_tiers(WaterTiers {
+            reflect: true,
+            ..Default::default()
+        })
+        .with_units(UnitsSetup {
+            feed: feed.clone(),
+            capacity: 16,
+            classes: vec![
+                UnitClass {
+                    color: [1.0, 0.001, 0.001],
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    floats: true,
+                };
+                2
+            ],
+            min_pixels: 1.0,
+            models: vec![Some(Arc::new(tower)), None],
+            rigs: Vec::new(),
+        });
+    let extent = vk::Extent2D {
+        width: 321,
+        height: 241,
+    };
+    let (rw, rh) = (extent.width.div_ceil(2), extent.height.div_ceil(2));
+    let view = app.view();
+    let (center, camera) = {
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(4096.0 * 0.56, 4096.0 * 0.5);
+        view.camera.yaw = 0.0;
+        view.camera.pitch = 0.52;
+        view.camera.distance = 530.0;
+        view.fog = false;
+        view.time = Some(0.0);
+        (view.camera.target, view.camera)
+    };
+    let offsets = [-136.0, -49.0, 42.0, 135.0];
+    let radius = 23.0f32;
+    let publish = |tick, filtered| {
+        let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+        for (i, dx) in offsets.into_iter().enumerate() {
+            let x = center.x + dx;
+            let z = center.y;
+            let words: [u32; ATTRIBUTE_COUNT] = [
+                x.to_bits(),
+                z.to_bits(),
+                x.to_bits(),
+                z.to_bits(),
+                0,
+                0,
+                0,
+                1.0f32.to_bits(),
+                radius.to_bits(),
+                u32::from(i != 0),
+                ae_render::units::NO_POSE,
+                if filtered && i == 3 { 55.0f32.to_bits() } else { 0 },
+                if filtered { [0, 2, 3, 1][i] } else { 0 },
+            ];
+            for (column, word) in columns.iter_mut().zip(words) {
+                column.push(word);
+            }
+        }
+        feed.publish(Arc::new(InstanceStream {
+            tick,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            columns,
+            anim: AnimWrites::default(),
+        }));
+    };
+
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut executor = Executor::new(
+        gpu.clone(),
+        ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 2,
+        },
+    )
+    .unwrap();
+    app.create(&gpu, executor.bindless_mut(), target, 2).unwrap();
+    let (mut graph, _) = app.declare(target, executor.bindless_mut()).unwrap();
+    assert!(app.water_tiers().reflect);
+    let image = ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == "water.reflection")
+            .unwrap() as u32,
+    );
+    let desc = BufferDesc {
+        size: u64::from(rw) * u64::from(rh) * 8,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let buffer = graph.buffer("reflection probe", desc, ResourceClass::External);
+    graph
+        .pass(
+            "reflection probe copy",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Readback { image, buffer },
+            },
+        )
+        .access(image, Role::TransferSrc)
+        .discard(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass(
+            "reflection probe read",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Library(LibraryPass::HostRead),
+            },
+        )
+        .access(buffer, Role::HostRead)
+        .root();
+    let mut readback = OwnedBuffer::new(&gpu, desc, MemoryLocation::GpuToCpu, "reflection probe").unwrap();
+    executor.set_graph(graph).unwrap();
+    let (all, filtered, off) = {
+        let mut render = || {
+            let mut last = None;
+            for _ in 0..6 {
+                let token = executor.begin_frame().unwrap();
+                app.prepare(executor.bindless_mut(), token.slot).unwrap();
+                let mut externals = (0..executor.graph().resources.len() as u32)
+                    .map(|index| app.external(ResourceId(index), token.slot))
+                    .collect::<Vec<_>>();
+                externals[buffer.index()] = Some(Binding::Buffer(BufferBinding {
+                    buffer: readback.buffer,
+                    size: desc.size,
+                    offset: 0,
+                    identity: 0x5245464c,
+                    storage: None,
+                }));
+                executor
+                    .execute(token, app.recorder(), &|id| externals[id.index()], &[], &[])
+                    .unwrap();
+                last = Some(token);
+            }
+            executor.wait(last.unwrap()).unwrap();
+            (readback.mapped().unwrap().to_vec(), app.readback().unwrap())
+        };
+        publish(1, false);
+        render();
+        view.lock().unwrap().frozen = Some(lod_view(&source, &camera, extent.width, extent.height));
+        let (all, surface_all) = render();
+        publish(2, true);
+        let (filtered, surface_filtered) = render();
+        assert_ne!(surface_all, surface_filtered, "water samples the reflected geometry");
+        view.lock().unwrap().water = false;
+        let (off, _) = render();
+        (all, filtered, off)
+    };
+    assert!(
+        off.iter().all(|&byte| byte == 0),
+        "the water toggle skips the mirror draws"
+    );
+
+    let project = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let red_pixels = |image: &[u8], x: f32, height: f32| {
+        let p = project * Vec3::new(x, level - height, center.y).extend(1.0);
+        let cx = ((p.x / p.w * 0.5 + 0.5) * rw as f32) as i32;
+        let cy = ((p.y / p.w * 0.5 + 0.5) * rh as f32) as i32;
+        assert!((7..rw as i32 - 7).contains(&cx) && (7..rh as i32 - 7).contains(&cy));
+        (cy - 7..=cy + 7)
+            .flat_map(|y| (cx - 7..=cx + 7).map(move |x| (y * rw as i32 + x) as usize * 8))
+            .filter(|&i| {
+                let [r, g, b] = scrgb_pixel(image, i);
+                r > 0.004 && r > 3.0 * g.max(b)
+            })
+            .count()
+    };
+    for (i, dx) in offsets.into_iter().enumerate() {
+        let height = if i == 0 { radius * 0.8 } else { radius * 0.3 };
+        let (unfiltered, visible) = (
+            red_pixels(&all, center.x + dx, height),
+            red_pixels(&filtered, center.x + dx, height),
+        );
+        assert!(
+            unfiltered >= 2,
+            "row {i} appears at its mirrored position ({unfiltered} red pixels)"
+        );
+        if i == 0 {
+            assert_eq!(visible, unfiltered, "Own tower stays in the mirror");
+        } else {
+            assert_eq!(visible, 0, "blip, ghost and submerged row are absent ({i})");
+        }
+    }
+    assert!(
+        filtered.as_chunks::<8>().0.contains(&[0; 8]),
+        "sky keeps the clear value"
+    );
+    gpu.wait_idle();
+    drop(executor);
+    app.destroy(&gpu);
+    readback.destroy(&gpu);
+    assert_clean(&gpu);
+}
+
+struct RefractionProbe {
+    color: Vec<u8>,
+    surface: Vec<u8>,
+}
+
+struct WaterDart {
+    depth: f32,
+    radius: f32,
+}
+
+fn refraction_probe(
+    gpu: &Arc<GpuDevice>,
+    depth: f32,
+    water: ae_render::water::WaterParams,
+    dart: Option<WaterDart>,
+    shadows: bool,
+) -> RefractionProbe {
+    use ae_framegraph::{ResourceId, Role};
+    use ae_render::library::{LibraryPass, WaterTiers};
+    use ae_render::terrain::app::{NATIVE, PassWork, ScenePass, TerrainApp, TerrainOutput, TerrainSource};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{RenderApp, TargetInfo};
+    use ae_render::units::{InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+
+    let (heightmap, scale, offset) = Heightmap::from_cells((32, 32), |_, _| -depth, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, offset, Some(0.0));
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback)
+        .with_water()
+        .with_water_tiers(WaterTiers {
+            refract: true,
+            ..Default::default()
+        })
+        .with_water_params(water);
+    if let Some(dart) = dart {
+        let feed = Arc::new(UnitFeed::default());
+        let xy = 64.0f32.to_bits();
+        let columns = [
+            xy,
+            xy,
+            xy,
+            xy,
+            0,
+            0,
+            0,
+            1.0f32.to_bits(),
+            dart.radius.to_bits(),
+            0,
+            ae_render::units::NO_POSE,
+            dart.depth.to_bits(),
+            0,
+        ]
+        .map(|word| vec![word]);
+        feed.publish(Arc::new(InstanceStream {
+            columns,
+            tick: 1,
+            published: std::time::Instant::now(),
+            tick_seconds: 0.0,
+            sim_seconds: 0.0,
+            anim: Default::default(),
+        }));
+        app = app.with_units(UnitsSetup {
+            feed,
+            capacity: 4,
+            classes: vec![UnitClass {
+                color: [1.0, 0.005, 0.004],
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                floats: true,
+            }],
+            min_pixels: 0.0,
+            models: Vec::new(),
+            rigs: Vec::new(),
+        });
+    }
+    if shadows {
+        app = app.with_shadows();
+    }
+    {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.target = glam::Vec2::splat(64.0);
+        view.camera.distance = 62.0;
+        view.camera.pitch = 0.8;
+        view.camera.yaw = 0.0;
+        view.time = Some(0.0);
+        view.fog = false;
+    }
+    let extent = vk::Extent2D {
+        width: 192,
+        height: 144,
+    };
+    app.create_offscreen(gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut executor = Executor::new(
+        gpu.clone(),
+        ExecutorConfig {
+            profile: false,
+            frames_in_flight: 2,
+            record_threads: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    app.create(gpu, executor.bindless_mut(), target, 2).unwrap();
+    let (mut graph, _) = app.declare(target, executor.bindless_mut()).unwrap();
+    let image = ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == "water.refraction")
+            .unwrap() as u32,
+    );
+    let desc = BufferDesc {
+        size: u64::from(extent.width) * u64::from(extent.height) * 8,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let buffer = graph.buffer("refraction probe", desc, ResourceClass::External);
+    graph
+        .pass(
+            "refraction probe copy",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Readback { image, buffer },
+            },
+        )
+        .access(image, Role::TransferSrc)
+        .discard(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass(
+            "refraction probe read",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Library(LibraryPass::HostRead),
+            },
+        )
+        .access(buffer, Role::HostRead)
+        .root();
+    let mut readback = OwnedBuffer::new(gpu, desc, MemoryLocation::GpuToCpu, "refraction probe").unwrap();
+    executor.set_graph(graph).unwrap();
+    for _ in 0..4 {
+        let token = executor.begin_frame().unwrap();
+        app.prepare(executor.bindless_mut(), token.slot).unwrap();
+        let mut externals = (0..executor.graph().resources.len() as u32)
+            .map(|index| app.external(ResourceId(index), token.slot))
+            .collect::<Vec<_>>();
+        externals[buffer.index()] = Some(Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            size: desc.size,
+            offset: 0,
+            identity: 0x52454652,
+            storage: None,
+        }));
+        executor
+            .execute(token, app.recorder(), &|id| externals[id.index()], &[], &[])
+            .unwrap();
+        executor.wait(token).unwrap();
+    }
+    let color = readback.mapped().unwrap().to_vec();
+    let surface = app.readback().unwrap();
+    drop(executor);
+    app.destroy(gpu);
+    readback.destroy(gpu);
+    RefractionProbe { color, surface }
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn refractive_water_reconstructs_seabed_depth_and_matches_absorption() {
+    use ae_render::water::WaterParams;
+    let gpu = gpu();
+    let absorption = [0.035_f32, 0.075, 0.16];
+    let plain = WaterParams {
+        absorption: [0.0; 3],
+        caustics: 0.0,
+        ..Default::default()
+    };
+    let tint = WaterParams { absorption, ..plain };
+    let exposure = ae_render::tonemap::ToneParams::default().exposure();
+    for depth in [1.0_f32, 4.0, 16.0] {
+        let scene = refraction_probe(&gpu, depth, plain, None, false);
+        let refracted = refraction_probe(&gpu, depth, tint, None, false);
+        let deep_mix = 1.0 - (-depth * absorption.iter().sum::<f32>() * 0.1).exp();
+        let mut count = 0;
+        for (base, actual) in scene
+            .color
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(refracted.color.as_chunks::<8>().0)
+        {
+            if base[6..8] != [0, 0x3c] {
+                continue;
+            }
+            assert_eq!(actual[6..8], [0, 0x3c]);
+            let base = scrgb_pixel(base, 0);
+            let actual = scrgb_pixel(actual, 0);
+            for i in 0..3 {
+                let t = (-depth * tint.absorption[i]).exp();
+                let scatter = tint.shallow[i] + deep_mix * (tint.deep[i] - tint.shallow[i]);
+                let want = base[i] * t + (1.0 - t) * scatter * exposure;
+                // Half-float readback and the reverse-Z world reconstruction.
+                assert!(
+                    (actual[i] - want).abs() <= want * 0.004 + 0.001,
+                    "{depth} m channel {i}: {} vs {want}",
+                    actual[i]
+                );
+            }
+            count += 1;
+        }
+        assert!(count > 8000, "only {count} seabed samples");
+        assert_ne!(
+            scene.surface, refracted.surface,
+            "the surface must consume the underwater result"
+        );
+    }
+    assert_eq!(gpu.instance.counters.errors(), 0);
+    assert_eq!(gpu.instance.counters.warnings(), 0);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn refractive_water_masks_above_water_hulls_and_shadows_caustics() {
+    use ae_render::water::WaterParams;
+    let gpu = gpu();
+    let plain = WaterParams {
+        caustics: 0.0,
+        ..Default::default()
+    };
+    // A coarse web (a 33 m tile): the underwater pass fades out threads
+    // finer than a few pixels, and the probe looks from RTS height.
+    let web = WaterParams {
+        caustics: 0.03,
+        ..plain
+    };
+    let hull = || {
+        Some(WaterDart {
+            depth: 0.0,
+            radius: 8.0,
+        })
+    };
+    let open = refraction_probe(&gpu, 4.0, plain, hull(), false);
+    let open_caustics = refraction_probe(&gpu, 4.0, web, hull(), false);
+    let shadow = refraction_probe(&gpu, 4.0, plain, hull(), true);
+    let shadow_caustics = refraction_probe(&gpu, 4.0, web, hull(), true);
+    let absent = refraction_probe(&gpu, 4.0, web, None, true);
+    let mut masked = 0;
+    let mut brightened = 0;
+    let mut suppressed = 0;
+    for i in (0..open.color.len()).step_by(8) {
+        if open.color[i + 6..i + 8] == [0, 0] && absent.color[i + 6..i + 8] == [0, 0x3c] {
+            assert_eq!(
+                open_caustics.color[i..i + 8],
+                [0; 8],
+                "above-water geometry enters the copy"
+            );
+            masked += 1;
+        }
+        let y = |data: &RefractionProbe| y709(scrgb_pixel(&data.color, i));
+        let lit_caustics = y(&open_caustics) - y(&open);
+        if lit_caustics > 0.008 {
+            brightened += 1;
+            if y(&shadow) > 0.0
+                && y(&shadow) < y(&open) * 0.9
+                && (y(&shadow_caustics) - y(&shadow)).abs() < lit_caustics * 0.2
+            {
+                suppressed += 1;
+            }
+        }
+    }
+    assert!(
+        masked > 30 && brightened > 100 && suppressed > 5,
+        "masked {masked}, lit {brightened}, suppressed {suppressed}"
+    );
+    assert_eq!(gpu.instance.counters.errors(), 0);
+    assert_eq!(gpu.instance.counters.warnings(), 0);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn submerged_dart_keeps_paint_and_gets_only_the_requested_outline() {
+    use ae_render::water::WaterParams;
+    let gpu = gpu();
+    let no_tint = WaterParams {
+        caustics: 0.0,
+        absorption: [0.0; 3],
+        ..Default::default()
+    };
+    let tint = WaterParams {
+        absorption: [0.1, 0.2, 0.5],
+        shallow: [0.0; 3],
+        deep: [0.0; 3],
+        sub_keep: 0.6,
+        sub_tint: 4.0,
+        sub_tint_max: 3.0,
+        ..no_tint
+    };
+    let sub = || {
+        Some(WaterDart {
+            depth: 4.0,
+            radius: 2.6,
+        })
+    };
+    let base = refraction_probe(&gpu, 10.0, no_tint, sub(), false);
+    let painted = refraction_probe(&gpu, 10.0, tint, sub(), false);
+    let outlined_tint = WaterParams {
+        outline: true,
+        ..no_tint
+    };
+    let outlined = refraction_probe(&gpu, 10.0, outlined_tint, sub(), false);
+    let mut sub_pixels = 0;
+    let mut edge_pixels = 0;
+    for i in (0..base.color.len()).step_by(8) {
+        let b = scrgb_pixel(&base.color, i);
+        let p = scrgb_pixel(&painted.color, i);
+        if b[0] > 4.0 * b[1] && b[0] > 0.08 {
+            sub_pixels += 1;
+            for j in 0..3 {
+                let want = b[j] * (-tint.absorption[j] * 3.0).exp().max(0.6);
+                assert!(
+                    (p[j] - want).abs() < 0.002 + want * 0.004,
+                    "channel {j}: {} vs {want}",
+                    p[j]
+                );
+            }
+        }
+        if outlined.color[i..i + 8] != base.color[i..i + 8] {
+            edge_pixels += 1;
+        }
+    }
+    assert!(
+        sub_pixels > 12 && edge_pixels > 3 && edge_pixels < sub_pixels,
+        "{sub_pixels} hull pixels, {edge_pixels} edge pixels"
+    );
+    assert_eq!(gpu.instance.counters.errors(), 0);
+    assert_eq!(gpu.instance.counters.warnings(), 0);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn surface_refraction_grows_with_depth_and_rejects_dry_or_bright_samples() {
+    use ae_framegraph::{ResourceId, Role};
+    use ae_render::bindless::{PUSH_STAGES, Push};
+    use ae_render::executor::{PassContext, Recorder};
+
+    struct Shader {
+        pipeline: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        out: ResourceId,
+    }
+
+    impl Recorder<()> for Shader {
+        fn record(&mut self, _: &(), ctx: &PassContext<'_>) -> anyhow::Result<()> {
+            let mut push = Push::default();
+            push.words[0] = ctx.buffer(self.out)?.storage.unwrap();
+            unsafe {
+                ctx.device
+                    .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+                ctx.device.cmd_bind_descriptor_sets(
+                    ctx.cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.layout,
+                    0,
+                    &[ctx.global_set],
+                    &[],
+                );
+                ctx.device.cmd_push_constants(
+                    ctx.cmd,
+                    self.layout,
+                    PUSH_STAGES,
+                    0,
+                    ae_render::pipeline::push_bytes(&push),
+                );
+                ctx.device.cmd_dispatch(ctx.cmd, 1, 1, 1);
+            }
+            Ok(())
+        }
+    }
+
+    let gpu = gpu();
+    let mut executor = Executor::new(
+        gpu.clone(),
+        ExecutorConfig {
+            profile: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut graph = FrameGraph::new();
+    let desc = BufferDesc {
+        size: 32,
+        usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+    };
+    let out = graph.buffer("refraction offset and guard", desc, ResourceClass::External);
+    graph
+        .pass("probe", PassKind::Compute, ())
+        .access(out, Role::StorageBufferWrite(ShaderStage::Compute))
+        .id();
+    graph
+        .pass("host read", PassKind::Transfer, ())
+        .access(out, Role::HostRead)
+        .root();
+    let mut buffer = OwnedBuffer::new(&gpu, desc, MemoryLocation::GpuToCpu, "refraction guard probe").unwrap();
+    let storage = executor.bindless_mut().whole_buffer(&buffer).unwrap();
+    let layout = executor.bindless().pipeline_layout();
+    let pipeline =
+        ae_render::pipeline::compute_pipeline(&gpu.device, ae_render::spirv!("test_water_refract.comp"), layout)
+            .unwrap();
+    let mut shader = Shader { pipeline, layout, out };
+    executor.set_graph(graph).unwrap();
+    let token = executor.begin_frame().unwrap();
+    let binding = Binding::Buffer(BufferBinding {
+        buffer: buffer.buffer,
+        size: 32,
+        offset: 0,
+        identity: 0x52454647,
+        storage: Some(storage.index),
+    });
+    executor
+        .execute(token, &mut shader, &|id| (id == out).then_some(binding), &[], &[])
+        .unwrap();
+    executor.wait(token).unwrap();
+    let values: Vec<_> = buffer.mapped().unwrap()[..32]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    assert_eq!(values[0], 0.0);
+    assert!(values[..4].windows(2).all(|w| w[0] < w[1]), "{values:?}");
+    assert_eq!(values[4..7], [1.0, 0.0, 0.0]);
+    assert!(values[7] > 0.0 && values[7] < 1.0);
+    unsafe { gpu.device.destroy_pipeline(pipeline, None) };
+    drop(executor);
+    buffer.destroy(&gpu);
+    assert_clean(&gpu);
+}
+
+fn volume_test_source() -> Arc<ae_render::terrain::app::TerrainSource> {
+    use ae_render::terrain::app::TerrainSource;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+
+    let (heightmap, scale, offset) = Heightmap::from_cells((64, 64), |_, _| -24.0, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, Some(0.0));
+    Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    })
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn water_volume_shows_snells_window_and_crosses_the_near_plane_smoothly() {
+    use ae_render::library::WaterTiers;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{Headless, RenderApp, TargetInfo};
+    use glam::Vec2;
+
+    let gpu = gpu();
+    let source = volume_test_source();
+    let extent = vk::Extent2D {
+        width: 161,
+        height: 161,
+    };
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let config = ExecutorConfig {
+        profile: false,
+        record_threads: 2,
+        ..Default::default()
+    };
+    let full = WaterTiers {
+        reflect: true,
+        refract: true,
+        waves: true,
+        volume: true,
+    };
+    let init = |tiers| {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+            .with_water()
+            .with_water_tiers(tiers);
+        let view = app.view();
+        {
+            let mut v = view.lock().unwrap();
+            v.time = Some(0.0);
+            v.fog = false;
+            v.camera.target = Vec2::splat(256.0);
+            v.camera.yaw = 0.0;
+            v.camera.distance = 28.0;
+        }
+        app.create_offscreen(&gpu, extent).unwrap();
+        let headless = Headless::new(&gpu, &mut app, target, config).unwrap();
+        (app, headless)
+    };
+    let (mut app, mut headless) = init(full);
+    let (mut surface_only, mut reference) = init(WaterTiers { volume: false, ..full });
+    let place = |app: &TerrainApp, eye_height, pitch, fov_y| {
+        let view = app.view();
+        let mut view = view.lock().unwrap();
+        view.camera.pitch = pitch;
+        view.camera.fov_y = fov_y;
+        view.camera_focus = Some(eye_height - view.camera.offset_dir().y * view.camera.distance);
+    };
+
+    place(&app, 4.0, 0.6, 0.8);
+    place(&surface_only, 4.0, 0.6, 0.8);
+    headless.frames(&mut app, 8).unwrap();
+    reference.frames(&mut surface_only, 8).unwrap();
+    headless.wait().unwrap();
+    reference.wait().unwrap();
+    assert!(
+        app.readback() == surface_only.readback(),
+        "above-water output must be byte-identical"
+    );
+
+    place(&app, -3.0, -1.5, 2.16);
+    place(&surface_only, -3.0, -1.5, 2.16);
+    headless.frames(&mut app, 6).unwrap();
+    reference.frames(&mut surface_only, 6).unwrap();
+    headless.wait().unwrap();
+    reference.wait().unwrap();
+    let below = app.readback().unwrap();
+    let sky = surface_only.readback().unwrap();
+    let pixel = |x, y| ((y * extent.width + x) * 4) as usize;
+    let center = pixel(extent.width / 2, extent.height / 2);
+    let sky_color = &sky[center..center + 3];
+    assert!(sky.as_chunks::<4>().0.iter().filter(|p| &p[..3] == sky_color).count() > below.len() / 8);
+    assert!(
+        below.as_chunks::<4>().0.iter().all(|p| &p[..3] != sky_color),
+        "no clear sky below the water"
+    );
+    let center_color = &below[center..center + 3];
+    let outside = &below[0..3];
+    assert!(
+        center_color[1] >= outside[1] + 20,
+        "Snell's window {center_color:?}, internal reflection {outside:?}"
+    );
+    assert!(
+        outside[2] > outside[0],
+        "water in-scatter outside the window {outside:?}"
+    );
+
+    let mut previous: Option<Vec<u8>> = None;
+    // Per step: the channels that changed by more than 48/255, and where.
+    let mut max_step = (0, 0, 0, 0);
+    for step in 0..=16 {
+        place(&app, 2.0 - step as f32 * 0.25, -0.37, 0.8);
+        headless.frames(&mut app, 2).unwrap();
+        headless.wait().unwrap();
+        let frame = app.readback().unwrap();
+        if let Some(previous) = previous {
+            let jumps: Vec<usize> = frame
+                .iter()
+                .zip(previous)
+                .enumerate()
+                .filter(|(_, (a, b))| a.abs_diff(*b) > 48)
+                .map(|(i, _)| i / 4 / extent.width as usize)
+                .collect();
+            if jumps.len() > max_step.0 {
+                let rows = (jumps.iter().min().copied(), jumps.iter().max().copied());
+                max_step = (jumps.len(), step, rows.0.unwrap_or(0), rows.1.unwrap_or(0));
+            }
+        }
+        previous = Some(frame);
+    }
+    RenderApp::destroy(&mut app, &gpu);
+    RenderApp::destroy(&mut surface_only, &gpu);
+    drop((headless, reference));
+    assert_clean(&gpu);
+    // A 25 cm step moves the waterline's band across the near plane (the
+    // full tier's swell and static octaves make the surface at the eye
+    // wavy, so the band is a few rows deep), but never pops the frame: at
+    // most 2% of the channels change by more than 48/255.
+    let budget = (extent.width * extent.height * 4) as usize / 50;
+    assert!(
+        max_step.0 <= budget,
+        "largest 25 cm step changed {} channels by more than 48 (step, rows): {max_step:?}",
+        max_step.0
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn water_quality_draws_and_resizes_with_the_surface_enabled_and_disabled() {
+    use ae_framegraph::ResourceId;
+    use ae_render::library::WaterTiers;
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput};
+    use ae_render::thread::{RenderApp, TargetInfo};
+
+    let gpu = gpu();
+    let source = volume_test_source();
+    let mut off = [Vec::new(), Vec::new()];
+    for (water, tiers) in [
+        (false, WaterTiers::default()),
+        (true, WaterTiers::default()),
+        (
+            true,
+            WaterTiers {
+                reflect: true,
+                ..Default::default()
+            },
+        ),
+        (
+            true,
+            WaterTiers {
+                refract: true,
+                ..Default::default()
+            },
+        ),
+        (
+            true,
+            WaterTiers {
+                reflect: true,
+                refract: true,
+                waves: true,
+                volume: false,
+            },
+        ),
+        (
+            true,
+            WaterTiers {
+                reflect: true,
+                refract: true,
+                waves: true,
+                volume: true,
+            },
+        ),
+    ] {
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_water_tiers(tiers);
+        if water {
+            app = app.with_water();
+        }
+        let view = app.view();
+        view.lock().unwrap().time = Some(0.0);
+        let mut executor = Executor::new(
+            gpu.clone(),
+            ExecutorConfig {
+                profile: false,
+                record_threads: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (index, (width, height)) in [(96, 72), (117, 81)].into_iter().enumerate() {
+            let target = TargetInfo {
+                extent: vk::Extent2D { width, height },
+                format: vk::Format::R8G8B8A8_SRGB,
+                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+            if index == 0 {
+                app.create(&gpu, executor.bindless_mut(), target, 2).unwrap();
+            } else {
+                assert!(app.retarget(&gpu, executor.bindless_mut(), target, 2).unwrap());
+                executor.forget_external_states();
+            }
+            app.create_offscreen(&gpu, target.extent).unwrap();
+            let (graph, _) = app.declare(target, executor.bindless_mut()).unwrap();
+            assert_eq!(app.water_tiers(), tiers);
+            executor.set_graph(graph).unwrap();
+            let mut render = |enabled| {
+                view.lock().unwrap().water = enabled;
+                for _ in 0..6 {
+                    let token = executor.begin_frame().unwrap();
+                    app.prepare(executor.bindless_mut(), token.slot).unwrap();
+                    let bindings = (0..executor.graph().resources.len() as u32)
+                        .map(|id| app.external(ResourceId(id), token.slot))
+                        .collect::<Vec<_>>();
+                    executor
+                        .execute(token, app.recorder(), &|id| bindings[id.index()], &[], &[])
+                        .unwrap();
+                    executor.wait(token).unwrap();
+                }
+                app.readback().unwrap()
+            };
+            let enabled = render(water);
+            assert_eq!(enabled.len(), (width * height * 4) as usize);
+            if water {
+                let disabled = render(false);
+                assert!(
+                    disabled == off[index],
+                    "{tiers:?} after water switch at {width}×{height}"
+                );
+                assert!(enabled != disabled, "{tiers:?} draws the surface at {width}×{height}");
+            } else {
+                off[index] = enabled;
+            }
+        }
+        RenderApp::destroy(&mut app, &gpu);
+    }
+    assert_clean(&gpu);
 }

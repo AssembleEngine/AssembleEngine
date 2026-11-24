@@ -8,6 +8,11 @@
 // `ae.words.x`: the shadow caster's cascade (bindless.glsl's block).
 
 void main() {
+    // Radar blips and ghosts cast no shadow (eligible: Own and Seen only).
+    if (!eligible(uint(gl_InstanceIndex))) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
     Unit unit = loadUnit(uint(gl_InstanceIndex));
     if (hasModel(unit.cls)) {
         // Cast by its model (units_models_shadow.vert): outside the clip

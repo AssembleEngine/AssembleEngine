@@ -22,7 +22,9 @@
 //! render that target. [`DeclareInput::flags`] holds [`DECLARE_UNITS`],
 //! [`DECLARE_READBACK`], [`DECLARE_WATER`], [`DECLARE_SHADOWS`] and
 //! [`DECLARE_PARTICLES`] (the last three added later; a module that ignores
-//! them simply draws no water, no unit shadows, or no particles).
+//! them simply draws no water, no unit shadows, or no particles). On a
+//! wet scene the host can also request reflection, refraction, waves and
+//! underwater volume. The graph declares whichever tiers it supports.
 //!
 //! `frame` returns the address of [`FrameOutput`] as four `u32`s: pointer
 //! and word count of a bitset of *disabled* programs (a conditional pass
@@ -108,6 +110,14 @@ pub const DECLARE_SHADOWS: u32 = 1 << 3;
 /// depth itself), so a graph that draws particles declares its depth
 /// buffer with sampled usage. A graph without them draws no particles.
 pub const DECLARE_PARTICLES: u32 = 1 << 4;
+/// Request planar reflection on a scene with [`DECLARE_WATER`].
+pub const DECLARE_WATER_REFLECT: u32 = 1 << 5;
+/// Request depth-aware refraction on a scene with [`DECLARE_WATER`].
+pub const DECLARE_WATER_REFRACT: u32 = 1 << 6;
+/// Request displaced water and wakes on a scene with [`DECLARE_WATER`].
+pub const DECLARE_WATER_WAVES: u32 = 1 << 7;
+/// Request underwater volume on a scene with [`DECLARE_WATER_REFRACT`].
+pub const DECLARE_WATER_VOLUME: u32 = 1 << 8;
 
 /// How the output image encodes the display's light ([`DeclareInput::encoding`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,7 +210,8 @@ pub struct DeclareInput {
     /// `VkFormat` of the target (the swapchain's, or the readback image's).
     pub color_format: u32,
     /// [`DECLARE_UNITS`], [`DECLARE_READBACK`], [`DECLARE_WATER`],
-    /// [`DECLARE_SHADOWS`], [`DECLARE_PARTICLES`].
+    /// [`DECLARE_SHADOWS`], [`DECLARE_PARTICLES`], [`DECLARE_WATER_REFLECT`],
+    /// [`DECLARE_WATER_REFRACT`], [`DECLARE_WATER_WAVES`], [`DECLARE_WATER_VOLUME`].
     pub flags: u32,
     /// [`OutputEncoding`] as a wire value.
     pub encoding: u32,
@@ -327,6 +338,28 @@ pub fn glow_spec(width: u32, height: u32) -> crate::ImageSpec {
     // Usage: sampled (0x4) | colour attachment (0x10).
     crate::ImageSpec::color_2d(GLOW_FORMAT, width, height, 0x4 | 0x10)
 }
+
+/// Reflected terrain and unit draw lists.
+pub const TERRAIN_LEAVES_REFLECT_NAME: &str = "terrain.leaves_reflect";
+pub const TERRAIN_INDIRECT_REFLECT_NAME: &str = "terrain.indirect_reflect";
+pub const UNITS_VISIBLE_REFLECT_NAME: &str = "units.visible_reflect";
+pub const UNITS_INDIRECT_REFLECT_NAME: &str = "units.indirect_reflect";
+/// The planar reflection's scene colour and reverse-Z depth.
+pub const WATER_REFLECTION_NAME: &str = "water.reflection";
+pub const WATER_REFLECTION_DEPTH_NAME: &str = "water.reflection.depth";
+/// Underwater scene colour sampled by the water surface.
+pub const WATER_REFRACTION_NAME: &str = "water.refraction";
+/// The wave accumulation, churn normals and filtered displacement.
+pub const WATER_RAW_NAME: &str = "water.raw";
+pub const WATER_CHURN_NAME: &str = "water.churn";
+pub const WATER_WAVES_NAME: &str = "water.waves";
+/// Wave-particle ring.
+pub const WATER_PARTICLES_NAME: &str = "water.particles";
+/// Conforming water mesh leaves and their indirect draw.
+pub const WATER_MESH_LEAVES_NAME: &str = "water.mesh.leaves";
+pub const WATER_MESH_INDIRECT_NAME: &str = "water.mesh.indirect";
+/// Scene colour after applying underwater volume shading.
+pub const WATER_VOLUME_OUT_NAME: &str = "water.volume.out";
 
 /// A bloom buffer (`bloom.downsample`, `bloom.blur_x`, `bloom.blur_y`):
 /// the glow at a quarter of the target's size, blurred with an 11-tap

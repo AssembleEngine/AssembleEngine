@@ -90,10 +90,12 @@ pub mod keys {
     pub const PAUSE: u32 = 1 << 16;
     pub const Z: u32 = 1 << 17;
     pub const U: u32 = 1 << 18;
+    pub const Y: u32 = 1 << 19;
 }
 
 /// Movement keys currently held (WASD or arrows pan, Q/E orbit, R/F tilt,
-/// shift faster).
+/// Page Up/Page Down raise and lower the orbit point, Home returns it to the
+/// ground, shift faster).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeldKeys {
     pub forward: bool,
@@ -104,6 +106,9 @@ pub struct HeldKeys {
     pub orbit_right: bool,
     pub tilt_up: bool,
     pub tilt_down: bool,
+    pub raise: bool,
+    pub lower: bool,
+    pub ground: bool,
     pub fast: bool,
 }
 
@@ -216,6 +221,9 @@ impl SdlWindow {
             orbit_right: down(sdl::SDL_SCANCODE_E),
             tilt_up: down(sdl::SDL_SCANCODE_R),
             tilt_down: down(sdl::SDL_SCANCODE_F),
+            raise: down(sdl::SDL_SCANCODE_PAGEUP),
+            lower: down(sdl::SDL_SCANCODE_PAGEDOWN),
+            ground: down(sdl::SDL_SCANCODE_HOME),
             fast: down(sdl::SDL_SCANCODE_LSHIFT) || down(sdl::SDL_SCANCODE_RSHIFT),
         }
     }
@@ -250,6 +258,7 @@ impl SdlWindow {
                         sdl::SDLK_B => keys::B,
                         sdl::SDLK_N => keys::N,
                         sdl::SDLK_O => keys::O,
+                        sdl::SDLK_Y => keys::Y,
                         sdl::SDLK_H => keys::H,
                         sdl::SDLK_X => keys::X,
                         sdl::SDLK_PAUSE => keys::PAUSE,

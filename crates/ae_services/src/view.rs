@@ -13,6 +13,7 @@ use ae_sim::runtime::{Runtime, World};
 use ae_sim::schema::Schema;
 use ae_view::{Frame, Observer, ViewClass, ViewSpec, ViewTable};
 use anyhow::{Context, Result, ensure};
+use std::collections::HashMap;
 
 /// Sensor cell side, world units.
 pub const SENSOR_CELL: f32 = 32.0;
@@ -22,6 +23,8 @@ pub struct ViewPipeline {
     capture_spec: CaptureSpec,
     capture: Capture,
     pub coverage: Coverage,
+    dive: Option<WaterColumn>,
+    sonar: Option<WaterColumn>,
     /// `(component, field)` of each spec field.
     pub names: Vec<(String, String)>,
     ally: usize,
@@ -35,13 +38,50 @@ pub struct ViewPipeline {
     allies: Vec<u32>,
 }
 
+/// Capture an optional component separately so entities that lack it stay in the view.
+pub struct WaterColumn {
+    spec: CaptureSpec,
+    capture: Capture,
+    words: HashMap<u64, u32>,
+}
+
+impl WaterColumn {
+    pub fn new(schema: &Schema, component: &str, field: &str) -> Result<Option<Self>> {
+        if !schema.components.iter().any(|c| c.name == component) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            spec: CaptureSpec::new(schema, &[(component, field)])?,
+            capture: Capture::default(),
+            words: HashMap::new(),
+        }))
+    }
+
+    pub fn capture(&mut self, rt: &Runtime, world: &World) -> Result<()> {
+        rt.capture(world, &self.spec, &mut self.capture)?;
+        self.words.clear();
+        self.words.extend(
+            self.capture
+                .entities
+                .iter()
+                .copied()
+                .zip(self.capture.columns[0].iter().copied()),
+        );
+        Ok(())
+    }
+
+    pub fn get(&self, entity: u64) -> Option<u32> {
+        self.words.get(&entity).copied()
+    }
+}
+
 impl ViewPipeline {
     /// Fields of `Body`, `Team`, `Sensor` and `extra` components with a view
     /// class other than never (4-byte fields only); `allies` allyteams on a
     /// square map of `extent` world units.
     pub fn new(schema: &Schema, extra: &[&str], allies: usize, extent: f32) -> Result<Self> {
         let mut components = vec!["Body", "Team", "Sensor"];
-        components.extend_from_slice(extra);
+        components.extend(extra.iter().copied().filter(|c| !matches!(*c, "Dive" | "Sonar")));
         let mut names = Vec::new();
         let mut fields = Vec::new();
         for &c in &components {
@@ -83,6 +123,13 @@ impl ViewPipeline {
         );
         let refs: Vec<(&str, &str)> = names.iter().map(|(c, f)| (c.as_str(), f.as_str())).collect();
         let capture_spec = CaptureSpec::new(schema, &refs)?;
+        let dive = WaterColumn::new(schema, "Dive", "depth")?;
+        let sonar = WaterColumn::new(schema, "Sonar", "radius")?;
+        let submerged = dive.as_ref().map(|_| {
+            names.push(("Dive".into(), "depth".into()));
+            fields.push(("Dive.depth".into(), ViewClass::Los));
+            fields.len() - 1
+        });
         ensure!(
             fields.len() <= 32,
             "{} viewed fields; a view table takes 32",
@@ -92,6 +139,7 @@ impl ViewPipeline {
             fields,
             x,
             y,
+            submerged,
             wobble: 3.0 * SENSOR_CELL,
             wobble_ticks: 30,
         };
@@ -99,6 +147,8 @@ impl ViewPipeline {
         Ok(Self {
             spec,
             capture_spec,
+            dive,
+            sonar,
             capture: Capture::default(),
             coverage: Coverage::new(grid, allies),
             names,
@@ -116,7 +166,28 @@ impl ViewPipeline {
     /// Capture the world's current tick and stamp coverage.
     pub fn capture(&mut self, rt: &Runtime, world: &World) -> Result<()> {
         rt.capture(world, &self.capture_spec, &mut self.capture)?;
+        if let Some(dive) = &mut self.dive {
+            dive.capture(rt, world)?;
+            self.capture.columns.push(
+                self.capture
+                    .entities
+                    .iter()
+                    .map(|&e| dive.get(e).unwrap_or_default())
+                    .collect(),
+            );
+        }
         let c = &self.capture;
+        let sonar = if let Some(sonar) = &mut self.sonar {
+            sonar.capture(rt, world)?;
+            Some(
+                c.entities
+                    .iter()
+                    .map(|&e| f32::from_bits(sonar.get(e).unwrap_or_default()))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
         let f = |col: usize| c.columns[col].iter().map(|w| f32::from_bits(*w)).collect::<Vec<f32>>();
         self.xs = f(self.spec.x);
         self.ys = f(self.spec.y);
@@ -130,6 +201,7 @@ impl ViewPipeline {
                 ally: &self.allies,
                 los: &self.ls,
                 radar: &self.rs,
+                sonar: sonar.as_deref(),
             },
             true,
         );

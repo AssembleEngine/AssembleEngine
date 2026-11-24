@@ -164,13 +164,19 @@ pub struct Sensors<'a> {
     pub los: &'a [f32],
     /// Radar radius, world units (0: none).
     pub radar: &'a [f32],
+    /// Sonar radius, when supplied by the game.
+    pub sonar: Option<&'a [f32]>,
 }
 
 impl Sensors<'_> {
     fn len(&self) -> usize {
         let n = self.x.len();
         assert!(
-            self.y.len() == n && self.ally.len() == n && self.los.len() == n && self.radar.len() == n,
+            self.y.len() == n
+                && self.ally.len() == n
+                && self.los.len() == n
+                && self.radar.len() == n
+                && self.sonar.is_none_or(|s| s.len() == n),
             "sensor columns differ in length"
         );
         n
@@ -183,6 +189,7 @@ pub struct Coverage {
     pub grid: SensorGrid,
     pub los: Vec<Bits>,
     pub radar: Vec<Bits>,
+    pub sonar: Vec<Bits>,
     /// Cells written while stamping (spans summed, overlaps counted
     /// again): the work done, deterministic.
     pub stamped: u64,
@@ -195,6 +202,7 @@ impl Coverage {
             grid,
             los: bits(),
             radar: bits(),
+            sonar: bits(),
             stamped: 0,
         }
     }
@@ -216,15 +224,20 @@ impl Coverage {
             }
         }
         let grid = self.grid;
-        let stamp_ally = |(rows, (los, radar)): (&Vec<u32>, (&mut Bits, &mut Bits))| -> u64 {
+        let stamp_ally = |(rows, ((los, radar), sonar)): (&Vec<u32>, ((&mut Bits, &mut Bits), &mut Bits))| -> u64 {
             los.clear();
             radar.clear();
+            sonar.clear();
             let mut discs: Vec<(u32, Vec<u32>)> = Vec::new();
             let mut stamped = 0;
             for &row in rows {
                 let r = row as usize;
                 let (cx, cy) = grid.cell(units.x[r], units.y[r]);
-                for (bits, radius) in [(&mut *los, units.los[r]), (&mut *radar, units.radar[r])] {
+                for (bits, radius) in [
+                    (&mut *los, units.los[r]),
+                    (&mut *radar, units.radar[r]),
+                    (&mut *sonar, units.sonar.map_or(0.0, |s| s[r])),
+                ] {
                     if radius.is_nan() || radius <= 0.0 {
                         continue;
                     }
@@ -241,7 +254,7 @@ impl Coverage {
             }
             stamped
         };
-        let pairs = self.los.iter_mut().zip(self.radar.iter_mut());
+        let pairs = self.los.iter_mut().zip(&mut self.radar).zip(&mut self.sonar);
         self.stamped = if parallel {
             by_ally.par_iter().zip(pairs.collect::<Vec<_>>()).map(stamp_ally).sum()
         } else {
@@ -334,6 +347,7 @@ mod tests {
             ally: &w.ally,
             los: &w.los,
             radar: &w.radar,
+            sonar: None,
         }
     }
 
@@ -359,6 +373,25 @@ mod tests {
             }
         }
         bits
+    }
+
+    #[test]
+    fn sonar_stamps_the_same_discs_as_radar() {
+        let grid = SensorGrid::new(256.0, 256.0, 32.0);
+        let mut coverage = Coverage::new(grid, 2);
+        let world = world(739, 64, 2, 256.0);
+        let units = sensors(&world);
+        coverage.stamp(
+            &Sensors {
+                sonar: Some(units.radar),
+                ..units
+            },
+            true,
+        );
+        assert_eq!(coverage.sonar, coverage.radar);
+        assert!(coverage.sonar.iter().any(|bits| bits.count() != 0));
+        coverage.stamp(&units, false);
+        assert!(coverage.sonar.iter().all(|bits| bits.count() == 0));
     }
 
     #[test]
@@ -439,6 +472,7 @@ mod tests {
                 ally: &[0],
                 los: &[5.0],
                 radar: &[0.0],
+                sonar: None,
             },
             false,
         );

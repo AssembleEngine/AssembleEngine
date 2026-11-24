@@ -6,6 +6,9 @@
 #include "particles_common.glsl"
 
 #define heightTex AE_S2D(8, 2)
+#ifdef WATER_SPLIT
+#include "particles_water.glsl"
+#endif
 
 layout(local_size_x = 64) in;
 
@@ -22,6 +25,9 @@ void main() {
         cmd.casterCount = 0u;
         cmd.casterFirstVertex = 0u;
         cmd.casterFirstInstance = 0u;
+#ifdef WATER_SPLIT
+        cmd.belowCount = 0u;
+#endif
     }
     if (t >= u.pool.z) {
         return;
@@ -39,10 +45,19 @@ void main() {
     Spawn s = spawns[lo];
     uint e = (s.info.x & 0xffffu) * 6u;
     vec3 origin = s.posScale.xyz;
+#ifdef WATER_SPLIT
+    bool surfaceSpawn = false;
+#endif
     if ((s.info.x & 0x10000u) != 0u) {
         float h = textureLod(heightTex, (origin.xz / u.map.x + 0.5) * u.map.yz, 0.0).r * u.height.x + u.height.y;
         if (u.height.w > 0.5) {
+#ifdef WATER_SPLIT
+            float surface = waterSurfaceAt(origin.xz);
+            surfaceSpawn = h < surface;
+            h = max(h, surface);
+#else
             h = max(h, u.height.z);
+#endif
         }
         origin.y += h;
     }
@@ -63,7 +78,17 @@ void main() {
     vec3 off = vec3(sqrt(1.0 - z2 * z2) * cos(a2), z2, sqrt(1.0 - z2 * z2) * sin(a2)) * pow(rand01(rng), 1.0 / 3.0) * motion.w * scale;
     float life = mix(shape.z, shape.w, rand01(rng));
     uint slot = (u.pool.w + t) % u.pool.x;
+#ifdef WATER_SPLIT
+    vec3 position = origin + off;
+    // Keep the authored height of a surface flare after applying spawn
+    // jitter. The splash itself uses the normal water-intersection rule.
+    if (surfaceSpawn && u.effects[e + 4u].z > 0.5) {
+        position.y = max(position.y, waterSurfaceAt(position.xz) + s.posScale.y);
+    }
+    particles[slot].posAge = vec4(position, 0.0);
+#else
     particles[slot].posAge = vec4(origin + off, 0.0);
+#endif
     particles[slot].velLife = vec4(dir * speed, life);
     particles[slot].info = uvec4(s.info.x & 0xffffu, rng, floatBitsToUint(scale), 0u);
 }

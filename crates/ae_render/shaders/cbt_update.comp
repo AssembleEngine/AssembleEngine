@@ -10,6 +10,24 @@ layout(local_size_x = 64) in;
 #define MODE_NONE 2u
 // The bindless push block's words: x mode, y writeDraw, z level, w pad.
 
+#ifdef WATER_MESH
+#define WAVE_SAMPLE 14
+#include "water_patch.glsl"
+#include "water_lod_error.glsl"
+#endif
+
+#ifndef WATER_MESH
+// The waterline's band (world units about the water level: the swell's
+// reach) and its error gain: a vertical error at a steep bank moves the
+// shoreline about twice as far sideways.
+const float WATERLINE_MARGIN = 1.0;
+const float WATERLINE_GAIN = 2.0;
+// Below this height error (world units) the coarse mesh places the
+// shoreline; above it, the spacing counts at this weight.
+const float WATERLINE_FLAT = 0.25;
+const float WATERLINE_SPACING = 0.5;
+#endif
+
 struct Bounds {
     vec3 bmin, bmax;
     float px;     // screen-space error of drawing this node with its sub-mesh
@@ -20,6 +38,14 @@ Bounds nodeBounds(ivec2 v0, ivec2 v1, ivec2 v2) {
     Bounds r;
     vec2 c0 = latticeToCell(v0), c1 = latticeToCell(v1), c2 = latticeToCell(v2);
     vec2 a = min(min(c0, c1), c2), b = max(max(c0, c1), c2);
+#ifdef WATER_MESH
+    vec2 extent = u.map.xy * u.map.w / u.map.z;
+    vec2 p0 = c0 * extent, p1 = c1 * extent, p2 = c2 * extent;
+    r.inMap = true;
+    r.bmin = vec3(a.x * extent.x, u.water.x - WAVE_BOUND, a.y * extent.y);
+    r.bmax = vec3(b.x * extent.x, u.water.x + WAVE_BOUND, b.y * extent.y);
+    r.px = wavePixelError(p0, p1, p2, r.bmin, r.bmax);
+#else
     r.inMap = a.x < u.map.x && a.y < u.map.y;
     float err = meshError(length(c1 - c0), c0, c1, c2, a, b, true);
     a = clamp(a, vec2(0.0), u.map.xy);
@@ -29,6 +55,24 @@ Bounds nodeBounds(ivec2 v0, ivec2 v1, ivec2 v2) {
     r.bmin = cellToWorldBox(a, hmin);
     r.bmax = cellToWorldBox(b, hmax);
     r.px = projectError(err, r.bmin, r.bmax);
+    // Where the node crosses the water level, a height error moves the
+    // shoreline sideways by the error over the slope: seen from above it is
+    // fully visible (a coarse channel shows its bed as triangles above the
+    // water, and the water over its banks), so the sine discount does not
+    // apply. Parents contain their children's boxes, so parents stay >=.
+    if (u.water.y > 0.5 && hmin < u.water.x + WATERLINE_MARGIN && hmax > u.water.x - WATERLINE_MARGIN) {
+        float dist = max(distance(clamp(u.lodCamPos.xyz, r.bmin, r.bmax), u.lodCamPos.xyz), 1.0);
+        r.px = max(r.px, err * WATERLINE_GAIN * u.lod.y / dist);
+        // From afar a channel narrower than the sub-mesh's spacing falls
+        // between its vertices and vanishes (a few metres of height error,
+        // a pixel, but the whole river's width): where the coarse mesh is
+        // off at all, the shoreline may move by up to the spacing.
+        if (err > WATERLINE_FLAT) {
+            float spacing = length(c1 - c0) / float(SUBMESH_DENOM) * u.map.w;
+            r.px = max(r.px, spacing * WATERLINE_SPACING * u.lod.y / dist);
+        }
+    }
+#endif
     return r;
 }
 
@@ -62,12 +106,20 @@ void main() {
     decodeTriangle(id, v0, v1, v2);
     Bounds r = nodeBounds(v0, v1, v2);
 
+#ifdef MIRROR
+    if (r.inMap && r.bmax.y >= u.water.x && inFrustum(u.mirrorPlanes, r.bmin, r.bmax)) {
+#else
     if (ae.words.y != 0u && r.inMap && inFrustum(u.drawFrustum, r.bmin, r.bmax)) {
+#endif
         uint slot = atomicAdd(ind[IND_DRAW_INSTANCES], 1u);
-        if (slot < u.cfg.w) leaves[slot] = Leaf(ivec4(v0, v1), ivec4(v2, int(id), 0));
+        if (slot < CBT_CAPACITY) leaves[slot] = Leaf(ivec4(v0, v1), ivec4(v2, int(id), 0));
     }
 
+#ifndef MIRROR
     float tau = u.lod.x;
+#ifdef WATER_MESH
+    tau = 1.0;
+#endif
     if (ae.words.x == MODE_SPLIT) {
         if (pixelError(r) > tau) splitConforming(id);
     } else if (ae.words.x == MODE_MERGE && depthOf(id) > 1u) {
@@ -84,4 +136,5 @@ void main() {
             }
         }
     }
+#endif
 }

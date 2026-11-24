@@ -11,7 +11,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav"] }
+ae-sdk = { path = "../../sdk/ae-sdk", features = ["nav", "water"] }
 
 [profile.release]
 panic = "abort"

@@ -1,0 +1,124 @@
+#version 460
+// The camera patch's wave filter (the prototype's blur.comp, RA3's
+// OceanDisplacement.fx BlurU/BlurV): the particles' raw displacement plus
+// RA3's static displacement, blurred by the 21-tap raised cosine along U,
+// then along V, in shared memory for a 32 x 32 block. RA3's transversal
+// bell shapes the height; its longitudinal (choppy, horizontal) term is not
+// ported -- the surface is displaced vertically only. The slopes come from
+// the same pass: the blur's derivative taps (the bell's exact derivative)
+// give the gradient of the blurred field. Then RA3's soft limit, metres,
+// and the analytic swell, limited by the depth (water_swell.glsl).
+//
+// Writes water.waves: (d height / dx, d height / dz, height (m), 0).
+// Push: image 0 the raw splat, 7 the static map, 8 the ground height;
+// float bits in images 2-6 (wind x, z, swell frequency scale, strength,
+// water clock) and 9-14 (height scale, offset, cell size, 1 / samples x, z,
+// water level); sampler 1 linear clamp, 2 linear repeat.
+#include "bindless.glsl"
+#include "water_patch.glsl"
+#include "water_swell.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba16f, set = AE_BINDLESS_SET, binding = AE_STORAGE_IMAGES) uniform writeonly image2D outWaves[];
+
+const int APRON = 9;                // the end taps of the 21 weigh zero
+const int TILE = 32;
+const int SPAN = TILE + 2 * APRON;
+const int SRC_STRIDE = SPAN + 1;    // odd strides: no bank conflicts across rows
+const int MID_STRIDE = TILE + 1;
+const float TRANS[19] = float[](0.024471742, 0.095491503, 0.206107374, 0.345491503, 0.500000000, 0.654508497, 0.793892626, 0.904508497, 0.975528258, 1.000000000, 0.975528258, 0.904508497, 0.793892626, 0.654508497, 0.500000000, 0.345491503, 0.206107374, 0.095491503, 0.024471742);
+// d/dx of the blurred field per texel: minus the bell's derivative.
+const float DERIV[19] = float[](-0.048540276, -0.092329092, -0.127080092, -0.149391608, -0.157079633, -0.149391608, -0.127080092, -0.092329092, -0.048540276, 0.000000000, 0.048540276, 0.092329092, 0.127080092, 0.149391608, 0.157079633, 0.149391608, 0.127080092, 0.092329092, 0.048540276);
+const float NORM = 1.0 / 21.0;
+// Metres per raw unit (the prototype's kHeightScale), and RA3's soft limit
+// (linear to the knee, easing into the limit; prototype units).
+const float HEIGHT_SCALE = 8.0;
+const float KNEE = 0.09;
+const float LIMIT = 1.6;
+// The static displacement: tiles per metre and tiles per second.
+const float STATIC_SCALE = 1.0 / 38.0;
+const float STATIC_SPEED = 0.02;
+
+shared float src[SPAN * SRC_STRIDE];
+shared vec2 mid[SPAN * MID_STRIDE];  // along U: (bell, derivative)
+
+float param(int slot) { return uintBitsToFloat(AE_IMAGE(slot)); }
+
+Swell swell() {
+    return Swell(vec2(param(2), param(3)), param(4), param(5));
+}
+
+// OceanDisplacement.fx PS_StaticDisplacement: two copies of the static
+// map's height, rotated +-75 degrees and scrolling along x, at the mip a
+// fragment over the patch would pick.
+float staticDisplacement(vec2 world, float texel) {
+    vec2 tc = world * STATIC_SCALE;
+    float c = cos(radians(75.0)), s = sin(radians(75.0));
+    mat2 rot = mat2(c, -s, s, c);
+    vec2 drift = vec2(param(6) * STATIC_SPEED, 0.0);
+    vec2 diverge = rot * tc + drift, divergeInv = transpose(rot) * tc + drift;
+    float lod = log2(max(texel * STATIC_SCALE * float(textureSize(AE_S2D(7, 2), 0).x), 1e-6));
+    float d = textureLod(AE_S2D(7, 2), diverge, lod).a * 2.0 - 1.0;
+    d += textureLod(AE_S2D(7, 2), divergeInv, lod).a * 2.0 - 1.0;
+    return d * 0.09 * param(5);
+}
+
+float groundAt(vec2 world) {
+    vec2 uv = (world / param(11) + 0.5) * vec2(param(12), param(13));
+    return textureLod(AE_S2D(8, 1), uv, 0.0).r * param(9) + param(10);
+}
+
+void main() {
+    ivec2 size = imageSize(outWaves[ae.words.x]);
+    float texel = patchSpan() / float(size.x);
+    int lid = int(gl_LocalInvocationIndex);
+    ivec2 origin = ivec2(gl_WorkGroupID.xy) * TILE - APRON;
+    for (int i = lid; i < SPAN * SPAN; i += 256) {
+        ivec2 c = ivec2(i % SPAN, i / SPAN);
+        ivec2 t = clamp(origin + c, ivec2(0), size - 1);
+        vec2 world = patchOrigin() + (vec2(t) + 0.5) * texel;
+        src[c.y * SRC_STRIDE + c.x] = texelFetch(AE_S2D(0, 1), t, 0).r + staticDisplacement(world, texel);
+    }
+    barrier();
+    for (int i = lid; i < SPAN * TILE; i += 256) {
+        int x = i % TILE, y = i / TILE;
+        vec2 acc = vec2(0.0);
+        for (int k = 0; k < 2 * APRON + 1; ++k) {
+            acc += src[y * SRC_STRIDE + x + k] * vec2(TRANS[k], DERIV[k]);
+        }
+        mid[y * MID_STRIDE + x] = acc * NORM;
+    }
+    barrier();
+    Swell s = swell();
+    float level = param(14);
+    for (int i = lid; i < TILE * TILE; i += 256) {
+        int x = i % TILE, y = i / TILE;
+        vec3 acc = vec3(0.0); // height, d/dx, d/dz (raw units per texel)
+        for (int k = 0; k < 2 * APRON + 1; ++k) {
+            vec2 m = mid[(y + k) * MID_STRIDE + x];
+            acc += vec3(m.x * TRANS[k], m.y * TRANS[k], m.x * DERIV[k]);
+        }
+        acc *= NORM;
+        // RA3's limit with a soft knee: a hard clamp turns an overloaded
+        // area into a plateau with a cliff around it.
+        float a = abs(acc.x);
+        float t = tanh((a - KNEE) / (LIMIT - KNEE));
+        float height = a > KNEE ? sign(acc.x) * (KNEE + (LIMIT - KNEE) * t) : acc.x;
+        float gain = a > KNEE ? 1.0 - t * t : 1.0;
+        ivec2 dest = ivec2(gl_WorkGroupID.xy) * TILE + ivec2(x, y);
+        vec2 world = patchOrigin() + (vec2(dest) + 0.5) * texel;
+        // Signed: above the rest level the allowance runs out, so the swell
+        // washes up the beach only as far as it could; the simulated waves
+        // (the static displacement, wakes, rings) die out where the water
+        // ends.
+        float seabed = level - groundAt(world);
+        float wet = smoothstep(-0.2, 0.6, seabed);
+        vec2 slope = acc.yz * (gain * HEIGHT_SCALE / texel) * wet;
+        height *= HEIGHT_SCALE * wet;
+        vec2 grad;
+        float shore = swellShoreFactor(s, seabed);
+        height += swellHeight(s, world, param(6), grad) * shore;
+        slope += grad * shore;
+        imageStore(outWaves[ae.words.x], dest, vec4(slope, clamp(height, -WAVE_BOUND, WAVE_BOUND), 0.0));
+    }
+}

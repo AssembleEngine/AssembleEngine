@@ -63,6 +63,9 @@ pub enum Map {
     WaterCrossing,
     /// [`scenario::land_crossing_plan`]: pathsim's dry map.
     LandCrossing,
+    /// [`scenario::coast_plan`]: the M16 water fixture (a coastline, a
+    /// shelf, deep water and a river mouth), all five movement classes.
+    Coast,
     /// [`NavPlugin::terrain`], a loaded map (`ae_map`), with the land map's
     /// movement classes; units of the map's own only when asked for.
     Loaded,
@@ -152,7 +155,13 @@ impl NavPlugin {
             ground: None,
             teams: 0,
             terrain: None,
-            starts: Vec::new(),
+            // The coast fixture's own start points (M16.2): on dry land, so
+            // `map_starts` and the skirmish game's bases use them instead
+            // of its opposite-corner fallback.
+            starts: match map {
+                Map::Coast => scenario::coast_starts(map_cells),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -207,6 +216,7 @@ impl NavPlugin {
         match self.map {
             Map::WaterCrossing => scenario::water_crossing_plan_with(units, self.map_cells, workers, profiles),
             Map::LandCrossing => scenario::land_crossing_plan_with(units, self.map_cells, workers, profiles),
+            Map::Coast => scenario::coast_plan_with(units, self.map_cells, workers, profiles),
             Map::Loaded => scenario::terrain_plan_with(
                 units,
                 (**self.terrain.as_ref().expect("Map::Loaded without a terrain")).clone(),
@@ -220,7 +230,7 @@ impl NavPlugin {
     pub fn map_profiles(&self) -> Vec<MovementProfile> {
         let cfg = NavConfig::default();
         match self.map {
-            Map::WaterCrossing => water_profiles(cfg.cell_size),
+            Map::WaterCrossing | Map::Coast => water_profiles(cfg.cell_size),
             Map::LandCrossing | Map::Loaded => profiles_for(cfg.cell_size, cfg.radius_scale),
         }
     }

@@ -47,9 +47,14 @@
 //! the camera's reference EV and the tonemap applies the eased one). All or
 //! none: the checks reject a partial declaration or the wrong order.
 
-use ae_framegraph::{BufferDesc, FrameGraph, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage};
+use ae_framegraph::{
+    BufferDesc, FrameGraph, ImageDesc, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage,
+};
 use ash::vk;
 use std::fmt;
+
+mod water;
+pub use water::WaterTiers;
 
 /// Host-owned resources a graph can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,12 +101,49 @@ pub enum LibraryResource {
     /// `exposure.clear` zeroes it, `exposure.meter` adds counts,
     /// `exposure.adapt` reads it.
     ExposureHistogram,
+    /// The shore travel-time field (M16.5): R16F, one texel per ground
+    /// height sample, `water.shore` writes it after a ground change. Zero at
+    /// the waterline, rising seaward; the rich tiers time their shore foam
+    /// with it.
+    WaterShore,
+    /// The tileable caustic web (M16.5): RGBA8 with mips, made once when the
+    /// water renderer is built; the refract tier's underwater pass projects
+    /// it.
+    WaterCaustics,
+    TerrainLeavesReflect,
+    TerrainIndirectReflect,
+    UnitVisibleReflect,
+    UnitIndirectReflect,
+    WaterReflection,
+    WaterReflectionDepth,
+    WaterRefraction,
+    WaterParticles,
+    WaterRaw,
+    WaterChurn,
+    WaterWaves,
+    WaterMeshLeaves,
+    WaterMeshIndirect,
+    WaterVolumeOut,
 }
 
 impl LibraryResource {
-    pub const ALL: [LibraryResource; 18] = [
+    pub const ALL: [LibraryResource; 34] = [
         Self::TerrainLeaves,
         Self::TerrainIndirect,
+        Self::TerrainLeavesReflect,
+        Self::TerrainIndirectReflect,
+        Self::UnitVisibleReflect,
+        Self::UnitIndirectReflect,
+        Self::WaterReflection,
+        Self::WaterReflectionDepth,
+        Self::WaterRefraction,
+        Self::WaterVolumeOut,
+        Self::WaterParticles,
+        Self::WaterRaw,
+        Self::WaterChurn,
+        Self::WaterWaves,
+        Self::WaterMeshLeaves,
+        Self::WaterMeshIndirect,
         Self::UnitInstances,
         Self::UnitVisible,
         Self::UnitIndirect,
@@ -118,12 +160,28 @@ impl LibraryResource {
         Self::LightClusters,
         Self::Exposure,
         Self::ExposureHistogram,
+        Self::WaterShore,
+        Self::WaterCaustics,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::TerrainLeaves => "terrain.leaves",
             Self::TerrainIndirect => "terrain.indirect",
+            Self::TerrainLeavesReflect => ae_render_abi::module::TERRAIN_LEAVES_REFLECT_NAME,
+            Self::TerrainIndirectReflect => ae_render_abi::module::TERRAIN_INDIRECT_REFLECT_NAME,
+            Self::UnitVisibleReflect => ae_render_abi::module::UNITS_VISIBLE_REFLECT_NAME,
+            Self::UnitIndirectReflect => ae_render_abi::module::UNITS_INDIRECT_REFLECT_NAME,
+            Self::WaterReflection => ae_render_abi::module::WATER_REFLECTION_NAME,
+            Self::WaterReflectionDepth => ae_render_abi::module::WATER_REFLECTION_DEPTH_NAME,
+            Self::WaterRefraction => ae_render_abi::module::WATER_REFRACTION_NAME,
+            Self::WaterVolumeOut => ae_render_abi::module::WATER_VOLUME_OUT_NAME,
+            Self::WaterParticles => ae_render_abi::module::WATER_PARTICLES_NAME,
+            Self::WaterRaw => ae_render_abi::module::WATER_RAW_NAME,
+            Self::WaterChurn => ae_render_abi::module::WATER_CHURN_NAME,
+            Self::WaterWaves => ae_render_abi::module::WATER_WAVES_NAME,
+            Self::WaterMeshLeaves => ae_render_abi::module::WATER_MESH_LEAVES_NAME,
+            Self::WaterMeshIndirect => ae_render_abi::module::WATER_MESH_INDIRECT_NAME,
             Self::UnitInstances => "units.instances",
             Self::UnitVisible => "units.visible",
             Self::UnitIndirect => "units.indirect",
@@ -140,6 +198,8 @@ impl LibraryResource {
             Self::LightClusters => "lights.clusters",
             Self::Exposure => ae_render_abi::module::EXPOSURE_NAME,
             Self::ExposureHistogram => ae_render_abi::module::EXPOSURE_HISTOGRAM_NAME,
+            Self::WaterShore => "water.shore",
+            Self::WaterCaustics => "water.caustics",
         }
     }
 
@@ -147,10 +207,42 @@ impl LibraryResource {
         Self::ALL.into_iter().find(|r| r.name() == name)
     }
 
+    pub fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::TerrainLeavesReflect
+                | Self::TerrainIndirectReflect
+                | Self::UnitVisibleReflect
+                | Self::UnitIndirectReflect
+                | Self::WaterReflection
+                | Self::WaterReflectionDepth
+                | Self::WaterRefraction
+                | Self::WaterVolumeOut
+                | Self::WaterParticles
+                | Self::WaterRaw
+                | Self::WaterChurn
+                | Self::WaterWaves
+                | Self::WaterMeshLeaves
+                | Self::WaterMeshIndirect
+        )
+    }
+
     pub fn is_image(self) -> bool {
         matches!(
             self,
-            Self::ReadbackTarget | Self::ShadowMap | Self::ParticleShadows | Self::Exposure
+            Self::ReadbackTarget
+                | Self::ShadowMap
+                | Self::ParticleShadows
+                | Self::Exposure
+                | Self::WaterShore
+                | Self::WaterCaustics
+                | Self::WaterReflection
+                | Self::WaterReflectionDepth
+                | Self::WaterRefraction
+                | Self::WaterVolumeOut
+                | Self::WaterRaw
+                | Self::WaterChurn
+                | Self::WaterWaves
         )
     }
 }
@@ -160,12 +252,18 @@ impl LibraryResource {
 pub enum LibraryPass {
     TerrainLod,
     TerrainDraw,
+    TerrainCullReflect,
+    TerrainReflect,
+    UnitsResetReflect,
+    UnitsCullReflect,
+    UnitsReflect,
     UnitsReset,
     UnitsCull,
     /// The units' poses: each animated unit's skinning palette, once per
     /// bone per frame, into [`LibraryResource::UnitPalette`] (compute).
     UnitsPose,
     UnitsDraw,
+    UnitsWaterOverlay,
     UnitsCount,
     /// The units' shadow map: every unit (not only the visible ones) drawn
     /// from the sun into [`LibraryResource::ShadowMap`], depth only.
@@ -178,11 +276,23 @@ pub enum LibraryPass {
     /// The water surface over the terrain and units: tests against their
     /// depth read-only and blends into the colour target.
     WaterDraw,
+    WaterUnderwater,
+    WaterVolume,
+    WaterEmit,
+    WaterSplat,
+    WaterChurn,
+    WaterBlur,
+    WaterLod,
+    /// The shore travel-time field (M16.5): a jump flood over the ground
+    /// height texture into [`LibraryResource::WaterShore`], recorded only
+    /// after a ground change (the host skips it otherwise).
+    WaterShore,
     /// Spawn, move and sort the particles (compute).
     ParticlesSim,
     /// The particles, back to front, blended over the scene; samples the
     /// depth buffer.
     ParticlesDraw,
+    ParticlesUnderwater,
     /// Each view cluster's lights, from [`LibraryResource::LightList`]
     /// into [`LibraryResource::LightClusters`] (compute).
     LightsCluster,
@@ -247,19 +357,34 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 24] = [
+    pub const ALL: [LibraryPass; 39] = [
         Self::TerrainLod,
         Self::TerrainDraw,
+        Self::TerrainCullReflect,
+        Self::TerrainReflect,
+        Self::UnitsResetReflect,
+        Self::UnitsCullReflect,
+        Self::UnitsReflect,
         Self::UnitsReset,
         Self::UnitsCull,
         Self::UnitsPose,
         Self::UnitsDraw,
+        Self::UnitsWaterOverlay,
         Self::UnitsCount,
         Self::ShadowsDraw,
         Self::ShadowsParticles,
         Self::WaterDraw,
+        Self::WaterUnderwater,
+        Self::WaterVolume,
+        Self::WaterEmit,
+        Self::WaterSplat,
+        Self::WaterChurn,
+        Self::WaterBlur,
+        Self::WaterLod,
+        Self::WaterShore,
         Self::ParticlesSim,
         Self::ParticlesDraw,
+        Self::ParticlesUnderwater,
         Self::LightsCluster,
         Self::Tonemap,
         Self::PostEncode,
@@ -278,16 +403,31 @@ impl LibraryPass {
         match self {
             Self::TerrainLod => "terrain.lod",
             Self::TerrainDraw => "terrain.draw",
+            Self::TerrainCullReflect => "terrain.cull_reflect",
+            Self::TerrainReflect => "terrain.reflect",
+            Self::UnitsResetReflect => "units.reset_reflect",
+            Self::UnitsCullReflect => "units.cull_reflect",
+            Self::UnitsReflect => "units.reflect",
             Self::UnitsReset => "units.reset",
             Self::UnitsCull => "units.cull",
             Self::UnitsPose => "units.pose",
             Self::UnitsDraw => "units.draw",
+            Self::UnitsWaterOverlay => "units.water_overlay",
             Self::UnitsCount => "units.count",
             Self::ShadowsDraw => "shadows.draw",
             Self::ShadowsParticles => "shadows.particles",
             Self::WaterDraw => "water.draw",
+            Self::WaterUnderwater => "water.underwater",
+            Self::WaterVolume => "water.volume",
+            Self::WaterEmit => "water.emit",
+            Self::WaterSplat => "water.splat",
+            Self::WaterChurn => "water.churn",
+            Self::WaterBlur => "water.blur",
+            Self::WaterLod => "water.lod",
+            Self::WaterShore => "water.shore",
             Self::ParticlesSim => "particles.sim",
             Self::ParticlesDraw => "particles.draw",
+            Self::ParticlesUnderwater => "particles.underwater",
             Self::LightsCluster => "lights.cluster",
             Self::Tonemap => "post.tonemap",
             Self::PostEncode => "post.encode",
@@ -310,26 +450,43 @@ impl LibraryPass {
     pub fn kind(self) -> PassKind {
         match self {
             Self::TerrainLod
+            | Self::TerrainCullReflect
+            | Self::UnitsCullReflect
             | Self::UnitsCull
             | Self::UnitsPose
+            | Self::WaterShore
+            | Self::WaterEmit
+            | Self::WaterBlur
+            | Self::WaterLod
             | Self::ParticlesSim
             | Self::LightsCluster
             | Self::ExposureMeter
             | Self::ExposureAdapt => PassKind::Compute,
             Self::TerrainDraw
+            | Self::TerrainReflect
+            | Self::UnitsReflect
             | Self::UnitsDraw
+            | Self::UnitsWaterOverlay
             | Self::ShadowsDraw
             | Self::ShadowsParticles
             | Self::WaterDraw
+            | Self::WaterUnderwater
+            | Self::WaterVolume
+            | Self::WaterSplat
+            | Self::WaterChurn
             | Self::ParticlesDraw
+            | Self::ParticlesUnderwater
             | Self::Tonemap
             | Self::PostEncode
             | Self::BloomDownsample
             | Self::BloomBlurX
             | Self::BloomBlurY => PassKind::Graphics,
-            Self::UnitsReset | Self::UnitsCount | Self::ReadbackCopy | Self::HostRead | Self::ExposureClear => {
-                PassKind::Transfer
-            }
+            Self::UnitsReset
+            | Self::UnitsResetReflect
+            | Self::UnitsCount
+            | Self::ReadbackCopy
+            | Self::HostRead
+            | Self::ExposureClear => PassKind::Transfer,
             Self::Present => PassKind::Present,
         }
     }
@@ -353,6 +510,40 @@ impl LibraryPass {
                 (R::TerrainLeaves, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::TerrainIndirect, Role::IndirectBuffer),
             ],
+            Self::TerrainCullReflect => &[
+                (R::TerrainIndirect, Role::StorageBufferRead(ShaderStage::Compute)),
+                (R::TerrainLeavesReflect, Role::StorageBufferWrite(ShaderStage::Compute)),
+                (
+                    R::TerrainIndirectReflect,
+                    Role::StorageBufferWrite(ShaderStage::Compute),
+                ),
+            ],
+            Self::TerrainReflect => &[
+                (R::TerrainLeavesReflect, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::TerrainIndirectReflect, Role::IndirectBuffer),
+                (R::WaterReflection, Role::ColorAttachment(ae_framegraph::LoadOp::Clear)),
+                (
+                    R::WaterReflectionDepth,
+                    Role::DepthAttachment(ae_framegraph::LoadOp::Clear),
+                ),
+            ],
+            Self::UnitsResetReflect => &[(R::UnitIndirectReflect, Role::TransferDst)],
+            Self::UnitsCullReflect => &[
+                (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Compute)),
+                (R::UnitVisibleReflect, Role::StorageBufferWrite(ShaderStage::Compute)),
+                (R::UnitIndirectReflect, Role::StorageBufferWrite(ShaderStage::Compute)),
+            ],
+            Self::UnitsReflect => &[
+                (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::UnitVisibleReflect, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::UnitIndirectReflect, Role::IndirectBuffer),
+                (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::WaterReflection, Role::ColorAttachment(ae_framegraph::LoadOp::Load)),
+                (
+                    R::WaterReflectionDepth,
+                    Role::DepthAttachment(ae_framegraph::LoadOp::Load),
+                ),
+            ],
             Self::UnitsReset => &[(R::UnitIndirect, Role::TransferDst)],
             Self::UnitsCull => &[
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Compute)),
@@ -363,7 +554,7 @@ impl LibraryPass {
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Compute)),
                 (R::UnitPalette, Role::StorageBufferWrite(ShaderStage::Compute)),
             ],
-            Self::UnitsDraw => &[
+            Self::UnitsDraw | Self::UnitsWaterOverlay => &[
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitVisible, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitIndirect, Role::IndirectBuffer),
@@ -388,7 +579,7 @@ impl LibraryPass {
                 (R::ParticleKeys, Role::StorageBufferWrite(ShaderStage::Compute)),
                 (R::ParticleIndirect, Role::StorageBufferWrite(ShaderStage::Compute)),
             ],
-            Self::ParticlesDraw => &[
+            Self::ParticlesDraw | Self::ParticlesUnderwater => &[
                 (R::ParticleState, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::ParticleKeys, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::ParticleIndirect, Role::IndirectBuffer),
@@ -397,6 +588,28 @@ impl LibraryPass {
                 (R::LightList, Role::StorageBufferWrite(ShaderStage::Compute)),
                 (R::LightClusters, Role::StorageBufferWrite(ShaderStage::Compute)),
             ],
+            Self::WaterUnderwater => &[(R::WaterCaustics, Role::Sampled(ShaderStage::Fragment))],
+            Self::WaterVolume => &[(R::WaterRefraction, Role::Sampled(ShaderStage::Fragment))],
+            Self::WaterEmit => &[(R::WaterParticles, Role::StorageBufferWrite(ShaderStage::Compute))],
+            Self::WaterSplat => &[
+                (R::WaterParticles, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::WaterRaw, Role::ColorAttachment(ae_framegraph::LoadOp::Clear)),
+            ],
+            Self::WaterChurn => &[
+                (R::WaterParticles, Role::StorageBufferRead(ShaderStage::Vertex)),
+                (R::WaterChurn, Role::ColorAttachment(ae_framegraph::LoadOp::Clear)),
+            ],
+            Self::WaterBlur => &[
+                (R::WaterRaw, Role::Sampled(ShaderStage::Compute)),
+                (R::WaterChurn, Role::Sampled(ShaderStage::Compute)),
+                (R::WaterWaves, Role::StorageImageWrite(ShaderStage::Compute)),
+            ],
+            Self::WaterLod => &[
+                (R::WaterWaves, Role::Sampled(ShaderStage::Compute)),
+                (R::WaterMeshLeaves, Role::StorageBufferWrite(ShaderStage::Compute)),
+                (R::WaterMeshIndirect, Role::StorageBufferWrite(ShaderStage::Compute)),
+            ],
+            Self::WaterShore => &[(R::WaterShore, Role::StorageImageWrite(ShaderStage::Compute))],
             Self::ReadbackCopy => &[(R::ReadbackBuffer, Role::TransferDst)],
             Self::WaterDraw
             | Self::Tonemap
@@ -413,7 +626,7 @@ impl LibraryPass {
     /// buffer, whose formats the host checks).
     pub fn attachments(self) -> Option<Attachments> {
         match self {
-            Self::TerrainDraw | Self::UnitsDraw => Some(Attachments {
+            Self::TerrainDraw | Self::UnitsDraw | Self::UnitsWaterOverlay => Some(Attachments {
                 color: 1,
                 glow: true,
                 depth: DepthUse::Write,
@@ -423,11 +636,13 @@ impl LibraryPass {
                 glow: true,
                 depth: DepthUse::Read,
             }),
-            Self::ParticlesDraw => Some(Attachments {
-                color: 1,
-                glow: true,
-                depth: DepthUse::Sampled,
-            }),
+            Self::ParticlesDraw | Self::ParticlesUnderwater | Self::WaterUnderwater | Self::WaterVolume => {
+                Some(Attachments {
+                    color: 1,
+                    glow: self == Self::ParticlesDraw,
+                    depth: DepthUse::Sampled,
+                })
+            }
             _ => None,
         }
     }
@@ -437,9 +652,13 @@ impl LibraryPass {
         matches!(
             self,
             Self::UnitsReset
+                | Self::UnitsResetReflect
+                | Self::UnitsCullReflect
+                | Self::UnitsReflect
                 | Self::UnitsCull
                 | Self::UnitsPose
                 | Self::UnitsDraw
+                | Self::UnitsWaterOverlay
                 | Self::UnitsCount
                 | Self::ShadowsDraw
         )
@@ -447,15 +666,27 @@ impl LibraryPass {
 
     /// Whether it needs the particle renderer.
     pub fn uses_particles(self) -> bool {
-        matches!(self, Self::ParticlesSim | Self::ParticlesDraw | Self::ShadowsParticles)
+        matches!(
+            self,
+            Self::ParticlesSim | Self::ParticlesDraw | Self::ParticlesUnderwater | Self::ShadowsParticles
+        )
     }
 
     /// Whether it shades by the shadow maps: in a graph that declares
     /// [`LibraryResource::ShadowMap`] (and [`LibraryResource::ParticleShadows`])
     /// it must sample each in this role.
     pub fn receives(self) -> Option<Role> {
-        matches!(self, Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw)
-            .then_some(Role::Sampled(ShaderStage::Fragment))
+        matches!(
+            self,
+            Self::TerrainDraw
+                | Self::UnitsDraw
+                | Self::UnitsWaterOverlay
+                | Self::TerrainReflect
+                | Self::UnitsReflect
+                | Self::WaterDraw
+                | Self::WaterUnderwater
+        )
+        .then_some(Role::Sampled(ShaderStage::Fragment))
     }
 
     /// Whether it is lit by the clustered lights: in a graph that declares
@@ -463,7 +694,7 @@ impl LibraryPass {
     /// it must read both in this role.
     pub fn lit(self) -> Option<Role> {
         match self {
-            Self::TerrainDraw | Self::UnitsDraw | Self::WaterDraw => {
+            Self::TerrainDraw | Self::UnitsDraw | Self::UnitsWaterOverlay | Self::WaterDraw => {
                 Some(Role::StorageBufferRead(ShaderStage::Fragment))
             }
             Self::ParticlesSim => Some(Role::StorageBufferRead(ShaderStage::Compute)),
@@ -508,6 +739,14 @@ pub struct LibraryEnv {
     pub shadows: bool,
     /// The scene has particles (the particle renderer exists).
     pub particles: bool,
+    /// The ground height texture's size, when the map has water (the shore
+    /// field's size; [`LibraryResource::WaterShore`] and
+    /// [`LibraryResource::WaterCaustics`] exist only then).
+    pub ground: Option<(u32, u32)>,
+    /// The engine's own graph declares the water data: the `water.shore`
+    /// bake pass and the two library images (M16.5). Off for the M7 graph,
+    /// so an ordinary scene allocates no water data.
+    pub bake_water: bool,
     /// How the output image encodes the display's light (SDR has no display
     /// intermediate; the tonemap writes the target, as before).
     pub encoding: crate::encode::OutputEncoding,
@@ -537,25 +776,45 @@ impl LibraryEnv {
 pub type ResourceMap = Vec<Option<LibraryResource>>;
 
 /// Fill in library buffer sizes (declared as 0) from `desc` and map every
-/// resource to its library resource. A library resource must be declared
-/// `External`, as a buffer of size 0 (or exactly its size), for
+/// resource to its library resource. Reflection targets and lists are
+/// `Transient`. Host bindings are `External`. Declare a buffer with size 0
+/// (or exactly its size), for
 /// [`LibraryResource::ReadbackTarget`] as an image of the target's extent
-/// and colour format, and for [`LibraryResource::ShadowMap`] as its spec
-/// (in a scene whose units cast shadows).
+/// and colour format, and for a host-filled image as a shape the bound image
+/// supports: a module's explicit descriptor may ask for less usage than the
+/// allocation has, never more (see [`check_bound_image`]).
 pub fn resolve<R>(
     graph: &mut FrameGraph<R>,
     env: &LibraryEnv,
     desc: impl Fn(LibraryResource) -> Option<BufferDesc>,
 ) -> Result<ResourceMap, LibraryError> {
     let mut map = Vec::with_capacity(graph.resources.len());
+    let mut seen = std::collections::HashSet::new();
     for resource in &mut graph.resources {
         let Some(lib) = LibraryResource::from_name(&resource.name) else {
             map.push(None);
             continue;
         };
-        if resource.class != ResourceClass::External {
+        // A library resource is one host object, but the graph tracks
+        // producers and readers by resource id: a second declaration of the
+        // same name would bind the same image under another id, so a writer
+        // for the first is not a dependency of a reader of the second (and
+        // the unrooted writer is pruned). The JSON loader refuses duplicate
+        // names; the module path must too.
+        if !seen.insert(lib) {
             return Err(error(format!(
-                "library resource `{}` must be External, not {:?}",
+                "library resource `{}` is declared more than once; the host binds one object and the graph's producers are tracked by resource id",
+                resource.name
+            )));
+        }
+        let class = if lib.is_transient() {
+            ResourceClass::Transient
+        } else {
+            ResourceClass::External
+        };
+        if resource.class != class {
+            return Err(error(format!(
+                "library resource `{}` must be {class:?}, not {:?}",
                 resource.name, resource.class
             )));
         }
@@ -624,6 +883,79 @@ pub fn resolve<R>(
                     )));
                 }
             }
+            (ResourceDesc::Image(image), true)
+                if matches!(lib, LibraryResource::WaterRefraction | LibraryResource::WaterVolumeOut) =>
+            {
+                let want = image_desc(lib, env)?;
+                if (image.format, image.width, image.height) != (want.format, want.width, want.height) {
+                    return Err(error(format!(
+                        "`{}` must match the HDR scene's format and size",
+                        lib.name()
+                    )));
+                }
+                check_bound_image(lib.name(), image, &want)?;
+            }
+            (ResourceDesc::Image(image), true) if lib == LibraryResource::WaterShore => {
+                let Some((w, h)) = env.ground else {
+                    return Err(error(format!(
+                        "library resource `{}` does not exist in this scene (the map has no water)",
+                        resource.name
+                    )));
+                };
+                let format = crate::water::shore::FIELD_FORMAT;
+                if image.format != format
+                    || image.width != w
+                    || image.height != h
+                    || !image.aspect.contains(vk::ImageAspectFlags::COLOR)
+                {
+                    return Err(error(format!(
+                        "`{}` is {:?} {}x{}; the shore field is {format:?} {w}x{h} with a colour aspect (one texel per ground height sample)",
+                        resource.name, image.format, image.width, image.height
+                    )));
+                }
+            }
+            (ResourceDesc::Image(image), true) if lib == LibraryResource::WaterCaustics => {
+                if env.ground.is_none() {
+                    return Err(error(format!(
+                        "library resource `{}` does not exist in this scene (the map has no water)",
+                        resource.name
+                    )));
+                }
+                let (format, size) = (crate::water::caustics::FORMAT, crate::water::caustics::SIZE);
+                let mips = crate::upload::mip_levels(size, size);
+                if image.format != format
+                    || image.width != size
+                    || image.height != size
+                    || image.mip_levels != mips
+                    || !image.aspect.contains(vk::ImageAspectFlags::COLOR)
+                {
+                    return Err(error(format!(
+                        "`{}` is {:?} {}x{} with {} mips; the caustic web is {format:?} {size}x{size} with {mips} (caustics::SIZE)",
+                        resource.name, image.format, image.width, image.height, image.mip_levels
+                    )));
+                }
+            }
+            (ResourceDesc::Image(image), true) if lib.is_transient() => {
+                let canonical = image_desc(lib, env)?;
+                if (image.format, image.width, image.height) != (canonical.format, canonical.width, canonical.height) {
+                    return Err(error(format!(
+                        "`{}` must be a {:?} attachment of {}x{}",
+                        resource.name, canonical.format, canonical.width, canonical.height
+                    )));
+                }
+            }
+            (ResourceDesc::Buffer(buffer), true) => {
+                // A library resource named without its descriptor: a graph
+                // file's or module's `kind = library` entry. The host supplies
+                // the image's format and size (the graph cannot know them).
+                if buffer.size != 0 {
+                    return Err(error(format!(
+                        "`{}` is declared with {} bytes; a library image takes no size",
+                        resource.name, buffer.size
+                    )));
+                }
+                resource.desc = ResourceDesc::Image(image_desc(lib, env)?);
+            }
             (ResourceDesc::Image(image), true) => {
                 if image.format != env.color_format
                     || image.width != env.extent.width
@@ -663,9 +995,191 @@ pub fn resolve<R>(
                 )));
             }
         }
+        // The host binds the image it allocated (the water images are built
+        // by the water renderer, the shadow maps by the terrain). The graph
+        // bakes the descriptor's usage into its access states and bindless
+        // handles, so a module's explicit descriptor may promise less than
+        // the allocation supports but never more: otherwise the graph is
+        // accepted and every draw reports a Vulkan usage/layout error.
+        if let ResourceDesc::Image(image) = &resource.desc
+            && let Ok(canonical) = image_desc(lib, env)
+        {
+            check_bound_image(&resource.name, image, &canonical)?;
+        }
         map.push(Some(lib));
     }
     Ok(map)
+}
+
+/// The descriptor of a library image (`None` for a library buffer): what a
+/// graph file's or module's `kind = library` entry is filled in with, and
+/// what a declared image has to match. The water data exist only on a map
+/// with water; a `None` [`LibraryEnv::ground`] refuses them.
+pub fn image_desc(lib: LibraryResource, env: &LibraryEnv) -> Result<ImageDesc, LibraryError> {
+    use LibraryResource as R;
+    use ae_render_abi::module as m;
+    let missing = |why: &str| {
+        error(format!(
+            "library image `{}` does not exist in this scene ({why})",
+            lib.name()
+        ))
+    };
+    Ok(match lib {
+        R::ShadowMap => {
+            if !env.shadows {
+                return Err(missing("its units cast no shadows"));
+            }
+            let mut desc = ImageDesc::color_2d(
+                vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32),
+                m::SHADOW_MAP_WIDTH,
+                m::SHADOW_MAP_HEIGHT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            );
+            desc.aspect = vk::ImageAspectFlags::DEPTH;
+            desc
+        }
+        R::ParticleShadows => {
+            if !(env.shadows && env.particles) {
+                return Err(missing("it needs units that cast shadows and particles"));
+            }
+            ImageDesc::color_2d(
+                vk::Format::from_raw(m::PARTICLE_SHADOW_FORMAT as i32),
+                m::PARTICLE_SHADOW_WIDTH,
+                m::PARTICLE_SHADOW_HEIGHT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            )
+        }
+        R::Exposure => ImageDesc::color_2d(
+            vk::Format::from_raw(m::EXPOSURE_FORMAT as i32),
+            1,
+            1,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+        ),
+        R::WaterShore => {
+            let Some((w, h)) = env.ground else {
+                return Err(missing("the map has no water"));
+            };
+            ImageDesc::color_2d(
+                crate::water::shore::FIELD_FORMAT,
+                w,
+                h,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
+        }
+        R::WaterCaustics => {
+            if env.ground.is_none() {
+                return Err(missing("the map has no water"));
+            }
+            let size = crate::water::caustics::SIZE;
+            ImageDesc {
+                mip_levels: crate::upload::mip_levels(size, size),
+                ..ImageDesc::color_2d(crate::water::caustics::FORMAT, size, size, vk::ImageUsageFlags::SAMPLED)
+            }
+        }
+
+        R::WaterRaw | R::WaterChurn | R::WaterWaves => {
+            if !env.water {
+                return Err(missing("the scene draws no water"));
+            }
+            crate::water::waves::patch_desc(lib == R::WaterWaves)
+        }
+        R::WaterRefraction | R::WaterVolumeOut => ImageDesc::color_2d(
+            env.scene_format,
+            env.extent.width,
+            env.extent.height,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC,
+        ),
+        R::WaterReflection | R::WaterReflectionDepth => {
+            if !env.water {
+                return Err(missing("the scene draws no water"));
+            }
+            let extent = crate::water::reflect::half_extent(env.extent);
+            if lib == R::WaterReflection {
+                ImageDesc::color_2d(
+                    env.scene_format,
+                    extent.width,
+                    extent.height,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                        | vk::ImageUsageFlags::SAMPLED
+                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                )
+            } else {
+                ImageDesc::depth_2d(
+                    env.depth_format,
+                    extent.width,
+                    extent.height,
+                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                )
+            }
+        }
+        R::ReadbackTarget
+        | R::TerrainLeavesReflect
+        | R::TerrainIndirectReflect
+        | R::UnitVisibleReflect
+        | R::UnitIndirectReflect
+        | R::TerrainLeaves
+        | R::TerrainIndirect
+        | R::UnitInstances
+        | R::UnitVisible
+        | R::UnitIndirect
+        | R::UnitCounts
+        | R::UnitPalette
+        | R::ReadbackBuffer
+        | R::ParticleState
+        | R::ParticleKeys
+        | R::ParticleIndirect
+        | R::LightList
+        | R::LightClusters
+        | R::WaterParticles
+        | R::WaterMeshLeaves
+        | R::WaterMeshIndirect
+        | R::ExposureHistogram => {
+            return Err(error(format!(
+                "library resource `{}` is not an image this scene fills in (declare its descriptor)",
+                lib.name()
+            )));
+        }
+    })
+}
+
+/// An explicit descriptor may ask for no more than the image the host binds:
+/// unsupported usage, extra samples, layers, mips or aspects describe a
+/// different image than the one the draws actually use. Usage is a subset
+/// (a declaration may sample an image it never attaches); the rest must
+/// match the allocation.
+fn check_bound_image(name: &str, image: &ImageDesc, canonical: &ImageDesc) -> Result<(), LibraryError> {
+    let unsupported = image.usage & !canonical.usage;
+    if !unsupported.is_empty() {
+        return Err(error(format!(
+            "`{name}` declares image usage {unsupported:?}, which the bound image does not support (its usage is {:?})",
+            canonical.usage
+        )));
+    }
+    if image.samples != canonical.samples {
+        return Err(error(format!(
+            "`{name}` is {:?} sampled; the bound image is {:?}",
+            image.samples, canonical.samples
+        )));
+    }
+    if image.layers != canonical.layers {
+        return Err(error(format!(
+            "`{name}` has {} layers; the bound image has {}",
+            image.layers, canonical.layers
+        )));
+    }
+    if image.mip_levels != canonical.mip_levels {
+        return Err(error(format!(
+            "`{name}` has {} mip levels; the bound image has {}",
+            image.mip_levels, canonical.mip_levels
+        )));
+    }
+    if image.aspect != canonical.aspect {
+        return Err(error(format!(
+            "`{name}` has aspect {:?}; the bound image's is {:?}",
+            image.aspect, canonical.aspect
+        )));
+    }
+    Ok(())
 }
 
 /// Check that pass `pass` of `graph`, wired as library pass `lib`, uses
@@ -762,20 +1276,76 @@ pub fn check<R>(
     ) {
         return check_bloom(graph, pass, lib, env);
     }
+    // The water data a surface may sample when the graph declares them: M7's
+    // shader ignores them; the rich tiers read them (stage 3).
+    let mut allowed: Vec<(LibraryResource, Role)> = if lib == LibraryPass::WaterDraw {
+        [
+            LibraryResource::WaterShore,
+            LibraryResource::WaterCaustics,
+            LibraryResource::WaterReflection,
+            LibraryResource::WaterRefraction,
+        ]
+        .into_iter()
+        .filter(|r| map.contains(&Some(*r)))
+        .map(|r| (r, Role::Sampled(ShaderStage::Fragment)))
+        .collect()
+    } else {
+        Vec::new()
+    };
+
+    if map.contains(&Some(LibraryResource::WaterWaves)) {
+        if lib == LibraryPass::WaterDraw {
+            allowed.extend([
+                (LibraryResource::WaterWaves, Role::Sampled(ShaderStage::Graphics)),
+                (
+                    LibraryResource::WaterMeshLeaves,
+                    Role::StorageBufferRead(ShaderStage::Vertex),
+                ),
+                (LibraryResource::WaterMeshIndirect, Role::IndirectBuffer),
+                (LibraryResource::WaterChurn, Role::Sampled(ShaderStage::Fragment)),
+            ]);
+        }
+        if matches!(
+            lib,
+            LibraryPass::ParticlesUnderwater | LibraryPass::WaterUnderwater | LibraryPass::WaterVolume
+        ) {
+            allowed.push((LibraryResource::WaterWaves, Role::Sampled(ShaderStage::Fragment)));
+        }
+        if lib == LibraryPass::ParticlesSim {
+            allowed.push((LibraryResource::WaterWaves, Role::Sampled(ShaderStage::Compute)));
+        }
+        if matches!(
+            lib,
+            LibraryPass::UnitsDraw | LibraryPass::ShadowsDraw | LibraryPass::UnitsReflect
+        ) {
+            allowed.push((LibraryResource::WaterWaves, Role::Sampled(ShaderStage::Vertex)));
+        }
+    }
     let glow = glow_resource(graph).is_some();
     let glow_format = vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32);
-    let (mut scene, mut glow_color, mut depth) = (0, 0, 0);
+    let (mut scene, mut glow_color, mut depth, mut source) = (0, 0, 0, 0);
     for intent in &p.intents {
         let r = resource(intent.resource);
         if lib
             .requires()
             .iter()
             .chain(&receives)
+            .chain(&allowed)
             .any(|&(needed, role)| map[intent.resource.index()] == Some(needed) && intent.role == role)
         {
             continue;
         }
         match (lib, intent.role) {
+            (LibraryPass::WaterUnderwater | LibraryPass::WaterVolume, Role::Sampled(ShaderStage::Fragment))
+                if r.name == ae_render_abi::module::SCENE_NAME =>
+            {
+                source += 1;
+                if !matches!(r.desc, ResourceDesc::Image(image) if image.format == env.scene_format
+                    && (image.width, image.height) == (env.extent.width, env.extent.height))
+                {
+                    return Err(error(format!("pass `{name}` needs a full-size HDR scene")));
+                }
+            }
             (_, Role::ColorAttachment(_)) if lib.attachments().is_some() => {
                 let ResourceDesc::Image(image) = r.desc else {
                     return Err(error(format!(
@@ -842,6 +1412,9 @@ pub fn check<R>(
                 )));
             }
         }
+    }
+    if matches!(lib, LibraryPass::WaterUnderwater | LibraryPass::WaterVolume) && source != 1 {
+        return Err(error(format!("pass `{name}` must sample `scene` once")));
     }
     if let Some(a) = lib.attachments() {
         let need_glow = a.glow && glow;
@@ -1194,9 +1767,27 @@ pub fn check_graph<R>(
     map: &ResourceMap,
     env: &LibraryEnv,
     libs: impl Fn(usize) -> Option<LibraryPass>,
-) -> Result<(), LibraryError> {
-    let written = |lib: LibraryPass| (0..graph.passes.len()).any(|i| libs(i) == Some(lib));
-    if (written(LibraryPass::UnitsDraw) || written(LibraryPass::ShadowsDraw)) && !written(LibraryPass::UnitsPose) {
+) -> Result<WaterTiers, LibraryError> {
+    check_graph_named(graph, map, env, |i| libs(i).map(LibraryPass::name))
+}
+
+/// Check the tier contracts before resolving library names to recorders.
+/// This also diagnoses partial declarations of tiers whose recorders are
+/// still under development.
+pub(crate) fn check_graph_named<'a, R>(
+    graph: &FrameGraph<R>,
+    map: &ResourceMap,
+    env: &LibraryEnv,
+    libs: impl Fn(usize) -> Option<&'a str>,
+) -> Result<WaterTiers, LibraryError> {
+    let written = |lib: LibraryPass| (0..graph.passes.len()).any(|i| libs(i) == Some(lib.name()));
+    let draws_units = [
+        LibraryPass::UnitsDraw,
+        LibraryPass::UnitsWaterOverlay,
+        LibraryPass::ShadowsDraw,
+        LibraryPass::UnitsReflect,
+    ];
+    if draws_units.into_iter().any(&written) && !written(LibraryPass::UnitsPose) {
         return Err(error(
             "the graph draws the units but no `units.pose` pass writes their palettes (`units.palette`)".into(),
         ));
@@ -1220,6 +1811,22 @@ pub fn check_graph<R>(
             "the graph declares `shadows.color` but no `shadows.particles` pass writes it".into(),
         ));
     }
+    // The water data: the shore field has one host-scheduled producer, and a
+    // graph that declares it needs that producer (a reader without one would
+    // sample an undefined image).
+    let shore_passes = (0..graph.passes.len())
+        .filter(|&i| libs(i) == Some(LibraryPass::WaterShore.name()))
+        .count();
+    if shore_passes > 1 {
+        return Err(error(format!(
+            "the graph has {shore_passes} `water.shore` passes; the field has one producer (they share its scratch images)"
+        )));
+    }
+    if map.contains(&Some(LibraryResource::WaterShore)) && shore_passes == 0 {
+        return Err(error(
+            "the graph declares `water.shore` but no `water.shore` pass bakes it".to_string(),
+        ));
+    }
     let (list, clusters) = (
         map.contains(&Some(LibraryResource::LightList)),
         map.contains(&Some(LibraryResource::LightClusters)),
@@ -1237,7 +1844,7 @@ pub fn check_graph<R>(
     // The pass appends the units' model lights from the palettes
     // `units.pose` writes: it must run after it.
     if clusters && written(LibraryPass::UnitsPose) {
-        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib));
+        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib.name()));
         if let (Some(cluster), Some(pose)) = (first(LibraryPass::LightsCluster), first(LibraryPass::UnitsPose))
             && cluster < pose
         {
@@ -1317,7 +1924,7 @@ pub fn check_graph<R>(
     if exposure {
         // Write-write on the histogram orders nothing: a clear declared
         // after the meter would wipe the frame's counts.
-        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib));
+        let first = |lib: LibraryPass| (0..graph.passes.len()).find(|&i| libs(i) == Some(lib.name()));
         if let (Some(clear), Some(meter), Some(adapt)) = (
             first(LibraryPass::ExposureClear),
             first(LibraryPass::ExposureMeter),
@@ -1348,7 +1955,23 @@ pub fn check_graph<R>(
             )
         }));
     }
-    Ok(())
+    water::check(graph, env, libs)
+}
+
+/// Check the water contract against the passes the bake kept. The tier's
+/// resources remain in the declaration, so a pruned producer or consumer
+/// is reported the same way as a missing one.
+pub(crate) fn check_baked_water_tiers<'a, R>(
+    graph: &FrameGraph<R>,
+    baked: &ae_framegraph::BakedGraph,
+    env: &LibraryEnv,
+    libs: impl Fn(usize) -> Option<&'a str>,
+) -> Result<WaterTiers, LibraryError> {
+    let mut live = vec![false; graph.passes.len()];
+    for pass in baked.order() {
+        live[pass.index()] = true;
+    }
+    water::check(graph, env, |i| if live[i] { libs(i) } else { None })
 }
 
 #[cfg(test)]
@@ -1367,6 +1990,8 @@ mod tests {
             water: true,
             shadows: true,
             particles: true,
+            ground: Some((64, 64)),
+            bake_water: false,
             encoding: crate::encode::OutputEncoding::Sdr,
             levels: crate::encode::DisplayLevels::default(),
             working: Default::default(),
@@ -1445,6 +2070,355 @@ mod tests {
             pass(&graph, LibraryPass::WaterDraw),
         );
         assert!(water > units, "the water is declared after the units");
+    }
+
+    #[test]
+    fn reflection_declares_clear_and_load_on_the_half_resolution_target() {
+        use crate::terrain::app::native_graph_with_water_tiers;
+        let env = env();
+        let tiers = WaterTiers {
+            reflect: true,
+            ..Default::default()
+        };
+        let mut graph = native_graph_with_water_tiers(&env, TerrainOutput::Present, tiers);
+        assert!(wire(graph.clone(), &env).is_ok());
+        let pass = pass(&graph, LibraryPass::UnitsReflect);
+        let color = graph.passes[pass]
+            .intents
+            .iter_mut()
+            .find(|i| matches!(i.role, Role::ColorAttachment(_)))
+            .unwrap();
+        color.role = Role::ColorAttachment(LoadOp::Clear);
+        let error = wire(graph, &env).unwrap_err().0;
+        assert!(
+            error.contains("units.reflect") && error.contains("water.reflection"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reflected_and_overlaid_units_need_their_palettes() {
+        for lib in ["units.reflect", "units.water_overlay"] {
+            let mut graph = FrameGraph::new();
+            graph.pass(lib, PassKind::Graphics, Some(lib)).id();
+            let error = check_graph_named(&graph, &Vec::new(), &env(), |i| graph.passes[i].record)
+                .unwrap_err()
+                .0;
+            assert!(error.contains("no `units.pose` pass"), "{lib}: {error}");
+        }
+    }
+
+    #[test]
+    fn refraction_reserves_scene_alpha_after_units() {
+        use crate::terrain::app::native_graph_with_water_tiers;
+        let env = env();
+        let mut graph = native_graph_with_water_tiers(
+            &env,
+            TerrainOutput::Present,
+            WaterTiers {
+                refract: true,
+                ..Default::default()
+            },
+        );
+        let resources = resolve(&mut graph, &env, size).unwrap();
+        let scene = ResourceId(graph.resources.iter().position(|r| r.name == "scene").unwrap() as u32);
+        let underwater = pass(&graph, LibraryPass::WaterUnderwater);
+        graph
+            .pass("custom scene alpha reader", PassKind::Graphics, LibraryPass::HostRead)
+            .sampled(scene, ShaderStage::Fragment)
+            .id();
+        let injected = graph.passes.pop().unwrap();
+        graph.passes.insert(underwater, injected);
+        let error = check_graph_named(&graph, &resources, &env, |i| Some(graph.passes[i].record.name()))
+            .unwrap_err()
+            .0;
+        assert!(error.contains("alpha is reserved"), "{error}");
+    }
+
+    #[test]
+    fn water_tiers_require_real_producers_and_consumers() {
+        use ae_render_abi::module::{
+            WATER_REFLECTION_NAME, WATER_REFRACTION_NAME, WATER_VOLUME_OUT_NAME, WATER_WAVES_NAME,
+        };
+
+        for (producer, output) in [
+            ("terrain.reflect", WATER_REFLECTION_NAME),
+            ("water.underwater", WATER_REFRACTION_NAME),
+            ("water.blur", WATER_WAVES_NAME),
+            ("water.volume", WATER_VOLUME_OUT_NAME),
+        ] {
+            let mut graph = FrameGraph::new();
+            graph.pass("display label", PassKind::Graphics, producer).id();
+            let error = check_graph_named(&graph, &Vec::new(), &env(), |i| Some(graph.passes[i].record))
+                .unwrap_err()
+                .0;
+            assert!(error.contains(producer) && error.contains(output), "{error}");
+        }
+
+        let desc = ImageDesc::color_2d(
+            env().scene_format,
+            64,
+            64,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        );
+        let mut graph = FrameGraph::new();
+        let output = graph.image(WATER_REFRACTION_NAME, desc, ResourceClass::Transient);
+        let scene = graph.image("scene", desc, ResourceClass::Transient);
+        let depth = graph.image(
+            "depth",
+            ImageDesc::depth_2d(
+                env().depth_format,
+                64,
+                64,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            ),
+            ResourceClass::Transient,
+        );
+        graph
+            .pass("terrain", PassKind::Graphics, Some("terrain.draw"))
+            .color(scene, LoadOp::Clear)
+            .depth(depth, LoadOp::Clear)
+            .id();
+        let env = LibraryEnv {
+            units: false,
+            shadows: false,
+            particles: false,
+            ..env()
+        };
+        // A matching label on a fullscreen program cannot own refraction.
+        graph
+            .pass("water.underwater", PassKind::Graphics, None)
+            .color(output, LoadOp::Clear)
+            .sampled(scene, ShaderStage::Fragment)
+            .sampled(depth, ShaderStage::Fragment)
+            .id();
+        graph
+            .pass("water surface", PassKind::Graphics, Some("water.draw"))
+            .color(scene, LoadOp::Load)
+            .depth_read(depth)
+            .sampled(output, ShaderStage::Fragment)
+            .root()
+            .id();
+        let check = |graph: &FrameGraph<Option<&str>>| {
+            let libs = |i: usize| graph.passes[i].record;
+            check_graph_named(graph, &vec![None; graph.resources.len()], &env, libs)
+        };
+        let error = check(&graph).unwrap_err().0;
+        assert!(
+            error.contains("water.underwater") && error.contains(WATER_REFRACTION_NAME),
+            "{error}"
+        );
+        graph.passes[1].record = Some("water.underwater");
+        assert_eq!(
+            check(&graph),
+            Ok(WaterTiers {
+                refract: true,
+                ..WaterTiers::default()
+            })
+        );
+
+        let check_baked = |graph: &FrameGraph<Option<&str>>| {
+            let baked = ae_framegraph::bake(graph, Default::default()).unwrap();
+            check_baked_water_tiers(graph, &baked, &env, |i| graph.passes[i].record)
+        };
+        assert!(check_baked(&graph).unwrap().refract);
+        graph.roots.clear();
+        let unrelated = graph.image("unrelated", desc, ResourceClass::Transient);
+        graph
+            .pass("unrelated", PassKind::Graphics, None)
+            .color(unrelated, LoadOp::Clear)
+            .root()
+            .id();
+        let error = check_baked(&graph).unwrap_err().0;
+        assert!(
+            error.contains("water.draw") && error.contains(WATER_REFRACTION_NAME),
+            "{error}"
+        );
+
+        graph.passes.swap(1, 2);
+        let error = check(&graph).unwrap_err().0;
+        assert!(
+            error.contains("must run before") && error.contains(WATER_REFRACTION_NAME),
+            "{error}"
+        );
+        graph.passes.swap(1, 2);
+        graph.passes[2].intents.retain(|i| i.resource != output);
+        let error = check(&graph).unwrap_err().0;
+        assert!(
+            error.contains("must sample") && error.contains(WATER_REFRACTION_NAME),
+            "{error}"
+        );
+
+        let mut graph = FrameGraph::new();
+        let output = graph.image(WATER_VOLUME_OUT_NAME, desc, ResourceClass::Transient);
+        graph
+            .pass("volume", PassKind::Graphics, Some("water.volume"))
+            .color(output, LoadOp::Clear)
+            .id();
+        graph
+            .pass("tonemap", PassKind::Graphics, Some("post.tonemap"))
+            .sampled(output, ShaderStage::Fragment)
+            .id();
+        let error = check(&graph).unwrap_err().0;
+        assert!(
+            error.contains("water.volume") && error.contains(WATER_REFRACTION_NAME),
+            "{error}"
+        );
+    }
+
+    /// M16.5: the water data are graph resources of the library's fixed
+    /// size and format — the shore field one texel per ground sample, the
+    /// caustic web its 256² with the full mip chain — and they exist only on
+    /// a map with water (a dry scene is refused, naming the resource).
+    #[test]
+    fn the_water_data_is_a_graph_resource_of_the_librarys_size() {
+        use crate::water::{caustics, shore};
+        let shore_desc = |w: u32, h: u32| {
+            ImageDesc::color_2d(
+                shore::FIELD_FORMAT,
+                w,
+                h,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+            )
+        };
+        let shore_graph = |desc: ImageDesc| {
+            let mut graph = FrameGraph::<LibraryPass>::new();
+            let resource = graph.image(LibraryResource::WaterShore.name(), desc, ResourceClass::External);
+            graph
+                .pass(
+                    LibraryPass::WaterShore.name(),
+                    PassKind::Compute,
+                    LibraryPass::WaterShore,
+                )
+                .access(resource, Role::StorageImageWrite(ShaderStage::Compute))
+                .root();
+            graph
+        };
+        let env = env();
+        assert!(wire(shore_graph(shore_desc(64, 64)), &env).is_ok());
+        let error = wire(shore_graph(shore_desc(32, 64)), &env).unwrap_err().0;
+        assert!(error.contains("water.shore") && error.contains("64x64"), "{error}");
+        let dry = LibraryEnv { ground: None, ..env };
+        let error = wire(shore_graph(shore_desc(64, 64)), &dry).unwrap_err().0;
+        assert!(error.contains("water.shore") && error.contains("no water"), "{error}");
+
+        let caustics_desc = ImageDesc {
+            mip_levels: crate::upload::mip_levels(caustics::SIZE, caustics::SIZE),
+            ..ImageDesc::color_2d(
+                caustics::FORMAT,
+                caustics::SIZE,
+                caustics::SIZE,
+                vk::ImageUsageFlags::SAMPLED,
+            )
+        };
+        // The web has no pass of its own (it is made when the water renderer
+        // is built, like the terrain's textures): resolve checks its
+        // descriptor.
+        let caustics_graph = |desc: ImageDesc| {
+            let mut graph = FrameGraph::<LibraryPass>::new();
+            graph.image(LibraryResource::WaterCaustics.name(), desc, ResourceClass::External);
+            graph
+        };
+        assert!(resolve(&mut caustics_graph(caustics_desc), &env, |_| None).is_ok());
+        let short = ImageDesc {
+            mip_levels: 1,
+            ..caustics_desc
+        };
+        let mut graph = caustics_graph(short);
+        let error = resolve(&mut graph, &env, |_| None).unwrap_err().0;
+        assert!(error.contains("water.caustics") && error.contains("256x256"), "{error}");
+
+        // M16.5 fourth review: an explicit descriptor may promise no more
+        // usage or shape than the image the host binds. The shore field is
+        // storage+sampled (never an attachment), the web is sampled only,
+        // and both are single-sample, single-layer 2D images.
+        let shore_err = |desc: ImageDesc| wire(shore_graph(desc), &env).unwrap_err().0;
+        let shore_base = shore_desc(64, 64);
+        let mut attachment = shore_base;
+        attachment.usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        let error = shore_err(attachment);
+        assert!(
+            error.contains("water.shore") && error.contains("COLOR_ATTACHMENT") && error.contains("usage"),
+            "{error}"
+        );
+        let mut samples = shore_base;
+        samples.samples = vk::SampleCountFlags::TYPE_2;
+        let error = shore_err(samples);
+        assert!(error.contains("water.shore") && error.contains("TYPE_2"), "{error}");
+        let mut layers = shore_base;
+        layers.layers = 2;
+        let error = shore_err(layers);
+        assert!(error.contains("water.shore") && error.contains("layers"), "{error}");
+        let mut mips = shore_base;
+        mips.mip_levels = 2;
+        let error = shore_err(mips);
+        assert!(error.contains("water.shore") && error.contains("mip levels"), "{error}");
+        let mut aspect = shore_base;
+        aspect.aspect |= vk::ImageAspectFlags::DEPTH;
+        let error = shore_err(aspect);
+        assert!(error.contains("water.shore") && error.contains("aspect"), "{error}");
+
+        let caustics_err = |desc: ImageDesc| resolve(&mut caustics_graph(desc), &env, |_| None).unwrap_err().0;
+        let mut storage = caustics_desc;
+        storage.usage |= vk::ImageUsageFlags::STORAGE;
+        let error = caustics_err(storage);
+        assert!(
+            error.contains("water.caustics") && error.contains("STORAGE") && error.contains("usage"),
+            "{error}"
+        );
+        let mut samples = caustics_desc;
+        samples.samples = vk::SampleCountFlags::TYPE_2;
+        assert!(caustics_err(samples).contains("TYPE_2"));
+        let mut layers = caustics_desc;
+        layers.layers = 2;
+        assert!(caustics_err(layers).contains("layers"));
+        let mut aspect = caustics_desc;
+        aspect.aspect |= vk::ImageAspectFlags::DEPTH;
+        assert!(caustics_err(aspect).contains("aspect"));
+    }
+
+    /// M16.5 fifth review: a library resource is one host object, so a graph
+    /// cannot declare it twice under different ids: the graph tracks producers
+    /// and readers by resource id, and the second reader would not depend on
+    /// the first writer (whose unrooted bake is pruned). The JSON loader
+    /// refuses duplicate names; the module path must too.
+    #[test]
+    fn a_library_resource_is_declared_once() {
+        use crate::water::shore;
+        let env = env();
+        let shore_desc = ImageDesc::color_2d(
+            shore::FIELD_FORMAT,
+            64,
+            64,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        );
+        let mut graph = FrameGraph::<LibraryPass>::new();
+        graph.image(LibraryResource::WaterShore.name(), shore_desc, ResourceClass::External);
+        graph.image(LibraryResource::WaterShore.name(), shore_desc, ResourceClass::External);
+        let error = resolve(&mut graph, &env, |_| None).unwrap_err().0;
+        assert!(
+            error.contains("water.shore") && error.contains("more than once"),
+            "{error}"
+        );
+
+        let leaves = BufferDesc {
+            size: 0,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+        };
+        let mut graph = FrameGraph::<LibraryPass>::new();
+        graph.buffer(LibraryResource::TerrainLeaves.name(), leaves, ResourceClass::External);
+        graph.buffer(LibraryResource::TerrainLeaves.name(), leaves, ResourceClass::External);
+        let size = |lib: LibraryResource| {
+            (lib == LibraryResource::TerrainLeaves).then_some(BufferDesc {
+                size: 16,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            })
+        };
+        let error = resolve(&mut graph, &env, size).unwrap_err().0;
+        assert!(
+            error.contains("terrain.leaves") && error.contains("more than once"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1729,7 +2703,7 @@ mod tests {
             check_graph(&g, &map, &env(), |i| Some(g.passes[i].record)).map_err(|e| e.0)
         };
         let g = base();
-        assert_eq!(shadows(&g), Ok(()));
+        assert_eq!(shadows(&g), Ok(WaterTiers::default()));
         let mut g = base();
         let (cluster, pose) = (pass(&g, LibraryPass::LightsCluster), pass(&g, LibraryPass::UnitsPose));
         g.passes.swap(cluster, pose);

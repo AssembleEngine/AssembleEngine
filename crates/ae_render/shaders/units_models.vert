@@ -15,9 +15,21 @@ layout(location = 3) out vec4 outUv;
 layout(location = 4) out vec4 outColor;
 layout(location = 5) flat out uint outMaterial;
 
+#ifdef SUB
+layout(location = 6) flat out float outSceneAlpha;
+#endif
+
 void main() {
     DrawRecord d = draws[ae.words.y + uint(gl_DrawID)];
     uint row = visible[d.visibleBase + uint(gl_InstanceIndex)];
+#ifdef SUB
+    bool overlay = ae.words.x != 0u;
+    if (eligible(row) == overlay) {
+        gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    outSceneAlpha = attrf(ATTR_WATER, row) > 0.0 ? 0.5 : 1.0;
+#endif
     Unit unit = loadUnit(row);
     Skinned s = skinVertex(d, uint(gl_VertexIndex), poseOffset(row));
     vec3 world = place(unit, s.pos * modelClasses[d.cls].fit.x);
@@ -27,5 +39,10 @@ void main() {
     outUv = s.uv;
     outColor = s.color;
     outMaterial = d.material;
+#ifdef MIRROR
+    gl_Position = u.mirrorProj * vec4(world, 1.0);
+    gl_ClipDistance[0] = world.y - u.height.z;
+#else
     gl_Position = u.viewProj * vec4(world, 1.0);
+#endif
 }

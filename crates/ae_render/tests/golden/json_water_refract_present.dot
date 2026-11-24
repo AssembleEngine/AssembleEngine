@@ -1,0 +1,113 @@
+digraph frame_graph {
+  rankdir=LR;
+  node [shape=box, style=filled];
+  p2 [label="0: units reset\nTransfer", fillcolor="#fff3cd"];
+  p16 [label="1: exposure clear\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="2: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="3: units pose\nCompute", fillcolor="#d1e7dd"];
+  p3 [label="4: units cull\nCompute", fillcolor="#d1e7dd"];
+  p9 [label="5: units count\nTransfer", fillcolor="#fff3cd"];
+  p10 [label="6: units count read\nTransfer", fillcolor="#fff3cd"];
+  p5 [label="7: shadows\nGraphics", fillcolor="#cfe2ff"];
+  p4 [label="8: lights\nCompute", fillcolor="#d1e7dd"];
+  p11 [label="9: particles sim\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="10: particle shadows\nGraphics", fillcolor="#cfe2ff"];
+  p7 [label="11: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p8 [label="12: units\nGraphics", fillcolor="#cfe2ff"];
+  p12 [label="13: water underwater\nGraphics", fillcolor="#cfe2ff"];
+  p13 [label="14: water\nGraphics", fillcolor="#cfe2ff"];
+  p14 [label="15: units water overlay\nGraphics", fillcolor="#cfe2ff"];
+  p15 [label="16: particles\nGraphics", fillcolor="#cfe2ff"];
+  p17 [label="17: exposure meter\nCompute", fillcolor="#d1e7dd"];
+  p18 [label="18: exposure adapt\nCompute", fillcolor="#d1e7dd"];
+  p19 [label="19: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p20 [label="20: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p21 [label="21: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p22 [label="22: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p23 [label="23: present\nPresent", fillcolor="#e2e3e5"];
+  p0 -> p7 [label="terrain.leaves"];
+  p0 -> p7 [label="terrain.indirect"];
+  p1 -> p5 [label="units.palette"];
+  p1 -> p8 [label="units.palette"];
+  p1 -> p14 [label="units.palette"];
+  p2 -> p3 [label="units.indirect"];
+  p3 -> p5 [label="units.visible"];
+  p3 -> p5 [label="units.indirect"];
+  p3 -> p8 [label="units.visible"];
+  p3 -> p8 [label="units.indirect"];
+  p3 -> p9 [label="units.indirect"];
+  p3 -> p14 [label="units.visible"];
+  p3 -> p14 [label="units.indirect"];
+  p4 -> p7 [label="lights.list"];
+  p4 -> p7 [label="lights.clusters"];
+  p4 -> p8 [label="lights.list"];
+  p4 -> p8 [label="lights.clusters"];
+  p4 -> p11 [label="lights.list"];
+  p4 -> p11 [label="lights.clusters"];
+  p4 -> p13 [label="lights.list"];
+  p4 -> p13 [label="lights.clusters"];
+  p4 -> p14 [label="lights.list"];
+  p4 -> p14 [label="lights.clusters"];
+  p5 -> p7 [label="shadows.map"];
+  p5 -> p8 [label="shadows.map"];
+  p5 -> p12 [label="shadows.map"];
+  p5 -> p13 [label="shadows.map"];
+  p5 -> p14 [label="shadows.map"];
+  p6 -> p7 [label="shadows.color"];
+  p6 -> p8 [label="shadows.color"];
+  p6 -> p12 [label="shadows.color"];
+  p6 -> p13 [label="shadows.color"];
+  p6 -> p14 [label="shadows.color"];
+  p7 -> p8 [label="depth"];
+  p7 -> p8 [label="scene"];
+  p7 -> p8 [label="glow"];
+  p8 -> p12 [label="depth"];
+  p8 -> p12 [label="scene"];
+  p8 -> p13 [label="depth"];
+  p8 -> p13 [label="scene"];
+  p8 -> p13 [label="glow"];
+  p8 -> p14 [label="depth"];
+  p9 -> p10 [label="units.counts"];
+  p11 -> p6 [label="particles.state"];
+  p11 -> p6 [label="particles.keys"];
+  p11 -> p6 [label="particles.indirect"];
+  p11 -> p15 [label="particles.state"];
+  p11 -> p15 [label="particles.keys"];
+  p11 -> p15 [label="particles.indirect"];
+  p12 -> p13 [label="scene"];
+  p12 -> p13 [label="water.refraction"];
+  p12 -> p14 [label="depth"];
+  p13 -> p14 [label="depth"];
+  p13 -> p14 [label="scene"];
+  p13 -> p14 [label="glow"];
+  p14 -> p15 [label="depth"];
+  p14 -> p15 [label="scene"];
+  p14 -> p15 [label="glow"];
+  p14 -> p17 [label="depth"];
+  p15 -> p17 [label="scene"];
+  p15 -> p17 [label="glow"];
+  p15 -> p19 [label="glow"];
+  p15 -> p22 [label="scene"];
+  p16 -> p17 [label="exposure.histogram"];
+  p17 -> p18 [label="exposure.histogram"];
+  p18 -> p19 [label="exposure"];
+  p18 -> p22 [label="exposure"];
+  p19 -> p20 [label="bloom.0"];
+  p19 -> p21 [label="bloom.0"];
+  p20 -> p21 [label="bloom.0"];
+  p20 -> p21 [label="bloom.1"];
+  p21 -> p22 [label="bloom.0"];
+  p22 -> p23 [label="target"];
+  // physical 0 Transient: depth
+  // resource depth: sampled 3, storage image -, storage buffer -
+  // physical 1 Transient: scene
+  // resource scene: sampled 4, storage image -, storage buffer -
+  // physical 2 Transient: glow
+  // resource glow: sampled 5, storage image -, storage buffer -
+  // physical 3 Transient: water.refraction
+  // resource water.refraction: sampled 8, storage image -, storage buffer -
+  // physical 4 Transient: bloom.0
+  // resource bloom.0: sampled 6, storage image -, storage buffer -
+  // physical 5 Transient: bloom.1
+  // resource bloom.1: sampled 7, storage image -, storage buffer -
+}

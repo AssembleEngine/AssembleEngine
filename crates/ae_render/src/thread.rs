@@ -469,6 +469,7 @@ fn render_main<A: RenderApp>(
             }
             let resources = executor.graph().resources.len();
             let back = Binding::Image(ImageBinding {
+                initial: vk::ImageLayout::UNDEFINED,
                 image: swapchain.images[image as usize],
                 view: swapchain.views[image as usize],
                 format: target.format,

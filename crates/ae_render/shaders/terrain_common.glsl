@@ -50,6 +50,18 @@ layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     vec4 effects;        // x: effect time (s): the sim time drawn, so decals follow the sim's speed
     vec4 photometry;     // x: exposure, y: unused, z: sun lux, w: sky lux
+#if defined(MIRROR) || defined(UNDERWATER)
+    mat4 mirrorProj;
+    vec4 mirrorCamera;
+    vec4 mirrorPlanes[6];
+#endif
+#ifdef UNDERWATER
+    mat4 inverseViewProj;
+    vec4 shallowWater; // w: caustic texture scale
+    vec4 deepWater;
+    vec4 subWater;     // tint path multiplier, minimum transmission, path cap, outline toggle
+    vec4 waterTransmission[129]; // RGB transmission and deep-water mix at each metre
+#endif
 } ae_FrameUBO[];
 #define u ae_FrameUBO[AE_BUF(0)]
 #define AE_LIGHT_BASE 10
@@ -59,17 +71,43 @@ layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer Tree
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer BitBuf { uint bits[]; } ae_BitBuf[];
 #define bits ae_BitBuf[AE_BUF(2)].bits     // CBT bitfield
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer SnapBuf { uint snap[]; } ae_SnapBuf[];
-#define snap ae_SnapBuf[AE_BUF(3)].snap    // bitfield snapshot
+#ifdef MIRROR
+#define snap bits
+#else
+#define snap ae_SnapBuf[AE_BUF(3)].snap
+#endif    // bitfield snapshot
 struct Leaf { ivec4 a; ivec4 b; };  // a = (v0, v1), b = (v2, heap id, 0)
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer LeafBuf { Leaf leaves[]; } ae_LeafBuf[];
+#ifdef WATER_MESH
+#define leaves ae_LeafBuf[AE_IMAGE(15)].leaves
+#elif defined(MIRROR)
+#define leaves ae_LeafBuf[ae.words.z].leaves
+#else
 #define leaves ae_LeafBuf[AE_BUF(4)].leaves  // draw list
+#endif
 // [0..3) update dispatch, [3..8) DrawIndexedIndirectCommand, [8] leaf count
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) BUF_QUAL buffer IndirectBuf { uint ind[]; } ae_IndirectBuf[];
+#ifdef WATER_MESH
+#define ind ae_IndirectBuf[AE_IMAGE(13)].ind
+#elif defined(MIRROR)
+#define ind ae_IndirectBuf[ae.words.w].ind
+#else
 #define ind ae_IndirectBuf[AE_BUF(5)].ind
+#endif
 #define pyramid AE_S2D(0, 0)    // (min, max, E_L, max E_{L-2}) per block
 #define heightTex AE_S2D(1, 1)  // normalised heights, linear filtering
 #define errorTex AE_S2D(2, 0)   // mip m: E_(m+1), exact error at spacing 2^(m+1)
 #define materialTex AE_US2D(3, 0) // material id per cell (FLAG_MATERIALS), else 1x1
+
+#ifdef WATER_MESH
+#define CBT_DEPTH 16u
+#define CBT_TREE_DEPTH 11u
+#define CBT_CAPACITY (1u << CBT_DEPTH)
+#else
+#define CBT_DEPTH u.cfg.x
+#define CBT_TREE_DEPTH u.cfg.y
+#define CBT_CAPACITY u.cfg.w
+#endif
 
 #define IND_DRAW_INSTANCES 4
 #define IND_LEAF_COUNT 8
@@ -83,7 +121,7 @@ uint depthOf(uint id) { return uint(findMSB(id)); }
 
 // Number of leaves below a node, evaluated on the snapshot (consistent with `tree`).
 uint nodeSum(uint id) {
-    uint d = depthOf(id), t = u.cfg.y;
+    uint d = depthOf(id), t = CBT_TREE_DEPTH;
     if (d <= t) return tree[id];
     uint s = d - t;
     uint word = snap[(id >> s) - (1u << t)];
@@ -109,14 +147,14 @@ uint decodeLeaf(uint handle) {
 }
 
 uint bitIndex(uint id, uint depth) {
-    uint D = u.cfg.x;
+    uint D = CBT_DEPTH;
     return (id << (D - depth)) - (1u << D);
 }
 
 #ifndef GRAPHICS
 void splitNode(uint id) {
     uint d = depthOf(id);
-    if (d < u.cfg.x) {
+    if (d < CBT_DEPTH) {
         uint b = bitIndex(2u * id + 1u, d + 1u);
         atomicOr(bits[b >> 5], 1u << (b & 31u));
     }
@@ -175,7 +213,7 @@ uint edgeNeighbor(uint id) { return neighbors(id).z; }
 
 #ifndef GRAPHICS
 void splitConforming(uint id) {
-    if (depthOf(id) >= u.cfg.x) return;
+    if (depthOf(id) >= CBT_DEPTH) return;
     splitNode(id);
     uint n = edgeNeighbor(id);
     while (n >= 2u) {

@@ -1356,6 +1356,19 @@ impl Bindless {
                 size: self.fallback_uniform.size,
             },
         };
+        // Writes queued before the retire still name the object that is
+        // about to go; drop them so a slot that has not flushed yet does not
+        // apply them after the object's destruction (the fallback below
+        // replaces them).
+        for pending in &mut self.pending {
+            pending.retain(|write| match *write {
+                Write::Sampled { index: i, .. } => !(slab == 0 && i == index),
+                Write::Sampler { index: i, .. } => !(slab == 1 && i == index),
+                Write::StorageImage { index: i, .. } => !(slab == 2 && i == index),
+                Write::StorageBuffer { index: i, .. } => !(slab == 3 && i == index),
+                Write::UniformBuffer { index: i, .. } => !(slab >= 4 && i == index),
+            });
+        }
         for slot in 0..self.frames {
             self.pending[slot].push(write);
         }
@@ -1585,8 +1598,14 @@ impl HandleTable {
         // the full `TABLE_SLOTS` words.
         let mut bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
         bytes.resize(TABLE_SLOTS * 4, 0);
-        let buffer = upload::buffer(gpu, &bytes, vk::BufferUsageFlags::UNIFORM_BUFFER, name)?;
-        let index = bindless.whole_uniform_buffer(&buffer)?.index;
+        let mut buffer = upload::buffer(gpu, &bytes, vk::BufferUsageFlags::UNIFORM_BUFFER, name)?;
+        let index = match bindless.whole_uniform_buffer(&buffer) {
+            Ok(handle) => handle.index,
+            Err(error) => {
+                buffer.destroy(gpu);
+                return Err(error);
+            }
+        };
         Ok(Self { buffer, index })
     }
 

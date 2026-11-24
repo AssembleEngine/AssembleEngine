@@ -180,6 +180,34 @@ pub fn image(
     )
 }
 
+pub(crate) fn mipped_image_spec(
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    layers: u32,
+) -> (ImageDesc, vk::ImageCreateFlags, vk::Format) {
+    let twin = storage_twin(format);
+    let flags = if twin != format {
+        vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE
+    } else {
+        vk::ImageCreateFlags::empty()
+    };
+    let usage = vk::ImageUsageFlags::SAMPLED
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | vk::ImageUsageFlags::TRANSFER_SRC
+        | vk::ImageUsageFlags::STORAGE;
+    let desc = ImageDesc {
+        mip_levels: mip_levels(width, height),
+        layers,
+        ..ImageDesc::color_2d(format, width, height, usage)
+    };
+    (desc, flags, twin)
+}
+
+pub(crate) const MIP_STORAGE_FEATURES: vk::FormatFeatureFlags2 = vk::FormatFeatureFlags2::from_raw(
+    vk::FormatFeatureFlags2::STORAGE_IMAGE.as_raw() | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT.as_raw(),
+);
+
 /// A sampled 2D (array) colour image: `layers[l][m]` is mip `m` of layer
 /// `l` (every layer the same mip count), with a view of `view_type`, left
 /// in `SHADER_READ_ONLY_OPTIMAL`.
@@ -281,6 +309,17 @@ pub fn image_layers(
 /// per level, its layers one after another, `texel_bytes` a texel. For tests
 /// and tools: it waits for the device.
 pub fn read_image(gpu: &GpuDevice, image: &OwnedImage, texel_bytes: u64) -> Result<Vec<Vec<u8>>> {
+    read_image_from(gpu, image, texel_bytes, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+}
+
+/// [`read_image`] for an image in `layout` (e.g. a storage image left in
+/// GENERAL): it is copied from that layout and left in it again.
+pub fn read_image_from(
+    gpu: &GpuDevice,
+    image: &OwnedImage,
+    texel_bytes: u64,
+    from_layout: vk::ImageLayout,
+) -> Result<Vec<Vec<u8>>> {
     let desc = image.desc;
     let sizes: Vec<u64> = (0..desc.mip_levels)
         .map(|i| ((desc.width >> i).max(1) * (desc.height >> i).max(1)) as u64 * desc.layers as u64 * texel_bytes)
@@ -326,12 +365,7 @@ pub fn read_image(gpu: &GpuDevice, image: &OwnedImage, texel_bytes: u64) -> Resu
             vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
         );
         let copy = (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
-        let before = layout(
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            any,
-            copy,
-        );
+        let before = layout(from_layout, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, any, copy);
         gpu.device
             .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&before));
         let regions: Vec<vk::BufferImageCopy> = (0..desc.mip_levels)
@@ -360,11 +394,11 @@ pub fn read_image(gpu: &GpuDevice, image: &OwnedImage, texel_bytes: u64) -> Resu
         );
         let after = layout(
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            from_layout,
             copy,
             (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
-                vk::AccessFlags2::SHADER_SAMPLED_READ,
+                vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
             ),
         );
         gpu.device
@@ -439,38 +473,13 @@ pub fn image_mipped(
     name: &str,
 ) -> Result<OwnedImage> {
     anyhow::ensure!(!layers.is_empty() && width > 0 && height > 0, "{name}: no texels");
-    let twin = storage_twin(format);
+    let (desc, flags, twin) = mipped_image_spec(format, width, height, layers.len() as u32);
     let srgb = twin != format;
-    // The shader's store has no format qualifier: the format must say so.
-    let mut props3 = vk::FormatProperties3::default();
-    let mut props = vk::FormatProperties2::default().push_next(&mut props3);
-    unsafe {
-        gpu.instance
-            .instance
-            .get_physical_device_format_properties2(gpu.physical, twin, &mut props)
-    };
-    let features = props3.optimal_tiling_features;
     anyhow::ensure!(
-        features
-            .contains(vk::FormatFeatureFlags2::STORAGE_IMAGE | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT),
+        gpu.optimal_format_features(twin).contains(MIP_STORAGE_FEATURES),
         "{name}: {twin:?} takes no formatless storage writes here, so its mips cannot be made"
     );
-    let levels = mip_levels(width, height);
-    let flags = if srgb {
-        vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE
-    } else {
-        vk::ImageCreateFlags::empty()
-    };
-    // TRANSFER_SRC: [`read_image`] (tests).
-    let usage = vk::ImageUsageFlags::SAMPLED
-        | vk::ImageUsageFlags::TRANSFER_DST
-        | vk::ImageUsageFlags::TRANSFER_SRC
-        | vk::ImageUsageFlags::STORAGE;
-    let desc = ImageDesc {
-        mip_levels: levels,
-        layers: layers.len() as u32,
-        ..ImageDesc::color_2d(format, width, height, usage)
-    };
+    let levels = desc.mip_levels;
     let mut target = OwnedImage::with_view_flags(gpu, desc, view_type, flags, name)?;
     let mut bytes = Vec::new();
     let mut regions = Vec::new();

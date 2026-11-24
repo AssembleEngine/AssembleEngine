@@ -5605,12 +5605,22 @@ Steps:
 2. Data and bake: absorption/wind/swell/foam settings, a shore travel-time field and a caustic
    texture (map bake or runtime), so the shaders have the demo's inputs.
 3. Reflection and refraction copies: the passes and graph resources, the water sampling them,
-   an RTS camera scene and its cost.
+   and the RTS benchmark scene definitions.
 4. Underwater pass and unit painting: depth-reconstructed tint and caustics, submerged-unit
    absorption and the chosen visibility aids.
 5. Displacement, wakes, spray and bubbles: emitters from the view stream, the surface mesh,
    and the near/far LOD decision.
 6. Underwater view and the visibility policy across every water pass, then tuning.
+
+The remaining work has three deliveries. Each has one approval and one full verification run
+on the integrated change. Run focused tests during implementation.
+
+- **M16.9–M16.14** delivers refraction, sonar, submerged unit painting and client visibility
+  checks for both water copies.
+- **M16.15–M16.18** delivers CBT displacement, riding hulls, wakes, impact rings, spray and
+  bubbles, with shared visibility checks.
+- **M16.19–M16.21** delivers the underwater camera, quality fallback, resize checks and final
+  captures. Benchmark execution and budget tuning require explicit consent.
 
 Verification:
 - Captures against the demo at the same view (same map, sea floor and camera) for colour,
@@ -5628,6 +5638,190 @@ reflection versus a cheaper screen-space approximation; which wakes/blasts are v
 (visual only) and which need a synced water field (submarines, amphibious gameplay); the
 visibility policy's details; whether the underwater pass runs always or only near/below the
 surface; how the copy layer exposes submerged state to the renderer (a view field or a mask).
+
+### M16 progress
+
+Stage 1 (survey and baseline) is built. The milestones and stage gates are in the M16 plan;
+this section records what exists and what is open, as the stage's `docs:` commit.
+
+- **M16.1 baseline gates.** `crates/ae_render/tests/data/m16_baseline.txt` pins one FNV hash
+  per pre-M16 fixture on the crossing maps: dry (the land crossing), wet M7, wet with the
+  observer's looks and a fixed vision feed (line of sight to grid column 17, explored to 19,
+  so the lake straddles the sight boundary and the river is unseen), and wet with the surface
+  switched off (the water crossing), at 320x180, eight frames (fixed time 8/60 s), shadows
+  on, keyed by GPU name and `driverVersion`. `tests/gpu.rs` `m16_baseline_*` renders them;
+  on an unknown device the test prints the four hashes and skips. A water shader that
+  ignored vision failed the observer fixture when the pass was bypassed. The advisory
+  SPIR-V gate is `tests/spirv.rs`: every shader `build.rs` compiles is pinned by its binary
+  hash in `tests/data/m16_spirv.txt` together with the compiler's identity (all of `glslc
+  --version`: shaderc, glslang and SPIRV-Tools). On the pinned toolchain a hash difference
+  is shader drift and fails. On a different compiler the hashes are advisory (the differing
+  files are printed) because a supported compiler may emit different but valid SPIR-V;
+  `AE_STRICT_SPIRV=1` requires the pinned toolchain. `GLSLC` is a registered build input,
+  so a changed compiler recompiles and restamps, and `AE_UPDATE_SPIRV=1` moves the pin.
+  With real glslc 2026.3 and 2026.1 (six and 27 differing binaries, all `spirv-val` clean)
+  the default run passes and the strict run refuses the toolchain; a one-constant edit to
+  `water.frag` still fails on the pinned compiler.
+- **M16.2 coast fixture.** `ae_nav::scenario::coast_terrain(cells)` and
+  `coast_starts`: a coastline, a beach, a 0-4 m shelf with sand/rock/weed beds, a drop to a
+  30-34 m basin and a river with a mouth and one ford, water at 42 m. `Map::Coast`,
+  `ae-client --map coast`, `ae_map` export/load round trip and the GPU test
+  `coast_fixture_renders` all use it; `NavPlugin::new(Map::Coast, cells)` carries the
+  generated starts, so `map_starts` emits them and the archive test keeps them on dry land.
+  `crates/ae_nav/tests/coast.rs` pins the terrain digest
+  and the five-class plan's 300-tick state hash at 0x7c54f08fc077ebad and 0xa751bf4a0d039c3a
+  (768 cells; identical at 1, 2, 4 and 8 workers, and the classes keep their media on every
+  tick).
+- **M16.4 water settings.** `ae_map::WaterLook` is `map.json`'s optional `water` object
+  (absorption per channel, shallow/deep radiance, wind direction and speed, swell
+  amplitude and length, foam, caustic scale, the submerged-unit limits and the outline
+  aid); every field defaults to the M7 values and the serde defaults leave an archive
+  without the object byte-identical. `ae_render::water::{WaterParams, params}` mirror it
+  without depending on `ae_map`, their defaults tied to the shader sources by a table test;
+  `TerrainApp::with_water_params` carries the look for the rich tiers (M7 ignores it) and
+  the client converts field by field. `--water-quality off|m7|reflect|refract|full`
+  selects the tier. M16.20 switches the wet default to `full`.
+- **M16.5 shore field and caustics.** `crates/ae_render/src/water/shore.rs` bakes the shore
+  travel-time field from the ground height texture with a GPU jump flood (seed, halving
+  steps, JFA+1, resolve; R16F, one texel per height sample, zero at the waterline and rising
+  seaward). The seeds are integer texel coordinates (RG16UI), exact at the 2560-cell default
+  and the 8192-cell archive limit. `water.shore` is a conditional compute library pass and
+  `water.shore` a library image; the app marks it dirty from a terrain update's cells (its
+  edit hook) and the pass records only then, rebuilding in full: a new waterline can be the
+  nearest shore for a wedge of the sea, so values change only where it is. No offline bake.
+  `water.caustics` is a deterministic tileable 256² RGBA8 web whose base pattern is computed
+  on the CPU and uploaded once; `upload::image_mipped` makes its mip chain on the GPU, and
+  the graph executor starts the image in the upload's layout so a first read keeps it.
+  The engine's own graph bakes both only when asked (`TerrainApp::with_water_data`, off for
+  M7); a graph file or module may name either as a `library` resource and the host fills in
+  the image descriptor, so a graph that declares them allocates the data before wiring and
+  M7, water-off and dry scenes allocate nothing. A module's explicit descriptor for either
+  image is checked against the allocation before the reload commits: its usage must be a
+  subset of the bound image's, and its samples, layers, mip levels and aspect must match, so
+  a graph cannot claim an attachment usage the image lacks. A library resource is declared
+  once by name: a second `water.shore` (or any other library resource) would bind the same
+  host object under another resource id, so a writer for the first is not a dependency of a
+  reader of the second and the unrooted bake is pruned; the module path refuses duplicates
+  by name, as the JSON loader does. GPU tests probe the coast field
+  (zero at the waterline, monotone seaward, tens of seconds in deep water, a raised river
+  island changes only its neighbourhood, and exact seeds on a 2561-wide map), the app's
+  first bake, clean skip and re-bake through a real terrain edit, that M7/off/dry allocate
+  none, that a first graph read keeps the uploaded caustics, and that an exhausted registry
+  leaks nothing; library tests check both descriptors, the library-image placeholders, the
+  unsupported usage/sample/layer/mip/aspect refusals, duplicate declarations, and that a dry
+  scene cannot declare them; module-level GPU tests declare the water images from a real
+  render module (an attachment usage is rejected by name and the live graph keeps drawing, a
+  duplicate `water.shore` is refused on load and on reload while a unique producer bakes and
+  reads nonzero travel time, and a canonical sampled caustics descriptor loads). A candidate
+  graph is baked with the executor's own
+  validation before the water data is committed or the module is counted as loaded, so a
+  graph the executor would refuse leaves the running module, its resources and its clean
+  bake in place and the frame keeps drawing. A full offscreen retarget retires the water
+  images' bindless handles with the other recreated objects, and the registry drops queued
+  writes for an index when it retires it, so no slot applies a destroyed view. The M16.1
+  frame gate is green.
+- **M16.6 tier framework.** Render-module ABI v3 carries wet-scene requests for reflection,
+  refraction, waves and underwater volume. The render SDK exposes the four bits in
+  `DeclareEnv`, and graph files use `water_reflect`, `water_refract`, `water_waves`
+  and `water_volume` on resources and passes. The graph contract checks complete tiers,
+  their producers and consumers, and the volume dependency on refraction. The app tracks
+  ownership through `WaterTiers` from the live passes in the baked graph. Modules whose
+  graphs have no rich water passes use the M7 surface.
+- **M16.7 instance columns and shadows.** Unit streams now carry water depth in metres and observer
+  state. `ae-client` fills depth with zero until games expose dive depth, passes through
+  the observer's state, and uses Own for unfiltered streams. The shared shader eligibility
+  rule (`eligible` in `units_common.glsl`) accepts Own and Seen. Darts and opaque and masked
+  models apply it in their shadow casters (`units_shadow.vert`, `units_models_shadow.vert`
+  and its masked variant), whose `m16_spirv.txt` hashes were re-pinned for the check. Blips
+  and ghosts still draw in the scene. The M16.1 observer frame was re-pinned for the removed
+  blip shadows.
+  `units.rs` tests tie the shader's column and view-state defines to the Rust constants,
+  and the client's stream test ties `RowState` to them.
+- **M16.8 planar reflection.** `--water-quality reflect` uses a mirrored reverse-Z camera
+  and clips terrain and units at the water plane into half-resolution HDR colour and depth.
+  The reflection redraws terrain from the current CBT and culls observer-eligible units into
+  its own indirect lists. Reflected geometry uses sunlight, sky and the scene's shadow maps.
+  The water surface samples the colour with its Fresnel weight and wave normals. Clear pixels
+  use the analytic sky. Native, WASM and JSON default graphs agree, and the coast GPU test
+  checks the reflected tower, clear sky and filtering of blips, ghosts and submerged units.
+  As with the other unit draws, a graph with `units.reflect` needs a `units.pose` pass.
+- **M16 delivery 1 (M16.9–M16.14).** `refract` and `full` use the HDR refraction
+  copy, reverse-Z depth, absorption and sun-projected caustics with scene shadows.
+  Submerged darts and models carry a paint marker and can use the optional outline.
+  In these tiers the units' cull, draws and shadow casters (`*_sub` variants) all place a
+  submerged row at its depth, so a diving hull casts from where it is drawn.
+  `units.water_overlay`, like the other unit draws, needs a `units.pose` pass.
+  Sand ripples, grain, weed and rock layers dress the seabed. The three default
+  graph entry points agree.
+- Crossing includes a ship-profile submarine and sonar-equipped vessels. Enemy
+  submerged units require sonar. The two water copies exclude hidden units, blips,
+  ghosts and explored-only rows. Observer switching clears the impact and particle
+  feeds and resets view history. The Crossing opt-in re-pins its world digest.
+- **M16 delivery 2 (M16.15–M16.18).** `full` now adds a camera-centred
+  displacement patch with Kelvin wakes, expanding impact rings and foam.
+  A separate conforming water CBT refines the surface against the filtered
+  waves and floating hulls sample their height and slope. Sorted and
+  packets partition at the displaced surface and draw the underwater list
+  into refraction with its wet mask intact. The client emits eligible bow
+  spray, splash and bubbles for any game's floating and submerged rows. Visibility tests check that hidden rows and
+  contacts do not start effects, that live effects decay after loss of
+  sight, and that an observer switch clears them. Native, WASM and JSON
+  plans agree. The M16.1 frame pins and earlier shader binaries still match.
+- **M16 delivery 3 (M16.19–M16.21).** The water volume grades submersion per pixel from the
+  displaced waterline and the camera near plane. Water-to-air Fresnel shapes Snell's window.
+  Exposure and tonemap read the volume output. `full` is the wet-map default in the client.
+  The host falls back to M7 when the target lacks a required rich format or usage. The quality
+  ladder has native, WASM and JSON graph goldens and GPU coverage for resizes and the water
+  switch. The underwater GPU probe checks the Snell window and fog from 3 m below, the 16-step
+  surface crossing and byte identity above the water. Final coast captures and the underwater
+  camera command are in [water.md](water.md). Page Up/Page Down move the camera's orbit point
+  off the ground (Home returns it), so the interactive camera can look up from below the surface.
+  Over water the wheel zooms to 5 m instead of 20 m, so zooming in reaches the seabed. The
+  eye keeps out of a 2 m band around the water level (the swell would carry it in and out),
+  and the underwater light falls from above and with depth, so up and down stay legible.
+- **M16 delivery 4 (prototype parity).** `full` ports the prototype's pieces instead of
+  cut-down versions: its three-train swell and static displacement, wave particles in closed
+  form (Kelvin wakes laid per metre of path, 24 s churned trails, blasts with a crater stamp,
+  three ring waves and a boil), RA3's 21-tap blur with derivative taps, `ocean.frag`'s normal
+  stack (wind-ripple loop, untiled churn facets), its teal environment composition, breakers
+  timed by the shore field (now baked and sampled by the default waves graph), and impact
+  whitewater. A shell landing in the water throws a spray column instead of a fireball. The
+  coast takes the prototype's sea and runs a shipping lane. Riding hulls now cast and reflect
+  from the waves, and the culls widen floating rows by `WAVE_BOUND`. `--capture-seconds`
+  captures live wakes and rings. RTS-scale departures and captures are in
+  [water.md](water.md) "The prototype's pieces in `full`". The GPU costs are unmeasured (pending consent).
+- **M16 delivery 5 (RTS-scale water fixes).** After delivery 4 the coast still read as clear
+  water over a sharp seabed, with stripes, a weave, lane-like wakes and a sea that turned
+  saturated from afar. Causes and fixes, in [water.md](water.md) "The prototype's pieces in
+  `full`": the seabed kept the beach sand's ripple normals (now the floor's own normal); the
+  caustics were a lattice of sines (now a jittered cellular web, faded out before its
+  threads reach a few pixels, where its two copies wove); the coast look now absorbs about three times as fast over its 0.8-4 m shelf, and
+  the floor is broad soft weed beds blurred with depth; the water's in-scatter is fogged; and
+  wakes are lengths in hull radii, not times (the coast convoy's peak live records fall from
+  42,699 to 8,809), with a frayed, wandering trail, emission just outside the patch (a hull
+  outside it emitted nothing, the likely cause of trails cut after a pan), and bubble
+  lightening only on young churn. The `refract` tier's frames
+  change with the shared seabed and underwater pass; M7 and `reflect` are unchanged.
+  Afterwards: the terrain LOD refines where a node crosses the water level, where its
+  from-above discount had drawn the coast's river bed as sand triangles above the water
+  and, from afar, lost it between its vertices (all tiers' wet frames change; the wet M16
+  baselines are re-pinned, the dry one holds). TODO: time the extra waterline leaves in the
+  benchmark run.
+- M16.10 defines the four coast benchmark scenes. `water-under` uses the new underside and
+  volume passes. Measurement and budget sign-off remain open pending explicit consent.
+- **M16.3 survey.** `docs/water.md` records the prototype's pass order, resources,
+  parameters and published costs, and maps every prototype pass to its `library.rs` pass
+  and tier flag. It has three paired prototype/engine captures (overview, fleet, close), a
+  standalone prototype blast capture, and an engine-only
+  below-surface capture, each at a documented camera. The prototype has no camera command
+  line and clamps its eye above the plane; its captures used a temporary checkout copy
+  with a `--camera` option, and there is no prototype below-surface capture (as the
+  research brief found).
+- The displaced surface uses CBT and the reflection is half resolution.
+  M16.21 groups per-pass costs,
+  scale and mesh tuning, and the budget check when the user consents to measurements.
+- Crossing uses dart meshes by default. The floating-unit draw supports both
+  darts and supplied hull models.
 
 ## TODO (open, not a priority now)
 

@@ -211,6 +211,20 @@ The split is the point: **topology is declared once** (or when it changes), **da
 A graph can come from a render module (`--render-module post`), a data file
 (`render/post.graph.json`), or engine code, and can be swapped while running.
 
+The host requests water tiers on wet scenes through the v3 declaration flags. Graph files
+use the corresponding `water_reflect`, `water_refract`, `water_waves` and `water_volume`
+conditions. A tier's library passes and resources form one contract. Volume requires
+refraction. The app derives water effect ownership from the library passes kept by the graph
+bake. A module that ignores the extra flags can keep drawing the M7 surface. The client requests full quality
+on wet maps. Before declaration, the host checks the requested formats, image usages, sample
+counts and extents for the target. It requests M7 when a rich requirement is unavailable.
+
+The volume pass reads the composited HDR scene, scene depth, refraction and the displacement
+patch when present. It reconstructs the near-plane ray origin to grade the transition by pixel.
+The water surface shades its underside with water-to-air Fresnel. In-scatter and absorption from
+the map's water parameters finish the image in `water.volume.out`. The exposure meter and
+tonemap sample that image when the pass is present.
+
 ### The pass library
 
 Render modules wire these; the engine owns their implementations.
@@ -225,7 +239,8 @@ Render modules wire these; the engine owns their implementations.
 | `units.count` | transfer | `units.indirect` | `units.counts` |
 | `shadows.draw` | graphics | instances (all units) | `shadows.map` (depth) |
 | `shadows.particles` | graphics | particle state, keys, indirect | `shadows.particles` (colour) |
-| `water.draw` | graphics | depth (read), sky, fog | colour 1 |
+| `water.draw` | graphics | depth (read), water tier inputs, sky and fog | scene and glow |
+| `water.volume` | graphics | scene, depth, refraction, optional displacement | `water.volume.out` |
 | `particles.sim` | compute | — | state, keys, indirect |
 | `particles.draw` | graphics | state, keys, indirect, depth | colour (half-res + upsample) |
 | `post.tonemap` | graphics | the scene, the bloom, the exposure image | the target (SDR, mapped from the working space to BT.709) or the display (HDR, in the working space) |
@@ -632,6 +647,7 @@ Two rules keep this from tangling:
 | what is hashed / saved | `crates/ae_sim/src/digest.rs`, `schema.rs` |
 | what an observer may see | `crates/ae_view/src/lib.rs`, `ae_services/src/view.rs` |
 | a render pass | `crates/ae_render/src/library.rs`, `executor.rs` |
+| the water (surface, settings, the baked shore field and caustics, and the M16 stack's design and survey) | `crates/ae_render/shaders/water.*`, `crates/ae_render/src/{water,terrain/renderer.rs}`, `docs/water.md` |
 | a resource's descriptor or handle | `crates/ae_render/src/bindless.rs`, `shaders/bindless.glsl` (the push table), `executor.rs` (`Binding`) |
 | how the output reaches the display (colour space, HDR) | `crates/ae_render/src/swapchain.rs`, `display.rs`, `library.rs` |
 | the working space, the gamut map and its compression | `crates/ae_render/src/colorspace.rs`, `encode.rs` |

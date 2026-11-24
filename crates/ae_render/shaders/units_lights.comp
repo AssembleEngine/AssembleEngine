@@ -21,6 +21,11 @@ void main() {
     if (row >= lf.model.y) {
         return;
     }
+#ifdef SUB
+    if (!eligible(row)) {
+        return;
+    }
+#endif
     uint cls = min(attru(ATTR_CLASS, row), MAX_CLASSES - 1u);
     uvec2 range = classLights[cls];
     if (range.y == 0u) {

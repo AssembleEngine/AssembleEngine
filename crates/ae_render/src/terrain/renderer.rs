@@ -33,6 +33,11 @@ use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::pipeline::{self, spirv};
 use crate::shadow::{Cascades, ShadowMap};
 use crate::upload::{self, MipFilter};
+use crate::water::{
+    WaterParams,
+    reflect::{self, MirrorFrame},
+    underwater, volume,
+};
 use ae_framegraph::BufferDesc;
 use anyhow::{Context as _, Result};
 use ash::vk;
@@ -209,6 +214,24 @@ impl TerrainInfo {
     }
 }
 
+struct TerrainReflection {
+    prepare: vk::Pipeline,
+    cull: vk::Pipeline,
+    draw: vk::Pipeline,
+    surface: vk::Pipeline,
+}
+
+struct TerrainRefraction {
+    terrain: vk::Pipeline,
+    decals: Option<vk::Pipeline>,
+    underwater: vk::Pipeline,
+    refract: vk::Pipeline,
+    full: vk::Pipeline,
+    seabed: OwnedImage,
+    seabed_index: u32,
+    seabed_group: crate::bindless::GroupId,
+}
+
 pub struct TerrainRenderer {
     pub max_depth: u32,
     info: TerrainInfo,
@@ -230,6 +253,12 @@ pub struct TerrainRenderer {
     wire: Option<vk::Pipeline>,
     /// The water surface; `None` on a map without water.
     water: Option<vk::Pipeline>,
+    reflection: Option<TerrainReflection>,
+    refraction: Option<TerrainRefraction>,
+    wave_surfaces: Option<[vk::Pipeline; 4]>,
+    wave_underwater: Option<vk::Pipeline>,
+    volume: [Option<(vk::Pipeline, vk::Pipeline)>; 4],
+    frame_index: u32,
 
     tree: OwnedBuffer,
     bits: OwnedBuffer,
@@ -461,7 +490,10 @@ impl TerrainRenderer {
                 OwnedBuffer::new(
                     gpu,
                     BufferDesc {
-                        size: size_of::<FrameUbo>() as u64,
+                        size: (size_of::<FrameUbo>()
+                            + usize::from(info.water_level.is_some())
+                                * (size_of::<MirrorFrame>() + underwater::FRAME_BYTES))
+                            as u64,
                         usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
@@ -800,6 +832,7 @@ impl TerrainRenderer {
             false,
             unit_shadows,
             false,
+            false,
         )?;
         let terrain_decals = match decals {
             Some(_) => Some(graphics_pipeline(
@@ -811,6 +844,7 @@ impl TerrainRenderer {
                 false,
                 unit_shadows,
                 true,
+                false,
             )?),
             None => None,
         };
@@ -824,39 +858,23 @@ impl TerrainRenderer {
                 true,
                 false,
                 false,
+                false,
             )?)
         } else {
             None
         };
-        let water = match info.water_level {
-            Some(_) => Some(
-                pipeline::graphics_pipeline(
+        let water = info
+            .water_level
+            .map(|_| {
+                water_pipeline(
                     device,
-                    &pipeline::GraphicsDesc {
-                        vertex: spirv!("water.vert"),
-                        fragment: spirv!("water.frag"),
-                        layout: pipeline_layout,
-                        color_formats: &[
-                            color_format,
-                            vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32),
-                        ],
-                        // Reverse-Z; tested against the terrain and units, never written.
-                        depth: Some(pipeline::DepthState {
-                            format: depth_format,
-                            write: false,
-                            compare: vk::CompareOp::GREATER_OR_EQUAL,
-                        }),
-                        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
-                        blend: pipeline::Blend::Premultiplied,
-                        // The water's glints replace what lies behind them in
-                        // the glow target (their own light, not the bed's).
-                        glow_blend: pipeline::Blend::Off,
-                    },
+                    pipeline_layout,
+                    color_format,
+                    depth_format,
+                    spirv!("water.frag"),
                 )
-                .context("water pipeline")?,
-            ),
-            None => None,
-        };
+            })
+            .transpose()?;
 
         Ok(Self {
             max_depth,
@@ -872,6 +890,12 @@ impl TerrainRenderer {
             terrain,
             wire,
             water,
+            reflection: None,
+            refraction: None,
+            wave_surfaces: None,
+            wave_underwater: None,
+            volume: [None; 4],
+            frame_index: handles[0],
             tree,
             bits,
             snap,
@@ -910,6 +934,9 @@ impl TerrainRenderer {
     /// Give the global-set handles back (the shadow map's too); the device
     /// objects stay until [`Self::destroy`].
     pub fn retire(&mut self, bindless: &mut crate::bindless::Bindless) {
+        if let Some(refraction) = &self.refraction {
+            bindless.retire_group(refraction.seabed_group);
+        }
         if let Some(group) = self.group.take() {
             bindless.retire_group(group);
         }
@@ -1073,6 +1100,23 @@ impl TerrainRenderer {
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(bytes_of(&ubo));
+            if self.reflection.is_some()
+                && let Some(level) = i.water_level
+            {
+                MirrorFrame::new(p.view_proj, p.cam_pos, level).write(bytes, size_of::<FrameUbo>());
+            }
+        }
+    }
+
+    pub(crate) fn write_water(&mut self, slot: usize, view_proj: Mat4, params: WaterParams) {
+        if self.refraction.is_some()
+            && let Some(bytes) = self.ubos[slot].mapped()
+        {
+            underwater::write(
+                &mut bytes[size_of::<FrameUbo>() + size_of::<MirrorFrame>()..],
+                view_proj,
+                params,
+            );
         }
     }
 
@@ -1237,6 +1281,25 @@ impl TerrainRenderer {
     /// attachment of `color_format` and a depth attachment of
     /// `depth_format` (cleared to 0: reverse-Z).
     pub fn record_draw(&self, ctx: &PassContext<'_>, wireframe: Wireframe) {
+        self.draw_terrain(ctx, wireframe, self.terrain, self.terrain_decals, &self.push);
+    }
+
+    pub(crate) fn record_draw_refract(&self, ctx: &PassContext<'_>, wireframe: Wireframe) -> Result<()> {
+        let refract = self.refraction.as_ref().context("terrain refraction pipelines")?;
+        let mut push = self.push;
+        push.image(12, refract.seabed_index);
+        self.draw_terrain(ctx, wireframe, refract.terrain, refract.decals, &push);
+        Ok(())
+    }
+
+    fn draw_terrain(
+        &self,
+        ctx: &PassContext<'_>,
+        wireframe: Wireframe,
+        terrain: vk::Pipeline,
+        decals: Option<vk::Pipeline>,
+        push: &crate::bindless::Push,
+    ) {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_descriptor_sets(
@@ -1252,14 +1315,11 @@ impl TerrainRenderer {
                 self.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytes_of(&self.push),
+                bytes_of(push),
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
-            let terrain = match self.terrain_decals {
-                Some(decals) if self.decal_live[ctx.slot] => decals,
-                _ => self.terrain,
-            };
+            let terrain = decals.filter(|_| self.decal_live[ctx.slot]).unwrap_or(terrain);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, terrain);
             device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, 3 * 4, 1, 0);
             if let (Wireframe::Triangles, Some(wire)) = (wireframe, self.wire) {
@@ -1267,6 +1327,422 @@ impl TerrainRenderer {
                 device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, 3 * 4, 1, 0);
             }
         }
+    }
+
+    pub(crate) fn prepare_reflection(&mut self, device: &ash::Device) -> Result<()> {
+        if self.reflection.is_some() {
+            return Ok(());
+        }
+        let [prepare, cull, draw, surface] = reflect::pipelines(device, |i| match i {
+            0 => pipeline::compute_pipeline(device, spirv!("cbt_prepare_mirror.comp"), self.pipeline_layout),
+            1 => pipeline::compute_pipeline(device, spirv!("cbt_update_mirror.comp"), self.pipeline_layout),
+            2 => graphics_pipeline(
+                device,
+                self.pipeline_layout,
+                self.color_format,
+                self.depth_format,
+                spirv!("terrain_mirror.frag"),
+                false,
+                self.unit_shadow_map.is_real(),
+                false,
+                true,
+            ),
+            _ => water_pipeline(
+                device,
+                self.pipeline_layout,
+                self.color_format,
+                self.depth_format,
+                spirv!("water_reflect.frag"),
+            ),
+        })?;
+        self.reflection = Some(TerrainReflection {
+            prepare,
+            cull,
+            draw,
+            surface,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn prepare_refraction(
+        &mut self,
+        gpu: &GpuDevice,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<()> {
+        let device = &gpu.device;
+        if self.refraction.is_some() {
+            return Ok(());
+        }
+        let terrain = |decals| {
+            graphics_pipeline(
+                device,
+                self.pipeline_layout,
+                self.color_format,
+                self.depth_format,
+                spirv!("terrain_refract_owner.frag"),
+                false,
+                self.unit_shadow_map.is_real(),
+                decals,
+                false,
+            )
+        };
+        let surface = |fragment| {
+            water_pipeline(
+                device,
+                self.pipeline_layout,
+                self.color_format,
+                self.depth_format,
+                fragment,
+            )
+        };
+        let [draw, underwater, refract, full] = reflect::pipelines(device, |i| match i {
+            0 => terrain(false),
+            1 => underwater::pipeline(device, self.pipeline_layout, self.color_format),
+            2 => surface(spirv!("water_refract.frag")),
+            _ => surface(spirv!("water_full.frag")),
+        })?;
+        let pending = (|| -> Result<_> {
+            let decals = self.terrain_decals.map(|_| terrain(true)).transpose()?;
+            let layers = super::tileset::seabed_layers();
+            let size = super::tileset::SEABED_SIZE;
+            let image = upload::image_mipped(
+                gpu,
+                vk::Format::R8G8B8A8_SRGB,
+                size,
+                size,
+                &layers.each_ref().map(Vec::as_slice),
+                MipFilter::Average,
+                vk::ImageViewType::TYPE_2D_ARRAY,
+                "seabed layers",
+            );
+            let result = image.and_then(|mut image| {
+                match bindless.group(|b| b.sampled_2d_array(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)) {
+                    Ok((index, group)) => Ok((image, index.0.index, group)),
+                    Err(err) => {
+                        image.destroy(gpu);
+                        Err(err)
+                    }
+                }
+            });
+            match result {
+                Ok((seabed, seabed_index, seabed_group)) => Ok(TerrainRefraction {
+                    terrain: draw,
+                    decals,
+                    underwater,
+                    refract,
+                    full,
+                    seabed,
+                    seabed_index,
+                    seabed_group,
+                }),
+                Err(err) => {
+                    if let Some(decals) = decals {
+                        unsafe { device.destroy_pipeline(decals, None) };
+                    }
+                    Err(err)
+                }
+            }
+        })();
+        match pending {
+            Ok(variants) => self.refraction = Some(variants),
+            Err(err) => {
+                for pipeline in [draw, underwater, refract, full] {
+                    unsafe { device.destroy_pipeline(pipeline, None) };
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn frame_index(&self) -> u32 {
+        self.frame_index
+    }
+
+    pub(crate) fn prepare_wave_surfaces(&mut self, device: &ash::Device) -> Result<()> {
+        if self.wave_surfaces.is_none() {
+            let fragments = [
+                spirv!("water_mesh.frag").as_slice(),
+                spirv!("water_mesh_reflect.frag").as_slice(),
+                spirv!("water_mesh_refract.frag").as_slice(),
+                spirv!("water_mesh_full.frag").as_slice(),
+            ];
+            self.wave_surfaces = Some(reflect::pipelines(device, |i| {
+                water_pipeline_with_vertex(
+                    device,
+                    self.pipeline_layout,
+                    self.color_format,
+                    self.depth_format,
+                    spirv!("water_mesh.vert"),
+                    fragments[i],
+                )
+            })?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_wave_underwater(&mut self, device: &ash::Device) -> Result<()> {
+        if self.wave_underwater.is_none() {
+            self.wave_underwater = Some(underwater::pipeline_with_shader(
+                device,
+                self.pipeline_layout,
+                self.color_format,
+                spirv!("water_underwater_waves.frag"),
+            )?);
+        }
+        Ok(())
+    }
+
+    fn volume_index(waves: bool, reflect: bool) -> usize {
+        2 * usize::from(waves) + usize::from(reflect)
+    }
+
+    pub(crate) fn prepare_volume(&mut self, device: &ash::Device, waves: bool, reflect: bool) -> Result<()> {
+        let index = Self::volume_index(waves, reflect);
+        if self.volume[index].is_none() {
+            let fragment = [
+                spirv!("water_rich_refract.frag").as_slice(),
+                spirv!("water_rich_full.frag").as_slice(),
+                spirv!("water_mesh_rich_refract.frag").as_slice(),
+                spirv!("water_mesh_rich_full.frag").as_slice(),
+            ][index];
+            let vertex = if waves {
+                spirv!("water_mesh.vert").as_slice()
+            } else {
+                spirv!("water.vert").as_slice()
+            };
+            let [volume, surface] = reflect::pipelines(device, |i| {
+                if i == 0 {
+                    volume::pipeline(device, self.pipeline_layout, self.color_format, waves)
+                } else {
+                    water_pipeline_with_vertex(
+                        device,
+                        self.pipeline_layout,
+                        self.color_format,
+                        self.depth_format,
+                        vertex,
+                        fragment,
+                    )
+                }
+            })?;
+            self.volume[index] = Some((volume, surface));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_volume(
+        &self,
+        ctx: &PassContext<'_>,
+        inputs: [u32; 3],
+        waves: Option<(crate::water::waves::WavePatch, u32)>,
+        reflect: bool,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut push = self.push;
+        push.words[0] = u32::from(enabled);
+        for (slot, image) in inputs.into_iter().enumerate() {
+            push.image(12 + slot, image);
+        }
+        if let Some((patch, image)) = waves {
+            patch.push(&mut push);
+            push.image(15, image);
+        }
+        let (volume, _) = self.volume[Self::volume_index(waves.is_some(), reflect)].context("water volume pipeline")?;
+        self.draw_water_vertices(ctx, volume, &push, 3);
+        Ok(())
+    }
+
+    pub(crate) fn water_push(&self) -> crate::bindless::Push {
+        self.push
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wave_surface(
+        &self,
+        ctx: &PassContext<'_>,
+        reflection: Option<u32>,
+        refraction: Option<u32>,
+        surface: crate::water::waves::WaveSurface,
+        leaves: BufferBinding,
+        indirect: BufferBinding,
+        volume: bool,
+    ) -> Result<()> {
+        let surfaces = self.wave_surfaces.context("water mesh pipelines")?;
+        let mut push = self.push;
+        surface.patch.push(&mut push);
+        push.image(14, surface.waves);
+        // The surface samples none of the terrain's error, material,
+        // tileset or decal images: their slots carry the water's own data
+        // (`water.frag` WATER_MESH), and the push words the swell.
+        let [static_map, ripples, foam] = surface.detail;
+        push.image(2, surface.shore);
+        push.image(3, surface.churn);
+        push.image(4, ripples);
+        push.image(5, static_map);
+        push.image(9, foam);
+        push.words = surface.swell;
+        push.image(15, leaves.storage.context("water mesh leaf storage")?);
+        let index = usize::from(reflection.is_some()) + 2 * usize::from(refraction.is_some());
+        if let Some(image) = reflection {
+            push.image(12, image);
+        }
+        if let Some(image) = refraction {
+            push.image(13, image);
+        }
+        let pipeline = if volume {
+            self.volume[Self::volume_index(true, reflection.is_some())]
+                .context("displaced underside pipeline")?
+                .1
+        } else {
+            surfaces[index]
+        };
+        self.bind_water(ctx, pipeline, &push);
+        unsafe {
+            ctx.device
+                .cmd_draw_indirect(ctx.cmd, indirect.buffer, indirect.offset + 3 * 4, 1, 0)
+        };
+        Ok(())
+    }
+
+    pub(crate) fn record_underwater(
+        &self,
+        ctx: &PassContext<'_>,
+        scene: u32,
+        depth: u32,
+        caustics: u32,
+        waves: Option<(crate::water::waves::WavePatch, u32)>,
+    ) -> Result<()> {
+        let refract = self.refraction.as_ref().context("terrain refraction pipelines")?;
+        let mut push = self.push;
+        push.image(12, scene);
+        push.image(13, depth);
+        push.image(14, caustics);
+        let pipeline = if let Some((patch, image)) = waves {
+            patch.push(&mut push);
+            push.image(15, image);
+            self.wave_underwater.context("displaced refraction pipeline")?
+        } else {
+            refract.underwater
+        };
+        self.draw_water_vertices(ctx, pipeline, &push, 3);
+        Ok(())
+    }
+
+    pub(crate) fn record_water_refract(
+        &self,
+        ctx: &PassContext<'_>,
+        reflection: Option<u32>,
+        refraction: u32,
+        volume: bool,
+    ) -> Result<()> {
+        let refract = self.refraction.as_ref().context("terrain refraction pipelines")?;
+        let mut push = self.push;
+        let pipeline = if let Some(reflection) = reflection {
+            push.image(12, reflection);
+            refract.full
+        } else {
+            refract.refract
+        };
+        let pipeline = if volume {
+            self.volume[Self::volume_index(false, reflection.is_some())]
+                .context("water underside pipeline")?
+                .1
+        } else {
+            pipeline
+        };
+        push.image(13, refraction);
+        self.draw_water(ctx, pipeline, &push);
+        Ok(())
+    }
+
+    pub(crate) fn record_cull_reflect(
+        &self,
+        ctx: &PassContext<'_>,
+        leaves: BufferBinding,
+        indirect: BufferBinding,
+    ) -> Result<()> {
+        let mirror = self.reflection.as_ref().context("terrain reflection pipelines")?;
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let mut push = self.push;
+        push.words[1] = (self.submesh_ib.size / 2) as u32;
+        reflect::push_buffers(&mut push, leaves, indirect)?;
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[ctx.global_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                crate::bindless::PUSH_STAGES,
+                0,
+                bytes_of(&push),
+            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, mirror.prepare);
+            device.cmd_dispatch(cmd, 1, 1, 1);
+            reflect::cull_barrier(ctx);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, mirror.cull);
+            device.cmd_dispatch_indirect(cmd, indirect.buffer, indirect.offset);
+            reflect::cull_barrier(ctx);
+            push.words[0] = 1;
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                crate::bindless::PUSH_STAGES,
+                0,
+                bytes_of(&push),
+            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, mirror.prepare);
+            device.cmd_dispatch(cmd, 1, 1, 1);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_draw_reflect(
+        &self,
+        ctx: &PassContext<'_>,
+        leaves: BufferBinding,
+        indirect: BufferBinding,
+    ) -> Result<()> {
+        let mirror = self.reflection.as_ref().context("terrain reflection pipelines")?;
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        let mut push = self.push;
+        reflect::push_buffers(&mut push, leaves, indirect)?;
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[ctx.global_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                crate::bindless::PUSH_STAGES,
+                0,
+                bytes_of(&push),
+            );
+            device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
+            device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, mirror.draw);
+            device.cmd_set_front_face(cmd, vk::FrontFace::CLOCKWISE);
+            device.cmd_draw_indexed_indirect(cmd, indirect.buffer, indirect.offset + 3 * 4, 1, 0);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_water_reflect(&self, ctx: &PassContext<'_>, reflection: u32) -> Result<()> {
+        let mirror = self.reflection.as_ref().context("terrain reflection pipelines")?;
+        let mut push = self.push;
+        push.image(12, reflection);
+        self.draw_water(ctx, mirror.surface, &push);
+        Ok(())
     }
 
     /// Whether this renderer can draw water (the map has a water level).
@@ -1278,7 +1754,27 @@ impl TerrainRenderer {
     /// attachment of `color_format` (loaded: it blends over the scene) and
     /// the depth buffer read-only. Nothing on a map without water.
     pub fn record_water(&self, ctx: &PassContext<'_>) {
-        let Some(water) = self.water else { return };
+        if let Some(water) = self.water {
+            self.draw_water(ctx, water, &self.push);
+        }
+    }
+
+    fn draw_water(&self, ctx: &PassContext<'_>, water: vk::Pipeline, push: &crate::bindless::Push) {
+        self.draw_water_vertices(ctx, water, push, 6);
+    }
+
+    fn draw_water_vertices(
+        &self,
+        ctx: &PassContext<'_>,
+        water: vk::Pipeline,
+        push: &crate::bindless::Push,
+        vertices: u32,
+    ) {
+        self.bind_water(ctx, water, push);
+        unsafe { ctx.device.cmd_draw(ctx.cmd, vertices, 1, 0, 0) };
+    }
+
+    fn bind_water(&self, ctx: &PassContext<'_>, water: vk::Pipeline, push: &crate::bindless::Push) {
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             device.cmd_bind_descriptor_sets(
@@ -1294,10 +1790,9 @@ impl TerrainRenderer {
                 self.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytes_of(&self.push),
+                bytes_of(push),
             );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, water);
-            device.cmd_draw(cmd, 6, 1, 0, 0);
         }
     }
 
@@ -1342,8 +1837,34 @@ impl TerrainRenderer {
                 .chain(self.terrain_decals)
                 .chain(self.wire)
                 .chain(self.water)
+                .chain(
+                    self.reflection
+                        .take()
+                        .into_iter()
+                        .flat_map(|m| [m.prepare, m.cull, m.draw, m.surface]),
+                )
             {
                 device.destroy_pipeline(p, None);
+            }
+        }
+        if let Some(mut r) = self.refraction.take() {
+            for p in [r.terrain, r.underwater, r.refract, r.full].into_iter().chain(r.decals) {
+                unsafe { device.destroy_pipeline(p, None) };
+            }
+            r.seabed.destroy(gpu);
+        }
+        if let Some(pipeline) = self.wave_underwater.take() {
+            unsafe { device.destroy_pipeline(pipeline, None) };
+        }
+        if let Some(surfaces) = self.wave_surfaces.take() {
+            for pipeline in surfaces {
+                unsafe { device.destroy_pipeline(pipeline, None) };
+            }
+        }
+        for (volume, surface) in self.volume.iter_mut().filter_map(Option::take) {
+            unsafe {
+                device.destroy_pipeline(volume, None);
+                device.destroy_pipeline(surface, None);
             }
         }
         self.table.destroy(gpu);
@@ -1408,8 +1929,14 @@ fn graphics_pipeline(
     wire: bool,
     unit_shadows: bool,
     decals: bool,
+    mirrored: bool,
 ) -> Result<vk::Pipeline> {
-    let vert = pipeline::shader_module(device, spirv!("terrain.vert"))?;
+    let vertex: &[u8] = if mirrored {
+        spirv!("terrain_mirror.vert")
+    } else {
+        spirv!("terrain.vert")
+    };
+    let vert = pipeline::shader_module(device, vertex)?;
     let frag = pipeline::shader_module(device, fragment)?;
     // UNIT_SHADOWS (unit_shadows.glsl): without a shadow map the lookup is
     // compiled out, not just skipped; DECALS (terrain_decals.glsl) likewise.
@@ -1482,11 +2009,17 @@ fn graphics_pipeline(
         vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA),
         vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA),
     ];
-    let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
-    let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+    let attachments = 2 - usize::from(mirrored);
+    let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend[..attachments]);
+    let dyn_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::FRONT_FACE,
+    ];
+    let dynamic =
+        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states[..2 + usize::from(mirrored)]);
     let mut rendering = vk::PipelineRenderingCreateInfo::default()
-        .color_attachment_formats(&formats)
+        .color_attachment_formats(&formats[..attachments])
         .depth_attachment_format(depth_format);
     if ae_framegraph::has_stencil(depth_format) {
         rendering = rendering.stencil_attachment_format(depth_format);
@@ -1509,4 +2042,52 @@ fn graphics_pipeline(
         device.destroy_shader_module(frag, None);
     }
     Ok(result.map_err(|(_, err)| err).context("terrain pipeline")?[0])
+}
+
+fn water_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    fragment: &[u8],
+) -> Result<vk::Pipeline> {
+    water_pipeline_with_vertex(
+        device,
+        layout,
+        color_format,
+        depth_format,
+        spirv!("water.vert"),
+        fragment,
+    )
+}
+
+fn water_pipeline_with_vertex(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    vertex: &[u8],
+    fragment: &[u8],
+) -> Result<vk::Pipeline> {
+    pipeline::graphics_pipeline(
+        device,
+        &pipeline::GraphicsDesc {
+            vertex,
+            fragment,
+            layout,
+            color_formats: &[
+                color_format,
+                vk::Format::from_raw(ae_render_abi::module::GLOW_FORMAT as i32),
+            ],
+            depth: Some(pipeline::DepthState {
+                format: depth_format,
+                write: false,
+                compare: vk::CompareOp::GREATER_OR_EQUAL,
+            }),
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            blend: pipeline::Blend::Premultiplied,
+            glow_blend: pipeline::Blend::Off,
+        },
+    )
+    .context("water pipeline")
 }

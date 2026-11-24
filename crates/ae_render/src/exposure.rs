@@ -210,6 +210,7 @@ impl Exposure {
     /// The exposure image as the graph binds it.
     pub fn image(&self) -> ImageBinding {
         ImageBinding {
+            initial: vk::ImageLayout::UNDEFINED,
             image: self.image.image,
             view: self.image.view,
             format: self.image.desc.format,

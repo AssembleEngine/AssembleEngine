@@ -27,7 +27,7 @@ pub struct DeclareTarget {
     pub width: u32,
     pub height: u32,
     pub color_format: vk::Format,
-    /// `DECLARE_*` flags: units, readback, water, shadows, particles.
+    /// `DECLARE_*` flags: units, readback, water and its tiers, shadows, particles.
     pub flags: u32,
     /// How the output encodes the display's light: HDR keeps the display
     /// intermediate and ends in `post.encode`, SDR has neither.

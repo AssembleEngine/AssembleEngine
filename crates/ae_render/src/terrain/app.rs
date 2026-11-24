@@ -39,7 +39,7 @@ use crate::encode::{DisplayLevels, Encode, OutputEncoding};
 use crate::executor::{Binding, BufferBinding, ImageBinding, PassContext, Recorder, SharedRecorder};
 use crate::exposure::{Exposure, ExposureFrame};
 use crate::fullscreen::FullscreenProgram;
-use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap};
+use crate::library::{self, LibraryEnv, LibraryPass, LibraryResource, ResourceMap, WaterTiers};
 use crate::lights::{Light, LightFrame, LightRenderer, LightStats};
 use crate::memory::{OwnedBuffer, OwnedImage};
 use crate::module::DeclareTarget;
@@ -48,8 +48,13 @@ use crate::particles::{ParticleFrame, ParticleRenderer, ParticlesSetup};
 use crate::thread::{RenderApp, TargetInfo};
 use crate::tonemap::{ToneParams, Tonemap};
 use crate::units::{UnitFrame, UnitRenderer, UnitsSetup};
+use crate::water::{
+    WaterFeed,
+    mesh::WaterMesh,
+    waves::{WavePatch, WaveSurface, Waves},
+};
 use ae_framegraph::{
-    BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceId, Role, ShaderStage,
+    BufferDesc, FrameGraph, ImageDesc, LoadOp, PassKind, ResourceClass, ResourceDesc, ResourceId, Role, ShaderStage,
 };
 use ae_render_abi::module::{
     DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program,
@@ -57,7 +62,7 @@ use ae_render_abi::module::{
 };
 use anyhow::{Context as _, Result};
 use ash::vk;
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use gpu_allocator::MemoryLocation;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -111,10 +116,36 @@ pub struct TerrainEdits {
     pub last_ms: f32,
 }
 
+/// A candidate graph's pending water-data change (see
+/// [`TerrainApp::prepare_water_data`]): committed when the graph is accepted,
+/// rolled back when it is not.
+struct WaterChange {
+    /// The renderer active before the candidate.
+    previous: Option<crate::water::WaterRenderer>,
+    action: WaterAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaterAction {
+    /// The candidate needs what is already allocated.
+    Keep,
+    /// The candidate needs nothing: the previous renderer is dropped on
+    /// acceptance.
+    Drop,
+    /// The candidate's renderer is installed; the previous one is destroyed
+    /// on acceptance.
+    Install,
+}
+
 /// What the main thread controls.
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainView {
     pub camera: Camera,
+    /// Look at a fixed world height instead of the ground under the target.
+    pub camera_focus: Option<f32>,
+    /// The camera may dive (the client sets it when it draws the water
+    /// volume): the eye then keeps out of the waves, see [`clear_of_waves`].
+    pub underwater_camera: bool,
     pub tau: f32,
     pub wireframe: Wireframe,
     pub lod_colors: bool,
@@ -144,6 +175,53 @@ pub struct TerrainView {
     /// Add the bloom to the scene before the tone curve (the app's
     /// [`ToneParams::bloom`] when on; 0 when off).
     pub bloom: bool,
+}
+
+impl TerrainView {
+    pub fn resolved_camera(&self, source: &TerrainSource) -> Camera {
+        Camera {
+            ground: self
+                .camera_focus
+                .unwrap_or_else(|| source.height_at(self.camera.target)),
+            ..self.camera
+        }
+    }
+
+    pub fn lod_view(&self, source: &TerrainSource, width: u32, height: u32) -> LodView {
+        let camera = self.resolved_camera(source);
+        lod_view_of(camera, self.eye_of(&camera, source), width, height)
+    }
+
+    /// Where the camera is, in world space.
+    pub fn eye(&self, source: &TerrainSource) -> Vec3 {
+        self.eye_of(&self.resolved_camera(source), source)
+    }
+
+    fn eye_of(&self, camera: &Camera, source: &TerrainSource) -> Vec3 {
+        let mut eye = camera.eye(|p| source.height_at(p));
+        if let Some(level) = source.info.water_level.filter(|_| self.underwater_camera) {
+            let floor = source.height_at(Vec2::new(eye.x, eye.z)) + 4.0;
+            eye.y = clear_of_waves(eye.y, level, floor);
+        }
+        eye
+    }
+}
+
+/// How far the moving surface reaches from the water level: the displaced
+/// patch is bounded to ±1.6 m, with a margin for the near plane's blend.
+pub const WAVE_BAND: f32 = 2.0;
+
+/// An eye height `y` kept out of the waves around `level`, so the swell does
+/// not carry the camera in and out of the water: inside the band it moves to
+/// the nearer edge, or above the water when the edge below is under `floor`.
+pub fn clear_of_waves(y: f32, level: f32, floor: f32) -> f32 {
+    if (y - level).abs() >= WAVE_BAND {
+        y
+    } else if y < level && level - WAVE_BAND >= floor {
+        level - WAVE_BAND
+    } else {
+        level + WAVE_BAND
+    }
 }
 
 /// One observer's vision for the terrain: line of sight now and cells ever
@@ -193,6 +271,52 @@ pub const NATIVE: u32 = u32::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PassWork {
+    /// Graph-owned buffers of the mirrored cull and draw.
+    Reflection {
+        pass: LibraryPass,
+        list: Option<ResourceId>,
+        indirect: ResourceId,
+        /// The full tier's waves, which the mirrored hulls ride.
+        waves: Option<ResourceId>,
+    },
+    /// The units' shadow casters, floating hulls riding the full tier's
+    /// waves.
+    ShadowsWaves(ResourceId),
+    WaterSurface {
+        reflection: Option<ResourceId>,
+        refraction: Option<ResourceId>,
+        /// waves, leaves, indirect, churn, shore
+        mesh: Option<[ResourceId; 5]>,
+        volume: bool,
+    },
+    WaterEmit(ResourceId),
+    WaterSplat {
+        particles: ResourceId,
+        churn: bool,
+    },
+    WaterBlur([ResourceId; 3]),
+    WaterLod([ResourceId; 3]),
+    UnitsWaves {
+        waves: ResourceId,
+        refract: bool,
+    },
+    ParticlesWaterSim(ResourceId),
+    ParticlesUnderwater {
+        depth: ResourceId,
+        waves: ResourceId,
+    },
+    WaterUnderwater {
+        scene: ResourceId,
+        depth: ResourceId,
+        caustics: ResourceId,
+        waves: Option<ResourceId>,
+    },
+    WaterVolume {
+        inputs: [ResourceId; 3],
+        waves: Option<ResourceId>,
+        reflect: bool,
+    },
+    RefractGeometry(LibraryPass),
     Library(LibraryPass),
     /// [`LibraryPass::ReadbackCopy`] with its source image and buffer.
     Readback {
@@ -255,6 +379,8 @@ struct DeclareKey {
     /// Paper white and peak as bits (an exact comparison).
     paper_white: u32,
     peak: u32,
+    /// Optional water passes requested for the current target.
+    water_flags: u32,
     /// The working space and output gamut `declare` was given (constant
     /// within a run today, but part of what the module saw).
     working: WorkingSpace,
@@ -268,7 +394,7 @@ struct ModuleState {
     /// module stays loaded and redeclares on the next frame).
     declared_for: Option<DeclareKey>,
     graph: FrameGraph<ScenePass>,
-    resources: ResourceMap,
+    wiring: Wiring,
     /// By payload: the fullscreen programs and where their uniform blocks
     /// start in the module's per-frame uniform bytes.
     programs: Vec<Option<(FullscreenProgram, usize)>>,
@@ -282,7 +408,7 @@ struct ModuleState {
 /// A module's declaration, wired and with its programs built.
 struct ModuleGraph {
     graph: FrameGraph<ScenePass>,
-    resources: ResourceMap,
+    wiring: Wiring,
     programs: Vec<Option<(FullscreenProgram, usize)>>,
     uniform_bytes: usize,
 }
@@ -361,11 +487,12 @@ pub enum TerrainOutput {
     Readback,
 }
 
-/// The installed graph's library resources (by resource index), its readback
-/// image, if any, and its glow (the bloom's input).
+/// The installed graph's library resources, glow and water effect owners.
+#[derive(Clone)]
 struct Wiring {
     resources: ResourceMap,
     glow: Option<ResourceId>,
+    water_tiers: WaterTiers,
 }
 
 struct Offscreen {
@@ -461,6 +588,20 @@ pub struct TerrainApp {
     water: bool,
     /// The water is drawn this frame (`view.water`).
     water_on: bool,
+    /// Requested by the caller when the module declares its graph.
+    requested_water_tiers: WaterTiers,
+    supported_water_tiers: Option<(vk::Extent2D, WaterTiers)>,
+    /// The map's water look (M16.4; the M7 surface ignores it).
+    water_params: crate::water::WaterParams,
+    /// The water data (M16.5): the shore field and the caustic web, on a map
+    /// with water and only when a graph declares them.
+    water_renderer: Option<crate::water::WaterRenderer>,
+    /// The engine's own graph bakes the water data (opt-in; M7 does not).
+    water_data: bool,
+    water_feed: Option<Arc<WaterFeed>>,
+    waves: Option<Waves>,
+    water_mesh: Option<WaterMesh>,
+    wave_patch: Option<WavePatch>,
     /// Shadows (opt-in): the hills' ([`super::sun`]).
     shadows: bool,
     /// The readback animation's frame index (held while paused), and when
@@ -477,6 +618,8 @@ impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
         let view = TerrainView {
             camera: source.overview_camera(),
+            camera_focus: None,
+            underwater_camera: false,
             tau: 2.0,
             wireframe: Wireframe::Off,
             lod_colors: false,
@@ -546,12 +689,81 @@ impl TerrainApp {
             wireframe: Wireframe::Off,
             water: false,
             water_on: false,
+            requested_water_tiers: WaterTiers::default(),
+            supported_water_tiers: None,
+            water_params: crate::water::WaterParams::default(),
+            water_renderer: None,
+            water_data: false,
+            water_feed: None,
+            waves: None,
+            water_mesh: None,
+            wave_patch: None,
             shadows: false,
             frames: 0,
             started: Instant::now(),
             paused_at: None,
             paused_for: Duration::ZERO,
         }
+    }
+
+    /// Request optional tiers when declaring a wet scene's render module.
+    pub fn with_water_tiers(mut self, tiers: WaterTiers) -> Self {
+        self.requested_water_tiers = tiers;
+        self.supported_water_tiers = None;
+        self
+    }
+
+    /// Receive observer-eligible impact rings and observer resets.
+    pub fn with_water_feed(mut self, feed: Arc<WaterFeed>) -> Self {
+        self.water_feed = Some(feed);
+        self
+    }
+
+    /// Water effect owners in the installed graph.
+    pub fn water_tiers(&self) -> WaterTiers {
+        self.wiring.as_ref().map_or(WaterTiers::default(), |w| w.water_tiers)
+    }
+
+    /// The map's water look (M16.4). The M7 surface keeps its constants; the
+    /// rich tiers read these.
+    pub fn with_water_params(mut self, params: crate::water::WaterParams) -> Self {
+        self.water_params = params;
+        self
+    }
+
+    /// The water look in effect (the defaults unless [`Self::with_water_params`]).
+    pub fn water_params(&self) -> &crate::water::WaterParams {
+        &self.water_params
+    }
+
+    /// Have the engine's own graph declare the water data (M16.5: the shore
+    /// bake and the caustic web). Off by default, so M7 scenes allocate
+    /// none; the rich tiers turn it on.
+    pub fn with_water_data(mut self) -> Self {
+        self.water_data = true;
+        self
+    }
+
+    /// Whether the water data is allocated (a graph that needs it ran).
+    pub fn has_water_data(&self) -> bool {
+        self.water_renderer.is_some()
+    }
+
+    /// Whether the full-map shore field is allocated (a graph declaring
+    /// `water.shore`).
+    pub fn has_shore_data(&self) -> bool {
+        self.water_renderer.as_ref().is_some_and(|w| w.has_shore())
+    }
+
+    /// Whether the caustic web is allocated (a graph declaring
+    /// `water.caustics`).
+    pub fn has_caustics_data(&self) -> bool {
+        self.water_renderer.as_ref().is_some_and(|w| w.has_caustics())
+    }
+
+    /// Shore bakes recorded so far (the first frame and each after an edit).
+    pub fn water_bakes(&self) -> u64 {
+        self.water_renderer.as_ref().map_or(0, |w| w.bakes())
     }
 
     /// Draw the water surface (a `water.draw` pass after the units) on a map
@@ -644,8 +856,33 @@ impl TerrainApp {
         self.output_space
     }
 
+    fn supported_water_tiers(
+        &mut self,
+        env: &LibraryEnv,
+        unsupported: impl FnOnce(WaterTiers, &LibraryEnv, &GpuDevice) -> Option<String>,
+    ) -> Result<WaterTiers> {
+        let requested = self.requested_water_tiers;
+        if !env.water || requested == WaterTiers::default() {
+            return Ok(WaterTiers::default());
+        }
+        if let Some((extent, tiers)) = self.supported_water_tiers
+            && extent == env.extent
+        {
+            return Ok(tiers);
+        }
+        let supported =
+            if let Some(reason) = unsupported(requested, env, self.gpu.as_ref().context("terrain GPU not created")?) {
+                eprintln!("[render] water: {reason} is unsupported on this target, using m7");
+                WaterTiers::default()
+            } else {
+                requested
+            };
+        self.supported_water_tiers = Some((env.extent, supported));
+        Ok(supported)
+    }
+
     /// What a module's declaration is for (`declare`'s key).
-    fn declare_key(&self, env: &LibraryEnv) -> DeclareKey {
+    fn declare_key(&self, env: &LibraryEnv, tiers: WaterTiers) -> DeclareKey {
         DeclareKey {
             extent: env.extent,
             format: env.color_format,
@@ -653,6 +890,7 @@ impl TerrainApp {
             encoding: env.encoding,
             paper_white: env.levels.paper_white.to_bits(),
             peak: env.levels.peak.to_bits(),
+            water_flags: tiers.declare_flags(env.water),
             working: env.working,
             gamut: env.gamut,
         }
@@ -744,6 +982,23 @@ impl TerrainApp {
         let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
         for update in &pending {
             renderer.apply(&gpu, update).context("terrain edit upload")?;
+            // The shore field is baked again from the changed ground (the
+            // pass records only while it is dirty).
+            if let Some(water) = self.water_renderer.as_ref() {
+                let rect = update
+                    .heights
+                    .iter()
+                    .filter(|r| r.mip == 0)
+                    .fold(None::<(u32, u32, u32, u32)>, |acc, r| {
+                        let (x0, y0) = (r.x, r.y);
+                        let (x1, y1) = (r.x + r.width, r.y + r.height);
+                        Some(match acc {
+                            None => (x0, y0, x1, y1),
+                            Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
+                        })
+                    });
+                water.mark_dirty(rect);
+            }
         }
         let mut edits = self.edits.lock().unwrap_or_else(|p| p.into_inner());
         edits.applied += pending.len() as u32;
@@ -795,6 +1050,12 @@ impl TerrainApp {
         }
     }
 
+    /// Whether a vision feed is attached (fog-of-war shading applies when
+    /// [`TerrainView::vision`] is also on, which is the default).
+    pub fn has_vision(&self) -> bool {
+        self.vision.is_some()
+    }
+
     /// The shared view; the main thread writes it, the render thread reads
     /// it once per frame.
     pub fn view(&self) -> Arc<Mutex<TerrainView>> {
@@ -834,9 +1095,8 @@ impl TerrainApp {
         };
         let effect_time = stream.map_or(time, |s| s.sim_time(s.alpha(now)) as f32);
         let aspect = self.extent.width as f32 / self.extent.height.max(1) as f32;
-        let mut camera = view.camera;
-        camera.ground = self.source.height_at(camera.target);
-        let eye = camera.eye(|p| self.source.height_at(p));
+        let camera = view.resolved_camera(&self.source);
+        let eye = view.eye_of(&camera, &self.source);
         let view_proj = camera.proj(aspect) * camera.view(eye);
         let live = LodView {
             pos: eye,
@@ -908,9 +1168,14 @@ fn fog(info: &TerrainInfo, on: bool, working: WorkingSpace) -> [f32; 4] {
 /// The view a frozen LOD would keep (call on the main thread with the
 /// target's size).
 pub fn lod_view(source: &TerrainSource, camera: &Camera, width: u32, height: u32) -> LodView {
-    let mut camera = *camera;
-    camera.ground = source.height_at(camera.target);
-    let eye = camera.eye(|p| source.height_at(p));
+    let camera = Camera {
+        ground: source.height_at(camera.target),
+        ..*camera
+    };
+    lod_view_of(camera, camera.eye(|p| source.height_at(p)), width, height)
+}
+
+fn lod_view_of(camera: Camera, eye: Vec3, width: u32, height: u32) -> LodView {
     let view_proj = camera.proj(width as f32 / height.max(1) as f32) * camera.view(eye);
     LodView {
         pos: eye,
@@ -964,6 +1229,7 @@ impl RenderApp for TerrainApp {
             old.destroy(gpu);
         }
         self.gpu = Some(gpu.clone());
+        self.supported_water_tiers = None;
         self.frames_in_flight = frames_in_flight;
         // The module programs' own sets still bind a combined image
         // sampler; the registry owns the object and deduplicates it.
@@ -1077,9 +1343,11 @@ impl RenderApp for TerrainApp {
     ) -> Result<(FrameGraph<ScenePass>, Option<ResourceId>)> {
         self.extent = target.extent;
         let env = self.env(target)?;
+        let requested = self.supported_water_tiers(&env, crate::water::quality::unsupported_image)?;
+        let key = self.declare_key(&env, requested);
         let pending = self.pending_module.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(wasm) = pending {
-            match self.load_module(&wasm, &env, bindless) {
+            match self.load_module(&wasm, &env, key, bindless) {
                 Ok(state) => {
                     if let Some(old) = self.module.replace(state) {
                         self.retire(old.programs, bindless);
@@ -1097,16 +1365,16 @@ impl RenderApp for TerrainApp {
                     .push(format!("reload rejected, the running module stays: {error:#}")),
             }
         }
-        let (graph, resources, glow) = match self.module.take() {
+        let (graph, wiring) = match self.module.take() {
             Some(mut state) => {
-                if state.declared_for != Some(self.declare_key(&env)) {
-                    let declared = self.declare_module(&mut state.module, &env, bindless);
+                if state.declared_for != Some(key) {
+                    let declared = self.declare_module(&mut state.module, &env, key, bindless);
                     match declared {
                         Ok(d) => {
                             let old = std::mem::replace(&mut state.programs, d.programs);
                             self.retire(old, bindless);
-                            (state.graph, state.resources, state.uniform_bytes, state.declared_for) =
-                                (d.graph, d.resources, d.uniform_bytes, Some(self.declare_key(&env)));
+                            (state.graph, state.wiring, state.uniform_bytes, state.declared_for) =
+                                (d.graph, d.wiring, d.uniform_bytes, Some(key));
                         }
                         Err(error) => {
                             self.module = Some(state);
@@ -1114,16 +1382,29 @@ impl RenderApp for TerrainApp {
                         }
                     }
                 }
-                let glow = library::glow_resource(&state.graph);
-                let out = (state.graph.clone(), state.resources.clone(), glow);
+                let out = (state.graph.clone(), state.wiring.clone());
                 self.module = Some(state);
                 out
             }
             None => {
-                let (graph, wiring) = self.wire(native_graph(&env, self.output), &env, |p| {
-                    Ok((NATIVE, ScenePassSource::Library(*p)))
-                })?;
-                (graph, wiring.resources, wiring.glow)
+                let graph = native_graph_with_water_tiers(&env, self.output, requested);
+                let change = self.prepare_water_data(Self::water_needs(&graph), &env, bindless)?;
+                let wired = self
+                    .wire(graph, &env, |p| Ok((NATIVE, Some(p.name()))))
+                    .and_then(|(graph, wiring)| {
+                        self.prepare_water_pipelines(wiring.water_tiers, bindless)?;
+                        Ok((graph, wiring))
+                    });
+                match wired {
+                    Ok((graph, wiring)) => {
+                        self.commit_water_data(change, bindless);
+                        (graph, wiring)
+                    }
+                    Err(error) => {
+                        self.rollback_water_data(change, bindless);
+                        return Err(error);
+                    }
+                }
             }
         };
         let backbuffers: Vec<ResourceId> = graph
@@ -1143,7 +1424,7 @@ impl RenderApp for TerrainApp {
                 anyhow::ensure!(backbuffers.is_empty(), "an offscreen graph declares no Backbuffer")
             }
         }
-        self.wiring = Some(Wiring { resources, glow });
+        self.wiring = Some(wiring);
         Ok((graph, backbuffers.first().copied()))
     }
 
@@ -1231,7 +1512,28 @@ impl RenderApp for TerrainApp {
         let renderer = self.renderer.as_mut().context("terrain renderer not created")?;
         let stats = renderer.read_stats(slot);
         *self.stats.lock().unwrap_or_else(|p| p.into_inner()) = stats;
+        let refract = params.water && self.wiring.as_ref().is_some_and(|w| w.water_tiers.refract);
+        self.wave_patch = self
+            .wiring
+            .as_ref()
+            .filter(|w| w.water_tiers.waves)
+            .map(|_| WavePatch::new(view.camera.target, params.cam_pos, view.camera.distance));
+        if let Some((waves, patch)) = self.waves.as_mut().zip(self.wave_patch) {
+            waves.prepare(
+                slot,
+                patch,
+                params.effect_time,
+                params.time,
+                self.water_params,
+                &self.source,
+                self.water_feed.as_deref(),
+                self.units.as_ref(),
+            );
+        }
         renderer.write_frame(slot, &params);
+        if refract {
+            renderer.write_water(slot, params.view_proj, self.water_params);
+        }
         if let Some(feed) = &self.vision {
             if self.vision_written.len() <= slot {
                 self.vision_written.resize(slot + 1, None);
@@ -1284,10 +1586,9 @@ impl RenderApp for TerrainApp {
                 unit_shadows: params.unit_shadows,
                 photometry: params.photometry,
             };
-            units.write_frame(slot, &frame, &setup.feed, frame_now);
+            units.write_frame_with_water(slot, &frame, &setup.feed, frame_now, refract);
         }
-        let mut camera = view.camera;
-        camera.ground = self.source.height_at(camera.target);
+        let camera = view.resolved_camera(&self.source);
         let v = camera.view(params.cam_pos);
         let axes = [v.row(0).truncate(), v.row(1).truncate(), -v.row(2).truncate()];
         if let Some(particles) = self.particle_renderer.as_mut() {
@@ -1435,6 +1736,20 @@ impl RenderApp for TerrainApp {
         Some(match lib {
             LibraryResource::TerrainLeaves => Binding::Buffer(self.renderer.as_ref()?.leaves()),
             LibraryResource::TerrainIndirect => Binding::Buffer(self.renderer.as_ref()?.indirect()),
+            LibraryResource::TerrainLeavesReflect
+            | LibraryResource::TerrainIndirectReflect
+            | LibraryResource::UnitVisibleReflect
+            | LibraryResource::UnitIndirectReflect
+            | LibraryResource::WaterReflection
+            | LibraryResource::WaterReflectionDepth
+            | LibraryResource::WaterRefraction
+            | LibraryResource::WaterVolumeOut
+            | LibraryResource::WaterParticles
+            | LibraryResource::WaterMeshLeaves
+            | LibraryResource::WaterMeshIndirect
+            | LibraryResource::WaterRaw
+            | LibraryResource::WaterChurn
+            | LibraryResource::WaterWaves => return None,
             LibraryResource::UnitInstances => Binding::Buffer(units()?.instances(slot)),
             LibraryResource::UnitVisible => Binding::Buffer(units()?.visible()),
             LibraryResource::UnitIndirect => Binding::Buffer(units()?.indirect()),
@@ -1443,6 +1758,7 @@ impl RenderApp for TerrainApp {
             LibraryResource::ReadbackTarget => {
                 let o = offscreen()?;
                 Binding::Image(ImageBinding {
+                    initial: vk::ImageLayout::UNDEFINED,
                     image: o.image.image,
                     view: o.image.view,
                     format: self.output_format,
@@ -1463,6 +1779,8 @@ impl RenderApp for TerrainApp {
                     storage: None,
                 })
             }
+            LibraryResource::WaterShore => Binding::Image(self.water_renderer.as_ref()?.shore_binding()?),
+            LibraryResource::WaterCaustics => Binding::Image(self.water_renderer.as_ref()?.caustics_binding()?),
             LibraryResource::ShadowMap => Binding::Image(self.renderer.as_ref()?.unit_shadow_map().binding()),
             LibraryResource::ParticleShadows => {
                 Binding::Image(self.renderer.as_ref()?.unit_shadow_map().color_binding())
@@ -1502,6 +1820,12 @@ impl RenderApp for TerrainApp {
     ) -> Result<bool> {
         if self.renderer.is_none() || self.output != TerrainOutput::Present || frames_in_flight != self.frames_in_flight
         {
+            // This path destroys the water data too: give its bindless
+            // handles back before the device objects go (the ordinary rebake
+            // keeps the data and its handles).
+            if let Some(water) = self.water_renderer.as_mut() {
+                water.retire(bindless);
+            }
             self.retire_handles(bindless);
             self.retire_module_programs(gpu, bindless);
             self.destroy(gpu);
@@ -1539,6 +1863,15 @@ impl RenderApp for TerrainApp {
         }
         if let Some(mut units) = self.unit_renderer.take() {
             units.destroy(gpu);
+        }
+        if let Some(mut waves) = self.waves.take() {
+            waves.destroy(gpu);
+        }
+        if let Some(mut mesh) = self.water_mesh.take() {
+            mesh.destroy(gpu);
+        }
+        if let Some(mut water) = self.water_renderer.take() {
+            water.destroy(gpu);
         }
         if let Some(mut renderer) = self.renderer.take() {
             renderer.destroy(gpu);
@@ -1581,6 +1914,12 @@ impl TerrainApp {
         }
         if let Some(old) = self.unit_renderer.as_mut() {
             old.retire(bindless);
+        }
+        if let Some(waves) = &self.waves {
+            waves.retire(bindless);
+        }
+        if let Some(mesh) = &self.water_mesh {
+            mesh.retire(bindless);
         }
         if let Some(old) = self.renderer.as_mut() {
             old.retire(bindless);
@@ -1700,13 +2039,23 @@ impl TerrainApp {
 
 impl Recorder<ScenePass> for TerrainApp {
     fn skip(&self, pass: &ScenePass) -> bool {
+        // The shore bake is host-owned: only the ground's dirty state skips
+        // it, never a module flag (a JSON author's `flag` cannot leave the
+        // first read without its producer).
+        if let PassWork::Library(LibraryPass::WaterShore) = pass.work {
+            return self.water_renderer.as_ref().is_none_or(|water| !water.shore_dirty());
+        }
         self.module.as_ref().is_some_and(|m| m.frame.is_disabled(pass.program))
     }
 
     fn clear_color(&self, pass: &ScenePass, resource: ResourceId) -> [f32; 4] {
         match pass.work {
+            PassWork::Reflection {
+                pass: LibraryPass::TerrainReflect,
+                ..
+            } => [0.0; 4],
             // No optical depth, no particle toward the sun.
-            PassWork::Library(LibraryPass::ShadowsParticles) => [0.0; 4],
+            PassWork::Library(LibraryPass::ShadowsParticles) | PassWork::WaterSplat { .. } => [0.0; 4],
             // The glow target holds only light sources: black where none is
             // (the sky is not one).
             _ if self.wiring.as_ref().is_some_and(|w| w.glow == Some(resource)) => [0.0, 0.0, 0.0, 1.0],
@@ -1745,6 +2094,10 @@ impl TerrainApp {
             encode: self.encode.as_ref(),
             bloom: self.bloom.as_ref(),
             exposure: self.exposure.as_ref(),
+            water_data: self.water_renderer.as_ref(),
+            waves: self.waves.as_ref(),
+            water_mesh: self.water_mesh.as_ref(),
+            wave_patch: self.wave_patch,
             lights: self.lights.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
             sampler: self.sampler,
@@ -1765,6 +2118,10 @@ struct SceneRecorder<'a> {
     encode: Option<&'a Encode>,
     bloom: Option<&'a Bloom>,
     exposure: Option<&'a Exposure>,
+    water_data: Option<&'a crate::water::WaterRenderer>,
+    waves: Option<&'a Waves>,
+    water_mesh: Option<&'a WaterMesh>,
+    wave_patch: Option<WavePatch>,
     lights: Option<&'a LightRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
     sampler: vk::Sampler,
@@ -1781,20 +2138,213 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
         let particles = || self.particles.context("particle renderer not created");
         let exposure = || self.exposure.context("exposure not created");
         match &pass.work {
+            PassWork::WaterSurface {
+                reflection,
+                refraction,
+                mesh,
+                volume,
+            } => {
+                if self.water {
+                    let sampled = |id| ctx.image(id)?.sampled.context("water sample handle");
+                    let reflection = reflection.map(sampled).transpose()?;
+                    let refraction = refraction.map(sampled).transpose()?;
+                    if let Some([waves, leaves, indirect, churn, shore]) = mesh {
+                        let wave_renderer = self.waves.context("wave renderer")?;
+                        terrain()?.record_wave_surface(
+                            ctx,
+                            reflection,
+                            refraction,
+                            WaveSurface {
+                                patch: self.wave_patch.context("water patch")?,
+                                waves: sampled(*waves)?,
+                                churn: sampled(*churn)?,
+                                shore: sampled(*shore)?,
+                                detail: wave_renderer.detail(),
+                                swell: wave_renderer.swell_words(),
+                            },
+                            ctx.buffer(*leaves)?,
+                            ctx.buffer(*indirect)?,
+                            *volume,
+                        )?;
+                    } else if let Some(refraction) = refraction {
+                        terrain()?.record_water_refract(ctx, reflection, refraction, *volume)?;
+                    } else if let Some(reflection) = reflection {
+                        terrain()?.record_water_reflect(ctx, reflection)?;
+                    }
+                }
+            }
+            PassWork::WaterEmit(particles) => self
+                .waves
+                .context("wave renderer")?
+                .record_emit(ctx, ctx.buffer(*particles)?)?,
+            PassWork::WaterSplat { particles, churn } => {
+                self.waves
+                    .context("wave renderer")?
+                    .record_splat(ctx, ctx.buffer(*particles)?, *churn)?
+            }
+            PassWork::WaterBlur([raw, churn, waves]) => self.waves.context("wave renderer")?.record_blur(
+                ctx,
+                ctx.image(*raw)?,
+                ctx.image(*churn)?,
+                ctx.image(*waves)?,
+            )?,
+            PassWork::WaterLod([waves, leaves, indirect]) => {
+                self.water_mesh.context("water mesh")?.record(
+                    ctx,
+                    terrain()?.water_push(),
+                    self.wave_patch.context("water patch")?,
+                    ctx.image(*waves)?.sampled.context("water wave sample")?,
+                    ctx.buffer(*leaves)?,
+                    ctx.buffer(*indirect)?,
+                )?;
+            }
+            PassWork::UnitsWaves { waves, refract } => {
+                if self.water {
+                    units()?.record_draw_waves(
+                        ctx,
+                        *refract,
+                        self.wave_patch.context("unit wave patch")?,
+                        ctx.image(*waves)?.sampled.context("unit wave sample")?,
+                    )?;
+                } else {
+                    units()?.record_draw(ctx);
+                }
+            }
+            PassWork::ParticlesWaterSim(waves) => {
+                if self.water {
+                    let wave = ctx.image(*waves)?.sampled.context("particle wave sample")?;
+                    particles()?
+                        .record_sim_with_water(ctx, Some((self.wave_patch.context("particle wave patch")?, wave)));
+                } else {
+                    particles()?.record_sim(ctx);
+                }
+            }
+            PassWork::ParticlesUnderwater { waves, depth } => {
+                if self.water {
+                    particles()?.record_underwater(
+                        ctx,
+                        ctx.image(*depth)?,
+                        self.wave_patch.context("underwater particle patch")?,
+                        ctx.image(*waves)?.sampled.context("underwater particle waves")?,
+                    )?;
+                }
+            }
+            PassWork::WaterUnderwater {
+                scene,
+                depth,
+                caustics,
+                waves,
+            } => {
+                if self.water {
+                    let sampled = |id| ctx.image(id)?.sampled.context("underwater sample handle");
+                    let wave = waves
+                        .map(sampled)
+                        .transpose()?
+                        .zip(self.wave_patch)
+                        .map(|(image, patch)| (patch, image));
+                    terrain()?.record_underwater(ctx, sampled(*scene)?, sampled(*depth)?, sampled(*caustics)?, wave)?;
+                }
+            }
+            PassWork::WaterVolume {
+                inputs: [scene, depth, refraction],
+                waves,
+                reflect,
+            } => {
+                let sampled = |id| ctx.image(id)?.sampled.context("water volume sample handle");
+                let wave = waves
+                    .map(sampled)
+                    .transpose()?
+                    .zip(self.wave_patch)
+                    .map(|(image, patch)| (patch, image));
+                terrain()?.record_volume(
+                    ctx,
+                    [sampled(*scene)?, sampled(*depth)?, sampled(*refraction)?],
+                    wave,
+                    *reflect,
+                    self.water,
+                )?;
+            }
+            PassWork::RefractGeometry(pass) => match pass {
+                LibraryPass::TerrainDraw if self.water => terrain()?.record_draw_refract(ctx, self.wireframe)?,
+                LibraryPass::TerrainDraw => terrain()?.record_draw(ctx, self.wireframe),
+                LibraryPass::UnitsDraw if self.water => units()?.record_draw_refract(ctx, false)?,
+                LibraryPass::UnitsDraw => units()?.record_draw(ctx),
+                LibraryPass::UnitsWaterOverlay if self.water => units()?.record_draw_refract(ctx, true)?,
+                LibraryPass::UnitsWaterOverlay => {}
+                _ => anyhow::bail!("invalid refraction pass {}", pass.name()),
+            },
+            PassWork::ShadowsWaves(waves) => {
+                let riding = if self.water {
+                    let image = ctx.image(*waves)?.sampled.context("caster wave sample")?;
+                    Some((self.wave_patch.context("caster wave patch")?, image))
+                } else {
+                    None
+                };
+                units()?.record_shadows_riding(ctx, riding);
+            }
+            PassWork::Reflection {
+                pass,
+                list,
+                indirect,
+                waves,
+            } => {
+                if self.water {
+                    let indirect = ctx.buffer(*indirect)?;
+                    let list = || ctx.buffer(list.context("reflection draw list")?);
+                    let riding = match waves {
+                        Some(waves) => Some((
+                            self.wave_patch.context("mirror wave patch")?,
+                            ctx.image(*waves)?.sampled.context("mirror wave sample")?,
+                        )),
+                        None => None,
+                    };
+                    match pass {
+                        LibraryPass::TerrainCullReflect => terrain()?.record_cull_reflect(ctx, list()?, indirect)?,
+                        LibraryPass::TerrainReflect => terrain()?.record_draw_reflect(ctx, list()?, indirect)?,
+                        LibraryPass::UnitsResetReflect => units()?.record_reset_reflect(ctx, indirect),
+                        LibraryPass::UnitsCullReflect => units()?.record_cull_reflect(ctx, list()?, indirect)?,
+                        LibraryPass::UnitsReflect => units()?.record_draw_reflect(ctx, list()?, indirect, riding)?,
+                        _ => anyhow::bail!("invalid reflection pass {}", pass.name()),
+                    }
+                }
+            }
             PassWork::Library(lib) => match lib {
                 LibraryPass::TerrainLod => terrain()?.record_lod(ctx, self.update_lod),
                 LibraryPass::TerrainDraw => terrain()?.record_draw(ctx, self.wireframe),
+                LibraryPass::TerrainCullReflect
+                | LibraryPass::TerrainReflect
+                | LibraryPass::UnitsResetReflect
+                | LibraryPass::UnitsCullReflect
+                | LibraryPass::UnitsReflect => anyhow::bail!("reflection pass needs graph buffers"),
                 LibraryPass::UnitsReset => units()?.record_reset(ctx),
                 LibraryPass::UnitsCull => units()?.record_cull(ctx),
                 LibraryPass::UnitsPose => units()?.record_pose(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
                 LibraryPass::UnitsCount => units()?.record_count(ctx),
+                LibraryPass::WaterEmit
+                | LibraryPass::WaterSplat
+                | LibraryPass::WaterChurn
+                | LibraryPass::WaterBlur
+                | LibraryPass::WaterLod
+                | LibraryPass::WaterUnderwater
+                | LibraryPass::WaterVolume
+                | LibraryPass::UnitsWaterOverlay => {
+                    anyhow::bail!("refraction pass needs graph resources")
+                }
                 LibraryPass::ShadowsDraw => units()?.record_shadows(ctx),
                 LibraryPass::ShadowsParticles => particles()?.record_shadows(ctx),
                 LibraryPass::WaterDraw => {
                     if self.water {
                         terrain()?.record_water(ctx);
                     }
+                }
+                LibraryPass::WaterShore => {
+                    let terrain = terrain()?;
+                    self.water_data.context("water data not created")?.record_shore(
+                        ctx,
+                        terrain.height_index(),
+                        terrain.linear_sampler_index(),
+                    )?
                 }
                 LibraryPass::ParticlesSim => particles()?.record_sim(ctx),
                 LibraryPass::LightsCluster => self
@@ -1803,7 +2353,9 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     .record_cluster(ctx, self.units),
                 LibraryPass::ExposureClear => exposure()?.record_clear(ctx),
                 LibraryPass::ExposureAdapt => exposure()?.record_adapt(ctx),
-                LibraryPass::ParticlesDraw => anyhow::bail!("particles.draw is wired as PassWork::Particles"),
+                LibraryPass::ParticlesDraw | LibraryPass::ParticlesUnderwater => {
+                    anyhow::bail!("particles.draw is wired as PassWork::Particles")
+                }
                 LibraryPass::ReadbackCopy => anyhow::bail!("readback.copy is wired as PassWork::Readback"),
                 LibraryPass::Tonemap => anyhow::bail!("post.tonemap is wired as PassWork::Tonemap"),
                 LibraryPass::BloomDownsample | LibraryPass::BloomBlurX | LibraryPass::BloomBlurY => {
@@ -1879,14 +2431,6 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
     }
 }
 
-/// How a graph's pass payload is wired, before checks.
-#[derive(Clone, Copy, Debug)]
-pub enum ScenePassSource {
-    Library(LibraryPass),
-    /// A fullscreen program; checked and built by the caller.
-    Fullscreen,
-}
-
 /// The scene's graph as the engine declares it natively: the units'
 /// shadow map when they cast shadows, the terrain, the units when the
 /// scene has them, the water surface when it draws water, and present or
@@ -1894,10 +2438,43 @@ pub enum ScenePassSource {
 /// are declared with size 0 ([`crate::library::resolve`] sizes them). A
 /// render module that declares the same graph gets the same bake.
 pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<LibraryPass> {
+    native_graph_with_water_tiers(env, output, WaterTiers::default())
+}
+
+pub fn native_graph_with_water_tiers(
+    env: &LibraryEnv,
+    output: TerrainOutput,
+    tiers: WaterTiers,
+) -> FrameGraph<LibraryPass> {
     let (width, height) = (env.extent.width, env.extent.height);
     let mut graph = FrameGraph::new();
     let leaves = library_buffer(&mut graph, LibraryResource::TerrainLeaves);
     let indirect = library_buffer(&mut graph, LibraryResource::TerrainIndirect);
+    // The water data (opt-in, M16.5): the shore field's bake and the caustic
+    // web. The M7 graph declares neither, so its topology and frames are
+    // unchanged and no water data is allocated.
+    let mut baked_shore = None;
+    let baked_caustics = if env.bake_water && env.ground.is_some() {
+        let shore = graph.image(
+            LibraryResource::WaterShore.name(),
+            crate::library::image_desc(LibraryResource::WaterShore, env).expect("a wet map"),
+            ResourceClass::External,
+        );
+        let caustics = graph.image(
+            LibraryResource::WaterCaustics.name(),
+            crate::library::image_desc(LibraryResource::WaterCaustics, env).expect("a wet map"),
+            ResourceClass::External,
+        );
+        graph
+            .pass("shore bake", PassKind::Compute, LibraryPass::WaterShore)
+            .access(shore, Role::StorageImageWrite(ShaderStage::Compute))
+            .conditional()
+            .root();
+        baked_shore = Some(shore);
+        Some(caustics)
+    } else {
+        None
+    };
     // Sampled usage for the particles (always, so a graph is the same
     // with and without them up to their passes).
     let depth = graph.image(
@@ -2015,6 +2592,115 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         ResourceClass::External,
     );
     let exposure_histogram = library_buffer(&mut graph, LibraryResource::ExposureHistogram);
+    let reflection = (env.water && tiers.reflect).then(|| {
+        let [color, depth] = [LibraryResource::WaterReflection, LibraryResource::WaterReflectionDepth].map(|r| {
+            graph.image(
+                r.name(),
+                library::image_desc(r, env).expect("wet reflection graph"),
+                ResourceClass::Transient,
+            )
+        });
+        let [leaves, indirect] = [
+            LibraryResource::TerrainLeavesReflect,
+            LibraryResource::TerrainIndirectReflect,
+        ]
+        .map(|r| library_buffer(&mut graph, r));
+        let unit_buffers = units.map(|_| {
+            [
+                LibraryResource::UnitVisibleReflect,
+                LibraryResource::UnitIndirectReflect,
+            ]
+            .map(|r| library_buffer(&mut graph, r))
+        });
+        (color, depth, leaves, indirect, unit_buffers)
+    });
+    let refraction = (env.water && (tiers.refract || tiers.volume)).then(|| {
+        let color = graph.image(
+            LibraryResource::WaterRefraction.name(),
+            library::image_desc(LibraryResource::WaterRefraction, env).expect("wet refraction graph"),
+            ResourceClass::Transient,
+        );
+        let caustics = baked_caustics.unwrap_or_else(|| {
+            graph.image(
+                LibraryResource::WaterCaustics.name(),
+                library::image_desc(LibraryResource::WaterCaustics, env).expect("wet caustics"),
+                ResourceClass::External,
+            )
+        });
+        (color, caustics)
+    });
+    let volume = (env.water && tiers.volume).then(|| {
+        let r = LibraryResource::WaterVolumeOut;
+        graph.image(
+            r.name(),
+            library::image_desc(r, env).expect("wet volume graph"),
+            ResourceClass::Transient,
+        )
+    });
+    let waves = (env.water && tiers.waves).then(|| {
+        use LibraryResource as R;
+        let [raw, churn, waves] = [R::WaterRaw, R::WaterChurn, R::WaterWaves].map(|r| {
+            graph.image(
+                r.name(),
+                library::image_desc(r, env).expect("wet wave patch"),
+                ResourceClass::Transient,
+            )
+        });
+        let [particles, leaves, indirect] = [R::WaterParticles, R::WaterMeshLeaves, R::WaterMeshIndirect].map(|r| {
+            graph.buffer(
+                r.name(),
+                BufferDesc {
+                    size: 0,
+                    usage: vk::BufferUsageFlags::empty(),
+                },
+                ResourceClass::Transient,
+            )
+        });
+        graph
+            .pass("water emit", PassKind::Compute, LibraryPass::WaterEmit)
+            .discard(particles, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
+        for (name, pass, target) in [
+            ("water splat", LibraryPass::WaterSplat, raw),
+            ("water churn", LibraryPass::WaterChurn, churn),
+        ] {
+            graph
+                .pass(name, PassKind::Graphics, pass)
+                .access(particles, Role::StorageBufferRead(ShaderStage::Vertex))
+                .color(target, LoadOp::Clear)
+                .id();
+        }
+        graph
+            .pass("water blur", PassKind::Compute, LibraryPass::WaterBlur)
+            .sampled(raw, ShaderStage::Compute)
+            .sampled(churn, ShaderStage::Compute)
+            .discard(waves, Role::StorageImageWrite(ShaderStage::Compute))
+            .id();
+        graph
+            .pass("water lod", PassKind::Compute, LibraryPass::WaterLod)
+            .sampled(waves, ShaderStage::Compute)
+            .discard(leaves, Role::StorageBufferWrite(ShaderStage::Compute))
+            .discard(indirect, Role::StorageBufferWrite(ShaderStage::Compute))
+            .id();
+        // The surface times its breakers by the shore field (baked once,
+        // again after a ground edit).
+        let shore = baked_shore.unwrap_or_else(|| {
+            let shore = graph.image(
+                R::WaterShore.name(),
+                library::image_desc(R::WaterShore, env).expect("a wet map"),
+                ResourceClass::External,
+            );
+            // Declared as a module declares it: the host makes the bake
+            // conditional on the ground's dirty state when it wires the
+            // graph.
+            graph
+                .pass("shore bake", PassKind::Compute, LibraryPass::WaterShore)
+                .access(shore, Role::StorageImageWrite(ShaderStage::Compute))
+                .root();
+            shore
+        });
+        (waves, leaves, indirect, churn, shore)
+    });
     // A receiver samples the maps the graph has, and reads the lights.
     let receivers = [map, tint];
     fn lit(
@@ -2069,14 +2755,17 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     // The units' shadows: the units drawn from the sun, before anything
     // that samples the map.
     if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
-        graph
+        // Floating hulls cast from where they ride the waves.
+        let mut shadows = graph
             .pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw)
             .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
             .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
             .access(draws, Role::IndirectBuffer)
-            .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-            .depth(map, LoadOp::Clear)
-            .id();
+            .access(palette, Role::StorageBufferRead(ShaderStage::Vertex));
+        if let Some((waves, ..)) = waves {
+            shadows = shadows.sampled(waves, ShaderStage::Vertex);
+        }
+        shadows.depth(map, LoadOp::Clear).id();
     }
     // The particles' coloured shadows: this frame's particles (the
     // simulation, declared later, is their state's only writer, so this
@@ -2089,6 +2778,62 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .access(draws, Role::IndirectBuffer)
             .color(tint, LoadOp::Clear)
             .id();
+    }
+    if let Some((color, depth, leaves, reflect_indirect, unit_buffers)) = reflection {
+        use ShaderStage::{Compute, Fragment, Vertex};
+        graph
+            .pass(
+                "terrain cull reflect",
+                PassKind::Compute,
+                LibraryPass::TerrainCullReflect,
+            )
+            .access(indirect, Role::StorageBufferRead(Compute))
+            .discard(leaves, Role::StorageBufferWrite(Compute))
+            .discard(reflect_indirect, Role::StorageBufferWrite(Compute))
+            .id();
+        if let (Some([instances, _, _, _, _]), Some([visible, draws])) = (units, unit_buffers) {
+            graph
+                .pass(
+                    "units reset reflect",
+                    PassKind::Transfer,
+                    LibraryPass::UnitsResetReflect,
+                )
+                .discard(draws, Role::TransferDst)
+                .id();
+            graph
+                .pass("units cull reflect", PassKind::Compute, LibraryPass::UnitsCullReflect)
+                .access(instances, Role::StorageBufferRead(Compute))
+                .discard(visible, Role::StorageBufferWrite(Compute))
+                .access(draws, Role::StorageBufferWrite(Compute))
+                .id();
+        }
+        let mut terrain = graph
+            .pass("terrain reflect", PassKind::Graphics, LibraryPass::TerrainReflect)
+            .access(leaves, Role::StorageBufferRead(Vertex))
+            .access(reflect_indirect, Role::IndirectBuffer)
+            .color(color, LoadOp::Clear)
+            .depth(depth, LoadOp::Clear);
+        for map in receivers.into_iter().flatten() {
+            terrain = terrain.sampled(map, Fragment);
+        }
+        terrain.id();
+        if let (Some([instances, _, _, _, palette]), Some([visible, draws])) = (units, unit_buffers) {
+            let mut units = graph
+                .pass("units reflect", PassKind::Graphics, LibraryPass::UnitsReflect)
+                .access(instances, Role::StorageBufferRead(Vertex))
+                .access(visible, Role::StorageBufferRead(Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .access(palette, Role::StorageBufferRead(Vertex));
+            // Floating hulls are mirrored where they ride the waves.
+            if let Some((waves, ..)) = waves {
+                units = units.sampled(waves, Vertex);
+            }
+            let mut units = units.color(color, LoadOp::Load).depth(depth, LoadOp::Load);
+            for map in receivers.into_iter().flatten() {
+                units = units.sampled(map, Fragment);
+            }
+            units.id();
+        }
     }
     receive(
         graph
@@ -2105,20 +2850,19 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     if let Some([instances, visible, draws, counts, palette]) = units {
         // Declared after the terrain draw: a second writer of the target
         // and the depth buffer, ordered after it.
-        receive(
-            graph
-                .pass("units", PassKind::Graphics, LibraryPass::UnitsDraw)
-                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
-                .access(draws, Role::IndirectBuffer)
-                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                .color(scene, LoadOp::Load)
-                .color(glow, LoadOp::Load)
-                .depth(depth, LoadOp::Load),
-            receivers,
-            lights,
-        )
-        .id();
+        let mut draw = graph
+            .pass("units", PassKind::Graphics, LibraryPass::UnitsDraw)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+            .access(draws, Role::IndirectBuffer)
+            .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
+            .color(scene, LoadOp::Load)
+            .color(glow, LoadOp::Load)
+            .depth(depth, LoadOp::Load);
+        if let Some((waves, ..)) = waves {
+            draw = draw.sampled(waves, ShaderStage::Vertex);
+        }
+        receive(draw, receivers, lights).id();
         graph
             .pass("units count", PassKind::Transfer, LibraryPass::UnitsCount)
             .access(draws, Role::TransferSrc)
@@ -2130,31 +2874,96 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .root()
             .id();
     }
+    let particle_sim = |graph: &mut FrameGraph<LibraryPass>, [state, keys, draws]: [ResourceId; 3]| {
+        let mut pass = graph
+            .pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim)
+            .access(state, write)
+            .access(keys, write)
+            .access(draws, write);
+        if let (Some(_), Some((waves, ..))) = (refraction, waves) {
+            pass = pass.sampled(waves, ShaderStage::Compute);
+        }
+        lit(pass, lights, ShaderStage::Compute).id();
+    };
+    if let Some((color, caustics)) = refraction {
+        if let Some(particles) = particles {
+            particle_sim(&mut graph, particles);
+        }
+        let mut underwater = graph
+            .pass("water underwater", PassKind::Graphics, LibraryPass::WaterUnderwater)
+            .color(color, LoadOp::Clear)
+            .sampled(scene, ShaderStage::Fragment)
+            .sampled(depth, ShaderStage::Fragment)
+            .sampled(caustics, ShaderStage::Fragment);
+        for map in receivers.into_iter().flatten() {
+            underwater = underwater.sampled(map, ShaderStage::Fragment);
+        }
+        if let Some((waves, ..)) = waves {
+            underwater = underwater.sampled(waves, ShaderStage::Fragment);
+        }
+        underwater.id();
+        if let (Some([state, keys, indirect]), Some((waves, ..))) = (particles, waves) {
+            graph
+                .pass(
+                    "particles underwater",
+                    PassKind::Graphics,
+                    LibraryPass::ParticlesUnderwater,
+                )
+                .access(state, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(keys, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(indirect, Role::IndirectBuffer)
+                .color(color, LoadOp::Load)
+                .sampled(depth, ShaderStage::Fragment)
+                .sampled(waves, ShaderStage::Fragment)
+                .id();
+        }
+    }
     if env.water {
-        // After the units (a third writer of the target), testing against
-        // the depth they leave without writing it.
+        let mut water = graph
+            .pass("water", PassKind::Graphics, LibraryPass::WaterDraw)
+            .color(scene, LoadOp::Load)
+            .color(glow, LoadOp::Load)
+            .depth_read(depth);
+        if let Some((color, ..)) = reflection {
+            water = water.sampled(color, ShaderStage::Fragment);
+        }
+        if let Some((color, _)) = refraction {
+            water = water.sampled(color, ShaderStage::Fragment);
+        }
+        if let Some((waves, leaves, indirect, churn, shore)) = waves {
+            water = water
+                .sampled(waves, ShaderStage::Graphics)
+                .access(leaves, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(indirect, Role::IndirectBuffer)
+                .sampled(churn, ShaderStage::Fragment)
+                .sampled(shore, ShaderStage::Fragment);
+        }
+        receive(water, receivers, lights).id();
+    }
+    if let (Some(_), Some([instances, visible, draws, _, palette])) = (refraction, units) {
         receive(
             graph
-                .pass("water", PassKind::Graphics, LibraryPass::WaterDraw)
+                .pass(
+                    "units water overlay",
+                    PassKind::Graphics,
+                    LibraryPass::UnitsWaterOverlay,
+                )
+                .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
+                .access(draws, Role::IndirectBuffer)
+                .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
                 .color(scene, LoadOp::Load)
                 .color(glow, LoadOp::Load)
-                .depth_read(depth),
+                .depth(depth, LoadOp::Load),
             receivers,
             lights,
         )
         .id();
     }
     if let Some([state, keys, draws]) = particles {
-        lit(
-            graph
-                .pass("particles sim", PassKind::Compute, LibraryPass::ParticlesSim)
-                .access(state, write)
-                .access(keys, write)
-                .access(draws, write),
-            lights,
-            ShaderStage::Compute,
-        )
-        .id();
+        if refraction.is_none() {
+            particle_sim(&mut graph, [state, keys, draws]);
+        }
         // Over everything else, sampling the depth the scene left.
         graph
             .pass("particles", PassKind::Graphics, LibraryPass::ParticlesDraw)
@@ -2166,6 +2975,18 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
             .sampled(depth, ShaderStage::Fragment)
             .id();
     }
+    if let Some(output) = volume {
+        let mut pass = graph
+            .pass("water volume", PassKind::Graphics, LibraryPass::WaterVolume)
+            .sampled(scene, ShaderStage::Fragment)
+            .sampled(depth, ShaderStage::Fragment)
+            .sampled(refraction.expect("volume needs refraction").0, ShaderStage::Fragment);
+        if let Some((wave_image, ..)) = waves {
+            pass = pass.sampled(wave_image, ShaderStage::Fragment);
+        }
+        pass.color(output, LoadOp::DontCare).id();
+    }
+    let post_scene = volume.unwrap_or(scene);
     // Automatic exposure: the histogram zeroed, the scene metered (with the
     // depth, to undo the fog of war's dimming, and the glow the bloom
     // shows), the EV adapted. It runs after every scene writer (the
@@ -2177,7 +2998,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         .id();
     graph
         .pass("exposure meter", PassKind::Compute, LibraryPass::ExposureMeter)
-        .sampled(scene, ShaderStage::Compute)
+        .sampled(post_scene, ShaderStage::Compute)
         .sampled(depth, ShaderStage::Compute)
         .sampled(glow, ShaderStage::Compute)
         .access(exposure_histogram, Role::StorageBufferReadWrite(ShaderStage::Compute))
@@ -2207,7 +3028,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
         .id();
     graph
         .pass("tonemap", PassKind::Graphics, LibraryPass::Tonemap)
-        .sampled(scene, ShaderStage::Fragment)
+        .sampled(post_scene, ShaderStage::Fragment)
         .sampled(bloom0, ShaderStage::Fragment)
         .sampled(exposure, ShaderStage::Fragment)
         .color(display.unwrap_or(target), LoadOp::DontCare)
@@ -2245,7 +3066,7 @@ pub fn native_graph(env: &LibraryEnv, output: TerrainOutput) -> FrameGraph<Libra
     graph
 }
 
-/// A library buffer as a graph declares it: `External`, size 0.
+/// A library-sized buffer as a graph declares it, with size 0.
 pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> ResourceId {
     graph.buffer(
         r.name(),
@@ -2253,7 +3074,11 @@ pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> Resou
             size: 0,
             usage: vk::BufferUsageFlags::empty(),
         },
-        ResourceClass::External,
+        if r.is_transient() {
+            ResourceClass::Transient
+        } else {
+            ResourceClass::External
+        },
     )
 }
 
@@ -2289,16 +3114,17 @@ impl TerrainApp {
         &mut self,
         wasm: &[u8],
         env: &LibraryEnv,
+        key: DeclareKey,
         bindless: &mut crate::bindless::Bindless,
     ) -> Result<ModuleState> {
         let engine = self.engine.get_or_insert_with(crate::module::engine).clone();
         let mut module = RenderModule::load(&engine, wasm)?;
-        let d = self.declare_module(&mut module, env, bindless)?;
+        let d = self.declare_module(&mut module, env, key, bindless)?;
         Ok(ModuleState {
             module,
-            declared_for: Some(self.declare_key(env)),
+            declared_for: Some(key),
             graph: d.graph,
-            resources: d.resources,
+            wiring: d.wiring,
             programs: d.programs,
             uniform_bytes: d.uniform_bytes,
             frame: ModuleFrame::default(),
@@ -2327,9 +3153,10 @@ impl TerrainApp {
     /// The module's graph for `env`, decoded and wired, with its fullscreen
     /// programs reflected, checked and built.
     fn declare_module(
-        &self,
+        &mut self,
         module: &mut RenderModule,
         env: &LibraryEnv,
+        key: DeclareKey,
         bindless: &mut crate::bindless::Bindless,
     ) -> Result<ModuleGraph> {
         // Contract 2 modules keep the per-pass form; 3 may use either.
@@ -2342,7 +3169,8 @@ impl TerrainApp {
             }
             | if env.water { DECLARE_WATER } else { 0 }
             | if env.shadows { DECLARE_SHADOWS } else { 0 }
-            | if env.particles { DECLARE_PARTICLES } else { 0 };
+            | if env.particles { DECLARE_PARTICLES } else { 0 }
+            | key.water_flags;
         let target = DeclareTarget {
             width: env.extent.width,
             height: env.extent.height,
@@ -2361,94 +3189,123 @@ impl TerrainApp {
         })?;
         let graph = ae_framegraph::descriptor::decode(&declared.graph)
             .map_err(|e| anyhow::anyhow!("graph declaration: {e}"))?;
+        // The output tail must match this app's output before anything is
+        // committed, so a rejected graph cannot change the water data.
+        let backbuffers = graph
+            .resources
+            .iter()
+            .filter(|r| r.class == ResourceClass::Backbuffer)
+            .count();
+        match self.output {
+            TerrainOutput::Present => anyhow::ensure!(
+                backbuffers == 1,
+                "the graph declares {backbuffers} Backbuffer resources; presenting needs one"
+            ),
+            TerrainOutput::Readback => anyhow::ensure!(
+                backbuffers == 0,
+                "an offscreen graph declares no Backbuffer ({backbuffers})"
+            ),
+        }
         let programs = ProgramTable::decode(&declared.programs).map_err(|e| anyhow::anyhow!("program table: {e}"))?;
-        let (graph, wiring) = self.wire(graph, env, |&payload| {
-            let program = programs
-                .get(payload as usize)
-                .with_context(|| format!("payload {payload} names no program (the table has {})", programs.len()))?;
-            match *program {
-                Program::Library(name) => LibraryPass::from_name(name)
-                    .map(|lib| (payload, ScenePassSource::Library(lib)))
-                    .with_context(|| format!("no library pass `{name}`")),
-                Program::Fullscreen { .. } => Ok((payload, ScenePassSource::Fullscreen)),
-            }
-        })?;
-        // Build each fullscreen program for the one pass that runs it (its
-        // descriptor sets are per frame slot, rewritten when the pass
-        // records, so two passes cannot share them in one frame).
-        let gpu = self.gpu.as_ref().context("not created")?;
-        let mut built: Vec<Option<(FullscreenProgram, usize)>> = (0..programs.len()).map(|_| None).collect();
-        let mut shapes: Vec<Option<(Vec<vk::Format>, usize)>> = vec![None; programs.len()];
-        let mut runner: Vec<Option<&str>> = vec![None; programs.len()];
-        let result = (|| -> Result<usize> {
-            for pass in &graph.passes {
-                let PassWork::Fullscreen { sampled } = &pass.record.work else {
-                    continue;
-                };
-                let formats: Vec<vk::Format> = pass
-                    .color_attachments()
-                    .map(|i| match graph.resources[i.resource.index()].desc {
-                        ae_framegraph::ResourceDesc::Image(image) => image.format,
-                        ae_framegraph::ResourceDesc::Buffer(_) => vk::Format::UNDEFINED,
-                    })
-                    .collect();
-                let slot = pass.record.program as usize;
-                if let Some(first) = runner[slot] {
-                    let label = match programs[slot] {
-                        Program::Fullscreen { label, .. } => label,
-                        Program::Library(name) => name,
-                    };
-                    anyhow::bail!(
-                        "passes `{first}` and `{}` both run fullscreen program {slot} (`{label}`); a fullscreen program runs in one pass (push it once per pass)",
-                        pass.name
-                    );
+        let change = self.prepare_water_data(Self::water_needs(&graph), env, bindless)?;
+        let gpu = self.gpu.clone().context("not created")?;
+        let result = (|| -> Result<ModuleGraph> {
+            let (graph, wiring) = self.wire(graph, env, |&payload| {
+                let program = programs.get(payload as usize).with_context(|| {
+                    format!("payload {payload} names no program (the table has {})", programs.len())
+                })?;
+                match *program {
+                    Program::Library(name) => Ok((payload, Some(name))),
+                    Program::Fullscreen { .. } => Ok((payload, None)),
                 }
-                runner[slot] = Some(&pass.name);
-                shapes[slot] = Some((formats, sampled.len()));
-            }
-            let mut offset = 0;
-            for (slot, program) in programs.iter().enumerate() {
-                let Program::Fullscreen {
-                    label,
-                    spirv,
-                    uniform_bytes,
-                } = *program
-                else {
-                    continue;
-                };
-                let Some((formats, sampled)) = &shapes[slot] else {
-                    continue;
-                };
-                built[slot] = Some((
-                    FullscreenProgram::new(
-                        gpu,
-                        bindless,
+            })?;
+            self.prepare_water_pipelines(wiring.water_tiers, bindless)?;
+            // Build each fullscreen program for the one pass that runs it (its
+            // descriptor sets are per frame slot, rewritten when the pass
+            // records, so two passes cannot share them in one frame).
+            let mut built: Vec<Option<(FullscreenProgram, usize)>> = (0..programs.len()).map(|_| None).collect();
+            let mut shapes: Vec<Option<(Vec<vk::Format>, usize)>> = vec![None; programs.len()];
+            let mut runner: Vec<Option<&str>> = vec![None; programs.len()];
+            let built_result = (|| -> Result<usize> {
+                for pass in &graph.passes {
+                    let PassWork::Fullscreen { sampled } = &pass.record.work else {
+                        continue;
+                    };
+                    let formats: Vec<vk::Format> = pass
+                        .color_attachments()
+                        .map(|i| match graph.resources[i.resource.index()].desc {
+                            ae_framegraph::ResourceDesc::Image(image) => image.format,
+                            ae_framegraph::ResourceDesc::Buffer(_) => vk::Format::UNDEFINED,
+                        })
+                        .collect();
+                    let slot = pass.record.program as usize;
+                    if let Some(first) = runner[slot] {
+                        let label = match programs[slot] {
+                            Program::Fullscreen { label, .. } => label,
+                            Program::Library(name) => name,
+                        };
+                        anyhow::bail!(
+                            "passes `{first}` and `{}` both run fullscreen program {slot} (`{label}`); a fullscreen program runs in one pass (push it once per pass)",
+                            pass.name
+                        );
+                    }
+                    runner[slot] = Some(&pass.name);
+                    shapes[slot] = Some((formats, sampled.len()));
+                }
+                let mut offset = 0;
+                for (slot, program) in programs.iter().enumerate() {
+                    let Program::Fullscreen {
                         label,
                         spirv,
                         uniform_bytes,
-                        *sampled,
-                        formats,
-                        self.frames_in_flight,
-                        legacy_only,
-                    )?,
-                    offset,
-                ));
-                offset += uniform_bytes as usize;
+                    } = *program
+                    else {
+                        continue;
+                    };
+                    let Some((formats, sampled)) = &shapes[slot] else {
+                        continue;
+                    };
+                    built[slot] = Some((
+                        FullscreenProgram::new(
+                            &gpu,
+                            bindless,
+                            label,
+                            spirv,
+                            uniform_bytes,
+                            *sampled,
+                            formats,
+                            self.frames_in_flight,
+                            legacy_only,
+                        )?,
+                        offset,
+                    ));
+                    offset += uniform_bytes as usize;
+                }
+                Ok(offset)
+            })();
+            match built_result {
+                Ok(uniform_bytes) => Ok(ModuleGraph {
+                    graph,
+                    wiring,
+                    programs: built,
+                    uniform_bytes,
+                }),
+                Err(error) => {
+                    for (mut program, _) in built.into_iter().flatten() {
+                        program.retire(bindless);
+                        program.destroy(&gpu);
+                    }
+                    Err(error)
+                }
             }
-            Ok(offset)
         })();
         match result {
-            Ok(uniform_bytes) => Ok(ModuleGraph {
-                graph,
-                resources: wiring.resources,
-                programs: built,
-                uniform_bytes,
-            }),
+            Ok(module) => {
+                self.commit_water_data(change, bindless);
+                Ok(module)
+            }
             Err(error) => {
-                for (mut program, _) in built.into_iter().flatten() {
-                    program.retire(bindless);
-                    program.destroy(gpu);
-                }
+                self.rollback_water_data(change, bindless);
                 Err(error)
             }
         }
@@ -2466,6 +3323,14 @@ impl TerrainApp {
             water: self.water && renderer.has_water(),
             shadows: self.unit_renderer.is_some() && renderer.unit_shadow_map().is_real(),
             particles: self.particle_renderer.is_some(),
+            // The shore field's size: one texel per ground height sample, on
+            // a map with water (the water renderer exists then).
+            ground: self
+                .source
+                .info
+                .water_level
+                .map(|_| (self.source.heightmap.width as u32, self.source.heightmap.height as u32)),
+            bake_water: self.water_data,
             encoding: self.encoding,
             levels: self.levels,
             working: self.working,
@@ -2473,13 +3338,160 @@ impl TerrainApp {
         })
     }
 
+    fn prepare_water_pipelines(&mut self, tiers: WaterTiers, bindless: &mut crate::bindless::Bindless) -> Result<()> {
+        if tiers.reflect || tiers.refract || tiers.waves {
+            let gpu = self.gpu.as_ref().context("terrain GPU not created")?;
+            let device = &gpu.device;
+            let terrain = self.renderer.as_mut().context("terrain renderer not created")?;
+            let (color, depth) = terrain.formats();
+            if tiers.reflect {
+                terrain.prepare_reflection(device)?;
+                if let Some(units) = &mut self.unit_renderer {
+                    units.prepare_reflection(device, color, depth)?;
+                }
+            }
+            if tiers.waves {
+                terrain.prepare_wave_surfaces(device)?;
+                if self.waves.is_none() {
+                    self.waves = Some(Waves::new(gpu, bindless, self.frames_in_flight, &terrain.water_push())?);
+                }
+                if self.water_mesh.is_none() {
+                    self.water_mesh = Some(WaterMesh::new(gpu, bindless, terrain.frame_index())?);
+                }
+                if let Some(units) = &mut self.unit_renderer {
+                    units.prepare_waves(device, color, depth)?;
+                }
+            }
+            if tiers.refract {
+                terrain.prepare_refraction(gpu, bindless)?;
+                if tiers.volume {
+                    terrain.prepare_volume(device, tiers.waves, tiers.reflect)?;
+                }
+                if tiers.waves {
+                    terrain.prepare_wave_underwater(device)?;
+                }
+                if tiers.waves
+                    && let Some(particles) = &mut self.particle_renderer
+                {
+                    particles.prepare_water_split(device, color)?;
+                }
+                if let Some(units) = &mut self.unit_renderer {
+                    units.prepare_refraction(device, color, depth)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What a graph needs of the water data: (shore, caustics).
+    fn water_needs<R>(graph: &FrameGraph<R>) -> (bool, bool) {
+        let has = |name: &str| graph.resources.iter().any(|r| r.name == name);
+        (
+            has(LibraryResource::WaterShore.name()),
+            has(LibraryResource::WaterCaustics.name()),
+        )
+    }
+
+    /// Begin the water-data change a candidate graph needs. The previous
+    /// renderer is kept aside until the graph is accepted, so a rejected
+    /// reload leaves the running one (and its clean bake) intact; the
+    /// candidate's renderer (if any) is installed for wiring.
+    fn prepare_water_data(
+        &mut self,
+        needs: (bool, bool),
+        env: &LibraryEnv,
+        bindless: &mut crate::bindless::Bindless,
+    ) -> Result<WaterChange> {
+        let current = self
+            .water_renderer
+            .as_ref()
+            .map_or((false, false), |w| (w.has_shore(), w.has_caustics()));
+        if needs == (false, false) {
+            return Ok(match self.water_renderer.take() {
+                Some(previous) => WaterChange {
+                    previous: Some(previous),
+                    action: WaterAction::Drop,
+                },
+                None => WaterChange {
+                    previous: None,
+                    action: WaterAction::Keep,
+                },
+            });
+        }
+        if needs == current {
+            return Ok(WaterChange {
+                previous: None,
+                action: WaterAction::Keep,
+            });
+        }
+        let (width, height) = env.ground.context("the water data need a map with water")?;
+        let gpu = self.gpu.as_ref().context("not created")?;
+        let level = self
+            .source
+            .info
+            .water_level
+            .context("the water data need a map with water")?;
+        let norm_level = (level - self.source.info.height_offset) / self.source.info.height_scale.max(1e-6);
+        let new = crate::water::WaterRenderer::new(
+            gpu,
+            bindless,
+            width,
+            height,
+            norm_level,
+            self.source.info.cell_size,
+            needs.0,
+            needs.1,
+        )
+        .context("water data")?;
+        let previous = self.water_renderer.replace(new);
+        Ok(WaterChange {
+            previous,
+            action: WaterAction::Install,
+        })
+    }
+
+    /// The candidate graph was accepted: destroy the renderer it replaced.
+    fn commit_water_data(&mut self, change: WaterChange, bindless: &mut crate::bindless::Bindless) {
+        if let WaterAction::Keep = change.action {
+            return;
+        }
+        self.destroy_water(change.previous, bindless);
+    }
+
+    /// The candidate graph was rejected: put the running renderer back,
+    /// destroying the candidate's (nothing in flight is using it).
+    fn rollback_water_data(&mut self, change: WaterChange, bindless: &mut crate::bindless::Bindless) {
+        match change.action {
+            WaterAction::Keep => {}
+            WaterAction::Install => {
+                // The installed renderer is the rejected candidate's.
+                let rejected = self.water_renderer.take();
+                self.destroy_water(rejected, bindless);
+                self.water_renderer = change.previous;
+            }
+            WaterAction::Drop => self.water_renderer = change.previous,
+        }
+    }
+
+    /// Destroy a renderer after the GPU is done with it.
+    fn destroy_water(&self, old: Option<crate::water::WaterRenderer>, bindless: &mut crate::bindless::Bindless) {
+        let Some(mut old) = old else { return };
+        if let Some(gpu) = &self.gpu {
+            gpu.wait_idle();
+        }
+        old.retire(bindless);
+        if let Some(gpu) = &self.gpu {
+            old.destroy(gpu);
+        }
+    }
+
     /// Size the library resources of `graph`, check its library passes and
     /// turn its payloads into [`ScenePass`]es.
-    fn wire<R>(
+    fn wire<'a, R>(
         &self,
         mut graph: FrameGraph<R>,
         env: &LibraryEnv,
-        source: impl Fn(&R) -> Result<(u32, ScenePassSource)>,
+        source: impl Fn(&R) -> Result<(u32, Option<&'a str>)>,
     ) -> Result<(FrameGraph<ScenePass>, Wiring)> {
         let units = self.unit_renderer.as_ref();
         let terrain = self.renderer.as_ref();
@@ -2487,6 +3499,10 @@ impl TerrainApp {
         let resources = library::resolve(&mut graph, env, |r| match r {
             LibraryResource::TerrainLeaves => terrain.map(|t| t.leaves_desc()),
             LibraryResource::TerrainIndirect => terrain.map(|t| t.indirect_desc()),
+            LibraryResource::TerrainLeavesReflect => terrain.map(|t| t.leaves_desc()),
+            LibraryResource::TerrainIndirectReflect => terrain.map(|t| t.indirect_desc()),
+            LibraryResource::UnitVisibleReflect => units.map(|u| u.visible_desc()),
+            LibraryResource::UnitIndirectReflect => units.map(|u| u.indirect_desc()),
             LibraryResource::UnitInstances => units.map(|u| u.instances_desc()),
             LibraryResource::UnitVisible => units.map(|u| u.visible_desc()),
             LibraryResource::UnitIndirect => units.map(|u| u.indirect_desc()),
@@ -2502,23 +3518,170 @@ impl TerrainApp {
             LibraryResource::LightList => self.lights.as_ref().map(|l| l.list_desc()),
             LibraryResource::LightClusters => self.lights.as_ref().map(|l| l.clusters_desc()),
             LibraryResource::ExposureHistogram => self.exposure.as_ref().map(|e| e.histogram_desc()),
+            LibraryResource::WaterParticles => Some(crate::water::waves::particle_desc()),
+            LibraryResource::WaterMeshLeaves => Some(crate::water::mesh::leaves_desc()),
+            LibraryResource::WaterMeshIndirect => Some(crate::water::mesh::indirect_desc()),
             LibraryResource::ReadbackTarget
             | LibraryResource::ShadowMap
             | LibraryResource::ParticleShadows
-            | LibraryResource::Exposure => None,
+            | LibraryResource::Exposure
+            // Images: the graph declares their descriptors, which
+            // `library::resolve` checks against the environment.
+            | LibraryResource::WaterShore
+            | LibraryResource::WaterCaustics
+            | LibraryResource::WaterReflection
+            | LibraryResource::WaterReflectionDepth
+            | LibraryResource::WaterRefraction
+            | LibraryResource::WaterVolumeOut
+            | LibraryResource::WaterRaw
+            | LibraryResource::WaterChurn
+            | LibraryResource::WaterWaves => None,
         })?;
         if resources.contains(&Some(LibraryResource::ReadbackTarget))
             && self.offscreen.as_ref().is_none_or(|o| o.extent != env.extent)
         {
             anyhow::bail!("`readback.target` needs an offscreen target of the graph's extent (create_offscreen)");
         }
+        let sources = graph
+            .passes
+            .iter()
+            .map(|p| source(&p.record).with_context(|| format!("pass `{}`", p.name)))
+            .collect::<Result<Vec<_>>>()?;
+        // Report partial tiers using the original library program names,
+        // even before the renderer has recorders for those programs.
+        let libs = |i: usize| sources[i].1;
+        let water_tiers = library::check_graph_named(&graph, &resources, env, libs)?;
         let mut passes = Vec::with_capacity(graph.passes.len());
-        for (index, pass) in graph.passes.iter().enumerate() {
-            let (program, source) = source(&pass.record).with_context(|| format!("pass `{}`", pass.name))?;
-            let work = match source {
-                ScenePassSource::Library(lib) => {
+        let resource_id = |resource| {
+            resources
+                .iter()
+                .position(|r| *r == Some(resource))
+                .map(|i| ResourceId(i as u32))
+                .with_context(|| format!("missing library resource {resource:?}"))
+        };
+        // Host-owned conditional passes; forced after the loop (the passes
+        // are borrowed while they are wired).
+        let mut host_conditional: Vec<usize> = Vec::new();
+        for (index, (pass, &(program, name))) in graph.passes.iter().zip(&sources).enumerate() {
+            let work = match name {
+                Some(name) => {
+                    let lib = LibraryPass::from_name(name)
+                        .with_context(|| format!("pass `{}`: no library pass `{name}`", pass.name))?;
                     library::check(&graph, index, lib, &resources, env)?;
+                    if lib == LibraryPass::WaterShore {
+                        // Host-owned scheduling: the executor's skip asks the
+                        // ground's dirty state, never a module flag.
+                        host_conditional.push(index);
+                    }
                     match lib {
+                        LibraryPass::TerrainCullReflect | LibraryPass::TerrainReflect => PassWork::Reflection {
+                            pass: lib,
+                            list: Some(resource_id(LibraryResource::TerrainLeavesReflect)?),
+                            indirect: resource_id(LibraryResource::TerrainIndirectReflect)?,
+                            waves: None,
+                        },
+                        LibraryPass::UnitsResetReflect | LibraryPass::UnitsCullReflect | LibraryPass::UnitsReflect => {
+                            PassWork::Reflection {
+                                pass: lib,
+                                list: if lib == LibraryPass::UnitsResetReflect {
+                                    None
+                                } else {
+                                    Some(resource_id(LibraryResource::UnitVisibleReflect)?)
+                                },
+                                indirect: resource_id(LibraryResource::UnitIndirectReflect)?,
+                                waves: (lib == LibraryPass::UnitsReflect && water_tiers.waves)
+                                    .then(|| resource_id(LibraryResource::WaterWaves))
+                                    .transpose()?,
+                            }
+                        }
+                        LibraryPass::ShadowsDraw if water_tiers.waves && env.units => {
+                            PassWork::ShadowsWaves(resource_id(LibraryResource::WaterWaves)?)
+                        }
+                        LibraryPass::WaterEmit => PassWork::WaterEmit(resource_id(LibraryResource::WaterParticles)?),
+                        LibraryPass::WaterSplat | LibraryPass::WaterChurn => PassWork::WaterSplat {
+                            particles: resource_id(LibraryResource::WaterParticles)?,
+                            churn: lib == LibraryPass::WaterChurn,
+                        },
+                        LibraryPass::WaterBlur => PassWork::WaterBlur([
+                            resource_id(LibraryResource::WaterRaw)?,
+                            resource_id(LibraryResource::WaterChurn)?,
+                            resource_id(LibraryResource::WaterWaves)?,
+                        ]),
+                        LibraryPass::WaterLod => PassWork::WaterLod([
+                            resource_id(LibraryResource::WaterWaves)?,
+                            resource_id(LibraryResource::WaterMeshLeaves)?,
+                            resource_id(LibraryResource::WaterMeshIndirect)?,
+                        ]),
+                        LibraryPass::UnitsDraw if water_tiers.waves => PassWork::UnitsWaves {
+                            waves: resource_id(LibraryResource::WaterWaves)?,
+                            refract: water_tiers.refract,
+                        },
+                        LibraryPass::WaterDraw if water_tiers.reflect || water_tiers.refract || water_tiers.waves => {
+                            PassWork::WaterSurface {
+                                volume: water_tiers.volume,
+                                reflection: water_tiers
+                                    .reflect
+                                    .then(|| resource_id(LibraryResource::WaterReflection))
+                                    .transpose()?,
+                                refraction: water_tiers
+                                    .refract
+                                    .then(|| resource_id(LibraryResource::WaterRefraction))
+                                    .transpose()?,
+                                mesh: if water_tiers.waves {
+                                    Some([
+                                        resource_id(LibraryResource::WaterWaves)?,
+                                        resource_id(LibraryResource::WaterMeshLeaves)?,
+                                        resource_id(LibraryResource::WaterMeshIndirect)?,
+                                        resource_id(LibraryResource::WaterChurn)?,
+                                        resource_id(LibraryResource::WaterShore)?,
+                                    ])
+                                } else {
+                                    None
+                                },
+                            }
+                        }
+                        LibraryPass::WaterUnderwater | LibraryPass::WaterVolume => {
+                            let mut samples = pass
+                                .intents
+                                .iter()
+                                .filter(|i| i.role == Role::Sampled(ShaderStage::Fragment));
+                            let scene = samples
+                                .clone()
+                                .find(|i| graph.resources[i.resource.index()].name == ae_render_abi::module::SCENE_NAME)
+                                .context("underwater scene")?
+                                .resource;
+                            let depth = samples
+                                .find(|i| {
+                                    matches!(graph.resources[i.resource.index()].desc,
+                                ResourceDesc::Image(image) if image.format == env.depth_format)
+                                        && resources[i.resource.index()].is_none()
+                                })
+                                .context("underwater depth")?
+                                .resource;
+                            let waves = water_tiers
+                                .waves
+                                .then(|| resource_id(LibraryResource::WaterWaves))
+                                .transpose()?;
+                            if lib == LibraryPass::WaterVolume {
+                                PassWork::WaterVolume {
+                                    inputs: [scene, depth, resource_id(LibraryResource::WaterRefraction)?],
+                                    waves,
+                                    reflect: water_tiers.reflect,
+                                }
+                            } else {
+                                PassWork::WaterUnderwater {
+                                    scene,
+                                    depth,
+                                    caustics: resource_id(LibraryResource::WaterCaustics)?,
+                                    waves,
+                                }
+                            }
+                        }
+                        LibraryPass::TerrainDraw | LibraryPass::UnitsDraw | LibraryPass::UnitsWaterOverlay
+                            if water_tiers.refract =>
+                        {
+                            PassWork::RefractGeometry(lib)
+                        }
                         LibraryPass::ReadbackCopy => {
                             let image = pass
                                 .intents
@@ -2533,6 +3696,18 @@ impl TerrainApp {
                                 .map(|i| i.resource)
                                 .context("readback buffer")?;
                             PassWork::Readback { image, buffer }
+                        }
+                        LibraryPass::ParticlesSim if water_tiers.waves && water_tiers.refract => {
+                            PassWork::ParticlesWaterSim(resource_id(LibraryResource::WaterWaves)?)
+                        }
+                        LibraryPass::ParticlesUnderwater => {
+                            let depth = pass.intents.iter().find(|i| i.role == Role::Sampled(ShaderStage::Fragment)
+                                && matches!(graph.resources[i.resource.index()].desc, ResourceDesc::Image(image) if image.format == env.depth_format))
+                                .context("underwater particle depth")?.resource;
+                            PassWork::ParticlesUnderwater {
+                                depth,
+                                waves: resource_id(LibraryResource::WaterWaves)?,
+                            }
                         }
                         LibraryPass::ParticlesDraw => {
                             let depth = pass
@@ -2666,7 +3841,7 @@ impl TerrainApp {
                         lib => PassWork::Library(lib),
                     }
                 }
-                ScenePassSource::Fullscreen => {
+                None => {
                     let name = &pass.name;
                     anyhow::ensure!(
                         pass.kind == PassKind::Graphics,
@@ -2693,17 +3868,6 @@ impl TerrainApp {
             };
             passes.push(ScenePass { program, work });
         }
-        library::check_graph(&graph, &resources, env, |i| match &passes[i].work {
-            PassWork::Library(lib) => Some(*lib),
-            PassWork::ExposureMeter { .. } => Some(LibraryPass::ExposureMeter),
-            PassWork::Encode { .. } => Some(LibraryPass::PostEncode),
-            PassWork::Bloom { pass, .. } => Some(match pass {
-                BloomPass::Downsample => LibraryPass::BloomDownsample,
-                BloomPass::BlurX => LibraryPass::BloomBlurX,
-                BloomPass::BlurY => LibraryPass::BloomBlurY,
-            }),
-            _ => None,
-        })?;
         let glow = library::glow_resource(&graph);
         let graph = FrameGraph {
             resources: graph.resources,
@@ -2711,25 +3875,114 @@ impl TerrainApp {
                 .passes
                 .into_iter()
                 .zip(passes)
-                .map(|(p, record)| ae_framegraph::Pass {
+                .enumerate()
+                .map(|(index, (p, record))| ae_framegraph::Pass {
                     name: p.name,
                     kind: p.kind,
                     scope: p.scope,
                     intents: p.intents,
-                    conditional: p.conditional,
+                    conditional: p.conditional || host_conditional.contains(&index),
                     record,
                 })
                 .collect(),
             roots: graph.roots,
             plan_version: graph.plan_version,
         };
-        Ok((graph, Wiring { resources, glow }))
+        // Check the candidate with the executor's own bake before committing
+        // its resources. Use only live library passes for shading ownership.
+        let baked = ae_framegraph::bake(&graph, ae_framegraph::BakeOptions::default()).context("frame graph bake")?;
+        let water_tiers = if water_tiers == WaterTiers::default() {
+            water_tiers
+        } else {
+            library::check_baked_water_tiers(&graph, &baked, env, libs)?
+        };
+        Ok((
+            graph,
+            Wiring {
+                resources,
+                glow,
+                water_tiers,
+            },
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "needs a Vulkan 1.3 GPU"]
+    fn an_unsupported_rich_water_target_draws_the_m7_frame() -> Result<()> {
+        use crate::device::GpuInstance;
+        use crate::executor::ExecutorConfig;
+        use crate::thread::Headless;
+
+        let instance = Arc::new(GpuInstance::new(&[], Some(true))?);
+        assert!(instance.validation);
+        let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
+        let (heightmap, scale, offset) = Heightmap::from_cells((32, 32), |_, _| 0.0, None);
+        let pyramid = super::super::heightmap::build_pyramid(&heightmap, scale, offset);
+        let info = TerrainInfo::new(&heightmap, &pyramid, 8.0, scale, offset, Some(8.0));
+        let source = Arc::new(TerrainSource {
+            heightmap,
+            pyramid,
+            info,
+            materials: None,
+        });
+        let target = TargetInfo {
+            extent: vk::Extent2D { width: 97, height: 73 },
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let render = |request| -> Result<Vec<u8>> {
+            let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+                .with_water()
+                .with_water_tiers(request);
+            app.view().lock().unwrap().time = Some(0.0);
+            app.create_offscreen(&gpu, target.extent)?;
+            let config = ExecutorConfig {
+                profile: false,
+                ..Default::default()
+            };
+            let mut headless = Headless::new(&gpu, &mut app, target, config)?;
+            let env = app.env(target)?;
+            let selected = app.supported_water_tiers(&env, |request, _, _| {
+                assert!(request.volume);
+                Some("water.waves (R16G16B16A16_SFLOAT, STORAGE)".into())
+            })?;
+            assert_eq!(selected, WaterTiers::default());
+            headless.frames(&mut app, 6)?;
+            headless.wait()?;
+            assert_eq!(app.water_tiers(), WaterTiers::default());
+            assert!(headless.stats().pass_names.iter().any(|name| name == "water"));
+            let frame = app.readback().context("water fallback readback")?;
+            RenderApp::destroy(&mut app, &gpu);
+            Ok(frame)
+        };
+        let m7 = render(WaterTiers::default())?;
+        let fallback = render(WaterTiers {
+            reflect: true,
+            refract: true,
+            waves: true,
+            volume: true,
+        })?;
+        assert!(m7 == fallback, "a rejected rich tier renders M7 byte for byte");
+        assert_eq!((instance.counters.errors(), instance.counters.warnings()), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn the_eye_keeps_out_of_the_waves() {
+        // Clear of the band: unchanged, above or below.
+        assert_eq!(clear_of_waves(50.0, 42.0, 20.0), 50.0);
+        assert_eq!(clear_of_waves(30.0, 42.0, 20.0), 30.0);
+        // In the band: to the nearer edge.
+        assert_eq!(clear_of_waves(42.1, 42.0, 20.0), 42.0 + WAVE_BAND);
+        assert_eq!(clear_of_waves(41.5, 42.0, 20.0), 42.0 - WAVE_BAND);
+        // Below, but the seabed leaves no room under the band: above.
+        assert_eq!(clear_of_waves(41.5, 42.0, 41.0), 42.0 + WAVE_BAND);
+    }
 
     #[test]
     fn the_default_peak_is_the_headroom_over_the_signal_reference() {

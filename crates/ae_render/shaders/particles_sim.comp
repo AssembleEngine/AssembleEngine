@@ -9,6 +9,9 @@
 #define PARTICLES_WRITE
 #include "particles_common.glsl"
 #include "lights.glsl"
+#ifdef WATER_SPLIT
+#include "particles_water.glsl"
+#endif
 
 layout(local_size_x = 64) in;
 
@@ -34,12 +37,24 @@ void main() {
     if (p.posAge.w >= p.velLife.w) {
         return;
     }
+#ifndef WATER_SPLIT
     if (u.flags.z != 0u && physics.z < 0.5) {
         keys[u.pool.x + atomicAdd(cmd.casterCount, 1u)] = i;
     }
+#endif
     float t = p.posAge.w / p.velLife.w;
     vec4 shape = u.effects[e + 2u];
     float radius = 0.5 * mix(shape.x, shape.y, t) * uintBitsToFloat(p.info.z);
+#ifdef WATER_SPLIT
+    float surface = waterSurfaceAt(p.posAge.xz);
+    // Route emissive puffs by their centre. A surface flash can be much
+    // wider than its height above the water and needs its full silhouette.
+    float layerHeight = p.posAge.y - (physics.z > 0.5 ? 0.0 : radius);
+    bool below = layerHeight < surface && particleOverWater(p.posAge.xz, surface);
+    if (u.flags.z != 0u && physics.z < 0.5 && !below) {
+        keys[u.pool.x + atomicAdd(cmd.casterCount, 1u)] = i;
+    }
+#endif
     bool visible = true;
     for (int k = 0; k < 6; ++k) {
         visible = visible && dot(u.frustum[k].xyz, p.posAge.xyz) + u.frustum[k].w >= -radius;
@@ -55,6 +70,12 @@ void main() {
     if (visible) {
         float q = clamp(log2(max(d, u.camPos.w) / u.camPos.w) / 24.0, 0.0, 1.0);
         uint key = ((65535u - uint(q * 65535.0)) << 16) | i;
+#ifdef WATER_SPLIT
+        // Reserve the high bit for the layer and retain all slot bits.
+        key = (key & 0xffffu) | ((key & 0xfffe0000u) >> 1);
+        if (below) atomicAdd(cmd.belowCount, 1u);
+        else key |= 0x80000000u;
+#endif
         keys[atomicAdd(cmd.instanceCount, 1u)] = key;
     }
     // The visible depth range (the moments' depth warp, the froxels' slices; flags.y), one

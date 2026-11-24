@@ -5,6 +5,14 @@
 #define CULL
 #include "units_common.glsl"
 
+// How far a floating hull may ride off its flat-water position (the full
+// tier's waves, water_patch.glsl WAVE_BOUND): the cull widens its sphere by
+// it, so a hull riding a crest at the screen's edge is not culled early.
+#include "water_patch.glsl"
+float rideMargin(Unit unit) {
+    return u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u ? WAVE_BOUND : 0.0;
+}
+
 layout(local_size_x = 64) in;
 
 void main() {
@@ -12,11 +20,14 @@ void main() {
     if (i >= u.counts.x) {
         return;
     }
+#ifdef MIRROR
+    if (!eligible(i)) return;
+#endif
     Unit unit = loadUnit(i);
     vec3 centre = unit.pos + vec3(0.0, 0.4 * unit.size, 0.0);
-    float r = 1.6 * unit.size;
+    float r = 1.6 * unit.size + rideMargin(unit);
     for (int k = 0; k < 6; k++) {
-        if (dot(u.frustum[k].xyz, centre) + u.frustum[k].w < -r) {
+        if (dot(UNIT_VIEW_PLANES[k].xyz, centre) + UNIT_VIEW_PLANES[k].w < -r) {
             return;
         }
     }

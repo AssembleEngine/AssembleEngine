@@ -17,11 +17,19 @@
 #include "units_models.glsl"
 #include "units_dart.glsl"
 
+// How far a floating hull may ride off its flat-water position (the full
+// tier's waves, water_patch.glsl WAVE_BOUND): the cull widens its sphere by
+// it, so a hull riding a crest at the screen's edge is not culled early.
+#include "water_patch.glsl"
+float rideMargin(Unit unit) {
+    return u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u ? WAVE_BOUND : 0.0;
+}
+
 layout(local_size_x = 64) in;
 
 bool inView(vec3 centre, float r) {
     for (int k = 0; k < 6; k++) {
-        if (dot(u.frustum[k].xyz, centre) + u.frustum[k].w < -r) {
+        if (dot(UNIT_VIEW_PLANES[k].xyz, centre) + UNIT_VIEW_PLANES[k].w < -r) {
             return false;
         }
     }
@@ -48,10 +56,13 @@ void main() {
     if (i >= u.counts.x) {
         return;
     }
+#ifdef MIRROR
+    if (!eligible(i)) return;
+#endif
     Unit unit = loadUnit(i);
     ModelClass mc = modelClasses[unit.cls];
     if (mc.cmd.y == 0u) {
-        if (inView(unit.pos + vec3(0.0, 0.4 * unit.size, 0.0), 1.6 * unit.size)) {
+        if (inView(unit.pos + vec3(0.0, 0.4 * unit.size, 0.0), 1.6 * unit.size + rideMargin(unit))) {
             visible[atomicAdd(cmdWords[1], 1u)] = i;
         }
         return;
@@ -65,10 +76,11 @@ void main() {
         sphere = vec4(mc.sphere.xyz * mc.fit.z, mc.fit.y);
     }
     vec3 centre = place(unit, sphere.xyz);
-    float r = sphere.w * unit.size;
+    float r = sphere.w * unit.size + rideMargin(unit);
     if (inView(centre, r)) {
         append(i, mc, 0u);
     }
+#ifndef MIRROR
     if (u.unitShadowScale[0].w > 0.0) {
         vec2 l = vec2(dot(u.unitShadowAxes[0].xyz, centre), dot(u.unitShadowAxes[1].xyz, centre));
         for (uint k = 0u; k < uint(UNIT_CASCADES); k++) {
@@ -78,4 +90,5 @@ void main() {
             }
         }
     }
+#endif
 }

@@ -28,9 +28,12 @@
 //! ```
 //!
 //! * **Resources** are declared in file order. `library`: an engine library
-//!   buffer by its name (`External`, size 0; the host sizes it), or the
-//!   units' shadow map `shadows.map`, the particles' coloured shadows
-//!   `shadows.color` or the exposure image `exposure` (their fixed specs).
+//!   resource by its name, without a descriptor: the
+//!   host fills in a buffer's size or an image's format and size, including
+//!   the units' shadow map `shadows.map`, the particles' coloured shadows
+//!   `shadows.color`, the exposure image `exposure` and the water data
+//!   (`water.shore`, `water.caustics`). Reflection draw buffers are
+//!   transient. Other library resources are external.
 //!   `image`:
 //!   the target's size times `scale` (default 1), `format` a Vulkan format
 //!   name, `target` (the target's colour format) or `display` (the HDR
@@ -63,10 +66,14 @@
 //!   only while bit n of the application's flags is set; `root` keeps a
 //!   pass whose results nothing reads. An access to a resource the scene
 //!   leaves out (its `when` does not hold) is left out with it, so a pass
-//!   can sample `shadows.map` only where the map exists.
+//!   can sample `shadows.map` only where the map exists. Use
+//!   `water.volume.out|scene` to select the first active resource.
 //! * Resources and passes may carry `when`: `units`, `no_units`,
 //!   `readback`, `present`, `water`, `no_water`, `shadows` or `no_shadows`
-//!   (the units cast shadows), `particles` or `no_particles`,
+//!   (the units cast shadows), `water_reflect`, `water_refract`,
+//!   `water_waves` or `water_volume` (the requested wet-scene tiers),
+//!   `water_reflect_units` (reflection and units),
+//!   `particles` or `no_particles`,
 //!   `particle_shadows` (both shadows and particles), `hdr` or `sdr` (the
 //!   output's encoding: HDR keeps the display intermediate and ends in
 //!   `post.encode`), to exist only in such scenes. A graph is checked for
@@ -76,8 +83,8 @@ use crate::colorspace::{Gamut, WorkingSpace};
 use crate::encode::{DisplayLevels, OutputEncoding};
 use crate::module::{DeclareTarget, Declared, ModuleFrame};
 use ae_render_abi::module::{
-    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program,
-    ProgramTable,
+    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, DECLARE_WATER_REFLECT,
+    DECLARE_WATER_REFRACT, DECLARE_WATER_VOLUME, DECLARE_WATER_WAVES, FrameInput, Program, ProgramTable,
 };
 use ae_render_abi::{Class, GraphBuilder, ImageSpec, LoadOp, PassKind, ResourceRef, Role, ShaderStage};
 use anyhow::{Context as _, Result, bail, ensure};
@@ -140,6 +147,15 @@ enum When {
     Present,
     Water,
     NoWater,
+    WaterReflect,
+    WaterReflectUnits,
+    WaterRefract,
+    WaterRefractUnits,
+    ParticlesRefract,
+    ParticlesWaterSplit,
+    ParticlesNoRefract,
+    WaterWaves,
+    WaterVolume,
     Shadows,
     NoShadows,
     Particles,
@@ -163,6 +179,8 @@ impl When {
             flags & DECLARE_WATER != 0,
             flags & DECLARE_SHADOWS != 0,
         );
+        let refract = water && flags & DECLARE_WATER_REFRACT != 0;
+        let particles = flags & DECLARE_PARTICLES != 0;
         match when {
             None => true,
             Some(When::Units) => units,
@@ -171,6 +189,19 @@ impl When {
             Some(When::Present) => !readback,
             Some(When::Water) => water,
             Some(When::NoWater) => !water,
+            Some(When::WaterReflect) => water && flags & DECLARE_WATER_REFLECT != 0,
+            Some(When::WaterReflectUnits) => units && Self::holds(Some(When::WaterReflect), flags, hdr),
+            Some(When::WaterRefract) => refract,
+            Some(When::WaterRefractUnits) => refract && units,
+            Some(When::ParticlesRefract) => particles && refract,
+            Some(When::ParticlesWaterSplit) => particles && refract && flags & DECLARE_WATER_WAVES != 0,
+            Some(When::ParticlesNoRefract) => particles && !refract,
+            Some(When::WaterWaves) => water && flags & DECLARE_WATER_WAVES != 0,
+            Some(When::WaterVolume) => {
+                water
+                    && flags & (DECLARE_WATER_REFRACT | DECLARE_WATER_VOLUME)
+                        == DECLARE_WATER_REFRACT | DECLARE_WATER_VOLUME
+            }
             Some(When::Shadows) => shadows,
             Some(When::NoShadows) => !shadows,
             Some(When::Particles) => flags & DECLARE_PARTICLES != 0,
@@ -182,16 +213,33 @@ impl When {
     }
 }
 
-/// Every combination of the `declare` flags a scene can be asked for
-/// (shadows only with units), each without and with particles.
-pub const SCENE_FLAGS: [u32; 24] = {
-    let mut flags = [0; 24];
-    let mut i = 0;
-    while i < 12 {
-        flags[i] = SCENE_FLAGS_BASE[i];
-        flags[i + 12] = SCENE_FLAGS_BASE[i] | DECLARE_PARTICLES;
-        i += 1;
+/// Every scene the host can request: shadows require units, water tiers
+/// require a wet scene, and underwater volume requires refraction.
+pub const SCENE_FLAGS: [u32; 156] = {
+    // Twelve dry combinations and twelve wet ones, with twelve valid tier
+    // combinations for each wet scene. The four ABI tier bits are contiguous.
+    let mut flags = [0; 156];
+    let mut index = 0;
+    let mut base = 0;
+    while base < SCENE_FLAGS_BASE.len() {
+        let mut particles = 0;
+        while particles <= DECLARE_PARTICLES {
+            let scene = SCENE_FLAGS_BASE[base] | particles;
+            let mut tiers = 0;
+            while tiers < DECLARE_WATER_VOLUME * 2 {
+                if (tiers == 0 || scene & DECLARE_WATER != 0)
+                    && (tiers & DECLARE_WATER_VOLUME == 0 || tiers & DECLARE_WATER_REFRACT != 0)
+                {
+                    flags[index] = scene | tiers;
+                    index += 1;
+                }
+                tiers += DECLARE_WATER_REFLECT;
+            }
+            particles += DECLARE_PARTICLES;
+        }
+        base += 1;
     }
+    assert!(index == flags.len());
     flags
 };
 
@@ -394,7 +442,7 @@ fn role(text: &str) -> Result<Role> {
     })
 }
 
-/// `"<resource> <role>[ discard]"`.
+/// `"<resource> <role>[ discard]"`. Names separated by `|` select the first active resource.
 fn access(text: &str) -> Result<(&str, Role, bool)> {
     let words: Vec<&str> = text.split_whitespace().collect();
     match words.as_slice() {
@@ -470,7 +518,7 @@ impl GraphFile {
                 };
                 file.build(&target).with_context(|| {
                     format!(
-                        "declaring for {encoding:?}, {}units, {}water, {}shadows, {}particles, {}",
+                        "declaring for {encoding:?}, {}units, {}water, {}shadows, {}particles, {}, flags {flags:#x}",
                         if flags & DECLARE_UNITS != 0 { "" } else { "no " },
                         if flags & DECLARE_WATER != 0 { "" } else { "no " },
                         if flags & DECLARE_SHADOWS != 0 { "" } else { "no " },
@@ -517,7 +565,13 @@ impl GraphFile {
                     } else if r.name == ae_render_abi::module::EXPOSURE_NAME {
                         g.image(&r.name, ae_render_abi::module::exposure_spec(), Class::External)
                     } else {
-                        g.buffer(&r.name, 0, 0, Class::External)
+                        let lib = crate::library::LibraryResource::from_name(&r.name);
+                        let class = if lib.is_some_and(|r| r.is_transient()) {
+                            Class::Transient
+                        } else {
+                            Class::External
+                        };
+                        g.buffer(&r.name, 0, 0, class)
                     }
                 }
                 ResourceKind::Image => {
@@ -623,15 +677,20 @@ impl GraphFile {
             let mut w = g.pass(&p.name, kind, payload);
             for a in &p.access {
                 let (resource, role, discard) = access(a).with_context(at)?;
-                let Some(&reference) = refs.get(resource) else {
-                    // Declared, but not in this scene: the access goes with it.
-                    ensure!(
-                        self.spec.resources.iter().any(|r| r.name == resource),
-                        "{}: no resource `{resource}`",
-                        at()
-                    );
-                    continue;
+                let declared = |name: &str| self.spec.resources.iter().any(|r| r.name == name);
+                let reference = if declared(resource) {
+                    refs.get(resource).copied()
+                } else {
+                    let mut first = None;
+                    for name in resource.split('|') {
+                        ensure!(declared(name), "{}: no resource `{name}`", at());
+                        first = first.or_else(|| refs.get(name).copied());
+                    }
+                    first
                 };
+                // Declared, but not in this scene: the access goes with it.
+                let Some(reference) = reference else { continue };
+
                 w = if discard {
                     w.discard(reference, role)
                 } else {
@@ -787,6 +846,148 @@ mod tests {
             assert!(role(bad).is_err(), "{bad}");
         }
         assert!(access("one").is_err() && access("a indirect maybe").is_err());
+    }
+
+    #[test]
+    fn water_tier_keys_select_only_the_requested_wet_graph_resources_and_passes() {
+        let tiers = ["water_reflect", "water_refract", "water_waves", "water_volume"];
+        let text = serde_json::json!({
+            "version": 1,
+            "resources": std::iter::once(serde_json::json!({"name": "target", "kind": "output"}))
+                .chain(tiers.map(|key| serde_json::json!({"name": key, "kind": "library", "when": key})))
+                .collect::<Vec<_>>(),
+            "passes": tiers.map(|key| serde_json::json!({
+                "name": key, "kind": "transfer", "library": "test", "when": key,
+                "access": [format!("{key} transfer_dst")],
+            })),
+        });
+        let mut file = GraphFile::parse(&serde_json::to_vec(&text).unwrap()).unwrap();
+        for (flags, want) in [
+            (DECLARE_WATER, vec![]),
+            (DECLARE_WATER | DECLARE_WATER_REFLECT, vec!["water_reflect"]),
+            (DECLARE_WATER | DECLARE_WATER_REFRACT, vec!["water_refract"]),
+            (DECLARE_WATER | DECLARE_WATER_WAVES, vec!["water_waves"]),
+            (DECLARE_WATER | DECLARE_WATER_VOLUME, vec![]),
+            (
+                DECLARE_WATER | DECLARE_WATER_REFRACT | DECLARE_WATER_VOLUME,
+                vec!["water_refract", "water_volume"],
+            ),
+            (
+                DECLARE_WATER_REFLECT | DECLARE_WATER_REFRACT | DECLARE_WATER_WAVES | DECLARE_WATER_VOLUME,
+                vec![],
+            ),
+        ] {
+            let target = DeclareTarget {
+                width: 64,
+                height: 64,
+                color_format: vk::Format::B8G8R8A8_SRGB,
+                flags,
+                encoding: OutputEncoding::Sdr,
+                levels: DisplayLevels::default(),
+                working: WorkingSpace::Bt709,
+                gamut: Gamut::Bt709,
+            };
+            let declared = file.declare(&target).unwrap().unwrap();
+            let graph = ae_framegraph::descriptor::decode(&declared.graph).unwrap();
+            let resources: Vec<_> = graph
+                .resources
+                .iter()
+                .filter(|r| r.name != "target")
+                .map(|r| r.name.as_str())
+                .collect();
+            let passes: Vec<_> = graph
+                .passes
+                .iter()
+                .filter(|p| p.name != "present")
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(resources, want, "{flags:#x}");
+            assert_eq!(passes, want, "{flags:#x}");
+        }
+    }
+
+    /// M16.5: a graph file names the water data as library resources (it
+    /// cannot know their format or size); `resolve` fills in the host's
+    /// images — the shore field's and the caustic web's descriptors — and
+    /// the shore bake pass passes the library's checks.
+    #[test]
+    fn library_images_get_their_host_descriptors() {
+        use crate::library::{LibraryEnv, LibraryPass, check, resolve};
+        let text = r#"{"version": 1, "resources": [
+            {"name": "water.shore", "kind": "library"},
+            {"name": "water.caustics", "kind": "library"},
+            {"name": "target", "kind": "output"}],
+          "passes": [
+            {"name": "shore", "kind": "compute", "library": "water.shore",
+             "access": ["water.shore storage_image_write:compute"], "root": true}]}"#;
+        let mut file = GraphFile::parse(text.as_bytes()).expect("the graph file parses");
+        let target = DeclareTarget {
+            width: 64,
+            height: 64,
+            color_format: vk::Format::B8G8R8A8_SRGB,
+            flags: ae_render_abi::module::DECLARE_READBACK | ae_render_abi::module::DECLARE_WATER,
+            encoding: OutputEncoding::Sdr,
+            levels: DisplayLevels::default(),
+            working: WorkingSpace::Bt709,
+            gamut: Gamut::Bt709,
+        };
+        let declared = file.declare(&target).unwrap().expect("the file declares");
+        let mut graph = ae_framegraph::descriptor::decode(&declared.graph).expect("the descriptor decodes");
+        let env = LibraryEnv {
+            color_format: vk::Format::B8G8R8A8_SRGB,
+            scene_format: crate::terrain::app::SCENE_FORMAT,
+            depth_format: vk::Format::D32_SFLOAT,
+            extent: vk::Extent2D { width: 64, height: 64 },
+            units: false,
+            water: true,
+            shadows: false,
+            particles: false,
+            ground: Some((257, 257)),
+            bake_water: false,
+            encoding: OutputEncoding::Sdr,
+            levels: DisplayLevels::default(),
+            working: WorkingSpace::Bt709,
+            gamut: Gamut::Bt709,
+        };
+        let map = resolve(&mut graph, &env, |_| {
+            Some(ae_framegraph::BufferDesc {
+                size: 64,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            })
+        })
+        .expect("the library resolves");
+        let desc = |name: &str| {
+            graph
+                .resources
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no resource {name}"))
+                .desc
+        };
+        let shore = desc("water.shore");
+        let ae_framegraph::ResourceDesc::Image(shore) = shore else {
+            panic!("water.shore is a buffer: {shore:?}");
+        };
+        assert_eq!(
+            (shore.format, shore.width, shore.height),
+            (crate::water::shore::FIELD_FORMAT, 257, 257),
+            "the shore field's host descriptor"
+        );
+        let caustics = desc("water.caustics");
+        let ae_framegraph::ResourceDesc::Image(caustics) = caustics else {
+            panic!("water.caustics is a buffer: {caustics:?}");
+        };
+        assert_eq!(
+            (caustics.format, caustics.width, caustics.height, caustics.mip_levels),
+            (crate::water::caustics::FORMAT, 256, 256, 9),
+            "the caustic web's host descriptor"
+        );
+        let index = graph
+            .passes
+            .iter()
+            .position(|p| p.name == "shore")
+            .expect("the shore pass");
+        check(&graph, index, LibraryPass::WaterShore, &map, &env).expect("the shore pass checks");
     }
 
     #[test]

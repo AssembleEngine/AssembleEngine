@@ -1,0 +1,16 @@
+[package]
+name = "ae_water_visibility_fixture"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ae-sdk = { path = "../../../../../sdk/ae-sdk", features = ["water"] }
+
+[profile.release]
+panic = "abort"
+
+[workspace]

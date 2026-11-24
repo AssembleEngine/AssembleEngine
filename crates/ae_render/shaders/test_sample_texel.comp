@@ -1,0 +1,19 @@
+#version 460
+// Test-only (M16.5): a real graph read of one texel. Samples the image in
+// push slot 0 at the texel in push words 0/1 and stores its RGBA8 into the
+// storage buffer in handle slot 0, so a test can compare what the graph read
+// with what was uploaded.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+#include "bindless.glsl"
+
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Out {
+    uint texel;
+} ae_Out[];
+#define OUT_TEXEL (ae_Out[AE_BUF(0)].texel)
+
+void main() {
+    ivec2 at = ivec2(ae.words.x, ae.words.y);
+    vec4 c = texelFetch(AE_S2D(0, 0), at, 0);
+    uvec4 q = uvec4(clamp(c * 255.0 + 0.5, 0.0, 255.0));
+    OUT_TEXEL = q.r | (q.g << 8) | (q.b << 16) | (q.a << 24);
+}

@@ -33,6 +33,8 @@ extern crate self as ae_sdk;
 
 #[cfg(feature = "nav")]
 pub mod nav;
+#[cfg(feature = "water")]
+pub mod water;
 
 #[cfg(feature = "catalog")]
 pub mod catalog;

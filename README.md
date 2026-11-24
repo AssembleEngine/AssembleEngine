@@ -63,10 +63,26 @@ builds each observer's view table by the fields' view classes (`#[field(view = .
 `ae-client --teams 2 --observer 0` draws the world as that allyteam sees it, with fog of war on the
 terrain. Details: [docs/PLAN.md](docs/PLAN.md) "M4 progress".
 
-M7 (render effects) has started with water: on maps with water, `ae-client` draws a water surface
-over the terrain and units (a `water.draw` library pass that render modules can wire too): analytic
-waves that fade into roughness with distance, sky reflection by fresnel, sun glints, shore foam, fog of
-war, and caustics on the ground under it; O toggles it, `--no-water` leaves it out. The hills cast the
+Water on wet maps defaults to `full`, with planar reflection, refraction, a displaced surface,
+riding hulls, wakes, impact rings, spray, bubbles and an underwater view. `full` is built from the
+RedAlert-graphics prototype's ocean, adapted to RTS camera heights and hull speeds: its three-train swell and scrolling static displacement, wave
+particles shaped by RA3's blur into Kelvin wakes and blast rings, churned trails drawn with normals,
+breakers timed by the baked shore field, and a shell landing in the water throws up a column of spray
+instead of a fireball. Use
+`--water-quality off|m7|reflect|refract|full` to select a tier. `reflect` adds planar reflection to
+M7's analytic surface and `refract` adds the shaded seabed and submerged hulls. A device that
+lacks a required rich image format or usage falls back to `m7`. O toggles water in the client,
+and `--no-water` starts without it. The native graph, `render/default` and
+`render/default.graph.json` support these tiers. On the coast, Crossing's submarines dive and
+surface as they sail. With `--teams 2 --observer 0`, Y cycles the observer.
+A map package's optional `water` object sets
+absorption, the shallow and deep colours, wind, swell, foam, caustics and the submerged-unit aids,
+with defaults that reproduce today's frame. The M16 port of the prototype's
+water stack — survey, settings, the passes, what each delivery ported and paired captures — is
+[docs/water.md](docs/water.md); `--map coast` is its fixture map (a coastline, a shelf, deep water,
+a river mouth and a shipping lane), which takes a sea adapted from the prototype's unless a map
+package sets its own. `--capture-seconds S` keeps the sim running for S seconds before a capture is read, so it shows
+live wakes and rings. The hills cast the
 sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
 toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
 shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
@@ -161,7 +177,9 @@ pass and the lights list at +10% on one scene), accepted as the cost of the glob
   for render modules).
 - A C compiler (flecs is built from source).
 - `glslc` (shaderc) to build `ae_render`; SDL3 and a Vulkan 1.3 driver to run `ae-client` and the GPU
-  tests, which also need `VK_LAYER_KHRONOS_validation`. `ae-client` builds the crossing game on first
+  tests, which also need `VK_LAYER_KHRONOS_validation`. The SPIR-V gate pins the compiler it was
+  recorded with (2026.4 here); another supported glslc builds, but its binary hashes are compared
+  advisorily unless `AE_STRICT_SPIRV=1`. `ae-client` builds the crossing game on first
   use, like `ae-headless` (the wasm target above); `--units 0` runs it without the sim.
 - Optional: `wasmtime` CLI to run the nav golden test as WASM; the Tracy profiler GUI for `--features tracy`.
 
@@ -237,6 +255,7 @@ cargo test --release -p ae_services --test crossing -- --nocapture       # nav i
 cargo test -p ae_nav --test golden                                       # bit-equal to the pathsim prototype
 cargo test -p ae_nav --test reference_sim --test service_vs_reference    # whole sim and service equal pathsim
 cargo test --release -p ae_nav --test water                              # movement classes on water maps
+cargo test -p ae_nav --test coast                                       # the M16 coast fixture's digests
 
 # Navigation at scale
 ./target/release/ae-tool bench nav-sim --threads 8 --no-save            # 10k units, land + water, 1..8 workers
@@ -247,6 +266,9 @@ cargo run --release -p ae_nav --bin navbench -- --quick                  # paths
 cargo test -p ae_render --test gpu -- --ignored --test-threads=1         # offscreen, validation must stay silent
 cargo run --release -p ae-client                                         # water crossing map + 10k units (WASD, wheel, right-drag)
 cargo run --release -p ae-client -- --map land --capture land.ppm        # 300 sim ticks, then an offscreen frame + GPU ms per pass
+cargo run --release -p ae-client -- --map coast --map-cells 768 --units 120 # coastal water
+cargo run --release -p ae-client -- --map coast --map-cells 768 --units 120 --camera 4816,2800,22,0.1,-1,57.5 # look up from underwater
+cargo test -p ae-client --test water_visibility -- --ignored --test-threads=1 # observer, waves, hulls and particle layers
 cargo run --release -p ae-client -- --units 0                            # terrain only
 cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (N: vignette)
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
@@ -270,8 +292,8 @@ results from the same machine; deterministic counters are compared everywhere.
 
 ## Client controls
 
-WASD / arrows pan, the wheel zooms, right- or middle-drag orbits and tilts, Q/E orbit, R/F tilt, shift
-moves faster; `+`/`-` sim speed, Pause pauses the sim and the animation clocks, `[`/`]` terrain detail,
+WASD / arrows pan, the wheel zooms, right- or middle-drag orbits and tilts, Q/E orbit, R/F tilt,
+Page Up/Page Down raise and lower the orbit point (Home returns it to the ground), shift moves faster; `+`/`-` sim speed, Pause pauses the sim and the animation clocks, `[`/`]` terrain detail,
 T wireframe, L colour by LOD depth, G fog, C freeze the LOD, P print the camera, V v-sync, N render
 module flag 0, M tileset, B blend weights, O water, H shadows, Z bloom, X explosion, **U HDR/SDR**,
 Esc quits.

@@ -13,10 +13,13 @@ use ae_framegraph::{BakeOptions, BufferDesc, FrameGraph, bake, dot};
 use ae_render::bindless::graph_indices;
 use ae_render::demo::{DemoOutput, build_demo_graph};
 use ae_render::encode::{DisplayLevels, OutputEncoding};
-use ae_render::library::{LibraryEnv, LibraryPass, LibraryResource, resolve};
+use ae_render::library::{LibraryEnv, LibraryPass, LibraryResource, WaterTiers, resolve};
 use ae_render::module::{DeclareTarget, RenderModule, build, engine};
-use ae_render::terrain::app::{TerrainOutput, native_graph};
-use ae_render_abi::module::{DECLARE_PARTICLES, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, Program, ProgramTable};
+use ae_render::terrain::app::{TerrainOutput, native_graph, native_graph_with_water_tiers};
+use ae_render_abi::module::{
+    DECLARE_PARTICLES, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, DECLARE_WATER_REFLECT, DECLARE_WATER_REFRACT,
+    Program, ProgramTable,
+};
 use ash::vk;
 use std::path::PathBuf;
 
@@ -55,6 +58,8 @@ fn env_with(units: bool, water: bool, shadows: bool, particles: bool, encoding: 
         water,
         shadows,
         particles,
+        ground: water.then_some((257, 257)),
+        bake_water: false,
         encoding,
         levels: LEVELS,
         working: Default::default(),
@@ -100,18 +105,22 @@ fn scene_hdr(encoding: OutputEncoding) -> String {
 fn module_hdr(name: &str, encoding: OutputEncoding) -> String {
     let env = env_with(true, true, true, true, encoding);
     let flags = DECLARE_UNITS | DECLARE_WATER | DECLARE_SHADOWS | DECLARE_PARTICLES;
+    let wasm = build(name).unwrap_or_else(|e| panic!("build render/{name}: {e:#}"));
+    module_dot(&wasm, &env, flags)
+}
+
+fn module_dot(bytes: &[u8], env: &LibraryEnv, flags: u32) -> String {
     let target = DeclareTarget {
-        width: EXTENT.width,
-        height: EXTENT.height,
+        width: env.extent.width,
+        height: env.extent.height,
         color_format: env.color_format,
         flags,
-        encoding,
-        levels: LEVELS,
+        encoding: env.encoding,
+        levels: env.levels,
         working: env.working,
         gamut: env.gamut,
     };
-    let wasm = build(name).unwrap_or_else(|e| panic!("build render/{name}: {e:#}"));
-    let mut module = RenderModule::load(&engine(), &wasm).expect("load the module");
+    let mut module = RenderModule::load(&engine(), bytes).expect("load render module");
     let declared = module
         .declare(&target)
         .expect("declare")
@@ -140,7 +149,7 @@ fn module_hdr(name: &str, encoding: OutputEncoding) -> String {
         roots: graph.roots,
         plan_version: graph.plan_version,
     };
-    resolve_libraries(&mut graph, &env);
+    resolve_libraries(&mut graph, env);
     dot_of(&graph)
 }
 
@@ -249,4 +258,92 @@ fn baked_plans_match_the_golden_dot_files() {
         "{}\n(after an intended change: AE_UPDATE_GOLDEN=1 cargo test -p ae_render --test golden)",
         failures.join("\n")
     );
+}
+
+#[test]
+fn water_reflection_has_the_same_plan_in_all_three_entry_points() {
+    let wasm = build("default").expect("build default module");
+    let json = include_bytes!("../../../render/default.graph.json");
+    for units in [false, true] {
+        let env = env_with(units, true, units, units, OutputEncoding::Sdr);
+        let mut flags = DECLARE_WATER | DECLARE_WATER_REFLECT;
+        if units {
+            flags |= DECLARE_UNITS | DECLARE_SHADOWS | DECLARE_PARTICLES;
+        }
+        let mut graph = native_graph_with_water_tiers(
+            &env,
+            TerrainOutput::Present,
+            WaterTiers {
+                reflect: true,
+                ..Default::default()
+            },
+        );
+        resolve_libraries(&mut graph, &env);
+        let native = dot_of(&graph);
+        let wasm = module_dot(&wasm, &env, flags);
+        let json = module_dot(json, &env, flags);
+        assert_eq!(native, wasm, "native and WASM reflection graphs with units={units}");
+        assert_eq!(native, json, "native and JSON reflection graphs with units={units}");
+        if units {
+            let failures = [("scene", &native), ("default", &wasm), ("json", &json)]
+                .into_iter()
+                .filter_map(|(name, dot)| check(&format!("{name}_water_reflect_present"), dot))
+                .collect::<Vec<_>>();
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+}
+
+#[test]
+fn dry_m7_refraction_surface_dynamics_and_volume_agree_in_all_three_entry_points() {
+    let default = build("default").expect("build default module");
+    let graph_file = include_bytes!("../../../render/default.graph.json");
+    for (label, wet, reflect, refract, waves, volume) in [
+        ("dry", false, false, false, false, false),
+        ("m7", true, false, false, false, false),
+        ("refract", true, false, true, false, false),
+        ("refract_reflect", true, true, true, false, false),
+        ("waves", true, true, true, true, false),
+        ("full_volume", true, true, true, true, true),
+    ] {
+        for units in [false, true] {
+            let env = env_with(units, wet, units, units, OutputEncoding::Sdr);
+            let tiers = WaterTiers {
+                reflect,
+                refract,
+                waves,
+                volume,
+            };
+            let mut flags = if wet { DECLARE_WATER } else { 0 };
+            if refract {
+                flags |= DECLARE_WATER_REFRACT;
+            }
+            if volume {
+                flags |= ae_render_abi::module::DECLARE_WATER_VOLUME;
+            }
+            if reflect {
+                flags |= DECLARE_WATER_REFLECT;
+            }
+            if waves {
+                flags |= ae_render_abi::module::DECLARE_WATER_WAVES;
+            }
+            if units {
+                flags |= DECLARE_UNITS | DECLARE_SHADOWS | DECLARE_PARTICLES;
+            }
+            let mut graph = native_graph_with_water_tiers(&env, TerrainOutput::Present, tiers);
+            resolve_libraries(&mut graph, &env);
+            let native = dot_of(&graph);
+            let wasm = module_dot(&default, &env, flags);
+            let json = module_dot(graph_file, &env, flags);
+            assert_eq!(native, wasm, "native and WASM {label}, units={units}");
+            assert_eq!(native, json, "native and JSON {label}, units={units}");
+            if units {
+                let failures = [("scene", &native), ("default", &wasm), ("json", &json)]
+                    .into_iter()
+                    .filter_map(|(name, dot)| check(&format!("{name}_water_{label}_present"), dot))
+                    .collect::<Vec<_>>();
+                assert!(failures.is_empty(), "{}", failures.join("\n"));
+            }
+        }
+    }
 }

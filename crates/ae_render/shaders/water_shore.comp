@@ -1,0 +1,102 @@
+#version 460
+// water.shore (M16.5, src/water/shore.rs): the shore travel-time field.
+// Every water texel gets the seconds a swell crest takes to reach the
+// waterline, zero at the waterline and rising seaward.
+//
+// Three modes in one shader, dispatched in order inside the library pass:
+//   0 seed:  mark the water texels that touch land (the waterline) and store
+//            their integer texel coordinates as the nearest seed (RG16UI:
+//            exact at every map width, unlike a half-float centre);
+//   1 flood: one jump-flood step (a 3x3 read at `step` texels, keeping the
+//            nearest valid seed); repeated with halving steps down to 1;
+//   2 final: distance to the nearest seed (metres) over the shallow-water
+//            speed 0.6 sqrt(g depth) at this texel, into R16F.
+// Each dispatch's writes are barriered to the next one's reads by the host.
+// The ground height texture is the terrain's (normalised heights), so the
+// water level arrives in the same units and depths scale by the height
+// scale (the resolve parameters, a storage block).
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#include "bindless.glsl"
+
+layout(r16f, set = AE_BINDLESS_SET, binding = AE_STORAGE_IMAGES) uniform image2D ae_storage_r16f[];
+layout(rg16ui, set = AE_BINDLESS_SET, binding = AE_STORAGE_IMAGES) uniform uimage2D ae_storage_rg16u[];
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer ShoreParams {
+    vec4 params;  // x: normalised water level, y: cell size (m), z: break depth (m), w: speed factor
+} ae_Shore[];
+#define SHORE (ae_Shore[AE_BUF(3)].params)
+#define FIELD (ae_storage_r16f[AE_BUF(0)])
+
+ivec2 grid_size() {
+    return ivec2(ae.words.z, ae.words.w);
+}
+
+float ground(ivec2 c) {
+    ivec2 hi = grid_size() - 1;
+    return texelFetch(AE_S2D(0, 0), clamp(c, ivec2(0), hi), 0).r;
+}
+
+// The ping-pong seed image (`slot` 1 or 2 in the handle table; the index is
+// a push-constant value, so dynamically uniform).
+#define SEEDS(slot) ae_storage_rg16u[AE_BUF(slot)]
+// No seed at a texel (texel coordinates are below this at every map size).
+const uint NO_SEED = 0xffffu;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = grid_size();
+    if (p.x >= size.x || p.y >= size.y) {
+        return;
+    }
+    uint mode = ae.words.x;
+    float level = SHORE.x;
+    if (mode == 0u) {
+        // Waterline: water here, land on one of the four sides.
+        bool water = ground(p) < level;
+        // At least one of the four sides is land.
+        float around = max(
+            max(ground(p + ivec2(1, 0)), ground(p - ivec2(1, 0))),
+            max(ground(p + ivec2(0, 1)), ground(p - ivec2(0, 1))));
+        uvec2 seed = (water && around >= level) ? uvec2(p) : uvec2(NO_SEED);
+        imageStore(SEEDS(1), p, uvec4(seed, 0u, 0u));
+        return;
+    }
+    int source = int(ae.words2.z);
+    if (mode == 1u) {
+        int step = int(ae.words.y);
+        int target = source == 1 ? 2 : 1;
+        uvec2 best = imageLoad(SEEDS(source), p).xy;
+        float best_distance = best.x == NO_SEED ? 1e20 : distance(vec2(best), vec2(p));
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = p + ivec2(dx, dy) * step;
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) {
+                    continue;
+                }
+                uvec2 seed = imageLoad(SEEDS(source), q).xy;
+                if (seed.x == NO_SEED) {
+                    continue;
+                }
+                float d = distance(vec2(seed), vec2(p));
+                if (d < best_distance) {
+                    best_distance = d;
+                    best = seed;
+                }
+            }
+        }
+        imageStore(SEEDS(target), p, uvec4(best, 0u, 0u));
+        return;
+    }
+    // Resolve: the distance to the waterline over the shallow-water speed at
+    // the break depth. A constant speed keeps the travel time monotone along
+    // a ray seaward; a depth-weighted integral (the prototype's Dijkstra
+    // bake) needs a fast-marching pass, not a nearest-seed flood.
+    uvec2 seed = imageLoad(SEEDS(source), p).xy;
+    bool water = ground(p) < level;
+    float time = 0.0;
+    if (water && seed.x != NO_SEED) {
+        float metres = distance(vec2(seed), vec2(p)) * SHORE.y;
+        float speed = SHORE.w * sqrt(9.81 * SHORE.z);
+        time = min(metres / speed, 60000.0);
+    }
+    imageStore(FIELD, p, vec4(time, 0.0, 0.0, 0.0));
+}

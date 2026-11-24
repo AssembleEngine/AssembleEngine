@@ -1,0 +1,22 @@
+# M16.1 frame-identity gate: one frame hash per pre-M16 fixture, keyed by
+# device and driver. A hash changes only in a commit whose message gives the
+# reason (M16.7's no-shadow rule for blips re-pins `observer`).
+#
+# Regenerate on a given machine by running with an empty section and pasting
+# the line the test prints:
+#   cargo test -p ae_render --test gpu -- --ignored --test-threads=1 m16_baseline_
+#
+# Fixtures, all at 320x180, 8 frames, shadows on, with the crossing maps:
+# `dry` (the land crossing), `wet` (the water crossing and M7 water),
+# `observer` (the water crossing, with the observer's own, enemy, blip and
+# selection looks and a fixed vision feed: line of sight to grid column 17,
+# explored to 19, so the lake straddles the sight boundary and the river is
+# never seen) and `off` (the water crossing, the surface switched off).
+#
+# NVIDIA GeForce RTX 3060 Ti, driverVersion 0x9b124100 (620.73.4.0), Linux
+# 7.3.5, loader 1.4.363, VK_LAYER_KHRONOS_validation.
+# NVIDIA GeForce RTX 3060 Ti | 0x9b124100
+dry 90466494cd8fd501
+wet f788822fbec8b6b3
+observer 7a98580fd243fcf7
+off ff142070860e9211

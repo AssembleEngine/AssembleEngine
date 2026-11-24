@@ -164,7 +164,8 @@ fn parse() -> Result<Opts> {
                 o.nav = Some(match value()?.as_str() {
                     "water" => Map::WaterCrossing,
                     "land" => Map::LandCrossing,
-                    m => bail!("unknown map {m} (water or land)"),
+                    "coast" => Map::Coast,
+                    m => bail!("unknown map {m} (water, land or coast)"),
                 })
             }
             "--map-cells" => o.map_cells = value()?.parse()?,

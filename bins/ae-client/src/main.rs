@@ -1,8 +1,8 @@
 //! Windowed client.
 //!
 //! ```text
-//! ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X]
-//!           [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--mailbox]
+//! ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X]
+//!           [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--mailbox]
 //!           [--frames-in-flight N] [--units N] [--workers N] [--ticks N]
 //!           [--render-module NAME|FILE.wasm|FILE.json] [--capture FILE.ppm]
 //! ```
@@ -58,7 +58,8 @@
 //! rest pose. A model replaces the class colour (no enemy tint).
 //!
 //! Controls: WASD / arrows pan, wheel zooms, right- or middle-drag orbits
-//! and tilts, Q/E orbit, R/F tilt, shift faster; `+`/`-` sim speed (doubles
+//! and tilts, Q/E orbit, R/F tilt, Page Up/Page Down raise and lower the
+//! orbit point (Home: back to the ground), shift faster; `+`/`-` sim speed (doubles
 //! with no upper limit; the sim becomes compute-bound), Pause pauses and
 //! resumes the sim and every animation clock (water, decals, particles),
 //! `[`/`]` more or less terrain detail, T wireframe, L colour by LOD depth,
@@ -88,7 +89,10 @@
 //! subdivision settles) and writes a binary PPM; with units it first runs
 //! `--ticks` sim ticks (default 300) and shows that tick. It always uses the
 //! SDR readback: a capture shows neither the HDR encoding nor the display's
-//! levels.
+//! levels. `--capture-seconds S` then keeps the sim running for S seconds
+//! of game time, two frames per tick on a clock pinned to the ticks, so the
+//! capture shows live wakes, impact rings and particles (without units,
+//! only the clock runs).
 //!
 //! `--bench` measures fixed scenes offscreen and writes `ae_bench` reports
 //! (see `bench.rs`; `--bench list` names them).
@@ -134,9 +138,7 @@ use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_render::demo::DemoApp;
 use ae_render::particles::{ParticleFeed, ParticlesSetup};
 use ae_render::swapchain::{HdrRequest, PresentPolicy};
-use ae_render::terrain::app::{
-    HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed, lod_view,
-};
+use ae_render::terrain::app::{HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed};
 use ae_render::terrain::edit::TerrainEditor;
 use ae_render::terrain::heightmap::{Heightmap, build_pyramid, generate};
 use ae_render::terrain::renderer::{FrameStats, TerrainInfo, Wireframe};
@@ -155,10 +157,37 @@ use std::time::{Duration, Instant};
 enum MapKind {
     Water,
     Land,
+    /// The M16 water fixture: a coastline, a shelf, deep water and a river
+    /// mouth ([`ae_nav::scenario::coast_terrain`]).
+    Coast,
     Generated,
     Demo,
     /// A map package's (`--package`).
     Package,
+}
+
+/// The water tiers selected by `--water-quality`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaterQuality {
+    /// No surface, and no tint or caustics under it (`--no-water`, M7's O).
+    Off,
+    /// Today's surface: one flat quad, analytic waves, tint and caustics.
+    M7,
+    Reflect,
+    Refract,
+    /// Reflection, refraction, surface dynamics and the underwater camera.
+    Full,
+}
+
+impl WaterQuality {
+    fn tiers(self) -> ae_render::library::WaterTiers {
+        ae_render::library::WaterTiers {
+            reflect: matches!(self, Self::Reflect | Self::Full),
+            refract: matches!(self, Self::Refract | Self::Full),
+            waves: self == Self::Full,
+            volume: self == Self::Full,
+        }
+    }
 }
 
 struct Options {
@@ -166,6 +195,7 @@ struct Options {
     map_cells: i32,
     relief: f32,
     camera: Option<[f32; 5]>,
+    camera_focus: Option<f32>,
     seconds: Option<f32>,
     exercise: bool,
     present: PresentPolicy,
@@ -182,6 +212,10 @@ struct Options {
     weights: bool,
     /// Draw the water surface on maps with water.
     water: bool,
+    /// The water tier (`--water-quality`; default full on wet maps).
+    water_quality: WaterQuality,
+    /// The loaded map's water settings (a map package's `water` object).
+    water_look: Option<ae_map::WaterLook>,
     /// The sun's shadows.
     shadows: bool,
     /// The tonemap's exposure, bloom and sun.
@@ -201,6 +235,10 @@ struct Options {
     explode: u32,
     /// `--capture-frames`: frames rendered before the capture is read.
     capture_frames: u32,
+    /// `--capture-seconds S`: after the settling frames, keep the sim
+    /// running for S seconds of game time (two frames per tick, the clock
+    /// pinned to the ticks), so wakes, rings and particles are live.
+    capture_seconds: Option<f32>,
     /// `--lights N`: N fixed point lights scattered around the camera
     /// target (a test of the clustered lights).
     lights: u32,
@@ -251,6 +289,7 @@ impl Default for Options {
             map_cells: 2560,
             relief: 1.0,
             camera: None,
+            camera_focus: None,
             seconds: None,
             exercise: false,
             present: PresentPolicy::Fifo,
@@ -265,6 +304,8 @@ impl Default for Options {
             tileset_size: 512,
             weights: false,
             water: true,
+            water_quality: WaterQuality::Full,
+            water_look: None,
             shadows: true,
             tone: ae_render::tonemap::ToneParams {
                 auto: true,
@@ -277,6 +318,7 @@ impl Default for Options {
             particle_blend: ae_render::particles::ParticleBlend::Sorted,
             explode: 0,
             capture_frames: 60,
+            capture_seconds: None,
             lights: 0,
             bench: None,
             record_threads: 1,
@@ -301,7 +343,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH]";
 
 fn parse() -> Result<Options> {
@@ -320,9 +362,10 @@ fn parse() -> Result<Options> {
                 o.map = match value("--map", &mut args)?.as_str() {
                     "water" => MapKind::Water,
                     "land" => MapKind::Land,
+                    "coast" => MapKind::Coast,
                     "generated" => MapKind::Generated,
                     "demo" => MapKind::Demo,
-                    other => bail!("--map {other:?}: expected water, land, generated or demo"),
+                    other => bail!("--map {other:?}: expected water, land, coast, generated or demo"),
                 }
             }
             "--map-cells" => o.map_cells = value("--map-cells", &mut args)?.parse().context("--map-cells")?,
@@ -333,11 +376,16 @@ fn parse() -> Result<Options> {
                     .split(',')
                     .map(str::parse)
                     .collect::<Result<_, _>>()
-                    .context("--camera X,Z,DIST,YAW,PITCH")?;
-                let parts: [f32; 5] = parts
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("--camera takes five numbers"))?;
-                o.camera = Some(parts);
+                    .context("--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]")?;
+                let [x, z, distance, yaw, pitch, rest @ ..] = parts.as_slice() else {
+                    bail!("--camera takes five numbers and an optional focus height");
+                };
+                anyhow::ensure!(
+                    rest.len() <= 1,
+                    "--camera takes five numbers and an optional focus height"
+                );
+                o.camera = Some([*x, *z, *distance, *yaw, *pitch]);
+                o.camera_focus = rest.first().copied();
             }
             "--seconds" => o.seconds = Some(value("--seconds", &mut args)?.parse().context("--seconds")?),
             "--exercise" => o.exercise = true,
@@ -393,6 +441,16 @@ fn parse() -> Result<Options> {
             }
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
+            "--water-quality" => {
+                o.water_quality = match value("--water-quality", &mut args)?.as_str() {
+                    "off" => WaterQuality::Off,
+                    "m7" => WaterQuality::M7,
+                    "reflect" => WaterQuality::Reflect,
+                    "refract" => WaterQuality::Refract,
+                    "full" => WaterQuality::Full,
+                    other => bail!("--water-quality {other:?}: expected off, m7, reflect, refract or full"),
+                }
+            }
             "--no-shadows" => o.shadows = false,
             "--ev100" => {
                 o.tone.ev100 = value("--ev100", &mut args)?.parse().context("--ev100")?;
@@ -420,6 +478,13 @@ fn parse() -> Result<Options> {
                     .parse::<u32>()
                     .context("--capture-frames N")?
                     .max(1)
+            }
+            "--capture-seconds" => {
+                let seconds: f32 = value("--capture-seconds", &mut args)?
+                    .parse()
+                    .context("--capture-seconds S")?;
+                anyhow::ensure!(seconds > 0.0, "--capture-seconds takes a positive number");
+                o.capture_seconds = Some(seconds);
             }
             "--lights" => o.lights = value("--lights", &mut args)?.parse().context("--lights N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
@@ -488,6 +553,9 @@ fn parse() -> Result<Options> {
             other => bail!("unknown argument {other:?}\n{USAGE}"),
         }
     }
+    if o.water_quality == WaterQuality::Off {
+        o.water = false;
+    }
     if !o.packages.is_empty() {
         let packages = ae_vfs::resolve_specs(&o.package_dirs, &o.packages)?;
         let mut vfs = ae_vfs::Vfs::new();
@@ -503,6 +571,7 @@ fn parse() -> Result<Options> {
             o.map = MapKind::Package;
             o.map_cells = map.info.cells;
             o.loaded_map = Some((Arc::new(map.to_terrain()), map.info.starts.clone()));
+            o.water_look = map.info.water;
         }
         o.mounts = packages.into_iter().map(|p| p.source).collect();
         // The packages' defaults (start points, the game's own) rule, not
@@ -552,11 +621,19 @@ fn default_workers() -> usize {
     (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 8)
 }
 
+/// The observer's vision feed: the sim publishes the observer's frames and
+/// the renderer shades by them, so both sides of the hand-off share one
+/// `Arc`. Without an observer, none (everything is drawn).
+fn observer_vision(s: &sim::SimOptions) -> Option<Arc<VisionFeed>> {
+    s.observer.map(|_| Arc::new(VisionFeed::new(s.vision_grid())))
+}
+
 /// The sim for this map, if it has units.
 fn sim_options(o: &Options) -> Option<sim::SimOptions> {
     let map = match o.map {
         MapKind::Water => Map::WaterCrossing,
         MapKind::Land => Map::LandCrossing,
+        MapKind::Coast => Map::Coast,
         MapKind::Package => Map::Loaded,
         MapKind::Generated | MapKind::Demo => return None,
     };
@@ -637,10 +714,11 @@ fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> 
     let mut materials = None;
     let mut nav = None;
     let (heightmap, scale, offset, water, cell_size) = match o.map {
-        MapKind::Water | MapKind::Land | MapKind::Package => {
+        MapKind::Water | MapKind::Land | MapKind::Coast | MapKind::Package => {
             let terrain = match (o.map, &o.loaded_map) {
                 (MapKind::Package, Some((t, _))) => (**t).clone(),
                 (MapKind::Water, _) => ae_nav::scenario::water_crossing_terrain(o.map_cells),
+                (MapKind::Coast, _) => ae_nav::scenario::coast_terrain(o.map_cells),
                 _ => ae_nav::scenario::land_crossing_terrain(o.map_cells),
             };
             let cell = terrain.geom.cell_size;
@@ -718,9 +796,17 @@ const DECALS: u32 = 1024;
 
 /// Where explosions go (particles and scorch marks, as the options turn
 /// them on), with `app` set up to draw them; `None` when both are off.
-fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects>>) {
+fn effects(app: TerrainApp, source: &Arc<TerrainSource>, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects>>) {
     let mut app = app;
     let mut effects = sim::Effects::default();
+    if source.info.water_level.is_some() {
+        let feed = Arc::new(ae_render::water::WaterFeed::default());
+        effects.surface_dynamics = o.water && o.water_quality.tiers().waves;
+        if effects.surface_dynamics {
+            app = app.with_water_feed(feed.clone());
+        }
+        effects.water = Some((source.clone(), feed));
+    }
     if let Some((feed, setup)) = particles(o) {
         app = app.with_particles(setup);
         effects.particles = Some(feed);
@@ -745,7 +831,7 @@ fn effects(app: TerrainApp, o: &Options) -> (TerrainApp, Option<Arc<sim::Effects
         app = app.with_decals(setup);
         effects.decals = Some(feed);
     }
-    let any = effects.particles.is_some() || effects.decals.is_some();
+    let any = effects.particles.is_some() || effects.decals.is_some() || effects.water.is_some();
     (app, any.then(|| Arc::new(effects)))
 }
 
@@ -811,7 +897,30 @@ fn explode_around(effects: &sim::Effects, target: Vec2, count: u32, seed: u32) -
     seen
 }
 
-/// Apply the tileset options to a new app.
+/// The map's water look as the renderer takes it: `ae_render` does not depend
+/// on `ae_map`, so the client converts field by field. No look (a generated
+/// map, or an archive from before M16) is [`WaterParams::default`].
+fn water_params(look: Option<ae_map::WaterLook>) -> ae_render::water::WaterParams {
+    let Some(look) = look else {
+        return ae_render::water::WaterParams::default();
+    };
+    ae_render::water::WaterParams {
+        absorption: look.absorption,
+        shallow: look.shallow,
+        deep: look.deep,
+        wind: look.wind,
+        wind_speed: look.wind_speed,
+        swell_amplitude: look.swell_amplitude,
+        swell_length: look.swell_length,
+        foam: look.foam,
+        caustics: look.caustics,
+        sub_tint: look.sub_tint,
+        sub_keep: look.sub_keep,
+        sub_tint_max: look.sub_tint_max,
+        outline: look.outline,
+    }
+}
+
 fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) -> TerrainApp {
     if let Some(t) = tileset {
         app = app.with_tileset(t);
@@ -819,6 +928,13 @@ fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) ->
     if o.water {
         app = app.with_water();
     }
+    app = app
+        .with_water_params(water_params(o.water_look.or_else(|| {
+            // The coast fixture carries no map package: it takes the
+            // prototype's sea.
+            matches!(o.map, MapKind::Coast).then(ae_map::WaterLook::prototype)
+        })))
+        .with_water_tiers(o.water_quality.tiers());
     if o.shadows {
         app = app.with_shadows();
     }
@@ -857,8 +973,10 @@ fn steer(
     source: &TerrainSource,
     dt: f32,
     sim_speed: &sim::SimSpeed,
+    water_volume: bool,
 ) {
     let held = window.held();
+    view.underwater_camera = water_volume && source.info.water_level.is_some();
     let camera = &mut view.camera;
     let speed = camera.distance * if held.fast { 2.5 } else { 0.9 } * dt;
     let (forward, right) = camera.ground_axes();
@@ -868,10 +986,30 @@ fn steer(
     let (w, h) = source.info.extent();
     camera.target = (camera.target + pan * speed).clamp(Vec2::ZERO, Vec2::new(w, h));
     camera.yaw += (held.orbit_right as i32 - held.orbit_left as i32) as f32 * 1.5 * dt - events.drag.0 * 0.005;
+    let min_pitch = if water_volume && source.info.water_level.is_some() {
+        -1.5
+    } else {
+        0.08
+    };
     camera.pitch =
         (camera.pitch + (held.tilt_up as i32 - held.tilt_down as i32) as f32 * 1.0 * dt + events.drag.1 * 0.004)
-            .clamp(0.08, 1.5);
-    camera.distance = (camera.distance * 0.88f32.powf(events.wheel)).clamp(20.0, w.max(h) * 2.0);
+            .clamp(min_pitch, 1.5);
+    // Page Up/Down move the orbit point off the ground (into the air, or up
+    // through the water from the seabed); Home follows the ground again.
+    let climb_rate = (camera.distance * 0.25).clamp(4.0, 200.0) * if held.fast { 2.5 } else { 1.0 };
+    let climb = (held.raise as i32 - held.lower as i32) as f32 * climb_rate * dt;
+    let ground = source.height_at(camera.target);
+    view.camera_focus = if held.ground {
+        None
+    } else {
+        orbit_height(view.camera_focus, ground, climb)
+    };
+    let submerged = water_volume
+        && source
+            .info
+            .water_level
+            .is_some_and(|level| view.camera_focus.unwrap_or(ground) < level);
+    camera.distance = (camera.distance * 0.88f32.powf(events.wheel)).clamp(min_zoom(submerged), w.max(h) * 2.0);
     if events.pressed & keys::PLUS != 0 {
         sim_speed.faster();
         println!("sim speed {}", sim_speed.label());
@@ -904,7 +1042,7 @@ fn steer(
             Some(_) => None,
             None => {
                 let (pw, ph) = window.pixel_size();
-                Some(lod_view(source, &view.camera, pw.max(1), ph.max(1)))
+                Some(view.lod_view(source, pw.max(1), ph.max(1)))
             }
         };
     }
@@ -929,15 +1067,32 @@ fn steer(
     }
     if events.pressed & keys::P != 0 {
         let c = &view.camera;
+        let focus = view.camera_focus.map_or_else(String::new, |y| format!(",{y:.2}"));
         println!(
-            "--camera {:.0},{:.0},{:.0},{:.3},{:.3}  (error target {:.2} px)",
+            "--camera {:.0},{:.0},{:.0},{:.3},{:.3}{focus}  (error target {:.2} px)",
             c.target.x, c.target.y, c.distance, c.yaw, c.pitch, view.tau
         );
     }
 }
 
+/// The closest the wheel brings the camera to its orbit point. Under water
+/// (with the volume drawn) it goes on down to the seabed, where the eye's
+/// clearance over the ground stops it; elsewhere the RTS limit holds.
+fn min_zoom(submerged: bool) -> f32 {
+    if submerged { 5.0 } else { 20.0 }
+}
+
+/// The orbit point's fixed height after climbing `climb` metres: `None`
+/// follows the ground at `ground`; a fixed height never sinks below it.
+fn orbit_height(focus: Option<f32>, ground: f32, climb: f32) -> Option<f32> {
+    match focus {
+        None if climb == 0.0 => None,
+        focus => Some((focus.unwrap_or(ground) + climb).max(ground)),
+    }
+}
+
 /// Apply `--camera`.
-fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>) {
+fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>, focus: Option<f32>) {
     if let Some([x, z, distance, yaw, pitch]) = camera {
         let view = app.view();
         let mut view = view.lock().unwrap();
@@ -945,6 +1100,7 @@ fn place_camera(app: &TerrainApp, camera: Option<[f32; 5]>) {
         view.camera.distance = distance;
         view.camera.yaw = yaw;
         view.camera.pitch = pitch;
+        view.camera_focus = focus;
     }
 }
 
@@ -964,31 +1120,30 @@ fn scatter_lights(app: TerrainApp, n: u32) -> TerrainApp {
 fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, path: &str) -> Result<ExitCode> {
     use ae_render::device::{GpuDevice, GpuInstance};
     use ae_render::executor::ExecutorConfig;
-    use ae_render::thread::{RenderApp, TargetInfo, run_headless};
+    use ae_render::thread::{Headless, RenderApp, TargetInfo, run_headless};
     let instance = Arc::new(GpuInstance::new(&[], None)?);
     let gpu = Arc::new(GpuDevice::new(instance.clone(), None)?);
     let app = with_look(TerrainApp::new(source.clone(), TerrainOutput::Readback), tileset(o)?, o);
-    let (mut app, effects_feed) = effects(app, o);
+    let (mut app, effects_feed) = effects(app, &source, o);
     if let Some(name) = &o.render_module {
         app = app.with_module(ae_render::module::build(name)?);
     }
     let mut sim_note = String::new();
+    let mut live = None;
     if let Some(s) = sim_options(o) {
         let started = Instant::now();
         let ground = Arc::new(GroundFeed::default());
         let mut sim = sim::Sim::new(&s, Some(ground.clone()))?;
-        if s.observer.is_some() {
-            let vision = Arc::new(VisionFeed::new(s.vision_grid()));
+        if let Some(vision) = observer_vision(&s) {
             sim = sim.with_vision(vision.clone());
             app = app.with_vision(vision);
+        }
+        if let Some(effects) = &effects_feed {
+            sim = sim.with_effects(effects.clone());
         }
         let built = started.elapsed();
         for _ in 0..o.ticks {
             sim.tick()?;
-        }
-        // `--explode` only where the observer sees, as deaths.
-        if let (Some(feed), Some((los, grid))) = (&effects_feed, sim.sight()) {
-            feed.set_sight(los, grid);
         }
         let ticked = started.elapsed() - built;
         if let (Some(update), Some(mut shown)) = (ground.take(), nav) {
@@ -1045,9 +1200,10 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         );
         let feed = Arc::new(UnitFeed::default());
         feed.publish(Arc::new(stream));
-        app = app.with_units(units_setup(&s, feed)?);
+        app = app.with_units(units_setup(&s, feed.clone())?);
+        live = Some((sim, feed));
     }
-    place_camera(&app, o.camera);
+    place_camera(&app, o.camera, o.camera_focus);
     app = scatter_lights(app, o.lights);
     if let Some(feed) = &effects_feed {
         let target = app.view().lock().unwrap().camera.target;
@@ -1066,18 +1222,32 @@ fn capture(source: Arc<TerrainSource>, nav: Option<Arc<Terrain>>, o: &Options, p
         format: ash::vk::Format::R8G8B8A8_SRGB,
         color_space: ash::vk::ColorSpaceKHR::SRGB_NONLINEAR,
     };
-    let executor = run_headless(
-        &gpu,
-        &mut app,
-        target,
-        o.capture_frames as usize,
-        ExecutorConfig {
-            frames_in_flight: o.frames_in_flight,
-            profile: true,
-            record_threads: o.record_threads,
-            ..ExecutorConfig::default()
-        },
-    )?;
+    let config = ExecutorConfig {
+        frames_in_flight: o.frames_in_flight,
+        profile: true,
+        record_threads: o.record_threads,
+        ..ExecutorConfig::default()
+    };
+    let executor = match o.capture_seconds {
+        Some(seconds) => {
+            const TICK: f32 = 1.0 / 30.0;
+            app.view().lock().unwrap().time = Some(0.0);
+            let mut headless = Headless::new(&gpu, &mut app, target, config)?;
+            headless.frames(&mut app, o.capture_frames as usize)?;
+            for tick in 0..(seconds / TICK).round() as u32 {
+                if let Some((sim, feed)) = live.as_mut() {
+                    sim.tick()?;
+                    feed.publish(Arc::new(sim.stream(TICK)?));
+                }
+                for half in 0..2 {
+                    app.view().lock().unwrap().time = Some((tick as f32 + half as f32 * 0.5) * TICK);
+                    headless.frames(&mut app, 1)?;
+                }
+            }
+            headless.finish()?
+        }
+        None => run_headless(&gpu, &mut app, target, o.capture_frames as usize, config)?,
+    };
     let pixels = app.readback().context("no readback")?;
     let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
     ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
@@ -1218,6 +1388,7 @@ fn run(o: Options) -> Result<ExitCode> {
                     tileset(&o)?,
                     &o,
                 ),
+                source,
                 &o,
             );
             app = app.with_hdr(hdr_settings.clone());
@@ -1225,7 +1396,7 @@ fn run(o: Options) -> Result<ExitCode> {
             if let Some(s) = sim_options(&o) {
                 let feed = Arc::new(UnitFeed::default());
                 app = app.with_units(units_setup(&s, feed.clone())?);
-                let vision = s.observer.map(|_| Arc::new(VisionFeed::new(s.vision_grid())));
+                let vision = observer_vision(&s);
                 if let Some(v) = &vision {
                     app = app.with_vision(v.clone());
                 }
@@ -1257,7 +1428,7 @@ fn run(o: Options) -> Result<ExitCode> {
                     app.module_status(),
                 ));
             }
-            place_camera(&app, o.camera);
+            place_camera(&app, o.camera, o.camera_focus);
             app = scatter_lights(app, o.lights);
             terrain = Some((app.view(), app.stats()));
             GpuRenderThread::start(&window, app, config)?
@@ -1266,6 +1437,7 @@ fn run(o: Options) -> Result<ExitCode> {
     let label = match o.map {
         MapKind::Water => "water crossing",
         MapKind::Land => "land crossing",
+        MapKind::Coast => "coast",
         MapKind::Generated => "generated",
         MapKind::Demo => "demo",
         MapKind::Package => "package map",
@@ -1393,7 +1565,15 @@ fn run(o: Options) -> Result<ExitCode> {
         last = Instant::now();
         if let (Some((view, _)), Some(source)) = (&terrain, &source) {
             let mut view = view.lock().unwrap_or_else(|p| p.into_inner());
-            steer(&window, &events, &mut view, source, dt, &sim_speed);
+            steer(
+                &window,
+                &events,
+                &mut view,
+                source,
+                dt,
+                &sim_speed,
+                o.water && o.water_quality.tiers().volume,
+            );
             if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0)
                 && explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0
             {
@@ -1407,6 +1587,11 @@ fn run(o: Options) -> Result<ExitCode> {
                 explode_around(feed, view.camera.target, 3, started.elapsed().as_nanos() as u32);
                 last_boom = Instant::now();
             }
+        }
+        if o.game == "crossing" && o.observer.is_some() && events.pressed & keys::Y != 0 {
+            ui.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(sim::UiInput::NextObserver);
         }
         if o.exercise {
             exercise(&mut window, started, &mut step);
@@ -1555,9 +1740,8 @@ fn run(o: Options) -> Result<ExitCode> {
 /// the camera ray through it, marched over the heightmap, the crossing
 /// bisected. `None` if the ray misses the map.
 fn ground_at(view: &TerrainView, source: &TerrainSource, (w, h): (u32, u32), x: f32, y: f32) -> Option<Vec2> {
-    let mut camera = view.camera;
-    camera.ground = source.height_at(camera.target);
-    let eye = camera.eye(|p| source.height_at(p));
+    let camera = view.resolved_camera(source);
+    let eye = view.eye(source);
     let inverse = (camera.proj(w as f32 / h.max(1) as f32) * camera.view(eye)).inverse();
     let at = |z: f32| {
         let p = inverse * glam::Vec4::new(x * 2.0 - 1.0, y * 2.0 - 1.0, z, 1.0);
@@ -1636,6 +1820,142 @@ mod tests {
         assert!(
             terrain.water_depth.iter().any(|&d| d > 0),
             "the map has water to subtract"
+        );
+    }
+
+    /// M16.4: a map's water look converts field by field; the defaults on
+    /// both sides agree, and the tiers that are not built are refused by
+    /// name (M7 and off are accepted).
+    #[test]
+    fn water_settings_and_quality_reach_the_renderer() {
+        assert_eq!(
+            water_params(None),
+            ae_render::water::WaterParams::default(),
+            "no settings are the defaults"
+        );
+        assert_eq!(
+            water_params(Some(ae_map::WaterLook::default())),
+            ae_render::water::WaterParams::default(),
+            "the map defaults are the render defaults"
+        );
+        let look = ae_map::WaterLook {
+            absorption: [0.2, 0.06, 0.05],
+            shallow: [100.0, 200.0, 300.0],
+            deep: [1.0, 2.0, 3.0],
+            wind: [0.6, 0.8],
+            wind_speed: 7.5,
+            swell_amplitude: 0.5,
+            swell_length: 30.0,
+            foam: 0.4,
+            caustics: 0.2,
+            sub_tint: 3.0,
+            sub_keep: 0.5,
+            sub_tint_max: 12.0,
+            outline: true,
+        };
+        let p = water_params(Some(look));
+        assert_eq!(p.absorption, look.absorption);
+        assert_eq!(p.shallow, look.shallow);
+        assert_eq!(p.deep, look.deep);
+        assert_eq!(p.wind, look.wind);
+        assert_eq!(p.wind_speed, look.wind_speed);
+        assert_eq!(p.swell_amplitude, look.swell_amplitude);
+        assert_eq!(p.swell_length, look.swell_length);
+        assert_eq!(p.foam, look.foam);
+        assert_eq!(p.caustics, look.caustics);
+        assert_eq!(p.sub_tint, look.sub_tint);
+        assert_eq!(p.sub_keep, look.sub_keep);
+        assert_eq!(p.sub_tint_max, look.sub_tint_max);
+        assert_eq!(p.outline, look.outline);
+    }
+
+    #[test]
+    fn the_orbit_point_climbs_from_the_ground_and_never_sinks_below_it() {
+        // Following the ground until a key moves it.
+        assert_eq!(orbit_height(None, 30.0, 0.0), None);
+        // Raised from the seabed, up through the water.
+        assert_eq!(orbit_height(None, 30.0, 5.0), Some(35.0));
+        assert_eq!(orbit_height(Some(35.0), 30.0, 20.0), Some(55.0));
+        // Lowered, it stops on the ground; panning onto higher ground lifts it.
+        assert_eq!(orbit_height(Some(35.0), 30.0, -10.0), Some(30.0));
+        assert_eq!(orbit_height(Some(35.0), 48.0, 0.0), Some(48.0));
+        // The wheel goes down to the seabed only under water.
+        assert!(min_zoom(true) < min_zoom(false));
+        assert_eq!(min_zoom(false), 20.0);
+    }
+
+    #[test]
+    fn water_quality_selects_the_expected_tiers() {
+        assert_eq!(Options::default().water_quality, WaterQuality::Full);
+        for (quality, reflect, refract) in [
+            (WaterQuality::Off, false, false),
+            (WaterQuality::M7, false, false),
+            (WaterQuality::Reflect, true, false),
+            (WaterQuality::Refract, false, true),
+            (WaterQuality::Full, true, true),
+        ] {
+            assert_eq!(
+                quality.tiers(),
+                ae_render::library::WaterTiers {
+                    reflect,
+                    refract,
+                    waves: quality == WaterQuality::Full,
+                    volume: quality == WaterQuality::Full,
+                }
+            );
+        }
+    }
+
+    /// The observer's vision hand-off (M16.1): a real sim publishes its
+    /// observer's line of sight and explored cells into the feed the
+    /// renderer reads, and an app given that feed shades by vision (the
+    /// water pixels are pinned by `ae_render`'s observer baseline).
+    #[test]
+    fn the_observer_vision_hand_off_publishes_frames() {
+        let o = sim::SimOptions {
+            map: Map::Coast,
+            map_cells: 256,
+            units: 8,
+            workers: 1,
+            quake: 0,
+            teams: 2,
+            observer: Some(0),
+            game: "crossing".into(),
+            mounts: Vec::new(),
+            param: None,
+            wasm: None,
+            loaded_map: None,
+            models: Vec::new(),
+        };
+        let vision = observer_vision(&o).expect("an observer has a vision feed");
+        let mut s = sim::Sim::new(&o, None).expect("the sim").with_vision(vision.clone());
+        s.tick().expect("a tick");
+        s.stream(1.0 / 30.0).expect("a stream");
+        let frame = vision.latest().expect("the sim published a vision frame");
+        let (los, grid) = s.sight().expect("an observer has sight");
+        assert_eq!(frame.los, los.words, "the frame is the observer's line of sight");
+        assert_eq!(
+            frame.explored.len(),
+            (grid.width as usize).div_ceil(64) * grid.height as usize
+        );
+        assert!(frame.los.iter().any(|&w| w != 0), "the observer sees some cells");
+
+        // The renderer's half: the same feed turns vision shading on.
+        let terrain = ae_nav::scenario::coast_terrain(256);
+        let (heightmap, scale, offset, water) = nav_heightmap(&terrain, 1.0);
+        let pyramid = build_pyramid(&heightmap, scale, offset);
+        let info = TerrainInfo::new(&heightmap, &pyramid, terrain.geom.cell_size, scale, offset, water);
+        let source = Arc::new(TerrainSource {
+            heightmap,
+            pyramid,
+            info,
+            materials: Some(terrain.material.clone()),
+        });
+        let app = TerrainApp::new(source, TerrainOutput::Readback).with_vision(vision);
+        assert!(app.has_vision(), "the app carries the feed the sim publishes");
+        assert!(
+            app.view().lock().unwrap().vision,
+            "the view shades by it (on by default)"
         );
     }
 }

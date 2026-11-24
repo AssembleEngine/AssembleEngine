@@ -42,4 +42,5 @@ pub mod thread;
 pub mod tonemap;
 pub mod units;
 pub mod upload;
+pub mod water;
 pub mod window;

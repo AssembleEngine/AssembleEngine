@@ -26,6 +26,12 @@ use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ImageBinding {
+    /// The layout the image already holds at its first graph use (a
+    /// host-uploaded image is `SHADER_READ_ONLY_OPTIMAL`): the executor's
+    /// access state starts there, so the first read keeps the contents
+    /// instead of discarding them from `UNDEFINED`. `UNDEFINED` for an
+    /// image a pass writes first.
+    pub initial: vk::ImageLayout,
     pub image: vk::Image,
     pub view: vk::ImageView,
     pub format: vk::Format,
@@ -225,10 +231,17 @@ impl StateStore for Store<'_> {
         match key {
             StateKey::Physical(_) => self.slot.entry(key).or_default(),
             StateKey::External(resource) => {
-                let identity = self.bindings[resource.index()]
-                    .map(|b| b.identity())
-                    .unwrap_or(u64::MAX);
-                self.external.entry(identity).or_default()
+                let binding = self.bindings.get(resource.index()).copied().flatten();
+                let identity = binding.map(|b| b.identity()).unwrap_or(u64::MAX);
+                // An image the host already filled starts in its layout
+                // (e.g. the uploaded caustic web), not UNDEFINED.
+                let initial = match binding {
+                    Some(Binding::Image(image)) => image.initial,
+                    _ => vk::ImageLayout::UNDEFINED,
+                };
+                self.external
+                    .entry(identity)
+                    .or_insert_with(|| AccessState::initialized(initial))
             }
         }
     }
@@ -743,6 +756,7 @@ impl<R> Executor<R> {
                         .unwrap_or_default();
                     if let Some(image) = &entry.image {
                         Some(Binding::Image(ImageBinding {
+                            initial: vk::ImageLayout::UNDEFINED,
                             image: image.image,
                             view: image.view,
                             format: image.desc.format,

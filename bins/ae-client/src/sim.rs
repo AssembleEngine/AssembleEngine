@@ -17,10 +17,11 @@ use crate::poser::Poser;
 use ae_model::anim::Rig;
 use ae_nav::math::TICK_SECONDS;
 use ae_render::decals::{Blend, Decal, DecalFeed, layer};
-use ae_render::particles::{Burst, EFFECT_NAMES, ParticleFeed, explosion};
-use ae_render::terrain::app::{VisionFeed, VisionFrame};
+use ae_render::particles::{Burst, EFFECT_NAMES, ParticleFeed, effect, explosion};
+use ae_render::terrain::app::{TerrainSource, VisionFeed, VisionFrame};
 use ae_render::terrain::renderer::VisionGrid;
 use ae_render::units::{ATTR_POSE, ATTRIBUTE_COUNT, AnimWrites, InstanceStream, NO_POSE, UnitClass, UnitFeed};
+use ae_render::water::{WaterFeed, WaterImpact};
 use ae_sdk::Entity;
 use ae_sdk::aim::Orientation;
 use ae_sdk::anim::{Anim, model_id};
@@ -31,7 +32,7 @@ use ae_services::anim::AnimPlugin;
 use ae_services::fx::{FxFeed, FxPlugin};
 use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
-use ae_services::view::{SENSOR_CELL, ViewPipeline};
+use ae_services::view::{SENSOR_CELL, ViewPipeline, WaterColumn};
 use ae_sim::capture::{Capture, CaptureSpec};
 use ae_sim::input::{Command, TickBundle};
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
@@ -58,6 +59,7 @@ const F_VX: usize = 2;
 const F_VY: usize = 3;
 const F_RADIUS: usize = 4;
 const F_PROFILE: usize = 5;
+const F_WATER: usize = 6;
 
 #[derive(Clone, Debug)]
 pub struct SimOptions {
@@ -92,6 +94,8 @@ pub struct SimOptions {
 /// A player's action from the window, in world coordinates.
 #[derive(Clone, Copy, Debug)]
 pub enum UiInput {
+    /// Cycle through the available allyteam observers.
+    NextObserver,
     /// Select the observer's own units within `radius` of `(x, y)`.
     Select { x: f32, y: f32, radius: f32 },
     /// Order the selection to `(x, y)`: in the skirmish game an
@@ -313,7 +317,8 @@ impl SimOptions {
                 })
                 .collect();
         }
-        self.plugin()
+        let mut classes: Vec<_> = self
+            .plugin()
             .map_profiles()
             .iter()
             .enumerate()
@@ -322,7 +327,15 @@ impl SimOptions {
                 gamut: ae_render::colorspace::Gamut::Bt709,
                 floats: p.medium.on_surface(),
             })
-            .collect()
+            .collect();
+        if self.game == "crossing" && self.map == Map::Coast {
+            classes.push(UnitClass {
+                color: [0.12, 0.48, 0.52],
+                gamut: ae_render::colorspace::Gamut::Bt709,
+                floats: true,
+            });
+        }
+        classes
     }
 }
 
@@ -335,19 +348,20 @@ pub struct Sim {
     workers: usize,
     spec: CaptureSpec,
     capture: Capture,
+    dive: Option<WaterColumn>,
     streamer: Streamer,
     view: Option<ViewState>,
     classes: u32,
+    class_floats: Vec<bool>,
+    water_motion_tick: Option<u64>,
     /// Skirmish: the bots of the allyteams no player plays, and the game's
     /// unit command stream.
     bots: Vec<ae_bot::SkirmishBot>,
     unit_command: Option<u64>,
     /// Explosions for units that die where the observer sees.
     effects: Option<Arc<Effects>>,
-    /// The last capture's units, by entity: `(entity, x, y, radius)`.
-    last_units: Vec<(u64, f32, f32, f32)>,
-    /// The observer's line of sight at the last tick.
-    last_los: Option<Bits>,
+    /// The last capture's units, sorted by entity.
+    last_units: Vec<DeathRow>,
     /// The module declares `Orientation` (its units may be drawn by it).
     has_orientation: bool,
     /// The module declares `Dying` (a killed unit's script plays its death).
@@ -482,6 +496,7 @@ impl Sim {
             None => None,
         };
         let classes = o.own_classes().len() as u32;
+        let dive = WaterColumn::new(&rt.schema, "Dive", "depth")?;
         let (bots, unit_command) = if o.skirmish() {
             let bots = ae_bot::SkirmishBot::pair(&rt)?
                 .into_iter()
@@ -504,17 +519,19 @@ impl Sim {
             workers: o.workers,
             spec,
             capture: Capture::default(),
+            dive,
             streamer: Streamer {
                 poser,
                 ..Streamer::default()
             },
             view,
             classes,
+            class_floats: o.classes().iter().map(|class| class.floats).collect(),
+            water_motion_tick: None,
             bots,
             unit_command,
             effects: None,
             last_units: Vec::new(),
-            last_los: None,
             has_orientation,
             has_dying,
             last_dying: Vec::new(),
@@ -538,6 +555,9 @@ impl Sim {
     /// Set off an explosion in `effects` for every unit that dies where
     /// the observer saw at the tick before (every unit without an observer).
     pub fn with_effects(mut self, effects: Arc<Effects>) -> Self {
+        if let Some(view) = &self.view {
+            effects.set_coverage(view);
+        }
         self.effects = Some(effects);
         self
     }
@@ -547,35 +567,40 @@ impl Sim {
     /// Only what the observer saw: a unit dying in the fog leaves nothing.
     /// A unit that died by script (it had `Dying` in the last capture) is
     /// skipped: its effects are its death script's.
-    fn emit_deaths(&mut self, dying: &[u64]) {
-        let Some(effects) = &self.effects else { return };
+    fn emit_effects(&mut self, dying: &[u64]) {
+        let Some(effects) = &self.effects else {
+            self.emit_fx();
+            return;
+        };
         let c = &self.capture;
-        let mut now: Vec<(u64, f32, f32, f32)> = (0..c.len())
-            .map(|r| (c.entities[r], c.f32(F_X, r), c.f32(F_Y, r), c.f32(F_RADIUS, r)))
+        let mut now: Vec<DeathRow> = (0..c.len())
+            .map(|r| {
+                (
+                    c.entities[r],
+                    c.f32(F_X, r),
+                    c.f32(F_Y, r),
+                    c.f32(F_RADIUS, r),
+                    water_depth(c, r),
+                )
+            })
             .collect();
         now.sort_unstable_by_key(|u| u.0);
-        let grid = self.view.as_ref().map(|v| v.pipeline.coverage.grid);
-        let seen = |x, y| match (&self.last_los, grid) {
-            (Some(los), Some(grid)) => {
-                let (cx, cy) = grid.cell(x, y);
-                los.get(cx, cy)
-            }
-            _ => true,
-        };
-        let sites = deaths(&self.last_units, &now, &self.last_dying, seen);
-        for &(x, y, scale, seed) in &sites {
-            effects.explode(x, y, scale, seed);
+        let sites = deaths(&self.last_units, &now, &self.last_dying, |x, y, sub| {
+            effects.eligible(x, y, sub)
+        });
+        for &(x, y, depth, scale, seed) in &sites {
+            effects.explode_at_depth(x, y, depth, scale, seed);
         }
+        if let Some(v) = &self.view {
+            effects.set_coverage(v);
+        }
+        self.emit_fx();
         self.last_units = now;
         self.last_dying = dying.to_vec();
-        if let Some(v) = &self.view {
-            let los = v.pipeline.coverage.los[v.observer[0].ally as usize].clone();
-            effects.set_sight(los.clone(), v.pipeline.coverage.grid);
-            self.last_los = Some(los);
-        }
     }
 
     /// The observer's line of sight in the last view, and its grid.
+    #[cfg(test)]
     pub fn sight(&self) -> Option<(Bits, SensorGrid)> {
         let v = self.view.as_ref()?;
         Some((
@@ -603,11 +628,17 @@ impl Sim {
     /// selected unit still in view (view ids resolved to entities by the
     /// observer, here in trusted code), all in one group.
     pub fn tick_with(&mut self, inputs: &[UiInput]) -> Result<()> {
+        if inputs.iter().any(|input| matches!(input, UiInput::NextObserver))
+            && let Some(view) = &self.view
+        {
+            self.switch_observer((view.observer[0].ally + 1) % view.pipeline.coverage.allies() as u32)?;
+        }
         let mut bundle = TickBundle::new(self.world.tick);
         if let Some(v) = self.view.as_mut() {
             let ally = v.observer[0].ally;
             for input in inputs {
                 match *input {
+                    UiInput::NextObserver => {}
                     UiInput::Select { x, y, radius } => {
                         let t = &v.table;
                         let [fx, fy] =
@@ -665,6 +696,32 @@ impl Sim {
         Ok(())
     }
 
+    pub fn switch_observer(&mut self, ally: u32) -> Result<()> {
+        let Some(view) = &mut self.view else { return Ok(()) };
+        anyhow::ensure!(
+            (ally as usize) < view.pipeline.coverage.allies(),
+            "unknown observer {ally}"
+        );
+        if view.observer[0].ally == ally {
+            return Ok(());
+        }
+        view.observer[0] = Observer::new(ally, 0x0B5E_4E00 ^ ally as u64);
+        view.explored.clear();
+        view.table = ViewTable::default();
+        view.selected.clear();
+        self.streamer.reset_view();
+        self.last_units.clear();
+        self.last_dying.clear();
+        self.water_motion_tick = None;
+        if let Some(fx) = &self.fx {
+            fx.take();
+        }
+        if let Some(effects) = &self.effects {
+            effects.clear(view);
+        }
+        Ok(())
+    }
+
     /// Units of movement class `class` with a non-zero velocity in the last
     /// capture.
     pub fn moving(&self, class: u32) -> usize {
@@ -677,8 +734,21 @@ impl Sim {
     /// Capture the world and build the stream (`tick_seconds` 0: no
     /// interpolation): every unit, or what the observer sees.
     pub fn stream(&mut self, tick_seconds: f32) -> Result<InstanceStream> {
-        self.emit_fx();
         self.rt.capture(&self.world, &self.spec, &mut self.capture)?;
+        if let Some(dive) = &mut self.dive {
+            dive.capture(&self.rt, &self.world)?;
+            self.capture.columns.resize_with(F_WATER, Vec::new);
+            if self.capture.columns[F_PROFILE].is_empty() {
+                self.capture.columns[F_PROFILE].resize(self.capture.entities.len(), 0);
+            }
+            self.capture.columns.push(
+                self.capture
+                    .entities
+                    .iter()
+                    .map(|&e| dive.get(e).unwrap_or_default())
+                    .collect(),
+            );
+        }
         let mut dying = Vec::new();
         if self.has_dying {
             for (ids, _) in self.rt.chunks(&self.world, "Dying")? {
@@ -687,7 +757,7 @@ impl Sim {
             dying.sort_unstable();
         }
         if self.view.is_none() {
-            self.emit_deaths(&dying);
+            self.emit_effects(&dying);
         }
         let Some(v) = self.view.as_mut() else {
             let t0 = Instant::now();
@@ -732,6 +802,7 @@ impl Sim {
                 .streamer
                 .stream(&self.capture, &anims, &orientations, Instant::now(), tick_seconds);
             self.pose_ms = t0.elapsed().as_secs_f64() * 1e3;
+            self.emit_water_motion(&stream);
             return Ok(stream);
         };
         let t0 = Instant::now();
@@ -753,6 +824,7 @@ impl Sim {
         let [fx, fy, fvx, fvy, fr, fp] = v
             .fields
             .map(|f| t.fields.iter().position(|&c| c == f).expect("viewed field"));
+        let depth = v.pipeline.spec.submerged.and_then(|f| t.column(f));
         let rows: Vec<UnitRow> = (0..t.len())
             .map(|r| {
                 let shown = |c: usize| t.mask[r] & (1 << c) != 0;
@@ -771,7 +843,8 @@ impl Sim {
                     vy: f32::from_bits(word(fvy)),
                     radius: if shown(fr) { word(fr) } else { BLIP_RADIUS.to_bits() },
                     class,
-                    state: t.state[r] as u8,
+                    water_depth: depth.map_or(0.0, |col| f32::from_bits(col[r])),
+                    state: t.state[r],
                 }
             })
             .collect();
@@ -782,14 +855,77 @@ impl Sim {
             .stream_rows(self.capture.tick, &rows, &[], &[], Instant::now(), tick_seconds);
         // After the rows: the last tick's line of sight decides, then
         // this one's is kept.
-        self.emit_deaths(&dying);
+        self.emit_effects(&dying);
         let v = self.view.as_mut().expect("observer");
         v.ms = [
             (t1 - t0).as_secs_f64() * 1e3,
             (t2 - t1).as_secs_f64() * 1e3,
             t2.elapsed().as_secs_f64() * 1e3,
         ];
+        self.emit_water_motion(&stream);
         Ok(stream)
+    }
+
+    fn emit_water_motion(&mut self, stream: &InstanceStream) {
+        let Some(fx) = &self.effects else { return };
+        let (true, Some((source, _)), Some(particles)) = (fx.surface_dynamics, &fx.water, &fx.particles) else {
+            return;
+        };
+        let period = (0.16 / stream.sim_seconds.max(0.01)).ceil() as u64;
+        if self
+            .water_motion_tick
+            .is_some_and(|last| stream.tick.saturating_sub(last) < period)
+        {
+            return;
+        }
+        self.water_motion_tick = Some(stream.tick);
+        use ae_render::units::{
+            ATTR_CLASS, ATTR_PREV_X, ATTR_PREV_Y, ATTR_RADIUS, ATTR_VIEW, ATTR_WATER, ATTR_X, ATTR_Y,
+        };
+        let c = &stream.columns;
+        let (x, z, prev_x, prev_z) = (&c[ATTR_X], &c[ATTR_Y], &c[ATTR_PREV_X], &c[ATTR_PREV_Y]);
+        let (radius, class, water, view) = (&c[ATTR_RADIUS], &c[ATTR_CLASS], &c[ATTR_WATER], &c[ATTR_VIEW]);
+        let f = |column: &[u32], row| f32::from_bits(column[row]);
+        let level = fx.water_level();
+        let mut bursts = Vec::new();
+        const MIN_TRAVEL_SQ: f32 = 0.01;
+        for r in 0..stream.len() {
+            let state = view[r];
+            if state > RowState::Seen as u32 {
+                continue;
+            }
+            let p = glam::Vec2::new(f(x, r), f(z, r));
+            let travel = p - glam::Vec2::new(f(prev_x, r), f(prev_z, r));
+            let depth = f(water, r);
+            if travel.length_squared() <= MIN_TRAVEL_SQ
+                || source.height_at(p) >= level
+                || (state != RowState::Own as u32 && !fx.eligible(p.x, p.y, depth > 0.0))
+            {
+                continue;
+            }
+            let radius = f(radius, r).clamp(1.0, 12.0);
+            let bow = travel.normalize() * radius;
+            let (at, y, kind) = if depth > 0.0 {
+                (
+                    p - bow * 0.75,
+                    (level - depth).max(source.height_at(p) + 0.5),
+                    effect::BUBBLE,
+                )
+            } else if self.class_floats.get(class[r] as usize).copied().unwrap_or(false) {
+                (p + bow * 0.7, 0.65, effect::BOW_SPRAY)
+            } else {
+                continue;
+            };
+            bursts.push(Burst {
+                pos: [at.x, y, at.y],
+                ground: kind == effect::BOW_SPRAY,
+                effect: kind,
+                count: 3,
+                scale: (radius / 3.0).clamp(0.7, 1.8),
+                seed: stream.tick as u32 ^ at.x.to_bits().rotate_left(13) ^ at.y.to_bits(),
+            });
+        }
+        particles.emit_all(&bursts);
     }
 
     /// The effects the sim's `fx` system has published since the last
@@ -806,7 +942,19 @@ impl Sim {
             return;
         }
         let Some(fx) = self.effects.clone() else { return };
-        let bursts = fx_bursts(&effects, &fx, &mut self.warned_fx);
+        let depth = |entity| {
+            self.dive.as_ref().map_or(0.0, |dive| {
+                dive.get(entity).map_or_else(
+                    || {
+                        self.last_units
+                            .binary_search_by_key(&entity, |row| row.0)
+                            .map_or(0.0, |i| self.last_units[i].4)
+                    },
+                    f32::from_bits,
+                )
+            })
+        };
+        let bursts = fx_bursts(&effects, &fx, &mut self.warned_fx, depth);
         if let Some(particles) = &fx.particles {
             particles.emit_all(&bursts);
         }
@@ -856,19 +1004,27 @@ fn profile(c: &Capture, r: usize) -> u32 {
     c.columns.get(F_PROFILE).map_or(0, |col| col[r])
 }
 
-/// Explosions (`(x, y, scale, seed)`) for the units of `last` missing from
-/// `now` (both sorted by entity: `(entity, x, y, radius)`) that stood where
-/// `seen(x, y)`.
+fn water_depth(c: &Capture, row: usize) -> f32 {
+    c.columns.get(F_WATER).map_or(0.0, |col| f32::from_bits(col[row]))
+}
+
+/// Entity, world x/z, radius and submerged depth.
+type DeathRow = (u64, f32, f32, f32, f32);
+
+/// Explosions for units missing from the new capture. Both inputs are sorted by entity.
 fn deaths(
-    last: &[(u64, f32, f32, f32)],
-    now: &[(u64, f32, f32, f32)],
+    last: &[DeathRow],
+    now: &[DeathRow],
     dying: &[u64],
-    seen: impl Fn(f32, f32) -> bool,
-) -> Vec<(f32, f32, f32, u32)> {
+    eligible: impl Fn(f32, f32, bool) -> bool,
+) -> Vec<(f32, f32, f32, f32, u32)> {
     let mut sites = Vec::new();
-    for &(id, x, y, radius) in last {
-        if now.binary_search_by_key(&id, |u| u.0).is_err() && dying.binary_search(&id).is_err() && seen(x, y) {
-            sites.push((x, y, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
+    for &(id, x, y, radius, depth) in last {
+        if now.binary_search_by_key(&id, |u| u.0).is_err()
+            && dying.binary_search(&id).is_err()
+            && eligible(x, y, depth > 0.0)
+        {
+            sites.push((x, y, depth, (radius / 6.0).clamp(0.6, 3.0), (id ^ (id >> 32)) as u32));
         }
     }
     sites
@@ -878,7 +1034,7 @@ fn deaths(
 /// `sees`, at the effect's nav `(x, y)`), named by the effects catalogue
 /// (`EFFECT_NAMES`); an unknown name is warned about once and skipped.
 /// `dir` is unused: the catalogue's effects are spherical for now.
-fn fx_bursts(effects: &[Effect], fx: &Effects, warned: &mut Vec<u64>) -> Vec<Burst> {
+fn fx_bursts(effects: &[Effect], fx: &Effects, warned: &mut Vec<u64>, depth: impl Fn(u64) -> f32) -> Vec<Burst> {
     let mut bursts = Vec::new();
     for e in effects {
         let Some(effect) = EFFECT_NAMES
@@ -895,12 +1051,17 @@ fn fx_bursts(effects: &[Effect], fx: &Effects, warned: &mut Vec<u64>) -> Vec<Bur
             }
             continue;
         };
-        if !fx.sees(e.pos[0], e.pos[2]) {
+        let depth = depth(e.entity.0);
+        if !fx.eligible(e.pos[0], e.pos[2], depth > 0.0) {
             continue;
         }
         bursts.push(Burst {
-            pos: e.pos,
-            ground: true,
+            pos: if depth > 0.0 {
+                [e.pos[0], fx.water_level() - depth + e.pos[1], e.pos[2]]
+            } else {
+                e.pos
+            },
+            ground: depth <= 0.0,
             effect: effect as u32,
             count: e.count,
             scale: e.scale,
@@ -912,16 +1073,32 @@ fn fx_bursts(effects: &[Effect], fx: &Effects, warned: &mut Vec<u64>) -> Vec<Bur
 
 /// Where explosions go: the particles (flash, fire, sparks, smoke) and a
 /// scar on the ground, each when the client draws them.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Effects {
     pub particles: Option<Arc<ParticleFeed>>,
     pub decals: Option<Arc<DecalFeed>>,
+    pub water: Option<(Arc<TerrainSource>, Arc<WaterFeed>)>,
+    pub surface_dynamics: bool,
     /// The atlas layers scars are picked from (by the explosion's seed) and
     /// how each blends; empty: the generated scorch mark.
     pub scars: Vec<(u32, Blend)>,
     /// The observer's line of sight as of the last tick (the sim sets it);
     /// `None`: everything is seen (no observer, or no sim).
-    sight: Mutex<Option<(Bits, SensorGrid)>>,
+    sight: Mutex<Option<EffectSight>>,
+}
+
+#[derive(Debug)]
+struct EffectSight {
+    los: Bits,
+    sonar: Bits,
+    grid: SensorGrid,
+}
+
+impl EffectSight {
+    fn eligible(&self, x: f32, z: f32, submerged: bool) -> bool {
+        let (cx, cy) = self.grid.cell(x, z);
+        (if submerged { &self.sonar } else { &self.los }).get(cx, cy)
+    }
 }
 
 /// The damage an explosion of size `scale` stands for in Recoil's terms,
@@ -931,36 +1108,144 @@ pub struct Effects {
 pub const DAMAGE_PER_SCALE: f32 = 250.0;
 
 impl Effects {
-    /// Whether the observer sees world `(x, z)`: an explosion is seen
-    /// whole (flash, fire, smoke, scar, glow) or not at all.
-    pub fn sees(&self, x: f32, z: f32) -> bool {
-        match &*self.sight.lock().unwrap_or_else(|p| p.into_inner()) {
-            Some((los, grid)) => {
-                let (cx, cy) = grid.cell(x, z);
-                los.get(cx, cy)
-            }
-            None => true,
+    /// Surface effects require line of sight. Submerged effects require sonar.
+    pub fn eligible(&self, x: f32, z: f32, submerged: bool) -> bool {
+        self.sight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_none_or(|sight| sight.eligible(x, z, submerged))
+    }
+
+    fn set_coverage(&self, view: &ViewState) {
+        let cov = &view.pipeline.coverage;
+        let ally = view.observer[0].ally as usize;
+        self.set_sight(cov.los[ally].clone(), cov.sonar[ally].clone(), cov.grid);
+    }
+
+    fn set_sight(&self, los: Bits, sonar: Bits, grid: SensorGrid) {
+        *self.sight.lock().unwrap_or_else(|p| p.into_inner()) = Some(EffectSight { los, sonar, grid });
+    }
+
+    fn clear(&self, view: &ViewState) {
+        let cov = &view.pipeline.coverage;
+        let empty = Bits::new(cov.grid.width, cov.grid.height);
+        let mut sight = self.sight.lock().unwrap_or_else(|p| p.into_inner());
+        *sight = Some(EffectSight {
+            los: empty.clone(),
+            sonar: empty,
+            grid: cov.grid,
+        });
+        if let Some(feed) = &self.water {
+            feed.1.clear();
+        }
+        if let Some(feed) = &self.particles {
+            feed.clear();
         }
     }
 
-    pub fn set_sight(&self, los: Bits, grid: SensorGrid) {
-        *self.sight.lock().unwrap_or_else(|p| p.into_inner()) = Some((los, grid));
+    fn water_level(&self) -> f32 {
+        self.water
+            .as_ref()
+            .and_then(|(source, _)| source.info.water_level)
+            .unwrap_or(0.0)
     }
 
     /// [`Self::explode`] if the observer sees `(x, z)` (explosions set off
     /// by hand: X, `--explode`); whether it went off.
     pub fn explode_if_seen(&self, x: f32, z: f32, scale: f32, seed: u32) -> bool {
-        let seen = self.sees(x, z);
+        // Hold the observer snapshot through publication. A simultaneous
+        // observer change either clears this impact or filters it first.
+        let sight = self.sight.lock().unwrap_or_else(|p| p.into_inner());
+        let seen = sight.as_ref().is_none_or(|s| s.eligible(x, z, false));
         if seen {
             self.explode(x, z, scale, seed);
         }
         seen
     }
 
-    /// An explosion of size `scale` on the ground at world `(x, z)`.
+    /// An explosion of size `scale` at world `(x, z)`: on the ground, or a
+    /// shell landing in the water ([`Self::hit_water`]).
     pub fn explode(&self, x: f32, z: f32, scale: f32, seed: u32) {
+        if self.over_water(x, z) {
+            self.hit_water(x, z, scale, seed);
+        } else {
+            self.explode_at_depth(x, z, 0.0, scale, seed);
+        }
+    }
+
+    fn over_water(&self, x: f32, z: f32) -> bool {
+        self.water
+            .as_ref()
+            .is_some_and(|(source, _)| source.height_at(glam::Vec2::new(x, z)) < self.water_level())
+    }
+
+    /// A shell or bomb landing in the water: no fireball and no scorch (a
+    /// unit dying on the water keeps both, [`Self::explode_at_depth`]). The
+    /// prototype's blast instead: a column of spray thrown up and a crown,
+    /// and on the surface a crater, ring waves, a churned boil and
+    /// whitewater (the renderer's wave particles, from the impact).
+    fn hit_water(&self, x: f32, z: f32, scale: f32, seed: u32) {
+        if let Some((_, feed)) = &self.water {
+            feed.emit(WaterImpact {
+                position: [x, z],
+                radius: 3.5 * scale,
+                seed,
+            });
+        }
+        if let Some(particles) = &self.particles {
+            let n = |base: f32| (base * scale.clamp(0.5, 4.0)).round() as u32;
+            particles.emit_all(&[
+                Burst {
+                    pos: [x, 0.5, z],
+                    ground: true,
+                    effect: effect::WATER_COLUMN,
+                    count: n(36.0),
+                    scale,
+                    seed,
+                },
+                Burst {
+                    pos: [x, 0.7, z],
+                    ground: true,
+                    effect: effect::SPLASH,
+                    count: n(24.0),
+                    scale,
+                    seed: seed ^ 0x2dc8_ee67,
+                },
+            ]);
+        }
+    }
+
+    fn explode_at_depth(&self, x: f32, z: f32, depth: f32, scale: f32, seed: u32) {
         if let Some(feed) = &self.particles {
-            feed.emit_all(&explosion([x, 1.0, z], true, scale, seed));
+            let y = if depth > 0.0 { self.water_level() - depth } else { 1.0 };
+            feed.emit_all(&explosion([x, y, z], depth <= 0.0, scale, seed));
+        }
+        if let Some((source, feed)) = &self.water
+            && source.height_at(glam::Vec2::new(x, z)) < self.water_level()
+        {
+            if depth <= 0.0 {
+                feed.emit(WaterImpact {
+                    position: [x, z],
+                    radius: 3.5 * scale,
+                    seed,
+                });
+            }
+            if self.surface_dynamics
+                && let Some(particles) = &self.particles
+            {
+                particles.emit(Burst {
+                    pos: [x, if depth <= 0.0 { 0.7 } else { self.water_level() - depth }, z],
+                    ground: depth <= 0.0,
+                    effect: if depth > 0.0 { effect::BUBBLE } else { effect::SPLASH },
+                    count: (12.0 * scale.clamp(0.5, 4.0)) as u32,
+                    scale,
+                    seed: seed ^ 0x2dc8_ee67,
+                });
+            }
+        }
+        if depth > 0.0 {
+            return;
         }
         if let Some(feed) = &self.decals {
             let (layer, blend) = match self.scars.len() {
@@ -991,9 +1276,11 @@ pub struct UnitRow {
     /// `f32` bits.
     pub radius: u32,
     pub class: u32,
+    /// Metres below the water surface. Zero for surfaced and land units.
+    pub water_depth: f32,
     /// Changing state (a blip seen, a unit lost to radar) snaps instead of
     /// interpolating.
-    pub state: u8,
+    pub state: RowState,
 }
 
 /// A unit as the last stream showed it.
@@ -1004,7 +1291,7 @@ struct Shown {
     y: f32,
     hx: f32,
     hy: f32,
-    state: u8,
+    state: RowState,
 }
 
 /// Turns captures into streams, remembering the last one by key.
@@ -1025,6 +1312,10 @@ pub struct Streamer {
 }
 
 impl Streamer {
+    fn reset_view(&mut self) {
+        self.previous.clear();
+    }
+
     /// The stream of `capture` (rows in entity order), units posed by their
     /// channels in `anims` and turned by their `orientations` (both by
     /// entity). A unit's previous position is its position in the previous
@@ -1056,7 +1347,8 @@ impl Streamer {
                     vy: capture.f32(F_VY, r),
                     radius: capture.columns[F_RADIUS][r],
                     class: profile(capture, r),
-                    state: 0,
+                    water_depth: water_depth(capture, r),
+                    state: RowState::Own,
                 }
             })
             .collect();
@@ -1110,7 +1402,7 @@ impl Streamer {
                 .get(o)
                 .filter(|x| x.0 == row.key)
                 .map_or_else(|| Orientation::along(hx, hy).rot, |x| x.1.rot);
-            let words = [
+            let words: [u32; ATTRIBUTE_COUNT] = [
                 x.to_bits(),
                 y.to_bits(),
                 px.to_bits(),
@@ -1122,6 +1414,8 @@ impl Streamer {
                 row.radius,
                 row.class,
                 NO_POSE,
+                row.water_depth.to_bits(),
+                row.state as u32,
             ];
             for (column, word) in columns.iter_mut().zip(words) {
                 column.push(word);
@@ -1335,7 +1629,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ae_render::units::ATTRIBUTES;
+    use ae_render::units::{ATTR_VIEW, ATTRIBUTES};
 
     fn capture(tick: u64, rows: &[(u64, f32, f32, f32, f32)]) -> Capture {
         let mut c = Capture {
@@ -1421,6 +1715,8 @@ mod tests {
         assert_eq!(second.columns[9], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
         assert_eq!(second.columns[10], [NO_POSE; 3], "no poses without models");
+        assert_eq!(column(&second, "water"), [0.0; 3]);
+        assert_eq!(second.columns[ATTR_VIEW], [0; 3], "unfiltered stream");
         // 9 left.
         let third = s.stream(
             &capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]),
@@ -1430,6 +1726,29 @@ mod tests {
             0.1,
         );
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+    }
+
+    #[test]
+    fn streams_pack_water_depth_and_observer_state() {
+        let rows = [RowState::Own, RowState::Seen, RowState::Blip, RowState::Ghost].map(|state| UnitRow {
+            key: state as u64,
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            radius: 1.0f32.to_bits(),
+            class: 0,
+            water_depth: if state == RowState::Seen { 4.5 } else { 0.0 },
+            state,
+        });
+        let stream = Streamer::default().stream_rows(1, &rows, &[], &[], Instant::now(), 0.0);
+        assert_eq!(column(&stream, "water"), [0.0, 4.5, 0.0, 0.0]);
+        assert_eq!(stream.columns[ATTR_VIEW], [0, 1, 2, 3]);
+        // The shaders' `eligible` (`view <= VIEW_SEEN`) takes Own and Seen,
+        // never Blip or Ghost.
+        let eligible = |state: RowState| state as u32 <= ae_render::units::VIEW_SEEN;
+        assert!(eligible(RowState::Own) && eligible(RowState::Seen));
+        assert!(!eligible(RowState::Blip) && !eligible(RowState::Ghost));
     }
 
     /// A unit with an `Orientation` is drawn by it, not by its velocity:
@@ -1613,26 +1932,30 @@ mod tests {
     #[test]
     fn units_that_vanish_where_seen_explode() {
         let last = [
-            (1, 10.0, 10.0, 6.0),
-            (2, 20.0, 20.0, 6.0),
-            (3, -30.0, 30.0, 6.0),
-            (5, 50.0, 50.0, 12.0),
+            (1, 10.0, 10.0, 6.0, 0.0),
+            (2, 20.0, 20.0, 6.0, 0.0),
+            (3, -30.0, 30.0, 6.0, 0.0),
+            (5, 50.0, 50.0, 12.0, 0.0),
         ];
-        let now = [(1, 11.0, 10.0, 6.0), (4, 40.0, 40.0, 6.0), (5, 51.0, 50.0, 12.0)];
-        let sites = deaths(&last, &now, &[], |x, _| x >= 0.0);
+        let now = [
+            (1, 11.0, 10.0, 6.0, 0.0),
+            (4, 40.0, 40.0, 6.0, 0.0),
+            (5, 51.0, 50.0, 12.0, 0.0),
+        ];
+        let sites = deaths(&last, &now, &[], |x, _, _| x >= 0.0);
         assert_eq!(sites.len(), 1, "only 2 died where seen (3 died in the fog): {sites:?}");
         assert!(
-            deaths(&last, &now, &[2], |x, _| x >= 0.0).is_empty(),
+            deaths(&last, &now, &[2], |x, _, _| x >= 0.0).is_empty(),
             "2 died by script (it had Dying): its death effects are its script's"
         );
-        assert_eq!((sites[0].0, sites[0].1, sites[0].2), (20.0, 20.0, 1.0));
+        assert_eq!((sites[0].0, sites[0].1, sites[0].3), (20.0, 20.0, 1.0));
         // One explosion: flash, fire, sparks, smoke, and a scorch mark.
         let effects = Effects {
             particles: Some(Arc::default()),
             decals: Some(Arc::default()),
             ..Effects::default()
         };
-        effects.explode(20.0, 20.0, 1.0, sites[0].3);
+        effects.explode(20.0, 20.0, 1.0, sites[0].4);
         let bursts = effects.particles.as_ref().unwrap().take_all();
         assert_eq!(bursts.len(), 4, "flash, fire, sparks, smoke: {bursts:?}");
         assert!(bursts.iter().all(|b| b.pos[0] == 20.0 && b.pos[2] == 20.0 && b.ground));
@@ -1644,7 +1967,35 @@ mod tests {
             "{:?}",
             decals[0]
         );
-        assert!(deaths(&last, &last, &[], |_, _| true).is_empty(), "nobody died");
+        assert!(deaths(&last, &last, &[], |_, _, _| true).is_empty(), "nobody died");
+    }
+
+    #[test]
+    fn submerged_deaths_require_sonar_even_in_line_of_sight() {
+        let mut effects = Effects::default();
+        let particles = Arc::new(ParticleFeed::default());
+        effects.particles = Some(particles.clone());
+        let last = [(7, 35.0, 35.0, 6.0, 4.0)];
+        let grid = SensorGrid::new(128.0, 128.0, 32.0);
+        let mut los = Bits::new(grid.width, grid.height);
+        let mut sonar = los.clone();
+        los.set(1, 1);
+        let emit = || {
+            let sites = deaths(&last, &[], &[], |x, z, sub| effects.eligible(x, z, sub));
+            for (x, z, depth, scale, seed) in &sites {
+                effects.explode_at_depth(*x, *z, *depth, *scale, *seed);
+            }
+            sites.len()
+        };
+        effects.set_sight(los.clone(), sonar.clone(), grid);
+        assert_eq!(emit(), 0);
+        assert!(particles.take_all().is_empty());
+        sonar.set(1, 1);
+        effects.set_sight(los, sonar, grid);
+        assert_eq!(emit(), 1);
+        let bursts = particles.take_all();
+        assert_eq!(bursts.len(), 4);
+        assert!(bursts.iter().all(|b| !b.ground && b.pos[1] == -4.0));
     }
 
     /// A sim effect becomes a burst only where the observer sees it, with
@@ -1670,7 +2021,7 @@ mod tests {
             flags: 0,
         };
         // No observer: everything is seen.
-        let bursts = fx_bursts(&[effect(5.0, 6.0, flash)], &fx, &mut Vec::new());
+        let bursts = fx_bursts(&[effect(5.0, 6.0, flash)], &fx, &mut Vec::new(), |_| 0.0);
         assert_eq!(bursts.len(), 1);
         assert_eq!(
             (
@@ -1687,16 +2038,16 @@ mod tests {
         let grid = SensorGrid::new(100.0, 100.0, 10.0);
         let mut los = Bits::new(grid.width, grid.height);
         los.set(0, 0);
-        fx.set_sight(los, grid);
+        fx.set_sight(los.clone(), Bits::new(grid.width, grid.height), grid);
         let seen = effect(5.0, 6.0, flash);
         let unseen = effect(55.0, 55.0, flash);
-        assert_eq!(fx_bursts(&[seen, unseen], &fx, &mut Vec::new()).len(), 1);
+        assert_eq!(fx_bursts(&[seen, unseen], &fx, &mut Vec::new(), |_| 0.0).len(), 1);
         // An unknown name: skipped, and only warned about once.
         let mut warned = Vec::new();
         let unknown = effect(5.0, 6.0, ae_sdk::abi::name_id("nope"));
-        assert!(fx_bursts(&[unknown], &fx, &mut warned).is_empty());
+        assert!(fx_bursts(&[unknown], &fx, &mut warned, |_| 0.0).is_empty());
         assert_eq!(warned, [ae_sdk::abi::name_id("nope")]);
-        assert!(fx_bursts(&[unknown], &fx, &mut warned).is_empty());
+        assert!(fx_bursts(&[unknown], &fx, &mut warned, |_| 0.0).is_empty());
         assert_eq!(warned.len(), 1);
     }
 
@@ -1709,11 +2060,11 @@ mod tests {
             decals: Some(Arc::default()),
             ..Effects::default()
         };
-        assert!(effects.sees(500.0, 500.0), "no observer: everything is seen");
+        assert!(effects.eligible(500.0, 500.0, false), "no observer: everything is seen");
         let grid = SensorGrid::new(100.0, 100.0, 10.0);
         let mut los = Bits::new(grid.width, grid.height);
         los.set(2, 3);
-        effects.set_sight(los, grid);
+        effects.set_sight(los, Bits::new(grid.width, grid.height), grid);
         assert!(!effects.explode_if_seen(55.0, 55.0, 1.0, 7));
         assert!(
             effects.particles.as_ref().unwrap().take_all().is_empty()

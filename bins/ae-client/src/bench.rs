@@ -238,7 +238,24 @@ const CLOSE: [f32; 5] = [2900.0, 17900.0, 500.0, 0.4, 0.6];
 /// a 12 m grid (radius 3) from (2304, 17296), the army camera's view.
 const FOX_PARAM: u64 = 10_000 | 12 << 32 | 144 << 40 | 1081 << 52;
 
-const SCENES: [Scene; 17] = [
+const COAST: Scene = Scene {
+    name: "water-overview",
+    about: "coast and river mouth from the overview camera",
+    map: MapKind::Coast,
+    map_cells: 768,
+    units: 1_000,
+    tileset: Some("temperate"),
+    camera: [2910.0, 3520.0, 2200.0, 0.20, 0.85],
+    path: Path::Fixed,
+    explosions: 0,
+    spread: 250.0,
+    fox: false,
+    live: false,
+    lights: 0,
+    model_lights: false,
+};
+
+const SCENES: [Scene; 21] = [
     Scene {
         name: "overview",
         about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate",
@@ -511,6 +528,25 @@ const SCENES: [Scene; 17] = [
         lights: 0,
         model_lights: false,
     },
+    COAST,
+    Scene {
+        name: "water-fleet",
+        about: "coast with ships and submarines in the basin",
+        camera: [4880.0, 1960.0, 560.0, 0.40, 0.54],
+        ..COAST
+    },
+    Scene {
+        name: "water-close",
+        about: "coast shelf and shallows from a low camera",
+        camera: [2580.0, 3650.0, 230.0, 0.10, 0.26],
+        ..COAST
+    },
+    Scene {
+        name: "water-under",
+        about: "below the coast surface",
+        camera: [4816.0, 2800.0, 22.0, 0.10, -1.00],
+        ..COAST
+    },
 ];
 
 fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Options {
@@ -530,10 +566,19 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
     o.particles_full = b.particles_full;
     o.particle_blend = b.particle_blend;
     o.map = scene.map;
+    o.water_quality = if matches!(scene.map, MapKind::Coast) {
+        super::WaterQuality::Full
+    } else {
+        super::WaterQuality::M7
+    };
     o.map_cells = scene.map_cells;
     o.units = scene.units;
     o.tileset = scene.tileset.map(str::to_string);
     o.camera = Some(scene.camera);
+    if scene.name == "water-under" {
+        // The eye is about 3 m below the 42 m surface, facing up into it.
+        o.camera_focus = Some(57.5);
+    }
     o.quake = 0;
     o.ticks = 300;
     o
@@ -635,6 +680,21 @@ fn median(v: &mut [f64]) -> u64 {
     v.get(v.len() / 2).map_or(0, |&m| m as u64)
 }
 
+fn select_scenes(target: &str) -> Result<Vec<&'static Scene>> {
+    if target == "all" {
+        return Ok(SCENES.iter().collect());
+    }
+    target
+        .split(',')
+        .map(|name| {
+            SCENES
+                .iter()
+                .find(|s| s.name == name)
+                .with_context(|| format!("unknown scene `{name}` (try --bench list)"))
+        })
+        .collect()
+}
+
 pub fn run(b: &BenchOptions) -> Result<ExitCode> {
     if b.target == "list" {
         for s in &SCENES {
@@ -642,21 +702,7 @@ pub fn run(b: &BenchOptions) -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
-    let scenes: Vec<&Scene> = if b.target == "all" {
-        SCENES.iter().collect()
-    } else {
-        let names: Vec<&str> = b.target.split(',').collect();
-        let mut picked = Vec::new();
-        for name in names {
-            picked.push(
-                SCENES
-                    .iter()
-                    .find(|s| s.name == name)
-                    .with_context(|| format!("unknown scene `{name}` (try --bench list)"))?,
-            );
-        }
-        picked
-    };
+    let scenes = select_scenes(&b.target)?;
     anyhow::ensure!(b.frames >= 10, "--frames must be at least 10");
     if scenes.len() > 1 && std::env::var_os(CHILD_ENV).is_none() {
         return run_isolated(&scenes);
@@ -714,8 +760,12 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     };
     let o = options_for(scene, b, fox);
     let source = cache.source(&o)?;
-    let mut app = with_look(TerrainApp::new(source, TerrainOutput::Readback), tileset(&o)?, &o)
-        .with_display(b.output, BENCH_LEVELS);
+    let mut app = with_look(
+        TerrainApp::new(source.clone(), TerrainOutput::Readback),
+        tileset(&o)?,
+        &o,
+    )
+    .with_display(b.output, BENCH_LEVELS);
     let mut posing = None;
     // The live scenes' sim and feed: every stream is published (each
     // writes only the cells that changed).
@@ -773,13 +823,13 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     };
     // Explosions (particles and scorch marks) only in scenes that set them off.
     let feed = if scene.explosions > 0 {
-        let (with, feed) = effects(app, &o);
+        let (with, feed) = effects(app, &source, &o);
         app = with;
         feed
     } else {
         None
     };
-    place_camera(&app, o.camera);
+    place_camera(&app, o.camera, o.camera_focus);
     if scene.lights > 0 {
         let target = app.view().lock().unwrap().camera.target;
         let source = app.source().clone();
@@ -1009,4 +1059,44 @@ fn model_setup(gpu: &Arc<GpuDevice>, s: &super::sim::SimOptions) -> Result<Sampl
     }
     bindless.destroy(gpu);
     Ok(ns(&mut times))
+}
+
+#[cfg(test)]
+mod water_scenes {
+    use super::*;
+
+    #[test]
+    fn declares_four_distinct_coast_camera_fixtures() {
+        let scenes = select_scenes("water-overview,water-fleet,water-close,water-under").unwrap();
+        let options = BenchOptions::default();
+        let cameras = scenes
+            .iter()
+            .map(|scene| {
+                let o = options_for(scene, &options, None);
+                assert!(matches!(o.map, MapKind::Coast));
+                assert_eq!(o.water_quality, crate::WaterQuality::Full);
+                assert!(o.units > 0);
+                assert_eq!(o.camera_focus.is_some(), scene.name == "water-under");
+                if scene.name == "water-under" {
+                    let (source, _) = crate::terrain_source(&o).unwrap();
+                    let source = Arc::new(source);
+                    let app = TerrainApp::new(source.clone(), TerrainOutput::Readback);
+                    place_camera(&app, o.camera, o.camera_focus);
+                    let camera = app.view().lock().unwrap().resolved_camera(&source);
+                    let eye = camera.eye(|xz| source.height_at(xz));
+                    let depth = source.info.water_level.unwrap() - eye.y;
+                    assert!((depth - 3.0).abs() < 0.2, "underwater camera depth: {depth}");
+                }
+                o.camera.unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(cameras.windows(2).all(|pair| pair[0][2] > pair[1][2]));
+        assert!(cameras[3][4] < 0.0);
+        assert!(
+            select_scenes("all")
+                .unwrap()
+                .iter()
+                .any(|scene| scene.name == "water-under")
+        );
+    }
 }

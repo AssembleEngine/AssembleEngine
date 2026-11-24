@@ -70,6 +70,7 @@ pub fn run(options: &Options) -> Result<Report> {
             ally: &a.ally,
             los: &a.los,
             radar: &a.radar,
+            sonar: None,
         };
         let mut serial = Coverage::new(grid, allies as usize);
         report.time(

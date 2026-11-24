@@ -15,7 +15,17 @@ void main() {
         ind[1] = 1u;
         ind[2] = 1u;
         if (ae.words.y != 0u) ind[IND_DRAW_INSTANCES] = 0u;
+#ifdef WATER_MESH
+        ind[3] = 48u; // Sixteen triangles in each LEB leaf's submesh.
+        ind[5] = 0u;
+        ind[6] = 0u;
+#elif defined(MIRROR)
+        ind[3] = ae.words.y; // Index count of the sub-mesh.
+        ind[5] = 0u;
+        ind[6] = 0u;
+        ind[7] = 0u;
+#endif
     } else {
-        ind[IND_DRAW_INSTANCES] = min(ind[IND_DRAW_INSTANCES], u.cfg.w);
+        ind[IND_DRAW_INSTANCES] = min(ind[IND_DRAW_INSTANCES], CBT_CAPACITY);
     }
 }

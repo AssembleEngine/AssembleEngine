@@ -13,8 +13,15 @@
 
 layout(location = 0) in vec3 inWorld;
 layout(location = 1) flat in uint inDepth;
+#ifdef MIRROR
+#define TERRAIN_EYE u.mirrorCamera.xyz
+#else
+#define TERRAIN_EYE u.camPos.xyz
+#endif
 layout(location = 0) out vec4 outColor;
+#ifndef MIRROR
 layout(location = 1) out vec4 outGlow;
+#endif
 
 vec3 hue(float h) {
     return clamp(abs(fract(h + vec3(0.0, 2.0, 1.0) / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
@@ -306,7 +313,9 @@ Surface tileset(vec2 cell, vec3 P, vec3 dx, vec3 dy, vec3 n) {
 void main() {
     // No light of its own until a glowing decal says otherwise; every
     // return path below leaves the glow black.
+#ifndef MIRROR
     outGlow = vec4(0.0);
+#endif
     // In uniform control flow: the tileset samples with explicit gradients.
     vec3 dPdx = dFdx(inWorld), dPdy = dFdy(inWorld);
     float cs = u.map.w;
@@ -372,6 +381,35 @@ void main() {
         roughness = ts.roughness;
     }
 
+#ifdef WATER_REFRACT_OWNER
+    if (inWorld.y < u.water.x) {
+        // The sea floor, as the prototype's (terrain_bake.frag): sand with
+        // broad, soft weed beds tens of metres across, and rock where the
+        // floor is steep. The domain is turned off the noise lattice so the
+        // beds do not line up with it. The water above scatters the
+        // floor's light, so its detail blurs with depth (a mip bias of
+        // about one level per metre), and it keeps only the floor's own
+        // shape for a normal: a land layer's bumps (the beach sand's
+        // ripples) would stripe the whole shelf.
+        float depth = u.water.x - inWorld.y;
+        vec2 p = mat2(0.8, 0.6, -0.6, 0.8) * inWorld.xz;
+        float blend = smoothstep(0.0, 0.6, depth);
+        float rockPatch = smoothstep(0.14, 0.47, slope);
+        float beds = valueNoise(p * 0.011 + 59.0) * 0.6 + valueNoise(p * 0.027 + 13.0) * 0.28 +
+                     valueNoise(p * 0.07 + 5.0) * 0.12;
+        float weedPatch = smoothstep(0.5, 0.64, beds);
+        float blur = exp2(clamp(depth * 0.9, 0.0, 6.0));
+        vec2 gx = dPdx.xz * blur, gy = dPdy.xz * blur;
+        vec3 sand = textureGrad(AE_S2D_ARRAY(12, 2), vec3(inWorld.xz / 38.0, 0), gx / 38.0, gy / 38.0).rgb;
+        vec3 weed = textureGrad(AE_S2D_ARRAY(12, 2), vec3(inWorld.xz / 27.0, 1), gx / 27.0, gy / 27.0).rgb;
+        vec3 stones = textureGrad(AE_S2D_ARRAY(12, 2), vec3(inWorld.xz / 31.0, 2), gx / 31.0, gy / 31.0).rgb;
+        vec3 seabed = mix(mix(sand, weed * 0.8, weedPatch), stones, rockPatch);
+        albedo = mix(albedo, seabed, blend);
+        roughness = mix(roughness, 0.78, blend);
+        n = normalize(mix(n, heightNormal, blend));
+    }
+#endif
+
     // The shading normal under the decals (shadows keep the ground's).
     vec3 shadeN = n;
     vec3 glow = vec3(0.0);
@@ -394,7 +432,7 @@ void main() {
     glow = aeToWorking(glow, wide);
 
     vec3 L = normalize(u.sun.xyz);
-    vec3 V = normalize(u.camPos.xyz - inWorld);
+    vec3 V = normalize(TERRAIN_EYE - inWorld);
     // On the ground, against the ground as the heights texture has it (the
     // mesh's LOD error would read as shadow on convex slopes).
     // Both shadows at the bilinear ground under the pixel (what the hills'
@@ -415,10 +453,13 @@ void main() {
     vec3 color = brdfLight(s, shadeN, V, L, sunE);
     color += brdfDiffuse(s, shadeN, V) * skyE + brdfAmbient(s, shadeN, V) * skyR;
     // The clustered lights (no shadows).
+#ifndef MIRROR
     if (lightsOn()) {
         color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, shadeN, V, s);
     }
+#endif
 
+#ifndef WATER_REFRACT_OWNER
     // Ground under water (AssembleEngine addition): tint by the depth of the
     // water column. This is the part of RA3's underwater pass the water
     // surface (water.frag) builds on: the surface blends its reflection
@@ -445,6 +486,8 @@ void main() {
         glow *= 1.0 - smoothstep(0.0, 1.0, depth);
     }
 
+#endif
+
     // Emissive: after the light and the shadows. Explosions go off only in
     // sight (the client's rule); if the spot falls out of sight while it
     // glows, the fog of war dims the glow as it dims the scar under it.
@@ -458,14 +501,16 @@ void main() {
         emitted = applyVision(emitted, inWorld.xz);
     }
 
-    float dist = distance(inWorld, u.camPos.xyz);
+    float dist = distance(inWorld, TERRAIN_EYE);
     float fogged = fogAmount(dist);
     color = mix(color, u.fog.rgb, fogged);
     // The scene buffer holds exposed radiance (the tonemap only curves).
     color *= u.photometry.x;
     // The bloom's light sources: only the emission, after the same fog and
     // vision the scene sees (fog is not a light source).
+#ifndef MIRROR
     outGlow = vec4(emitted * (1.0 - fogged) * u.photometry.x, 1.0);
+#endif
 
 #ifdef BARY
     // Wireframe overlay. Sub-mesh triangles are emitted as (v0, apex, v2), so the

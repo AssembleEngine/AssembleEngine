@@ -288,6 +288,17 @@ pub struct GpuDevice {
 }
 
 impl GpuDevice {
+    pub(crate) fn optimal_format_features(&self, format: vk::Format) -> vk::FormatFeatureFlags2 {
+        let mut features = vk::FormatProperties3::default();
+        let mut properties = vk::FormatProperties2::default().push_next(&mut features);
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_format_properties2(self.physical, format, &mut properties);
+        }
+        features.optimal_tiling_features
+    }
+
     /// Pick a Vulkan 1.3 device with a graphics queue (that presents to
     /// `surface`, if given; compute support preferred).
     pub fn new(instance: Arc<GpuInstance>, surface: Option<vk::SurfaceKHR>) -> Result<Self> {

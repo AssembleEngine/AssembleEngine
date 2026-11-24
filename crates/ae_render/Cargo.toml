@@ -23,3 +23,7 @@ sdl3-sys = { version = "0.7.2", features = ["use-ash-v0-38"] }
 
 [dev-dependencies]
 ae_gltf.workspace = true
+# The GPU tests render the M16 coast fixture map from the navigation crate's
+# generator (the same map as the client's `--map coast`). Test-only: the
+# renderer library itself stays independent of the sim side.
+ae_nav.workspace = true
