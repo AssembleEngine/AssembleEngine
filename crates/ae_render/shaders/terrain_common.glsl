@@ -50,6 +50,7 @@ layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     vec4 effects;        // x: effect time (s): the sim time drawn, so decals follow the sim's speed
     vec4 photometry;     // x: exposure, y: unused, z: sun lux, w: sky lux
+    uvec4 decalRelief;   // overlap policy and adaptive quality, minimum NoV (bits), step budgets
 #if defined(MIRROR) || defined(UNDERWATER)
     mat4 mirrorProj;
     vec4 mirrorCamera;

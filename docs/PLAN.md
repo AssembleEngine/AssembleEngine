@@ -5953,12 +5953,6 @@ From M12 (2026-11-19):
   clamp). The fog of war's dimming is divided out of the metering. Write-up in
   [lighting.md](lighting.md) ("Automatic exposure"). Not done: spot metering on a selection or
   the cursor, excluding the sky, and per-scene tuning beyond the constants.
-- **Roughness-aware sky specular.** `brdfAmbient` is Schlick Fresnel times a hemisphere
-  factor, independent of roughness; at a low camera pitch the ground's ambient specular
-  approaches the sky's colour (Fresnel rises at grazing) where a roughness-aware directional
-  albedo would leave most of it diffuse. Fine at the usual RTS pitch (Fresnel about 0.07);
-  fix with the split-sum environment term or an analytic roughness factor when low cameras
-  matter.
 - **glTF's default metallic 1.0.** A material that omits its pbr block renders as a fully
   rough metal (no diffuse, only the sky's and the lights' specular), as the spec says; content
   authored before M12 step 3 looked different. Decide whether the importer should warn on

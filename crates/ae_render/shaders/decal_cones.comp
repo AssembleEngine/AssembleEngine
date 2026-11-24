@@ -1,0 +1,64 @@
+#version 460
+
+// Corrected relaxed cone apertures from Bán et al. (2024), Algorithm 2.
+// https://doi.org/10.2312/sr.20241146
+// The max tree only prunes cells whose best possible ratio cannot tighten
+// the cone. Leaves use the paper's outward bilinear-edge test.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, set = 0, binding = 0) readonly buffer Heights { uint heights[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Cones { float cones[]; };
+layout(push_constant) uniform Params { int size; } p;
+
+uint boundAt(ivec2 tile, int count) {
+    int offset = (count * count - 1) / 3;
+    return heights[offset + tile.y * count + tile.x];
+}
+
+uint heightAt(ivec2 at) {
+    return boundAt(clamp(at, ivec2(0), ivec2(p.size - 1)), p.size);
+}
+
+bool limitsCone(ivec2 q, ivec2 direction, uint h) {
+    uint x = heightAt(q + ivec2(direction.x, 0));
+    uint y = heightAt(q + ivec2(0, direction.y));
+    uint diagonal = heightAt(q + direction);
+    return h > x || h > y || x > diagonal || y > diagonal;
+}
+
+void main() {
+    ivec2 apex = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(apex, ivec2(p.size)))) return;
+    uint base = heightAt(apex);
+    float bestSquared = 1.0;
+    ivec2 origin = ivec2(0);
+    int side = p.size;
+    for (;;) {
+        uint ceiling = boundAt(origin / side, p.size / side);
+        float rise = (float(ceiling) - float(base)) / 255.0;
+        vec2 delta = vec2(apex - clamp(apex, origin, origin + side - 1)) / float(p.size);
+        float distanceSquared = dot(delta, delta);
+        if (rise > 0.0 && distanceSquared < bestSquared * rise * rise) {
+            if (side > 1) {
+                side /= 2;
+                continue;
+            }
+            ivec2 deltaTexel = origin - apex;
+            ivec2 outward = mix(ivec2(1), ivec2(-1), lessThan(deltaTexel, ivec2(0)));
+            bool limiting = limitsCone(origin, outward, ceiling);
+            if (deltaTexel.x == 0) limiting = limiting || limitsCone(origin, ivec2(-1, outward.y), ceiling);
+            if (deltaTexel.y == 0) limiting = limiting || limitsCone(origin, ivec2(outward.x, -1), ceiling);
+            if (limiting) bestSquared = distanceSquared / (rise * rise);
+        }
+        // Stackless traversal of the implicit quadtree in Morton order.
+        while (side < p.size && all(equal((origin / side) & 1, ivec2(1)))) {
+            origin -= side;
+            side *= 2;
+        }
+        if (side == p.size) break;
+        ivec2 child = (origin / side) & 1;
+        int next = child.x + 2 * child.y + 1;
+        origin += side * (ivec2(next & 1, next >> 1) - child);
+    }
+    cones[apex.y * p.size + apex.x] = sqrt(bestSquared);
+}

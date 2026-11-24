@@ -35,7 +35,7 @@
 //! where the observer sees: an explosion is seen whole or not at all;
 //! `--no-particles` turns them off; they draw at half resolution,
 //! `--particles-full` at full) and leave a scar on the ground (a decal,
-//! relit by its normal map, its centre glowing like hot metal for up to
+//! relit by its micro-height, its centre glowing like hot metal for up to
 //! two seconds; `--no-decals`). The scars are Recoil's
 //! (`assets/decals/scars`; `--scars DIR` for another set, `--scars
 //! generated` for the engine's generated scorch mark).
@@ -135,6 +135,7 @@ mod sim;
 mod watch;
 
 use ae_nav::terrain::{NO_WATER, Terrain};
+use ae_render::decals::{DecalDebug, DecalParallaxOverlapMode, DecalReliefMode, DecalReliefSettings};
 use ae_render::demo::DemoApp;
 use ae_render::particles::{ParticleFeed, ParticlesSetup};
 use ae_render::swapchain::{HdrRequest, PresentPolicy};
@@ -224,6 +225,8 @@ struct Options {
     particles: bool,
     /// Scorch marks where explosions go off (`--no-decals`).
     decals: bool,
+    decal_debug: DecalDebug,
+    decal_relief: DecalReliefSettings,
     /// The scars' directory (`--scars DIR`; `generated`: the generated
     /// scorch mark); [`BUNDLED_SCARS`] when `None`.
     scars: Option<String>,
@@ -313,6 +316,8 @@ impl Default for Options {
             },
             particles: true,
             decals: true,
+            decal_debug: DecalDebug::Off,
+            decal_relief: DecalReliefSettings::default(),
             scars: None,
             particles_full: false,
             particle_blend: ae_render::particles::ParticleBlend::Sorted,
@@ -343,8 +348,8 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
-       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH]";
+const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--decal-debug VIEW] [--decal-relief off|normal|rcsm] [--decal-relief-strength N] [--rcsm-overlap safe|dominant|independent] [--rcsm-steps N] [--rcsm-refine N] [--rcsm-min-pixels N] [--rcsm-full-pixels N] [--rcsm-min-view-dot N] [--rcsm-force] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH] [--bench-scars N] [--bench-scar-spread METRES]";
 
 fn parse() -> Result<Options> {
     let mut o = Options::default();
@@ -460,6 +465,57 @@ fn parse() -> Result<Options> {
             "--sun-lux" => o.tone.sun_illuminance = value("--sun-lux", &mut args)?.parse().context("--sun-lux")?,
             "--no-particles" => o.particles = false,
             "--no-decals" => o.decals = false,
+            "--decal-debug" => {
+                let name = value("--decal-debug", &mut args)?;
+                o.decal_debug = DecalDebug::VIEWS
+                    .into_iter()
+                    .find(|&(key, _)| key == name)
+                    .map(|(_, view)| view)
+                    .with_context(|| format!("unknown decal debug view {name:?}"))?;
+            }
+            "--decal-relief" => {
+                o.decal_relief.mode = match value("--decal-relief", &mut args)?.as_str() {
+                    "off" => DecalReliefMode::Disabled,
+                    "normal" => DecalReliefMode::NormalMapping,
+                    "rcsm" => DecalReliefMode::RobustConeStepMapping,
+                    name => bail!("--decal-relief {name:?}: expected off, normal or rcsm"),
+                }
+            }
+            "--decal-relief-strength" => {
+                o.decal_relief.strength = value("--decal-relief-strength", &mut args)?
+                    .parse()
+                    .context("--decal-relief-strength")?
+            }
+            "--rcsm-overlap" => {
+                o.decal_relief.overlap_mode = match value("--rcsm-overlap", &mut args)?.as_str() {
+                    "safe" => DecalParallaxOverlapMode::NormalMappingFallback,
+                    "dominant" => DecalParallaxOverlapMode::DominantDecal,
+                    "independent" => DecalParallaxOverlapMode::IndependentExperimental,
+                    name => bail!("--rcsm-overlap {name:?}: expected safe, dominant or independent"),
+                }
+            }
+            "--rcsm-steps" => {
+                o.decal_relief.max_cone_steps = value("--rcsm-steps", &mut args)?.parse().context("--rcsm-steps")?
+            }
+            "--rcsm-refine" => {
+                o.decal_relief.max_refine_steps = value("--rcsm-refine", &mut args)?.parse().context("--rcsm-refine")?
+            }
+            "--rcsm-min-pixels" => {
+                o.decal_relief.min_parallax_pixels = value("--rcsm-min-pixels", &mut args)?
+                    .parse()
+                    .context("--rcsm-min-pixels")?
+            }
+            "--rcsm-full-pixels" => {
+                o.decal_relief.full_parallax_pixels = value("--rcsm-full-pixels", &mut args)?
+                    .parse()
+                    .context("--rcsm-full-pixels")?
+            }
+            "--rcsm-min-view-dot" => {
+                o.decal_relief.min_view_normal_dot = value("--rcsm-min-view-dot", &mut args)?
+                    .parse()
+                    .context("--rcsm-min-view-dot")?
+            }
+            "--rcsm-force" => o.decal_relief.adaptive_quality = false,
             "--scars" => o.scars = Some(value("--scars", &mut args)?),
             "--particles-full" => o.particles_full = true,
             "--particle-blend" => {
@@ -489,6 +545,20 @@ fn parse() -> Result<Options> {
             "--lights" => o.lights = value("--lights", &mut args)?.parse().context("--lights N")?,
             "--quake" => o.quake = value("--quake", &mut args)?.parse().context("--quake TICK (1..=255)")?,
             "--bench" => o.bench.get_or_insert_with(Default::default).target = value("--bench", &mut args)?,
+            "--bench-scars" => {
+                o.bench.get_or_insert_with(Default::default).scar_count =
+                    Some(value("--bench-scars", &mut args)?.parse().context("--bench-scars")?)
+            }
+            "--bench-scar-spread" => {
+                let spread: f32 = value("--bench-scar-spread", &mut args)?
+                    .parse()
+                    .context("--bench-scar-spread")?;
+                anyhow::ensure!(
+                    spread.is_finite() && spread >= 0.0,
+                    "--bench-scar-spread needs a finite nonnegative distance"
+                );
+                o.bench.get_or_insert_with(Default::default).scar_spread = Some(spread);
+            }
             "--frames" => {
                 o.bench.get_or_insert_with(Default::default).frames =
                     value("--frames", &mut args)?.parse().context("--frames")?
@@ -601,9 +671,7 @@ fn parse() -> Result<Options> {
         anyhow::ensure!(k < o.teams, "--observer {k} needs --teams of at least {}", k + 1);
     }
     if o.bench.as_ref().is_some_and(|b| b.target.is_empty()) {
-        bail!(
-            "--frames, --warmup, --label, --out, --no-save, --bench-output and --bench-size go with --bench\n{USAGE}"
-        );
+        bail!("--frames, --warmup, --label, --out, --no-save and --bench-* options go with --bench\n{USAGE}");
     }
     if auto_given {
         o.tone.auto = true;
@@ -814,6 +882,8 @@ fn effects(app: TerrainApp, source: &Arc<TerrainSource>, o: &Options) -> (Terrai
     if o.decals {
         let feed = Arc::new(ae_render::decals::DecalFeed::default());
         let mut setup = ae_render::decals::DecalsSetup::new(feed.clone(), DECALS);
+        setup.debug = o.decal_debug;
+        setup.relief = o.decal_relief;
         let dir = match o.scars.as_deref() {
             Some("generated") => None,
             Some(dir) => Some(dir),
@@ -840,9 +910,8 @@ const BUNDLED_SCARS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/d
 
 /// The generated atlas at 512² with the scars in `dir` added, and the
 /// scars' layers, blended as Recoil blends explosion scars (modulate).
-/// Every `NAME.tga` with a matching `NAME_normal.tga` is one scar; the
-/// normal map's green handedness is detected (`normal_green_up`), so both
-/// DirectX-style and OpenGL-style maps load.
+/// Pair each colour map with its `_mat.tga` surface, or a legacy
+/// `_normal.tga` with detected green handedness.
 fn recoil_scars(
     dir: &std::path::Path,
 ) -> Result<(ae_render::decals::DecalAtlas, Vec<(u32, ae_render::decals::Blend)>)> {
@@ -856,12 +925,12 @@ fn recoil_scars(
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".tga") && !n.ends_with("_normal.tga"))
+        .filter(|n| n.ends_with(".tga") && !n.ends_with("_mat.tga") && !n.ends_with("_normal.tga"))
         .collect();
     names.sort();
     if names.is_empty() {
         bail!(
-            "no scar colour maps (*.tga with a matching *_normal.tga) in {}",
+            "no scar colour maps (*.tga with a matching *_mat.tga or *_normal.tga) in {}",
             dir.display()
         );
     }
@@ -870,11 +939,14 @@ fn recoil_scars(
     for name in &names {
         let stem = name.strip_suffix(".tga").unwrap_or(name);
         let colour = read(name)?;
-        let normal = read(&format!("{stem}_normal.tga"))?;
-        let up = normal_green_up(&colour, &normal);
-        let layer = atlas
-            .add_layer(&colour, Some((&normal, up)))
-            .map_err(anyhow::Error::msg)?;
+        let material_name = format!("{stem}_mat.tga");
+        let layer = if dir.join(&material_name).try_exists()? {
+            atlas.add_material_layer(&colour, &read(&material_name)?)
+        } else {
+            let normal = read(&format!("{stem}_normal.tga"))?;
+            atlas.add_layer(&colour, Some((&normal, normal_green_up(&colour, &normal))))
+        }
+        .map_err(anyhow::Error::msg)?;
         scars.push((layer, Blend::Modulate));
     }
     Ok((atlas, scars))
@@ -1036,6 +1108,22 @@ fn steer(
     }
     if events.pressed & keys::G != 0 {
         view.fog = !view.fog;
+    }
+    if events.pressed & keys::F6 != 0 {
+        view.decal_relief.mode = view.decal_relief.mode.next();
+        println!("decal relief {:?}", view.decal_relief.mode);
+    }
+    if events.pressed & keys::F7 != 0 {
+        view.decal_debug = view.decal_debug.next();
+        println!("decal debug {:?}", view.decal_debug);
+    }
+    if events.pressed & keys::F9 != 0 {
+        view.decal_relief.overlap_mode = match view.decal_relief.overlap_mode {
+            DecalParallaxOverlapMode::NormalMappingFallback => DecalParallaxOverlapMode::DominantDecal,
+            DecalParallaxOverlapMode::DominantDecal => DecalParallaxOverlapMode::IndependentExperimental,
+            DecalParallaxOverlapMode::IndependentExperimental => DecalParallaxOverlapMode::NormalMappingFallback,
+        };
+        println!("RCSM overlap {:?}", view.decal_relief.overlap_mode);
     }
     if events.pressed & keys::C != 0 {
         view.frozen = match view.frozen {
@@ -1311,6 +1399,7 @@ fn run(o: Options) -> Result<ExitCode> {
             record_threads: o.record_threads,
             particles_full: o.particles_full,
             particle_blend: o.particle_blend,
+            decal_relief: o.decal_relief,
             ..b.clone()
         });
     }
@@ -1604,8 +1693,13 @@ fn run(o: Options) -> Result<ExitCode> {
             let detail = match &terrain {
                 Some((view, stats)) => {
                     let s = *stats.lock().unwrap_or_else(|p| p.into_inner());
-                    let tau = view.lock().unwrap_or_else(|p| p.into_inner()).tau;
-                    format!(" | {} leaves, {} drawn, {tau:.2} px", s.leaves, s.drawn)
+                    let view = view.lock().unwrap_or_else(|p| p.into_inner());
+                    let relief = if o.decals {
+                        format!(" | {:?} ({:?})", view.decal_relief.mode, view.decal_debug)
+                    } else {
+                        String::new()
+                    };
+                    format!(" | {} leaves, {} drawn, {:.2} px{relief}", s.leaves, s.drawn, view.tau)
                 }
                 None => String::new(),
             };

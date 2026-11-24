@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 ash.workspace = true
 glam = "0.30"
+sha2 = "0.10"
 ae_model.workspace = true
 gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }
 sdl3-sys = { version = "0.7.2", features = ["use-ash-v0-38"] }

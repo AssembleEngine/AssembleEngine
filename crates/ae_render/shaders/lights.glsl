@@ -266,16 +266,23 @@ vec3 brdfLight(SurfaceBRDF s, vec3 N, vec3 V, vec3 L, vec3 E) {
     return (brdfDiffuse(s, N, V) + brdfSpecular(s, N, V, L)) * (NdotL * E);
 }
 
-// The sky's specular, per unit sky radiance: a uniform hemisphere, so the
-// lobe sees the half of it above the reflection direction (the same
-// hemispherical approximation the diffuse sky uses). Known limitation: this
-// is Schlick Fresnel times that hemisphere factor, independent of
-// roughness, so a low camera's grazing view gets a strong sky reflection
-// where a roughness-aware directional albedo would dim it (TODO in PLAN).
-vec3 brdfAmbient(SurfaceBRDF s, vec3 N, vec3 V) {
-    float NdotV = max(dot(N, V), 1e-4);
-    vec3 R = reflect(-V, N);
-    return brdfFresnel(NdotV, s.f0) * (0.5 + 0.5 * R.y);
+// Diffuse and specular response per unit sky radiance. The analytic GGX
+// environment fit is based on Brian Karis, "Physically Based Shading on
+// Mobile" (2014), after Dimitar Lazarov.
+vec3 brdfSky(SurfaceBRDF s, vec3 N, vec3 V) {
+    float NdotV = clamp(dot(N, V), 0.0, 1.0);
+    float roughness = clamp(s.roughness, 0.0, 1.0);
+    vec4 fit = vec4(1.0, 0.0425, 1.04, -0.04)
+             + roughness * vec4(-1.0, -0.0275, -0.572, 0.022);
+    float fresnel = min(fit.x * fit.x, exp2(-9.28 * NdotV)) * fit.x + fit.y;
+    vec2 ab = fit.zw + vec2(-1.04, 1.04) * fresnel;
+    vec3 specular = clamp(s.f0 * ab.x + ab.y, 0.0, 1.0);
+    vec3 diffuse = s.albedo * (1.0 - s.metallic) * (1.0 - specular);
+    // The existing sky is an analytic hemisphere. Shift the lobe's mean
+    // towards the normal as it broadens with roughness.
+    float reflectionY = reflect(-V, N).y;
+    float lobeY = mix(reflectionY, N.y, roughness * roughness);
+    return diffuse * (0.5 + 0.5 * N.y) + specular * (0.5 + 0.5 * lobeY);
 }
 
 // The illuminance at p (lux) from the lights that reach it, times the

@@ -103,11 +103,10 @@ void main() {
     // Illuminance (lux) before the cosine; the particles' tint colours the
     // sunlight they shade.
     vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * n.y) * ao);
     vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     SurfaceBRDF s = SurfaceBRDF(base.rgb, mix(vec3(0.04), base.rgb, metallic), roughness, metallic);
     vec3 color = brdfLight(s, n, v, normalize(u.sun.xyz), sunE);
-    color += brdfDiffuse(s, n, v) * skyE + brdfAmbient(s, n, v) * (skyR * ao);
+    color += brdfSky(s, n, v) * (skyR * ao);
     // glTF's emissive factor x strength is dimensionless; the engine reads
     // it as luminance in cd/m² at this scale (documented in lighting.md).
     vec3 emitted = emissive * 19660.8;

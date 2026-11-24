@@ -26,13 +26,12 @@ void main() {
     // Illuminance (lux) before the receiver cosine; the particles' tint
     // multiplies the sunlight they colour.
     vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * n.y));
     vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     // The darts are flat-shaded blocks: a rough dielectric with a slight
     // sheen, so they sit with the terrain rather than looking like metal.
     SurfaceBRDF s = SurfaceBRDF(inColor, vec3(0.04), 0.7, 0.0);
     vec3 color = brdfLight(s, n, v, normalize(u.sun.xyz), sunE);
-    color += brdfDiffuse(s, n, v) * skyE + brdfAmbient(s, n, v) * skyR;
+    color += brdfSky(s, n, v) * skyR;
 #ifndef MIRROR
     if (lightsOn()) {
         color += lightsSurface(lightClusterFrag(gl_FragCoord), inWorld, n, v, s);

@@ -1620,6 +1620,7 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
         size,
         colour: vec![vec![colour_texel([0.3, 0.3, 0.3, 1.0]); texels]],
         surface: vec![vec![surface_texel([0.0, 0.0, 1.0], 1.0, 0.9); texels]],
+        height_layers: Vec::new(),
         materials: Vec::new(),
     });
     let screen = |x: f32, z: f32| {
@@ -1646,9 +1647,8 @@ fn auto_exposure_meters_the_glow_and_the_centre() {
         feed.place_all(&scars);
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_decals(DecalsSetup {
-                feed,
-                capacity: 32,
                 atlas: Some(atlas.clone()),
+                ..DecalsSetup::new(feed, 32)
             })
             .with_tone(ToneParams {
                 bloom,
@@ -6752,6 +6752,7 @@ fn decals_wrap_over_cliffs() {
         size,
         colour: vec![stripes],
         surface: Vec::new(),
+        height_layers: Vec::new(),
         materials: Vec::new(),
     });
     let half = 12.0f32;
@@ -6831,9 +6832,8 @@ fn decals_wrap_over_cliffs() {
                 }));
             }
             app = app.with_decals(DecalsSetup {
-                feed,
-                capacity: 64,
                 atlas: Some(atlas.clone()),
+                ..DecalsSetup::new(feed, 64)
             });
         }
         {
@@ -7240,6 +7240,7 @@ fn decals_relit_modulated_and_glowing() {
         size,
         colour,
         surface,
+        height_layers: Vec::new(),
         materials: Vec::new(),
     });
     let half = 12.0f32;
@@ -7257,9 +7258,8 @@ fn decals_relit_modulated_and_glowing() {
         let feed = Arc::new(DecalFeed::default());
         feed.place_all(decals);
         app = app.with_decals(DecalsSetup {
-            feed,
-            capacity: 16,
             atlas: Some(atlas.clone()),
+            ..DecalsSetup::new(feed, 16)
         });
         {
             let view = app.view();
@@ -7466,21 +7466,31 @@ fn decals_carry_their_roughness_and_metallic() {
         materials: None,
     });
 
-    // Three layers of the same mid grey: a smooth dielectric, a rough
-    // dielectric, and a smooth metal. Roughness is the texture, with no
-    // factor: 0.15, 0.95 and 0.15; the metal's metallic factor is 1.
+    // Smooth and rough dielectrics, then matching metals authored through
+    // the legacy factor and through the material texture.
     let size = 16u32;
     let texels = (size * size) as usize;
     let grey = |c: f32| vec![colour_texel([c, c, c, 1.0]); texels];
     let rough = |r: f32| vec![surface_texel([0.0, 0.0, 1.0], r, 0.0); texels];
     let atlas = Arc::new(DecalAtlas {
         size,
-        colour: vec![grey(0.5), grey(0.5), grey(0.5)],
-        surface: vec![rough(0.15), rough(0.95), rough(0.15)],
+        colour: vec![grey(0.5), grey(0.5), grey(0.5), grey(0.5), grey(0.0), grey(0.0)],
+        surface: vec![
+            rough(0.15),
+            rough(0.95),
+            rough(0.15),
+            vec![[128, 255, 38, 0]; texels],
+            rough(0.15),
+            rough(0.95),
+        ],
+        height_layers: vec![3],
         materials: vec![
             LayerMaterial { metallic: 0.0 },
             LayerMaterial { metallic: 0.0 },
             LayerMaterial { metallic: 1.0 },
+            LayerMaterial::default(),
+            LayerMaterial::default(),
+            LayerMaterial::default(),
         ],
     });
 
@@ -7502,22 +7512,22 @@ fn decals_carry_their_roughness_and_metallic() {
     let mirror = Vec3::new(-v.x, v.y, -v.z);
     let light = Light::point(ground + mirror * 60.0, Vec3::ONE, 1_500_000.0, 100.0, 3.0);
 
-    let render = |layer: u32| -> Vec<u8> {
+    let render = |layer: u32, camera: Camera, sky_only: bool| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
         feed.place_all(&[Decal::permanent([512.0, 512.0], [12.0, 12.0], 0.0, layer)]);
-        // The sun off: the frames differ only in the light's specular (the
-        // decal's albedo and normal are the same layer texture).
+        // Turn off the sun to isolate the point light and sky.
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_decals(DecalsSetup {
-                feed,
-                capacity: 8,
                 atlas: Some(atlas.clone()),
+                ..DecalsSetup::new(feed, 8)
             })
             .with_tone(ae_render::tonemap::ToneParams {
                 sun_illuminance: 0.0,
                 ..Default::default()
-            })
-            .with_lights(vec![light]);
+            });
+        if !sky_only {
+            app = app.with_lights(vec![light]);
+        }
         {
             let view = app.view();
             let mut view = view.lock().unwrap();
@@ -7541,9 +7551,13 @@ fn decals_carry_their_roughness_and_metallic() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let smooth = render(0);
-    let rough = render(1);
-    let metal = render(2);
+    let smooth = render(0, camera, false);
+    let rough = render(1, camera, false);
+    let metal = render(2, camera, false);
+    assert!(
+        metal == render(3, camera, false),
+        "texture metalness should match the legacy metallic factor"
+    );
 
     let clip = lod_view(&source, &camera, extent.width, extent.height).view_proj
         * Vec4::new(ground.x, ground.y, ground.z, 1.0);
@@ -7584,6 +7598,17 @@ fn decals_carry_their_roughness_and_metallic() {
         peak(&metal),
         peak(&smooth)
     );
+    // Black dielectrics remove the diffuse term. Without the point light
+    // the centre of the decal isolates sky specular at a grazing view.
+    let grazing = Camera { pitch: 0.12, ..camera };
+    let sample = ((extent.height / 2 * extent.width + extent.width / 2) * 4) as usize;
+    let smooth_sky = render(4, grazing, true)[sample];
+    let rough_sky = render(5, grazing, true)[sample];
+    assert!(
+        rough_sky > 0 && rough_sky + 24 < smooth_sky,
+        "sky reflection: rough {rough_sky}, smooth {smooth_sky}"
+    );
+    println!("grazing sky reflection: smooth {smooth_sky}, rough {rough_sky}");
     assert_clean(&gpu);
 }
 
@@ -7640,6 +7665,7 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
         size,
         colour: vec![vec![colour_texel([0.3, 0.3, 0.3, 1.0]); texels]],
         surface: vec![vec![surface_texel([0.0, 0.0, 1.0], 1.0, 0.9); texels]],
+        height_layers: Vec::new(),
         materials: Vec::new(),
     });
     let decal = Decal {
@@ -7653,9 +7679,8 @@ fn bloom_spreads_a_glow_but_not_lit_ground() {
         feed.place_all(&[decal]);
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
             .with_decals(DecalsSetup {
-                feed,
-                capacity: 4,
                 atlas: Some(atlas.clone()),
+                ..DecalsSetup::new(feed, 4)
             })
             .with_tone(ToneParams {
                 bloom,
@@ -9935,21 +9960,23 @@ fn lights_clusters_match_the_unculled_reference() {
 
 /// The bundled scars' normal maps relight the ground. One real scar
 /// (`assets/decals/scars/scar1`, loaded as the client loads it: `read_tga`,
-/// `normal_green_up`, `add_layer`, Recoil's modulate blend) on flat ground
-/// in the sun, against the same atlas with that layer's normals made flat
+/// `add_material_layer`, Recoil's modulate blend) on flat ground
+/// in the sun, against the same atlas with that layer's height made constant
 /// (roughness and glow kept), close up and at a gameplay distance. Inside
 /// the scar's footprint the two frames must differ: a normal map lost on
 /// the way (channels, mips, the tangent frame) leaves them equal.
 #[test]
 #[ignore = "needs a Vulkan GPU"]
-fn scar_normal_maps_relight_the_ground() {
-    use ae_render::decals::{Blend, Decal, DecalFeed, DecalsSetup, default_atlas, normal_green_up, read_tga};
-    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource};
+fn scar_height_relief_relights_the_ground() {
+    use ae_render::decals::{
+        Blend, Decal, DecalDebug, DecalFeed, DecalsSetup, Relief, SCAR_HEIGHT_RATIO, default_atlas, read_tga,
+    };
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::camera::Camera;
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::thread::{TargetInfo, run_headless};
-    use glam::Vec2;
+    use glam::{Vec2, Vec3, Vec4};
 
     let gpu = gpu();
     let n = 129;
@@ -9969,13 +9996,12 @@ fn scar_normal_maps_relight_the_ground() {
 
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
     let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
-    let (colour, normal) = (read("scar1.tga"), read("scar1_normal.tga"));
-    let up = normal_green_up(&colour, &normal);
+    let (colour, material) = (read("scar1.tga"), read("scar1_mat.tga"));
     let mut atlas = default_atlas(512);
-    let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap();
+    let layer = atlas.add_material_layer(&colour, &material).unwrap();
     let mut flat = atlas.clone();
     for t in &mut flat.surface[layer as usize] {
-        (t[0], t[1]) = (128, 128);
+        t[0] = 128;
     }
     let (atlas, flat) = (Arc::new(atlas), Arc::new(flat));
 
@@ -9984,18 +10010,19 @@ fn scar_normal_maps_relight_the_ground() {
         height: 480,
     };
     let centre = [512.0f32, 512.0];
-    let render = |atlas: &Arc<ae_render::decals::DecalAtlas>, camera: Camera, decal: bool| -> Vec<u8> {
+    let render = |atlas: &Arc<ae_render::decals::DecalAtlas>, camera: Camera, decal: bool, debug| -> Vec<u8> {
         let feed = Arc::new(DecalFeed::default());
         if decal {
             feed.place_all(&[Decal {
                 blend: Blend::Modulate,
+                relief: Relief::Proportional(SCAR_HEIGHT_RATIO),
                 ..Decal::permanent(centre, [16.0, 16.0], 0.6, layer)
             }]);
         }
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_decals(DecalsSetup {
-            feed,
-            capacity: 8,
             atlas: Some(atlas.clone()),
+            debug,
+            ..DecalsSetup::new(feed, 8)
         });
         {
             let view = app.view();
@@ -10033,15 +10060,15 @@ fn scar_normal_maps_relight_the_ground() {
             pitch: 0.9,
             fov_y: 0.8,
         };
-        let none = render(&atlas, camera, false);
-        let mapped = render(&atlas, camera, true);
-        let flattened = render(&flat, camera, true);
+        let none = render(&atlas, camera, false, DecalDebug::Off);
+        let mapped = render(&atlas, camera, true, DecalDebug::Off);
+        let flattened = render(&flat, camera, true, DecalDebug::Off);
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             for (tag, pixels) in [("mapped", &mapped), ("flat", &flattened)] {
                 let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
                 ppm.extend(pixels.chunks(4).flat_map(|p| [p[0], p[1], p[2]]));
                 std::fs::write(
-                    std::path::Path::new(&dir).join(format!("scar-normals-{name}-{tag}.ppm")),
+                    std::path::Path::new(&dir).join(format!("scar-relief-{name}-{tag}.ppm")),
                     ppm,
                 )
                 .unwrap();
@@ -10062,7 +10089,7 @@ fn scar_normal_maps_relight_the_ground() {
         let over2 = deltas.iter().filter(|&&d| d > 2.0).count() as f32 / deltas.len().max(1) as f32;
         let scar = footprint.iter().map(|&i| luma(&flattened, i)).sum::<f32>() / footprint.len().max(1) as f32;
         println!(
-            "scar normals {name}: footprint {} px, mean |dluma| {mean:.2}, {:.0} % over 2, scar luma {scar:.0} (green up: {up})",
+            "scar relief {name}: footprint {} px, mean |dluma| {mean:.2}, {:.0} % over 2, scar luma {scar:.0}",
             footprint.len(),
             over2 * 100.0
         );
@@ -10072,6 +10099,345 @@ fn scar_normal_maps_relight_the_ground() {
             "{name}: the normal map barely changes the frame (mean |dluma| {mean})"
         );
     }
+    // Compare matched world positions on the real, asymmetric heightmap.
+    // Read back the normal to isolate the decal basis from view-dependent lighting.
+    let camera = Camera {
+        target: Vec2::from(centre),
+        ground: 50.0,
+        distance: 25.0,
+        yaw: 0.4,
+        pitch: 0.9,
+        fov_y: 0.8,
+    };
+    let normals = |camera| {
+        let pixels = render(&atlas, camera, true, DecalDebug::Normal);
+        let vp = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+        (0..81).map(move |i| {
+            let x = centre[0] + (i % 9) as f32 - 4.0;
+            let z = centre[1] + (i / 9) as f32 - 4.0;
+            let clip = vp * Vec4::new(x, 50.0, z, 1.0);
+            let u = (clip.x / clip.w * 0.5 + 0.5) * extent.width as f32 - 0.5;
+            let v = (clip.y / clip.w * 0.5 + 0.5) * extent.height as f32 - 0.5;
+            let (x, y) = (u.floor() as usize, v.floor() as usize);
+            let at = |x, y| {
+                let px = (y * extent.width as usize + x) * 4;
+                Vec3::from_array(std::array::from_fn(|k| {
+                    let s = f32::from(pixels[px + k]) / 255.0;
+                    let linear = if s <= 0.04045 {
+                        s / 12.92
+                    } else {
+                        ((s + 0.055) / 1.055).powf(2.4)
+                    };
+                    linear * 2.0 - 1.0
+                }))
+            };
+            let row = |y| at(x, y).lerp(at(x + 1, y), u.fract());
+            row(y).lerp(row(y + 1), v.fract()).normalize()
+        })
+    };
+    let original: Vec<_> = normals(camera).collect();
+    let opposite = Camera {
+        yaw: camera.yaw + std::f32::consts::PI,
+        ..camera
+    };
+    let mean_difference = original
+        .iter()
+        .zip(normals(opposite))
+        .map(|(a, b)| a.angle_between(b))
+        .sum::<f32>()
+        / original.len() as f32;
+    println!(
+        "opposite views: mean normal angle {:.2} degrees",
+        mean_difference.to_degrees()
+    );
+    // The projected pixels can land on different parts of a texel.
+    assert!(mean_difference.to_degrees() < 6.0);
+
+    // A real crater in the terrain mesh receives a decal while the same
+    // renderer and instance switch from normal mapping to cone tracing.
+    use ae_render::decals::DecalReliefMode;
+    use ae_render::thread::Headless;
+    let side = 65;
+    let crater = Heightmap {
+        width: side,
+        height: side,
+        data: (0..side * side)
+            .map(|i| {
+                let x = ((i % side) as f32 - 32.0) * 2.0;
+                let z = ((i / side) as f32 - 32.0) * 2.0;
+                let radius = x.hypot(z);
+                0.5 - 0.075 * (-(radius / 7.0).powi(2)).exp() + 0.015 * (-((radius - 10.0) / 2.0).powi(2)).exp()
+            })
+            .collect(),
+    };
+    let pyramid = build_pyramid(&crater, 100.0, 0.0);
+    let info = TerrainInfo::new(&crater, &pyramid, 2.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource {
+        heightmap: crater,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let feed = Arc::new(DecalFeed::default());
+    feed.place(Decal::permanent([64.0, 64.0], [10.0, 8.0], 0.6, layer));
+    let mut app = TerrainApp::new(source, TerrainOutput::Readback).with_decals(DecalsSetup {
+        atlas: Some(atlas),
+        debug: DecalDebug::DisplacedUv,
+        ..DecalsSetup::new(feed, 8)
+    });
+    let view = app.view();
+    view.lock().unwrap().camera = Camera {
+        target: Vec2::splat(64.0),
+        ..camera
+    };
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut headless = Headless::new(&gpu, &mut app, target, ExecutorConfig::default()).unwrap();
+    let capture = |headless: &mut Headless<_>, app: &mut TerrainApp| {
+        headless.frames(app, 5).unwrap();
+        headless.wait().unwrap();
+        app.readback().unwrap()
+    };
+    let centre_hits = |pixels: &[u8]| {
+        let centre = (extent.width * (extent.height / 2) + extent.width / 2) as usize;
+        pixels.as_chunks::<4>().0[centre - 12..=centre + 12]
+            .iter()
+            .filter(|px| px[2] >= 245)
+            .count()
+    };
+    assert_eq!(centre_hits(&capture(&mut headless, &mut app)), 0);
+    {
+        let mut view = view.lock().unwrap();
+        view.camera.yaw += std::f32::consts::PI;
+        view.decal_relief.mode = DecalReliefMode::RobustConeStepMapping;
+        view.decal_relief.adaptive_quality = false;
+    }
+    assert!(centre_hits(&capture(&mut headless, &mut app)) > 15);
+    drop(headless);
+    ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+    assert_clean(&gpu);
+}
+
+#[test]
+#[ignore = "needs a Vulkan GPU"]
+fn decal_normals_follow_the_footprint_and_compose() {
+    use ae_render::decals::{
+        Decal, DecalAtlas, DecalDebug, DecalFeed, DecalReliefMode, DecalReliefSettings, DecalsSetup, Image,
+        RCSM_HEIGHT_SCALE, Relief,
+    };
+    use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::camera::Camera;
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::terrain::tileset::{Tileset, temperate};
+    use ae_render::thread::{TargetInfo, run_headless};
+    use glam::{Vec2, Vec3, Vec4};
+
+    let gpu = gpu();
+    let heightmap = Heightmap {
+        width: 65,
+        height: 65,
+        data: vec![0.5; 65 * 65],
+    };
+    let pyramid = build_pyramid(&heightmap, 100.0, 0.0);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, 100.0, 0.0, None);
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let mut atlas = DecalAtlas {
+        size: 16,
+        colour: vec![],
+        surface: vec![],
+        height_layers: vec![],
+        materials: vec![],
+    };
+    for (alpha, axis) in [(255, 0), (255, 1), (0, 0), (255, 2)] {
+        let colour = Image {
+            width: 16,
+            height: 16,
+            texels: vec![[128, 128, 128, alpha]; 256],
+        };
+        let material = Image {
+            width: 16,
+            height: 16,
+            texels: (0..256)
+                .map(|i| {
+                    let step = [i % 16, i / 16, 0][axis];
+                    [64 + 8 * step as u8, 77, 153, 255]
+                })
+                .collect(),
+        };
+        atlas.add_material_layer(&colour, &material).unwrap();
+    }
+    let atlas = Arc::new(atlas);
+    let extent = vk::Extent2D {
+        width: 384,
+        height: 288,
+    };
+    let camera = Camera {
+        target: Vec2::splat(128.0),
+        ground: 50.0,
+        distance: 128.0,
+        yaw: 0.4,
+        pitch: 1.5,
+        fov_y: 1.0,
+    };
+    let pos = [
+        [100.0, 114.0],
+        [128.0, 114.0],
+        [156.0, 114.0],
+        [100.0, 140.0],
+        [128.0, 140.0],
+        [156.0, 140.0],
+        [86.0, 128.0],
+        [170.0, 128.0],
+    ];
+    let decal = |i, layer, angle| Decal {
+        relief: Relief::World(12.75),
+        ..Decal::permanent(pos[i], [8.0, 4.0], angle, layer)
+    };
+    let decals = [
+        decal(0, 0, 0.0),
+        decal(1, 1, 0.0),
+        decal(2, 0, std::f32::consts::FRAC_PI_2),
+        decal(3, 0, 0.0),
+        decal(3, 1, 0.0),
+        decal(4, 1, 0.0),
+        decal(4, 0, 0.0),
+        decal(5, 2, 0.0),
+        Decal {
+            relief: Relief::World(0.0),
+            ..decal(6, 0, 0.0)
+        },
+        decal(7, 3, 0.0),
+    ];
+    let render = |camera: Camera, tileset: Option<Arc<Tileset>>, relief, debug| {
+        let feed = Arc::new(DecalFeed::default());
+        feed.place_all(&decals);
+        let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_decals(DecalsSetup {
+            atlas: Some(atlas.clone()),
+            debug,
+            relief,
+            ..DecalsSetup::new(feed, 16)
+        });
+        if let Some(tileset) = tileset {
+            app = app.with_tileset(tileset);
+        }
+        app.view().lock().unwrap().camera = camera;
+        app.create_offscreen(&gpu, extent).unwrap();
+        let target = TargetInfo {
+            extent,
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        run_headless(&gpu, &mut app, target, 4, ExecutorConfig::default()).unwrap();
+        let pixels = app.readback().unwrap();
+        ae_render::thread::RenderApp::destroy(&mut app, &gpu);
+        let view_proj = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+        pos.map(|[x, z]| {
+            let clip = view_proj * Vec4::new(x, 50.0, z, 1.0);
+            let u = ((clip.x / clip.w * 0.5 + 0.5) * extent.width as f32) as usize;
+            let v = ((clip.y / clip.w * 0.5 + 0.5) * extent.height as f32) as usize;
+            let px = (v * extent.width as usize + u) * 4;
+            Vec3::from_array(std::array::from_fn(|k| {
+                let s = f32::from(pixels[px + k]) / 255.0;
+                let linear = if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                };
+                linear * 2.0 - 1.0
+            }))
+        })
+    };
+    let u = Vec3::new(-0.4, 1.0, 0.0);
+    let v = Vec3::new(0.0, 1.0, -0.8);
+    let rotated_u = Vec3::new(0.0, 1.0, -0.4);
+    let opposite = Camera {
+        yaw: camera.yaw + std::f32::consts::PI,
+        ..camera
+    };
+    let oblique = Camera {
+        yaw: camera.yaw + std::f32::consts::FRAC_PI_2,
+        pitch: 0.65,
+        ..camera
+    };
+    let farther = Camera {
+        distance: 220.0,
+        yaw: 1.6,
+        ..camera
+    };
+    let normal = DecalReliefSettings::default();
+    assert_eq!(normal.mode, DecalReliefMode::NormalMapping);
+    let want = [u, v, rotated_u, v, u, Vec3::Y, Vec3::Y, Vec3::Y];
+    for camera in [camera, opposite, oblique, farther] {
+        for (i, (got, expected)) in render(camera, None, normal, DecalDebug::Normal)
+            .into_iter()
+            .zip(want)
+            .enumerate()
+        {
+            assert!(
+                got.distance(expected.normalize()) < 0.018,
+                "normal at yaw {}, pitch {}, case {i}: {got} vs {expected}",
+                camera.yaw,
+                camera.pitch
+            );
+        }
+    }
+    let disabled = DecalReliefSettings {
+        mode: DecalReliefMode::Disabled,
+        ..normal
+    };
+    for actual in render(camera, None, disabled, DecalDebug::Normal) {
+        assert!(actual.distance(Vec3::Y) < 0.018, "disabled normal {actual}");
+    }
+    let cone = DecalReliefSettings {
+        mode: DecalReliefMode::RobustConeStepMapping,
+        adaptive_quality: false,
+        ..normal
+    };
+    let markers = render(camera, None, cone, DecalDebug::OverlapFallback);
+    assert!(
+        markers[3].y > 0.9 && markers[4].y > 0.9,
+        "overlapped instances fall back"
+    );
+    assert!(markers[0].y < -0.9, "the isolated decal can trace");
+    let cone_normals = render(camera, None, cone, DecalDebug::Normal);
+    let scaled = |n: Vec3| Vec3::new(n.x * RCSM_HEIGHT_SCALE, n.y, n.z * RCSM_HEIGHT_SCALE).normalize();
+    assert!(
+        cone_normals[3].distance(scaled(v)) < 0.018,
+        "RCSM overlap, V ramp newest: {}",
+        cone_normals[3]
+    );
+    assert!(
+        cone_normals[4].distance(scaled(u)) < 0.018,
+        "RCSM overlap, U ramp newest: {}",
+        cone_normals[4]
+    );
+    // A terrain detail tilted along Z remains under a full-coverage U ramp.
+    let mut tileset = temperate(16);
+    tileset.anti_tiling = 0.0;
+    for layer in &mut tileset.layers {
+        layer.settings.normal_strength = 1.0;
+        for normal in layer.normal.as_chunks_mut::<2>().0 {
+            *normal = [128, 179];
+        }
+    }
+    let normals = render(camera, Some(Arc::new(tileset)), normal, DecalDebug::Normal);
+    let terrain = normals[7].normalize();
+    assert!(
+        terrain.z > 0.3,
+        "the tileset's detail normal should tilt along Z: {terrain}"
+    );
+    let expected = glam::Quat::from_rotation_arc(Vec3::Y, terrain) * u.normalize();
+    assert!(normals[0].distance(expected) < 0.02, "{} vs {expected}", normals[0]);
     assert_clean(&gpu);
 }
 
@@ -10147,6 +10513,15 @@ fn mips_are_made_on_the_gpu() {
     let rg: Vec<u8> = surface.chunks(4).flat_map(|t| [t[0], t[1]]).collect();
     let levels = make(vk::Format::R8G8_UNORM, 2, &[&rg], MipFilter::Normal, 2);
     assert!((levels[1][0] as i32 - want).abs() <= 1, "RG8 normals: {:?}", levels[1]);
+
+    // The signed decal texture averages full vectors as well, preserving
+    // the sign and adding no [0,1] encoding bias.
+    let lean = [-26214i16, 0].map(i16::to_le_bytes).concat();
+    let flat = [0u8; 4];
+    let rgba = [lean.as_slice(), &flat, lean.as_slice(), &flat].concat();
+    let levels = make(vk::Format::R16G16_SNORM, 2, &[&rgba], MipFilter::NormalSigned, 4);
+    let got = f32::from(i16::from_le_bytes([levels[1][0], levels[1][1]])) / 32767.0;
+    assert!((got + 0.4 / 0.4_f32.hypot(0.8)).abs() < 1e-4, "signed normal X: {got}");
 
     // R8, 4x4 down to one texel: the mean.
     let r8: Vec<u8> = (0..16u8).map(|i| i * 16).collect();

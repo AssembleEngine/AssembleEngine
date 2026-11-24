@@ -11,11 +11,9 @@
 //!   factor), blended into the ground's by the decal's coverage; its
 //!   roughness comes from the layer's surface texture.
 //! * Channels: the albedo texture is RGB colour with coverage in alpha; the
-//!   surface texture is the tangent normal x/y, roughness (0..1, used as is)
-//!   and the glow mask in alpha. The normal's z (out of the ground) is rebuilt
-//!   in the shader; metallic stays a per-layer factor. The source normal maps
-//!   carry the normal's x/y in red/green, roughness in blue and the glow mask
-//!   in alpha.
+//!   material texture is linear height, metalness, roughness and glow.
+//!   Signed UV slopes are precomputed and mipmapped independently. Legacy
+//!   normal layers are converted to equivalent slopes at upload.
 //! * It is unfolded over the ground from its centre: the plan ray to each
 //!   point, read every heightmap cell, flattened segment by segment along
 //!   the ground's slope. So a decal across a cliff's edge or at its foot
@@ -58,10 +56,16 @@ pub const SCORCH_FADE_IN: f32 = 1.0;
 pub const SCAR_GLOW_LIFE: f32 = 2.0;
 /// Most decals one binning cell lists (the newest are kept).
 pub const MAX_PER_CELL: usize = 255;
+/// Default full height range as a fraction of the decal's width.
+pub const DEFAULT_HEIGHT_RATIO: f32 = 24.0 / 512.0;
+/// Additional height multiplier for RCSM displacement and normal strength.
+pub const RCSM_HEIGHT_SCALE: f32 = 2.5;
+/// Full height range for explosion scars, as a fraction of their width.
+pub const SCAR_HEIGHT_RATIO: f32 = 4.0 * DEFAULT_HEIGHT_RATIO;
 /// Header words before the decals.
 const HEADER_WORDS: usize = 4;
 /// Words per decal.
-const DECAL_WORDS: usize = 16;
+const DECAL_WORDS: usize = 17;
 /// Cells a decal lists in at most.
 const CELLS_PER_DECAL: usize = 9;
 
@@ -97,6 +101,23 @@ pub struct Decal {
     pub glow: f32,
     pub glow_life: f32,
     pub blend: Blend,
+    /// Full world-space height range for this instance's relative relief.
+    pub relief: Relief,
+}
+
+/// How a decal's authored micro-height scales when its footprint changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Relief {
+    /// Height range as a fraction of the decal's final full width.
+    Proportional(f32),
+    /// Height range in world metres.
+    World(f32),
+}
+
+impl Default for Relief {
+    fn default() -> Self {
+        Self::Proportional(DEFAULT_HEIGHT_RATIO)
+    }
 }
 
 /// How a decal's colour meets the ground's.
@@ -130,6 +151,7 @@ impl Decal {
             glow: 0.0,
             glow_life: 0.0,
             blend: Blend::Replace,
+            relief: Relief::default(),
         }
     }
 
@@ -146,6 +168,7 @@ impl Decal {
             opacity: k.clamp(0.8, 1.0),
             glow: k.clamp(0.0, 1.0),
             glow_life: SCAR_GLOW_LIFE,
+            relief: Relief::Proportional(SCAR_HEIGHT_RATIO),
             ..Self::scorch(pos, radius, seed)
         }
     }
@@ -164,6 +187,7 @@ impl Decal {
             glow: 0.0,
             glow_life: 0.0,
             blend: Blend::Replace,
+            relief: Relief::default(),
         }
     }
 
@@ -225,12 +249,13 @@ pub struct DecalAtlas {
     /// Layer for layer, the colour (`R8G8B8A8_SRGB`): sRGB RGB, straight
     /// (not premultiplied) alpha, the coverage, linear.
     pub colour: Vec<Vec<[u8; 4]>>,
-    /// Layer for layer, the surface (`R8G8B8A8_UNORM`): R, G the tangent
-    /// normal's x, y as `n * 0.5 + 0.5` (x toward the decal's +x, y toward
-    /// its +z, down the rows; z, out of the ground, is rebuilt in the
-    /// shader), B the roughness (used as is), A the glow mask. Empty: every
-    /// layer flat, fully rough, without glow ([`FLAT_SURFACE`]).
+    /// Layer for layer, linear surface texels. Height layers store height
+    /// (128 is neutral), metalness, roughness and glow. Legacy layers
+    /// store tangent normal XY, roughness and glow. Empty uses flat legacy
+    /// surfaces ([`FLAT_SURFACE`]).
     pub surface: Vec<Vec<[u8; 4]>>,
+    /// Indices of surfaces with height and metalness in RG.
+    pub height_layers: Vec<u32>,
     /// Layer for layer, its surface material. Empty: every layer is
     /// [`LayerMaterial::default`].
     pub materials: Vec<LayerMaterial>,
@@ -299,12 +324,16 @@ impl DecalAtlas {
         }
     }
 
-    /// Set layer `layer`'s surface material (its metallic factor). Every
-    /// other layer keeps its own (or the default).
+    /// Set a legacy layer's uniform metallic factor.
     pub fn set_layer_material(&mut self, layer: u32, material: LayerMaterial) -> Result<(), String> {
         let n = self.colour.len();
         if layer as usize >= n {
             return Err(format!("material for decal layer {layer}, but the atlas has {n}"));
+        }
+        if self.height_layers.contains(&layer) {
+            return Err(format!(
+                "decal layer {layer} takes its metalness from the material texture"
+            ));
         }
         if self.materials.is_empty() {
             self.materials = vec![LayerMaterial::default(); n];
@@ -314,13 +343,17 @@ impl DecalAtlas {
         Ok(())
     }
 
-    /// The per-layer materials, packed for the shader: x metallic, y..w
-    /// reserved. A missing entry is [`LayerMaterial::default`].
+    /// The per-layer materials, packed for the shader: x legacy metallic,
+    /// y the weight of the metalness texture. Missing legacy entries are dielectric.
     pub(crate) fn gpu_materials(&self) -> Vec<[f32; 4]> {
         (0..self.colour.len())
             .map(|i| {
                 let m = self.materials.get(i).copied().unwrap_or_default();
-                [m.metallic.clamp(0.0, 1.0), 0.0, 0.0, 0.0]
+                if self.height_layers.contains(&(i as u32)) {
+                    [0.0, 1.0, 0.0, 0.0]
+                } else {
+                    [m.metallic.clamp(0.0, 1.0), 0.0, 0.0, 0.0]
+                }
             })
             .collect()
     }
@@ -336,9 +369,27 @@ impl DecalAtlas {
     /// they are). Without `normals` the layer is [`FLAT_SURFACE`]; its
     /// material starts at metallic 0. Returns the layer.
     pub fn add_layer(&mut self, colour: &Image, normals: Option<(&Image, bool)>) -> Result<u32, String> {
+        self.add_surface_layer(colour, normals)
+    }
+
+    /// Add a material layer with linear height, metalness, roughness and glow.
+    /// Increasing V follows the top-first image rows. Coverage comes from colour.
+    pub fn add_material_layer(&mut self, colour: &Image, material: &Image) -> Result<u32, String> {
+        let layer = self.add_surface_layer(colour, Some((material, false)))?;
+        self.height_layers.push(layer);
+        Ok(layer)
+    }
+
+    fn add_surface_layer(&mut self, colour: &Image, surface: Option<(&Image, bool)>) -> Result<u32, String> {
         let square = |img: &Image| -> Result<(), String> {
-            if img.width != img.height {
-                return Err(format!("decal image {}x{} is not square", img.width, img.height));
+            if img.width == 0 || img.width != img.height || img.texels.len() != img.width as usize * img.height as usize
+            {
+                return Err(format!(
+                    "invalid square decal image {}x{} with {} texels",
+                    img.width,
+                    img.height,
+                    img.texels.len()
+                ));
             }
             Ok(())
         };
@@ -364,7 +415,7 @@ impl DecalAtlas {
                 .map(colour_texel)
                 .collect()
         };
-        let surface_layer = match normals {
+        let surface_layer = match surface {
             Some((img, up)) => {
                 square(img)?;
                 let flipped: Vec<[u8; 4]> = img
@@ -413,6 +464,9 @@ impl DecalAtlas {
                 self.colour.len()
             ));
         }
+        if let Some(i) = self.height_layers.iter().find(|&&i| i as usize >= self.surface.len()) {
+            return Err(format!("decal material layer {i} has no surface"));
+        }
         if !self.materials.is_empty() && self.materials.len() != self.colour.len() {
             return Err(format!(
                 "decal atlas has {} material layers for {} colour layers",
@@ -448,6 +502,64 @@ impl DecalAtlas {
     }
 }
 
+/// Signed height slopes in normalized UV units. Top-first rows increase V.
+/// The neutral-height bias cancels when subtracting samples.
+fn height_derivatives(surface: &[[u8; 4]], size: usize) -> impl Iterator<Item = [f32; 2]> + '_ {
+    let height = move |x: usize, y: usize| f32::from(surface[y * size + x][0]);
+    let difference = move |lo, hi, span: usize| (hi - lo) * (size as f32 / 255.0) / span.max(1) as f32;
+    (0..surface.len()).map(move |i| {
+        let (x, y) = (i % size, i / size);
+        let (l, r) = (x.saturating_sub(1), (x + 1).min(size - 1));
+        let (u, d) = (y.saturating_sub(1), (y + 1).min(size - 1));
+        [
+            difference(height(l, y), height(r, y), r - l),
+            difference(height(x, u), height(x, d), d - u),
+        ]
+    })
+}
+
+pub(crate) struct GpuSurfaceLayer {
+    pub material: Vec<[u8; 4]>,
+    pub normals: Vec<[u8; 4]>,
+}
+
+impl DecalAtlas {
+    /// Convert legacy normals and heightfield slopes to signed tangent normals.
+    pub(crate) fn gpu_surfaces(&self) -> impl Iterator<Item = GpuSurfaceLayer> + '_ {
+        self.surface_layers().into_iter().enumerate().map(|(i, mut layer)| {
+            let pack = |slope: [f32; 2]| {
+                let n = glam::Vec3::new(-slope[0] * DEFAULT_HEIGHT_RATIO, -slope[1] * DEFAULT_HEIGHT_RATIO, 1.0)
+                    .normalize();
+                let [x, y] = [n.x, n.y].map(|c| (c * 32767.0).round() as i16);
+                let [a, b] = x.to_le_bytes();
+                let [c, d] = y.to_le_bytes();
+                [a, b, c, d]
+            };
+            let normals = if self.height_layers.contains(&(i as u32)) {
+                height_derivatives(&layer, self.size as usize).map(pack).collect()
+            } else {
+                layer
+                    .iter_mut()
+                    .map(|t| {
+                        let xy = [t[0], t[1]].map(|c| match c {
+                            127 | 128 => 0.0,
+                            _ => f32::from(c) / 127.5 - 1.0,
+                        });
+                        let z = (1.0 - xy[0] * xy[0] - xy[1] * xy[1]).max(0.0025).sqrt();
+                        t[0] = 128;
+                        t[1] = 0;
+                        pack(xy.map(|n| -n / (DEFAULT_HEIGHT_RATIO * z)))
+                    })
+                    .collect()
+            };
+            GpuSurfaceLayer {
+                material: layer,
+                normals,
+            }
+        })
+    }
+}
+
 /// An 8-bit RGBA image, rows top first.
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -465,6 +577,9 @@ pub fn read_tga(bytes: &[u8]) -> Result<Image, String> {
         u16::from_le_bytes([header[12], header[13]]) as u32,
         u16::from_le_bytes([header[14], header[15]]) as u32,
     );
+    if width == 0 || height == 0 {
+        return Err("TGA: empty image".into());
+    }
     if header[1] != 0 || !(kind == 2 || kind == 10) || bpp != 32 {
         return Err(format!(
             "TGA: only 32-bit true colour is read (colour map {}, type {kind}, {bpp} bits)",
@@ -735,7 +850,106 @@ pub fn default_atlas(size: u32) -> DecalAtlas {
         size,
         colour,
         surface,
+        height_layers: Vec::new(),
         materials,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DecalReliefMode {
+    Disabled = 0,
+    #[default]
+    NormalMapping = 1,
+    RobustConeStepMapping = 2,
+}
+
+impl DecalReliefMode {
+    pub(crate) const ALL: [Self; 3] = [Self::Disabled, Self::NormalMapping, Self::RobustConeStepMapping];
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DecalParallaxOverlapMode {
+    #[default]
+    NormalMappingFallback = 0,
+    DominantDecal = 1,
+    IndependentExperimental = 2,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DecalReliefSettings {
+    pub mode: DecalReliefMode,
+    pub overlap_mode: DecalParallaxOverlapMode,
+    pub strength: f32,
+    pub max_cone_steps: u32,
+    pub max_refine_steps: u32,
+    pub min_parallax_pixels: f32,
+    pub full_parallax_pixels: f32,
+    pub min_view_normal_dot: f32,
+    pub adaptive_quality: bool,
+}
+
+impl Default for DecalReliefSettings {
+    fn default() -> Self {
+        Self {
+            mode: DecalReliefMode::default(),
+            overlap_mode: DecalParallaxOverlapMode::default(),
+            strength: 1.0,
+            max_cone_steps: 48,
+            max_refine_steps: 6,
+            min_parallax_pixels: 0.75,
+            full_parallax_pixels: 2.0,
+            min_view_normal_dot: 0.18,
+            adaptive_quality: true,
+        }
+    }
+}
+
+/// Unlit terrain decal views. Individual views show the newest decal with
+/// nonzero coverage at the fragment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DecalDebug {
+    #[default]
+    Off = 0,
+    Height = 1,
+    Coverage = 2,
+    Normal = 3,
+    TangentNormal = 4,
+    Cone = 5,
+    CellBounds = 6,
+    Iterations = 7,
+    IntersectionDepth = 8,
+    DisplacedUv = 9,
+    IntersectionFailure = 10,
+    OverlapFallback = 11,
+    ReliefLod = 12,
+}
+
+impl DecalDebug {
+    pub const VIEWS: [(&'static str, Self); 13] = [
+        ("off", Self::Off),
+        ("height", Self::Height),
+        ("coverage", Self::Coverage),
+        ("normal", Self::Normal),
+        ("tangent-normal", Self::TangentNormal),
+        ("cone", Self::Cone),
+        ("cell-bounds", Self::CellBounds),
+        ("iterations", Self::Iterations),
+        ("depth", Self::IntersectionDepth),
+        ("uv", Self::DisplacedUv),
+        ("failed", Self::IntersectionFailure),
+        ("overlap", Self::OverlapFallback),
+        ("lod", Self::ReliefLod),
+    ];
+
+    pub fn next(self) -> Self {
+        Self::VIEWS[(self as usize + 1) % Self::VIEWS.len()].1
     }
 }
 
@@ -745,6 +959,8 @@ pub struct DecalsSetup {
     pub capacity: u32,
     /// The textures; [`default_atlas`] when `None`.
     pub atlas: Option<Arc<DecalAtlas>>,
+    pub debug: DecalDebug,
+    pub relief: DecalReliefSettings,
 }
 
 impl DecalsSetup {
@@ -753,6 +969,8 @@ impl DecalsSetup {
             feed,
             capacity,
             atlas: None,
+            debug: DecalDebug::Off,
+            relief: DecalReliefSettings::default(),
         }
     }
 }
@@ -798,6 +1016,8 @@ pub(crate) struct DecalSet {
     words: Vec<u32>,
     count: Vec<u32>,
     cursor: Vec<u32>,
+    clearance: Vec<f32>,
+    clearance_version: Option<u64>,
 }
 
 impl DecalSet {
@@ -809,6 +1029,8 @@ impl DecalSet {
             words: Vec::new(),
             count: Vec::new(),
             cursor: Vec::new(),
+            clearance: Vec::new(),
+            clearance_version: None,
         }
     }
 
@@ -843,6 +1065,16 @@ impl DecalSet {
             Blend::Replace => 0.0,
             Blend::Modulate => 1.0,
         };
+        let width = 2.0 * d.half[0].max(1e-3);
+        let height_range = match d.relief {
+            Relief::Proportional(ratio) => width * ratio,
+            Relief::World(metres) => metres,
+        };
+        let height_range = if height_range.is_finite() {
+            height_range.max(0.0)
+        } else {
+            0.0
+        };
         let words = [
             d.pos[0],
             d.pos[1],
@@ -857,15 +1089,16 @@ impl DecalSet {
             end,
             fade_out,
             d.glow.clamp(0.0, 1.0),
-            0.0,
+            height_range,
             glow_inv,
             blend,
+            0.0, // Filled by encode when the safe overlap policy needs it.
         ]
         .map(f32::to_bits);
         // The buckets of the distinct cells it touches (two of its cells
         // may share a bucket: listed once).
         let mask = buckets(self.capacity as u32) - 1;
-        let r = d.radius();
+        let r = f32::from_bits(words[2]).hypot(f32::from_bits(words[3]));
         let lo = |v: f32| ((v - r) / GRID_CELL).floor() as i32;
         let hi = |v: f32| ((v + r) / GRID_CELL).floor() as i32;
         let mut list = [0u32; CELLS_PER_DECAL];
@@ -913,10 +1146,46 @@ impl DecalSet {
         })
     }
 
+    /// A lower bound on distance from each footprint disc to any other.
+    /// The shader compares it to the entire ray's planar displacement.
+    /// Looking past GRID_CELL can only make this bound less pessimistic.
+    fn update_clearance(&mut self) {
+        let mut by_x: Vec<_> = self
+            .live
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| f32::from_bits(p.words[7]) > 0.0)
+            .map(|(i, p)| (i, p.bounds))
+            .collect();
+        by_x.sort_unstable_by(|a, b| a.1[0].total_cmp(&b.1[0]));
+        self.clearance.clear();
+        self.clearance.resize(self.live.len(), GRID_CELL);
+        for (at, &(i, [x, z, r])) in by_x.iter().enumerate() {
+            for &(j, [other_x, other_z, other_r]) in &by_x[at + 1..] {
+                let dx = other_x - x;
+                if dx >= r + MAX_RADIUS + GRID_CELL {
+                    break;
+                }
+                let limit = r + other_r + self.clearance[i].max(self.clearance[j]);
+                let dz = other_z - z;
+                if dx.abs() >= limit || dz.abs() >= limit {
+                    continue;
+                }
+                let distance = (dx.hypot(dz) - r - other_r - 1e-3).max(0.0);
+                self.clearance[i] = self.clearance[i].min(distance);
+                self.clearance[j] = self.clearance[j].min(distance);
+            }
+        }
+        self.clearance_version = Some(self.version);
+    }
+
     /// The GPU buffer's words ([`buffer_words`]; the unused tail of the
     /// index list left out). A counting sort into buffers kept between
     /// calls.
-    pub fn encode(&mut self) -> &[u32] {
+    pub fn encode(&mut self, debug: DecalDebug, check_overlap: bool) -> &[u32] {
+        if check_overlap && self.clearance_version != Some(self.version) {
+            self.update_clearance();
+        }
         let cap = self.capacity;
         let mask = buckets(cap as u32) - 1;
         let n_buckets = mask as usize + 1;
@@ -926,10 +1195,13 @@ impl DecalSet {
         self.count.clear();
         self.count.resize(n_buckets, 0);
         let words = &mut self.words;
-        words[..HEADER_WORDS].copy_from_slice(&[mask, 0, GRID_CELL.to_bits(), cap as u32]);
+        words[..HEADER_WORDS].copy_from_slice(&[mask, debug as u32, GRID_CELL.to_bits(), cap as u32]);
         for (i, p) in self.live.iter().enumerate() {
             let at = HEADER_WORDS + i * DECAL_WORDS;
             words[at..at + DECAL_WORDS].copy_from_slice(&p.words);
+            if check_overlap {
+                words[at + 16] = self.clearance[i].to_bits();
+            }
             for &b in &p.buckets[..p.n_buckets as usize] {
                 self.count[b as usize] += 1;
             }
@@ -984,7 +1256,7 @@ mod tests {
         set.insert(decal(10.0, 10.0, 4.0), 0.0); // cell (0, 0)
         set.insert(decal(32.0, 32.0, 4.0), 0.0); // the corner of four cells
         set.insert(decal(40.0, 10.0, 100.0), 0.0); // clamped to MAX_RADIUS
-        let words = set.encode().to_vec();
+        let words = set.encode(DecalDebug::Off, false).to_vec();
         assert!(words.len() <= buffer_words(3));
         // Distinct buckets for these cells at this table size.
         let cells = [
@@ -1020,7 +1292,7 @@ mod tests {
         assert!((half * std::f32::consts::SQRT_2 - MAX_RADIUS).abs() < 1e-3, "{half}");
 
         set.insert(decal(170.0, 170.0, 4.0), 1.0);
-        let words = set.encode().to_vec();
+        let words = set.encode(DecalDebug::Off, false).to_vec();
         // The first decal went; the others moved down one.
         assert_eq!(listed(&words, 3, 0, 0), vec![0, 1]);
         assert_eq!(listed(&words, 3, 5, 5), vec![2]);
@@ -1046,7 +1318,7 @@ mod tests {
             },
             1.0,
         );
-        let words = set.encode().to_vec();
+        let words = set.encode(DecalDebug::Off, false).to_vec();
         let at = |i: usize, k: usize| f32::from_bits(words[HEADER_WORDS + i * DECAL_WORDS + k]);
         assert_eq!((at(0, 10), at(0, 11)), (0.0, 0.0), "permanent");
         assert_eq!((at(1, 10), at(1, 11)), (3.0, 2.0), "ends at 3, fades over 0.5 s");
@@ -1083,7 +1355,7 @@ mod tests {
         for _ in 0..n {
             set.insert(decal(16.0, 16.0, 2.0), 0.0);
         }
-        let words = set.encode().to_vec();
+        let words = set.encode(DecalDebug::Off, false).to_vec();
         assert_eq!(listed(&words, n as u32, 0, 0), (5..n as u32).collect::<Vec<_>>());
     }
 
@@ -1093,6 +1365,7 @@ mod tests {
             size: 2,
             colour: vec![vec![[0; 4]; 4]; 2],
             surface: Vec::new(),
+            height_layers: Vec::new(),
             materials: Vec::new(),
         };
         assert_eq!(
@@ -1211,6 +1484,7 @@ mod tests {
             size: 2,
             colour: vec![vec![[0; 4]; 4]],
             surface: Vec::new(),
+            height_layers: Vec::new(),
             materials: Vec::new(),
         };
         // 4x4 colour, mid grey: box-filtered to 2x2 in linear light.
@@ -1247,6 +1521,7 @@ mod tests {
             size: 4,
             colour: Vec::new(),
             surface: Vec::new(),
+            height_layers: Vec::new(),
             materials: Vec::new(),
         };
         let texels: Vec<[u8; 4]> = (0..16u8).map(|i| [i * 9, 255 - i, i, 200]).collect();
@@ -1266,6 +1541,7 @@ mod tests {
                 size: 2,
                 colour: vec![vec![[0; 4]; 4]],
                 surface: Vec::new(),
+                height_layers: Vec::new(),
                 materials: Vec::new()
             }
             .add_layer(
@@ -1284,6 +1560,7 @@ mod tests {
             size: 4,
             colour: vec![vec![[0; 4]; 16]],
             surface: Vec::new(),
+            height_layers: Vec::new(),
             materials: Vec::new(),
         };
         assert!(
@@ -1371,48 +1648,76 @@ mod tests {
     }
 
     #[test]
-    fn recoil_scars_load_into_one_convention() {
+    fn bundled_scar_materials_preserve_the_source_channels() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/decals/scars");
         let read = |name: &str| read_tga(&std::fs::read(dir.join(name)).unwrap()).unwrap();
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".tga") && !n.ends_with("_normal.tga"))
-            .collect();
-        names.sort();
-        assert!(!names.is_empty(), "no bundled scars");
-        let mut atlas = default_atlas(256);
-        for name in names {
-            let stem = name.strip_suffix(".tga").unwrap();
-            let (colour, normal) = (read(&name), read(&format!("{stem}_normal.tga")));
-            assert_eq!(
-                (colour.width, colour.height),
-                (normal.width, normal.height),
-                "{name}: colour and normal differ in size"
-            );
-            let up = normal_green_up(&colour, &normal);
-            let layer = atlas.add_layer(&colour, Some((&normal, up))).unwrap() as usize;
-            assert_eq!(
-                atlas.materials[layer],
-                LayerMaterial::default(),
-                "{name}: roughness is the texture; the material stays a dielectric"
-            );
-            assert_eq!(
-                atlas.surface[layer].len(),
-                (atlas.size * atlas.size) as usize,
-                "{name}: a surface from the normal map"
-            );
-            let size = atlas.size as usize;
-            let sign = curl_sign(&atlas.surface[layer], size, &atlas.colour[layer]);
-            println!("{name}: green up {up}, curl {sign:.2}");
-            // The sign is the convention the loader picked (green down after
-            // the flip). Its magnitude is only a confidence hint: baked scar
-            // normals can carry weak tangential signal (0.02 here), so a
-            // magnitude gate would reject real scars.
-            assert!(sign > 0.0, "{name}: {sign}");
+        let mut atlas = default_atlas(512);
+        for i in 1..=10 {
+            let colour = read(&format!("scar{i}.tga"));
+            let material = read(&format!("scar{i}_mat.tga"));
+            assert_eq!((colour.width, colour.height), (512, 512));
+            assert_eq!((material.width, material.height), (512, 512));
+            let layer = atlas.add_material_layer(&colour, &material).unwrap() as usize;
+            assert_eq!(atlas.surface[layer], material.texels);
+            assert_eq!(atlas.gpu_materials()[layer], [0.0, 1.0, 0.0, 0.0]);
         }
         atlas.validate().unwrap();
+    }
+
+    #[test]
+    fn height_derivatives_use_normalized_uv_and_one_sided_borders() {
+        assert_eq!(
+            height_derivatives(&[[128, 0, 0, 0]; 16], 4).collect::<Vec<_>>(),
+            [[0.0; 2]; 16]
+        );
+        assert_eq!(height_derivatives(&[[42; 4]], 1).next(), Some([0.0; 2]));
+        for size in [4, 8, 16] {
+            let pixels: Vec<[u8; 4]> = (0..size * size)
+                .map(|i| {
+                    [
+                        128 + (64 / size * (i % size)) as u8 - (32 / size * (i / size)) as u8,
+                        42,
+                        70,
+                        0,
+                    ]
+                })
+                .collect();
+            // Decode both TGA row orders before differentiating.
+            for top_first in [false, true] {
+                let img = read_tga(&tga(size as u16, &pixels, true, top_first)).unwrap();
+                for [u, v] in height_derivatives(&img.texels, size) {
+                    assert!((u - 64.0 / 255.0).abs() < 1e-6, "U: {u}");
+                    assert!((v + 32.0 / 255.0).abs() < 1e-6, "V: {v}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relief_range_is_encoded_after_the_footprint_is_clamped() {
+        let mut set = DecalSet::new(4);
+        let decal = Decal::permanent([0.0, 0.0], [64.0, 48.0], 0.0, 0);
+        set.insert(decal, 0.0);
+        set.insert(
+            Decal {
+                relief: Relief::World(0.75),
+                ..decal
+            },
+            0.0,
+        );
+        set.insert(
+            Decal {
+                relief: Relief::World(0.0),
+                ..decal
+            },
+            0.0,
+        );
+        let words = set.encode(DecalDebug::Normal, false);
+        assert_eq!(words[1], DecalDebug::Normal as u32);
+        let range = |i| f32::from_bits(words[HEADER_WORDS + DECAL_WORDS * i + 13]);
+        assert!((range(0) - DEFAULT_HEIGHT_RATIO * (128.0 * MAX_RADIUS / 80.0)).abs() < 1e-6);
+        assert_eq!(range(1), 0.75);
+        assert_eq!(range(2), 0.0);
     }
 
     /// `cargo test --release -p ae_render --lib decal_encode_time -- --ignored --nocapture`
@@ -1432,7 +1737,7 @@ mod tests {
         }
         let t = std::time::Instant::now();
         for _ in 0..100 {
-            std::hint::black_box(set.encode());
+            std::hint::black_box(set.encode(DecalDebug::Off, false));
         }
         println!("{:.1} µs per encode of 1024 decals", t.elapsed().as_secs_f64() * 1e4);
     }

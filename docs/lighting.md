@@ -186,17 +186,20 @@ model. The sun's `E` carries the hills' and units' shadows and the
 particles' tint; the clustered lights have no shadows. Roughness is clamped
 to 0.04, and `a` to 1e-4.
 
-Without an environment map the sky is the only specular environment. It is a
-uniform hemisphere, so the integral has a closed form:
+The sky is the specular environment. `brdfSky` uses an analytic GGX
+directional-albedo fit to account for roughness and the view angle. The sky
+radiance is a uniform hemisphere. Its specular weight interpolates from
+the mirror reflection direction towards the normal as roughness increases:
 
     L_sky = skyTint * skyIlluminance / pi
-    ambient = F(N.V) * L_sky * (0.5 + 0.5 * R.y) * ao        (R = reflect(-V, N))
+    R = reflect(-V, N)
+    specularY = mix(R.y, N.y, roughness^2)
+    ambient = L_sky * ao * (specularAlbedo * (0.5 + 0.5 * specularY)
+              + albedo * (1 - metallic) * (1 - specularAlbedo) * (0.5 + 0.5 * N.y))
 
-(the same hemispherical approximation the diffuse sky uses). This is what
-keeps a metal visible where no light glints: `kD` is 0 for a metal, so its
-only light is the sun's and the lights' lobes plus this term. There is
-deliberately no prefiltered IBL, split-sum LUT, multi-scatter compensation,
-area light, or per-light shadow yet; the sky's radiance is a constant.
+The diffuse sky uses the energy left by the integrated specular term.
+Metals retain the sky reflection even in the absence of a direct highlight.
+The fit follows [Karis, Physically Based Shading on Mobile](https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile).
 
 Materials:
 
@@ -877,8 +880,5 @@ it say so below and in `tests/gpu.rs`.
   army-fox (8 167 µs) have no particles in these scenes and stay within
   their run spread. The test-only OIT blends skip the second attachment.
 
-Open: an environment map if the metals' sky term is not enough. Two known
-limitations are tracked in `PLAN.md`: the sky specular ignores roughness (a
-low camera at grazing incidence gets a strong sky reflection on the ground,
-where a roughness-aware directional albedo would dim it), and glTF's default
-metallic 1 makes content without pbr data a rough metal.
+Open: an environment map if the metals' sky term is insufficient. glTF's
+default metallic 1 makes content without pbr data a rough metal.

@@ -26,7 +26,7 @@
 use super::heightmap::{Heightmap, PYRAMID_BASE_LEVEL, Pyramid};
 use super::leb::{self, Cbt};
 use super::tileset::{TILESET_UBO_BYTES, Tileset, TilesetUbo};
-use crate::decals::DecalAtlas;
+use crate::decals::{DecalAtlas, DecalReliefMode, RCSM_HEIGHT_SCALE};
 use crate::device::GpuDevice;
 use crate::executor::{BufferBinding, PassContext};
 use crate::memory::{OwnedBuffer, OwnedImage};
@@ -80,6 +80,7 @@ struct FrameUbo {
     /// x: exposure, y: unused, z: the sun's illuminance (lux), w: the
     /// sky's (lux).
     photometry: [f32; 4],
+    decal_relief: [u32; 4],
 }
 
 /// The cell layout of the vision (fog of war) planes a renderer can show:
@@ -142,6 +143,7 @@ pub struct FrameParams {
     /// time drawn when a unit stream is live, so effects follow the sim's
     /// speed; otherwise `time`.
     pub effect_time: f32,
+    pub decal_relief: crate::decals::DecalReliefSettings,
     /// Shade by the hills' shadows (when the renderer has them).
     pub shadows: bool,
     /// Shade by the units' shadow map with these cascades (the graph
@@ -223,7 +225,7 @@ struct TerrainReflection {
 
 struct TerrainRefraction {
     terrain: vk::Pipeline,
-    decals: Option<vk::Pipeline>,
+    decals: Option<[vk::Pipeline; DecalReliefMode::ALL.len()]>,
     underwater: vk::Pipeline,
     refract: vk::Pipeline,
     full: vk::Pipeline,
@@ -289,18 +291,19 @@ pub struct TerrainRenderer {
     unit_shadow_map: ShadowMap,
     /// The terrain pipeline with decals (specialization constant 1), when
     /// made with them; used for a slot while it has any.
-    terrain_decals: Option<vk::Pipeline>,
+    terrain_decals: Option<[vk::Pipeline; DecalReliefMode::ALL.len()]>,
     /// Per slot: the decals ([`crate::decals`]; host-visible, 16 bytes
     /// without), and whether it has any.
     decal_bufs: Vec<OwnedBuffer>,
-    decal_live: Vec<bool>,
+    decal_live: Vec<Option<DecalReliefMode>>,
     /// The decal atlas (1x1 without decals).
     decal_atlas: OwnedImage,
-    /// Its surface: normal xy, roughness and the glow mask, layer for
-    /// layer.
+    /// Its linear height, metalness, roughness and glow, layer for layer.
     decal_surface: OwnedImage,
-    /// Its material parameters (x roughness, y metallic), layer for layer
-    /// (one entry without decals).
+    /// Its signed tangent normals, layer for layer.
+    decal_normals: OwnedImage,
+    decal_cones: OwnedImage,
+    /// Legacy metallic factors and the weight of material texture metalness.
     decal_materials: OwnedBuffer,
     /// Per slot: line-of-sight and explored bit planes (host-visible;
     /// 16 bytes without a vision grid).
@@ -529,15 +532,14 @@ impl TerrainRenderer {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        // The decal atlas: colour (sRGB) and, layer for layer, the surface
-        // (normal xy, roughness, glow mask; UNORM).
-        let (decal_atlas, decal_surface) = match decals {
+        let (decal_atlas, decal_surface, decal_normals, decal_cones) = match decals {
             Some((atlas, _)) => {
                 atlas.validate().map_err(anyhow::Error::msg)?;
                 // Mip 0 of each layer; the mips are made on the GPU.
                 let colour: Vec<&[u8]> = atlas.colour.iter().map(|l| l.as_flattened()).collect();
-                let surface = atlas.surface_layers();
-                let surface: Vec<&[u8]> = surface.iter().map(|l| l.as_flattened()).collect();
+                let layers: Vec<_> = atlas.gpu_surfaces().collect();
+                let surface: Vec<&[u8]> = layers.iter().map(|l| l.material.as_flattened()).collect();
+                let normals: Vec<&[u8]> = layers.iter().map(|l| l.normals.as_flattened()).collect();
                 let array = vk::ImageViewType::TYPE_2D_ARRAY;
                 (
                     upload::image_mipped(
@@ -556,10 +558,21 @@ impl TerrainRenderer {
                         atlas.size,
                         atlas.size,
                         &surface,
-                        MipFilter::Normal,
+                        MipFilter::Average,
                         array,
                         "decal surface",
                     )?,
+                    upload::image_mipped(
+                        gpu,
+                        vk::Format::R16G16_SNORM,
+                        atlas.size,
+                        atlas.size,
+                        &normals,
+                        MipFilter::NormalSigned,
+                        array,
+                        "decal tangent normals",
+                    )?,
+                    crate::decals_relief::upload_cones(gpu, atlas, &layers)?,
                 )
             }
             None => {
@@ -576,13 +589,30 @@ impl TerrainRenderer {
                 };
                 (
                     one(vk::Format::R8G8B8A8_SRGB, [0; 4], "decal atlas")?,
-                    one(vk::Format::R8G8B8A8_UNORM, [128, 128, 255, 0], "decal surface")?,
+                    one(vk::Format::R8G8B8A8_UNORM, [128, 0, 255, 0], "decal surface")?,
+                    one(vk::Format::R16G16_SNORM, [0; 4], "decal tangent normals")?,
+                    upload::image_layers(
+                        gpu,
+                        vk::Format::R32G32B32A32_SFLOAT,
+                        1,
+                        1,
+                        &[vec![&[0; 16]]],
+                        vk::ImageViewType::TYPE_2D_ARRAY,
+                        "decal cones",
+                    )?,
                 )
             }
         };
-        // The layers' material parameters (x roughness, y metallic); one
-        // matte dielectric entry without decals.
-        let material_texels = decals.map_or_else(|| vec![[0.9, 0.0, 0.0, 0.0]], |(atlas, _)| atlas.gpu_materials());
+        let mut material_texels = decals.map_or_else(|| vec![[0.0; 4]], |(atlas, _)| atlas.gpu_materials());
+        if let Some((atlas, _)) = decals {
+            for &layer in &atlas.height_layers {
+                let (lo, hi) = atlas.surface[layer as usize]
+                    .iter()
+                    .fold((128u8, 128u8), |(lo, hi), t| (lo.min(t[0]), hi.max(t[0])));
+                material_texels[layer as usize][2] = f32::from(lo) / 255.0;
+                material_texels[layer as usize][3] = f32::from(hi) / 255.0;
+            }
+        }
         let decal_materials = upload::buffer(gpu, slice_bytes(&material_texels), storage, "decal materials")?;
         let stats = (0..frames_in_flight)
             .map(|_| {
@@ -799,6 +829,24 @@ impl TerrainRenderer {
         push.sampler(2, bindless.sampler(&samplers[2])?.index);
         push.sampler(3, unit_shadow_map.color_sampler_index());
         push.sampler(4, unit_shadow_map.sampler_index());
+        let decal_sampler = make_sampler(vk::Filter::LINEAR)
+            .anisotropy_enable(decals.is_some() && gpu.max_sampler_anisotropy.is_some())
+            .max_anisotropy(gpu.max_sampler_anisotropy.unwrap_or(1.0).min(8.0));
+        push.sampler(5, bindless.sampler(&decal_sampler)?.index);
+        push.image(
+            14,
+            bindless
+                .sampled_2d_array(decal_normals.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+        );
+        push.image(
+            15,
+            bindless
+                .sampled_2d_array(decal_cones.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+                .0
+                .index,
+        );
 
         // Every buffer is in the global set (M15 step D); the per-slot ones
         // are slotted, so the table is the same every frame.
@@ -831,23 +879,26 @@ impl TerrainRenderer {
             spirv!("terrain.frag"),
             false,
             unit_shadows,
-            false,
+            None,
             false,
         )?;
-        let terrain_decals = match decals {
-            Some(_) => Some(graphics_pipeline(
-                device,
-                pipeline_layout,
-                color_format,
-                depth_format,
-                spirv!("terrain.frag"),
-                false,
-                unit_shadows,
-                true,
-                false,
-            )?),
-            None => None,
-        };
+        let terrain_decals = decals
+            .map(|_| {
+                reflect::pipelines(device, |i| {
+                    graphics_pipeline(
+                        device,
+                        pipeline_layout,
+                        color_format,
+                        depth_format,
+                        spirv!("terrain.frag"),
+                        false,
+                        unit_shadows,
+                        Some(DecalReliefMode::ALL[i]),
+                        false,
+                    )
+                })
+            })
+            .transpose()?;
         let wire = if gpu.fill_mode_non_solid {
             Some(graphics_pipeline(
                 device,
@@ -857,7 +908,7 @@ impl TerrainRenderer {
                 spirv!("terrain_wire.frag"),
                 true,
                 false,
-                false,
+                None,
                 false,
             )?)
         } else {
@@ -918,10 +969,12 @@ impl TerrainRenderer {
             has_shadows: shadows.is_some(),
             unit_shadow_map,
             terrain_decals,
-            decal_live: vec![false; frames_in_flight],
+            decal_live: vec![None; frames_in_flight],
             decal_bufs,
             decal_atlas,
             decal_surface,
+            decal_normals,
+            decal_cones,
             decal_materials,
             vision_bufs,
             vision,
@@ -1043,6 +1096,11 @@ impl TerrainRenderer {
         let planes = frustum_planes;
         let i = &self.info;
         let unit_shadow = Cascades::uniforms(p.unit_shadows.as_ref().filter(|_| self.unit_shadow_map.is_real()));
+        let relief_scale = if p.decal_relief.mode == DecalReliefMode::RobustConeStepMapping {
+            RCSM_HEIGHT_SCALE
+        } else {
+            1.0
+        };
         let ubo = FrameUbo {
             view_proj: p.view_proj.to_cols_array(),
             cam_pos: p.cam_pos.extend(1.0).to_array(),
@@ -1095,7 +1153,24 @@ impl TerrainRenderer {
             },
             vision: self.vision_uniform().unwrap_or([0.0; 4]),
             unit_shadow,
-            effects: [p.effect_time, 0.0, 0.0, 0.0],
+            effects: [
+                p.effect_time,
+                if p.decal_relief.strength.is_finite() {
+                    p.decal_relief.strength.max(0.0) * relief_scale
+                } else {
+                    0.0
+                },
+                p.decal_relief.min_parallax_pixels.max(0.0),
+                p.decal_relief
+                    .full_parallax_pixels
+                    .max(p.decal_relief.min_parallax_pixels.max(0.0) + 1e-3),
+            ],
+            decal_relief: [
+                p.decal_relief.overlap_mode as u32 | ((p.decal_relief.adaptive_quality as u32) << 2),
+                p.decal_relief.min_view_normal_dot.clamp(0.03, 0.97).to_bits(),
+                p.decal_relief.max_cone_steps.min(256),
+                p.decal_relief.max_refine_steps.min(24),
+            ],
             photometry: p.photometry,
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
@@ -1186,8 +1261,8 @@ impl TerrainRenderer {
 
     /// Whether `slot` draws with decals (made with them, written, some in
     /// view); set every frame.
-    pub fn set_decals_live(&mut self, slot: usize, live: bool) {
-        self.decal_live[slot] = live && self.terrain_decals.is_some();
+    pub fn set_decals_live(&mut self, slot: usize, live: bool, mode: DecalReliefMode) {
+        self.decal_live[slot] = (live && self.terrain_decals.is_some()).then_some(mode);
     }
 
     /// The LOD update: split and merge passes, reduction, draw list. Records
@@ -1297,7 +1372,7 @@ impl TerrainRenderer {
         ctx: &PassContext<'_>,
         wireframe: Wireframe,
         terrain: vk::Pipeline,
-        decals: Option<vk::Pipeline>,
+        decals: Option<[vk::Pipeline; DecalReliefMode::ALL.len()]>,
         push: &crate::bindless::Push,
     ) {
         let (device, cmd) = (ctx.device, ctx.cmd);
@@ -1319,7 +1394,9 @@ impl TerrainRenderer {
             );
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.submesh_vb.buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.submesh_ib.buffer, 0, vk::IndexType::UINT16);
-            let terrain = decals.filter(|_| self.decal_live[ctx.slot]).unwrap_or(terrain);
+            let terrain = decals
+                .zip(self.decal_live[ctx.slot])
+                .map_or(terrain, |(p, mode)| p[mode as usize]);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, terrain);
             device.cmd_draw_indexed_indirect(cmd, self.indirect.buffer, 3 * 4, 1, 0);
             if let (Wireframe::Triangles, Some(wire)) = (wireframe, self.wire) {
@@ -1344,7 +1421,7 @@ impl TerrainRenderer {
                 spirv!("terrain_mirror.frag"),
                 false,
                 self.unit_shadow_map.is_real(),
-                false,
+                None,
                 true,
             ),
             _ => water_pipeline(
@@ -1396,13 +1473,16 @@ impl TerrainRenderer {
             )
         };
         let [draw, underwater, refract, full] = reflect::pipelines(device, |i| match i {
-            0 => terrain(false),
+            0 => terrain(None),
             1 => underwater::pipeline(device, self.pipeline_layout, self.color_format),
             2 => surface(spirv!("water_refract.frag")),
             _ => surface(spirv!("water_full.frag")),
         })?;
         let pending = (|| -> Result<_> {
-            let decals = self.terrain_decals.map(|_| terrain(true)).transpose()?;
+            let decals = self
+                .terrain_decals
+                .map(|_| reflect::pipelines(device, |i| terrain(Some(DecalReliefMode::ALL[i]))))
+                .transpose()?;
             let layers = super::tileset::seabed_layers();
             let size = super::tileset::SEABED_SIZE;
             let image = upload::image_mipped(
@@ -1436,8 +1516,8 @@ impl TerrainRenderer {
                     seabed_group,
                 }),
                 Err(err) => {
-                    if let Some(decals) = decals {
-                        unsafe { device.destroy_pipeline(decals, None) };
+                    for p in decals.into_iter().flatten() {
+                        unsafe { device.destroy_pipeline(p, None) };
                     }
                     Err(err)
                 }
@@ -1834,7 +1914,7 @@ impl TerrainRenderer {
         unsafe {
             for p in [self.prepare, self.update, self.reduce, self.terrain]
                 .into_iter()
-                .chain(self.terrain_decals)
+                .chain(self.terrain_decals.into_iter().flatten())
                 .chain(self.wire)
                 .chain(self.water)
                 .chain(
@@ -1848,7 +1928,10 @@ impl TerrainRenderer {
             }
         }
         if let Some(mut r) = self.refraction.take() {
-            for p in [r.terrain, r.underwater, r.refract, r.full].into_iter().chain(r.decals) {
+            for p in [r.terrain, r.underwater, r.refract, r.full]
+                .into_iter()
+                .chain(r.decals.into_iter().flatten())
+            {
                 unsafe { device.destroy_pipeline(p, None) };
             }
             r.seabed.destroy(gpu);
@@ -1900,6 +1983,8 @@ impl TerrainRenderer {
         self.unit_shadow_map.destroy(gpu);
         self.decal_atlas.destroy(gpu);
         self.decal_surface.destroy(gpu);
+        self.decal_normals.destroy(gpu);
+        self.decal_cones.destroy(gpu);
         self.decal_materials.destroy(gpu);
     }
 }
@@ -1928,7 +2013,7 @@ fn graphics_pipeline(
     fragment: &[u8],
     wire: bool,
     unit_shadows: bool,
-    decals: bool,
+    decals: Option<DecalReliefMode>,
     mirrored: bool,
 ) -> Result<vk::Pipeline> {
     let vertex: &[u8] = if mirrored {
@@ -1941,9 +2026,13 @@ fn graphics_pipeline(
     // UNIT_SHADOWS (unit_shadows.glsl): without a shadow map the lookup is
     // compiled out, not just skipped; DECALS (terrain_decals.glsl) likewise.
     // Anti-tiling is a tileset degree in the table, not a compiled variant.
-    let spec_words = [u32::from(unit_shadows), u32::from(decals)];
+    let spec_words = [
+        u32::from(unit_shadows),
+        u32::from(decals.is_some()),
+        decals.unwrap_or_default() as u32,
+    ];
     let spec_value: Vec<u8> = spec_words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-    let spec_entries: [vk::SpecializationMapEntry; 2] = std::array::from_fn(|i| vk::SpecializationMapEntry {
+    let spec_entries: [vk::SpecializationMapEntry; 3] = std::array::from_fn(|i| vk::SpecializationMapEntry {
         constant_id: i as u32,
         offset: 4 * i as u32,
         size: 4,

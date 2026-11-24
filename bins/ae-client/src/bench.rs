@@ -92,6 +92,9 @@ pub struct BenchOptions {
     pub particles_full: bool,
     /// `--particle-blend`.
     pub particle_blend: ae_render::particles::ParticleBlend,
+    pub decal_relief: ae_render::decals::DecalReliefSettings,
+    pub scar_count: Option<u32>,
+    pub scar_spread: Option<f32>,
     /// `--bench-output`: what the readback target encodes (M13).
     pub output: OutputEncoding,
     /// `--bench-size`: the offscreen extent.
@@ -110,6 +113,9 @@ impl Default for BenchOptions {
             record_threads: 1,
             particles_full: false,
             particle_blend: ae_render::particles::ParticleBlend::Sorted,
+            decal_relief: Default::default(),
+            scar_count: None,
+            scar_spread: None,
             output: OutputEncoding::Sdr,
             size: (1280, 720),
         }
@@ -255,7 +261,37 @@ const COAST: Scene = Scene {
     model_lights: false,
 };
 
-const SCENES: [Scene; 21] = [
+const SCAR_CLOSE: Scene = Scene {
+    name: "scar-close",
+    about: "a fixed scar on dry terrain at close zoom, no particles",
+    map: MapKind::Land,
+    map_cells: 256,
+    units: 0,
+    tileset: None,
+    camera: [1024.0, 1024.0, 16.0, 0.4, 0.85],
+    path: Path::Fixed,
+    explosions: 0,
+    spread: 120.0,
+    fox: false,
+    live: false,
+    lights: 0,
+    model_lights: false,
+};
+
+const SCENES: [Scene; 24] = [
+    SCAR_CLOSE,
+    Scene {
+        name: "scar-orbit",
+        about: "a fixed scar on dry terrain during a full camera orbit",
+        path: Path::Orbit,
+        ..SCAR_CLOSE
+    },
+    Scene {
+        name: "scar-far",
+        about: "dry terrain from strategic zoom for sparse or dense fixed scars",
+        camera: [1024.0, 1024.0, 600.0, 0.4, 0.85],
+        ..SCAR_CLOSE
+    },
     Scene {
         name: "overview",
         about: "water crossing map, the middle from 3 km (500 of 10k units visible), temperate",
@@ -565,6 +601,10 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
     }
     o.particles_full = b.particles_full;
     o.particle_blend = b.particle_blend;
+    o.decal_relief = b.decal_relief;
+    if scene.name.starts_with("scar-") || b.scar_count.is_some() {
+        o.particles = false;
+    }
     o.map = scene.map;
     o.water_quality = if matches!(scene.map, MapKind::Coast) {
         super::WaterQuality::Full
@@ -822,7 +862,8 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
         Ok(())
     };
     // Explosions (particles and scorch marks) only in scenes that set them off.
-    let feed = if scene.explosions > 0 {
+    let scar_count = b.scar_count.unwrap_or(u32::from(scene.name.starts_with("scar-")));
+    let feed = if scene.explosions > 0 || scar_count > 0 {
         let (with, feed) = effects(app, &source, &o);
         app = with;
         feed
@@ -864,16 +905,16 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     };
     // This frame's explosions, scattered over `spread` around the target.
     let mut emitted = 0u32;
-    let mut emit = || {
+    let mut emit = |count, spread| {
         let Some(feed) = &feed else { return };
-        for _ in 0..scene.explosions {
+        for _ in 0..count {
             let h = emitted
                 .wrapping_mul(0x9e37_79b9)
                 .wrapping_add(0x7f4a_7c15)
                 .wrapping_mul(0x85eb_ca6b);
             let (dx, dz) = (
-                ((h & 0xffff) as f32 / 65535.0 - 0.5) * scene.spread,
-                ((h >> 16) as f32 / 65535.0 - 0.5) * scene.spread,
+                ((h & 0xffff) as f32 / 65535.0 - 0.5) * spread,
+                ((h >> 16) as f32 / 65535.0 - 0.5) * spread,
             );
             let scale = 0.8 + (h % 7) as f32 * 0.2;
             feed.explode(scene.camera[0] + dx, scene.camera[1] + dz, scale, h);
@@ -893,8 +934,15 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     // the explosions and ticks: the scene's state when measuring starts is
     // the same whatever the frame rate (a time-based count here moved
     // `battle`'s lights and its total between runs).
+    if scar_count != 0 {
+        let spread = b
+            .scar_spread
+            .unwrap_or(if scar_count == 1 { 0.0 } else { scene.spread });
+        emit(scar_count, spread);
+    }
+    let per_frame = if scar_count == 0 { scene.explosions } else { 0 };
     for warm_frame in 0..b.warmup {
-        emit();
+        emit(per_frame, scene.spread);
         tick_live(warm_frame, false)?;
         headless.frames(&mut app, 1)?;
     }
@@ -905,7 +953,7 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     let (mut upload_ms, mut uploaded) = (Vec::new(), Vec::new());
     for i in 0..b.frames {
         set_frame(i, b.frames);
-        emit();
+        emit(per_frame, scene.spread);
         tick_live(i, true)?;
         let started = Instant::now();
         headless.frames(&mut app, 1)?;

@@ -436,6 +436,8 @@ pub enum MipFilter {
     /// A tangent normal's x, y in rg (`n * 0.5 + 0.5`, z out of the surface
     /// rebuilt): the vectors summed and renormalised; b, a averaged.
     Normal = 2,
+    /// Signed tangent XY with positive Z reconstructed before averaging.
+    NormalSigned = 3,
 }
 
 /// Mips of a full chain down to 1x1.

@@ -141,6 +141,8 @@ enum WaterAction {
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainView {
     pub camera: Camera,
+    pub decal_relief: crate::decals::DecalReliefSettings,
+    pub decal_debug: crate::decals::DecalDebug,
     /// Look at a fixed world height instead of the ground under the target.
     pub camera_focus: Option<f32>,
     /// The camera may dive (the client sets it when it draws the water
@@ -564,7 +566,7 @@ pub struct TerrainApp {
     /// The live decals (kept across renderer re-creation).
     decal_set: Option<DecalSet>,
     /// Per slot: the decal version written into it.
-    decals_written: Vec<Option<u64>>,
+    decals_written: Vec<Option<(u64, crate::decals::DecalDebug, bool)>>,
     /// The slot `prepare` last filled.
     last_slot: usize,
     offscreen: Option<Offscreen>,
@@ -617,6 +619,8 @@ pub struct TerrainApp {
 impl TerrainApp {
     pub fn new(source: Arc<TerrainSource>, output: TerrainOutput) -> Self {
         let view = TerrainView {
+            decal_relief: Default::default(),
+            decal_debug: Default::default(),
             camera: source.overview_camera(),
             camera_focus: None,
             underwater_camera: false,
@@ -944,6 +948,11 @@ impl TerrainApp {
     /// draw: no pass of their own).
     pub fn with_decals(mut self, setup: DecalsSetup) -> Self {
         self.decal_set = Some(DecalSet::new(setup.capacity));
+        {
+            let mut view = self.view.lock().unwrap_or_else(|p| p.into_inner());
+            view.decal_relief = setup.relief;
+            view.decal_debug = setup.debug;
+        }
         self.decals = Some(setup);
         self
     }
@@ -1106,6 +1115,7 @@ impl TerrainApp {
         FrameParams {
             view_proj,
             cam_pos: eye,
+            decal_relief: view.decal_relief,
             lod_view: view.frozen.unwrap_or(live),
             tau: view.tau,
             update_lod: view.frozen.is_none(),
@@ -1560,17 +1570,21 @@ impl RenderApp for TerrainApp {
             if self.decals_written.len() <= slot {
                 self.decals_written.resize(slot + 1, None);
             }
-            if self.decals_written[slot] != Some(set.version) {
-                renderer.write_decals(slot, set.encode())?;
-                self.decals_written[slot] = Some(set.version);
+            let check_overlap = view.decal_relief.mode == crate::decals::DecalReliefMode::RobustConeStepMapping
+                && view.decal_relief.overlap_mode == crate::decals::DecalParallaxOverlapMode::NormalMappingFallback;
+            let key = (set.version, view.decal_debug, check_overlap);
+            if self.decals_written[slot] != Some(key) {
+                renderer.write_decals(slot, set.encode(view.decal_debug, check_overlap))?;
+                self.decals_written[slot] = Some(key);
             }
-            // The pipeline with decals only while one may be on screen
-            // (decals never expire: otherwise it would stay on for good).
+            // The decal pipeline runs in debug views or while a decal may be on screen.
             let i = &self.source.info;
             let heights = (i.height_offset, i.height_offset + i.height_scale);
             renderer.set_decals_live(
                 slot,
-                set.any_in_view(&super::renderer::frustum_planes(params.view_proj), heights),
+                view.decal_debug != crate::decals::DecalDebug::Off
+                    || set.any_in_view(&super::renderer::frustum_planes(params.view_proj), heights),
+                view.decal_relief.mode,
             );
         }
         if let (Some(units), Some(setup)) = (self.unit_renderer.as_mut(), self.units.as_ref()) {

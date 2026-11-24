@@ -19,6 +19,7 @@ pub mod bindless;
 pub mod bloom;
 pub mod colorspace;
 pub mod decals;
+mod decals_relief;
 pub mod demo;
 pub mod device;
 pub mod display;

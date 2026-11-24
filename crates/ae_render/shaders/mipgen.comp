@@ -48,15 +48,15 @@ void main() {
         if (a > 0.0) {
             o.rgb = (t[0].rgb * t[0].a + t[1].rgb * t[1].a + t[2].rgb * t[2].a + t[3].rgb * t[3].a) / a;
         }
-    } else if (p.mode == 2u) {
+    } else if (p.mode == 2u || p.mode == 3u) {
         vec3 n = vec3(0.0);
         for (int i = 0; i < 4; i++) {
-            vec2 xy = t[i].rg * 2.0 - 1.0;
+            vec2 xy = p.mode == 3u ? t[i].rg : t[i].rg * 2.0 - 1.0;
             n += vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
         }
         float len = length(n);
         n = len > 1e-6 ? n / len : vec3(0.0, 0.0, 1.0);
-        o.rg = n.xy * 0.5 + 0.5;
+        o.rg = p.mode == 3u ? n.xy : n.xy * 0.5 + 0.5;
     }
     if (p.srgb != 0u) {
         o.rgb = vec3(encodeSrgb(o.r), encodeSrgb(o.g), encodeSrgb(o.b));

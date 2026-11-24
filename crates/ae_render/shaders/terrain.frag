@@ -414,7 +414,14 @@ void main() {
     vec3 shadeN = n;
     vec3 glow = vec3(0.0);
     if (DECALS) {
-        Decals d = applyDecals(albedo, roughness, metallic, n, inWorld, dPdx, dPdy, heightNormal);
+        uint decalView = decalWords[1];
+        vec3 decalDebug;
+        Decals d = applyDecals(albedo, roughness, metallic, n, inWorld, dPdx, dPdy,
+                              heightNormal, TERRAIN_EYE, decalView, decalDebug);
+        if (decalView != 0u) {
+            outColor = vec4(aeToWorking(decalDebug, u.photometry.y > 0.5), 1.0);
+            return;
+        }
         albedo = d.albedo;
         roughness = d.roughness;
         metallic = d.metallic;
@@ -447,11 +454,10 @@ void main() {
     // a decal's material can raise the roughness or make the patch
     // metallic (F0 = its colour).
     vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(ground.xz, ground.y), units)) * tint;
-    vec3 skyE = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w * (0.5 + 0.5 * shadeN.y));
     vec3 skyR = aeUnitTint(AE_SKY_TINT, wide) * (u.photometry.w / AE_PI);
     SurfaceBRDF s = SurfaceBRDF(albedo, mix(vec3(0.04), albedo, metallic), max(roughness, 0.04), metallic);
     vec3 color = brdfLight(s, shadeN, V, L, sunE);
-    color += brdfDiffuse(s, shadeN, V) * skyE + brdfAmbient(s, shadeN, V) * skyR;
+    color += brdfSky(s, shadeN, V) * skyR;
     // The clustered lights (no shadows).
 #ifndef MIRROR
     if (lightsOn()) {

@@ -266,6 +266,8 @@ pub struct GpuDevice {
     pub device_name: String,
     /// `fillModeNonSolid` is enabled (line-mode wireframe pipelines).
     pub fill_mode_non_solid: bool,
+    /// The enabled anisotropic sampler's device limit, if supported.
+    pub max_sampler_anisotropy: Option<f32>,
     /// `fragmentStoresAndAtomics` is enabled (the particles' exact
     /// per-pixel reference, tests only).
     pub fragment_stores: bool,
@@ -407,12 +409,13 @@ impl GpuDevice {
                 base.fill_mode_non_solid == vk::TRUE,
                 base.fragment_stores_and_atomics == vk::TRUE,
                 base.texture_compression_bc == vk::TRUE,
+                base.sampler_anisotropy == vk::TRUE,
                 gpu_driven,
             );
             candidates.push((rank, physical, family, properties, optional));
         }
         candidates.sort_by_key(|(rank, ..)| *rank);
-        let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores, texture_compression_bc, gpu_driven)) = candidates
+        let (_, physical, queue_family, properties, (fill_mode_non_solid, fragment_stores, texture_compression_bc, sampler_anisotropy, gpu_driven)) = candidates
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("no Vulkan 1.3 device with dynamic rendering, synchronization2, clip distances, storage images of any format, a graphics+compute queue and the M15 descriptor-indexing set{}", rejected.map(|why| format!(": {why}")).unwrap_or_default()))?;
@@ -488,6 +491,7 @@ impl GpuDevice {
             .shader_storage_image_extended_formats(true)
             .shader_storage_image_write_without_format(true)
             .fill_mode_non_solid(fill_mode_non_solid)
+            .sampler_anisotropy(sampler_anisotropy)
             .fragment_stores_and_atomics(fragment_stores)
             .texture_compression_bc(texture_compression_bc)
             .multi_draw_indirect(gpu_driven)
@@ -542,6 +546,7 @@ impl GpuDevice {
             timestamp_period,
             device_name,
             fill_mode_non_solid,
+            max_sampler_anisotropy: sampler_anisotropy.then_some(properties.limits.max_sampler_anisotropy),
             fragment_stores,
             texture_compression_bc,
             compute_subgroups_32,
