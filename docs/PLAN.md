@@ -302,7 +302,7 @@ wholesale, `vkflecs-baseline/src/render_graph.rs`, RedAlert C++ host code.
 | **M5** Lockstep + replay | `ae_net`, `ae-relay`, replay verify, desync bisect, cross-platform CI | 4 clients with injected latency/loss in sync 30 min; replay digests equal on Linux + Windows; injected desync localised |
 | **M6** Content + mini-game | VFS, catalogue, `.aemap`, command queues, factories, economy as components, damage reductions | playable 2-faction skirmish defined only by an archive; bot-vs-bot headless golden digest |
 | **M17** Formatting + lints (done) | rustfmt with `max_width = 120`, a pinned toolchain, one mechanical reformat, clippy warnings fixed, a tracked pre-commit hook that gates both | `tools/fmt.sh --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; a commit that breaks either is refused; pinned digests unchanged |
-| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (done) · **M15** fully bindless resources (done) · **M16** RedAlert-graphics survey and port (water first) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
+| Later | **M11** glTF models + skinning · **M12** lights + HDR scene target (medium) · **M13** HDR output (lower) · **M14** unit scripts (done) · **M15** fully bindless resources (done) · **M16** RedAlert-graphics survey and port (water first, done) — see "Planned milestones M11–M16" · M7 water + shadows + particles + decals · M8 RmlUi + widget sandbox · M9 AI hosting + save/load + snapshot late-join · M10 tooling, second nav level, async compute, runtime multi-module sim | |
 
 ### M17 — Formatting, lints and the commit gate (done)
 
@@ -2629,7 +2629,7 @@ Packets, blend mode 8, and the half/full decision (`ParticleBlend::Packets`,
 - From M3: GPU tests with Vulkan validation + sync validation, zero messages; golden frame graph `.dot` output.
 - From M5: `ae-headless --replay x.aerep --verify` on all CI platforms.
 
-## Planned milestones M11–M16 (M11, M12, M13, M14, M15 done)
+## Planned milestones M11–M16 (M11, M12, M13, M14, M15, M16 done)
 
 Numbers are labels, not an order (M8–M10 keep theirs). Order by priority: M11 first (M12 needs
 it), M12 medium, M13 lower and after M12. Whether they come before or after M8–M10 is open.
@@ -5506,7 +5506,7 @@ set at index 2 next to their old sets. How handles reach a shader:
 - The editor's and the frame-graph visualiser's names for handles. The visualiser shows indices
   from the `.dot` goldens. Naming waits for the editor.
 
-### M16 — RedAlert-graphics survey and port (water first, priority: medium)
+### M16 — RedAlert-graphics survey and port (water first, priority: medium; done)
 
 `~/RedAlert-graphics` is the C++/Vulkan reconstruction of RA3's look: `src/draw.cpp` holds the
 frame's pass order, and `README.md` documents each shader it rebuilds, its parameters and its
@@ -5641,8 +5641,9 @@ surface; how the copy layer exposes submerged state to the renderer (a view fiel
 
 ### M16 progress
 
-Stage 1 (survey and baseline) is built. The milestones and stage gates are in the M16 plan;
-this section records what exists and what is open, as the stage's `docs:` commit.
+**M16 is complete (2026-11-25).** Stage 1 (survey and baseline) was built first; the tiers,
+deliveries and the benchmark sign-off followed. The milestones and stage gates are in the M16
+plan; this section records what exists, what is open and what was measured.
 
 - **M16.1 baseline gates.** `crates/ae_render/tests/data/m16_baseline.txt` pins one FNV hash
   per pre-M16 fixture on the crossing maps: dry (the land crossing), wet M7, wet with the
@@ -5805,10 +5806,10 @@ this section records what exists and what is open, as the stage's `docs:` commit
   Afterwards: the terrain LOD refines where a node crosses the water level, where its
   from-above discount had drawn the coast's river bed as sand triangles above the water
   and, from afar, lost it between its vertices (all tiers' wet frames change; the wet M16
-  baselines are re-pinned, the dry one holds). TODO: time the extra waterline leaves in the
-  benchmark run.
+  baselines are re-pinned, the dry one holds). The extra waterline leaves are measured in
+  "M16.21 measurements" below.
 - M16.10 defines the four coast benchmark scenes. `water-under` uses the new underside and
-  volume passes. Measurement and budget sign-off remain open pending explicit consent.
+  volume passes. Measurement and budget sign-off are in "M16.21 measurements" below.
 - **M16.3 survey.** `docs/water.md` records the prototype's pass order, resources,
   parameters and published costs, and maps every prototype pass to its `library.rs` pass
   and tier flag. It has three paired prototype/engine captures (overview, fleet, close), a
@@ -5822,6 +5823,48 @@ this section records what exists and what is open, as the stage's `docs:` commit
   scale and mesh tuning, and the budget check when the user consents to measurements.
 - Crossing uses dart meshes by default. The floating-unit draw supports both
   darts and supplied hull models.
+
+#### M16.21 measurements (2026-11-25; M16 complete)
+
+Measured with the user's consent on an idle machine (RTX 3060 Ti, driver 620.73.04,
+`AE_BENCH_MACHINE=rtx3060ti`), release, offscreen at 1280x720, 60 warm-up frames plus one
+second, 300 measured frames, one process per scene. Two complete `full` runs gave identical
+records. The full write-up and the commands are in [water.md](water.md) "Benchmarks (M16.10,
+M16.21)".
+
+- `ae-client --bench water-overview,water-fleet,water-close,water-under` gained
+  `--bench-water-quality off|m7|reflect|refract|full` and `--bench-reflection half|full`; the
+  records also carry `water_triangles` (the surface's drawn triangles in the last frame),
+  `water_tier` and `reflection_scale`. `WaterMesh` copies its indirect draw count out once a
+  frame, which is read after the GPU finishes.
+- `full` totals: overview 1,272.5 µs, fleet 1,162.0, close 1,133.5, under 907.8. The water
+  stack (blur, CBT LOD, surface, underwater, volume, emit/splat/churn, reflection) is
+  563–632 µs of those frames. `m7` is 740.6, 678.2, 614.8 and 283.3 µs; `reflect` adds
+  4–12% and `refract` 7–13% over `m7`, while `full` adds 71–221%. The prototype's blur is
+  96–106 µs here (214 under the surface) against its published 0.36 ms.
+- The surface's drawn triangles: 21,440 (overview, 1,340 leaves), 6,048 (fleet), 3,824
+  (close) and 96 (under). At a 0.25 px split target the overview draws 73,920 triangles and
+  changes 1.23% of channels by a mean of 0.019 codes (max 29, p99 1) for +43 µs in the
+  surface pass and +2.7% in the frame; the close camera changes 0.67% (mean 0.009, max 9,
+  p99 0). Half resolution stays for the reflection: a full-resolution comparison costs
+  +82 µs on overview (+6.5%) and +27 µs on close (+2.4%) and changes 0.13–0.14% of channels
+  (mean 0.002–0.004 codes).
+- Waterline terrain refinement, against the pre-M16 tree on the same M7 scenes: leaves rise
+  2.0–4.5× (overview 266,700 → 1,207,200 over 300 frames, orbit 1,021,999 → 2,076,211) and
+  the terrain draw rises 10.0–14.3% in those two views and 0.3–2.5% elsewhere; `gpu_total`
+  does not move. `bench-diff` (pre-M16 against this tree) reports 867 metrics, 520
+  unchanged, 21 regressed, all of them these leaf/drawn counters and the overview/orbit
+  terrain draw. The CPU benches report 707 metrics, 0 regressed against the committed
+  baseline. The budget is signed off at 0.91–1.27 ms per frame with 0.56–0.63 ms of water.
+- Deliberate test-data change: the four M16 frame-gate hashes were re-pinned. They had
+  already changed at `0bc8f83` (the decal relief commit's roughness-aware sky specular and
+  heightfield scars); the M16 water frames themselves are unchanged by this work.
+- Found on the way, in the decal relief's overlap clearance: it filtered candidate
+  occluders by word 7, which is opacity, instead of word 13, the relief height range, so a
+  flat neighbour decal made a relief decal fall back from cone tracing. The filter is
+  fixed, and `decal_normals_follow_the_footprint_and_compose` passes again. The GPU-suite
+  guard also now names `decals_relief.rs` and its two one-shot cone shaders as exceptions,
+  since that upload-time pass still owns its set; it is not a frame pass.
 
 ## TODO (open, not a priority now)
 

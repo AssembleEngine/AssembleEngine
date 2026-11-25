@@ -69,7 +69,8 @@ RedAlert-graphics prototype's ocean, adapted to RTS camera heights and hull spee
 particles shaped by RA3's blur into Kelvin wakes and blast rings, churned trails drawn with normals,
 breakers timed by the baked shore field, and a shell landing in the water throws up a column of spray
 instead of a fireball. Use
-`--water-quality off|m7|reflect|refract|full` to select a tier. `reflect` adds planar reflection to
+`--water-quality off|m7|reflect|refract|full` to select a tier and
+`--water-reflection half|full` for the reflection's resolution. `reflect` adds planar reflection to
 M7's analytic surface and `refract` adds the shaded seabed and submerged hulls. A device that
 lacks a required rich image format or usage falls back to `m7`. O toggles water in the client,
 and `--no-water` starts without it. The native graph, `render/default` and
@@ -138,6 +139,19 @@ may still use the old per-pass form for one version. `bench-diff` against the pr
 (`335e770`): `gpu_total` is within +0.8% to +5.7%, and 2 of 749 metrics regress (a noisy water
 pass and the lights list at +10% on one scene), accepted as the cost of the global set. Details: [docs/PLAN.md](docs/PLAN.md)
 "M15 — design".
+
+M16 (the RedAlert-graphics water port) is done. `full` water is the wet-map default:
+planar reflection at half resolution, refraction with a shaded seabed and submerged
+hulls, a displaced CBT surface, Kelvin wakes and impact rings from the view stream,
+spray and bubbles, and an underwater view with Snell's window. The four coast benchmark
+scenes (`water-overview`, `water-fleet`, `water-close`, `water-under`) cost 0.91-1.27 ms
+per frame at 1280x720 (0.56-0.63 ms of it water) on the reference RTX 3060 Ti, with two
+runs producing identical records. The reflection stays half resolution (full costs up to
+6.5% for a 0.14% channel change) and the surface's 1 px CBT target is confirmed against a
+4x finer mesh. The shoreline terrain refinement raises terrain leaves 2.0-4.5x and the
+terrain draw 10-14% at the two overview cameras, with the frame total unchanged.
+`--bench-water-quality` and `--bench-reflection` select the comparisons. Full write-up,
+captures and measurements: [docs/water.md](docs/water.md).
 
 | Crate | What it is | Origin |
 |---|---|---|

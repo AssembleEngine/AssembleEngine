@@ -11,8 +11,10 @@ prototype and this engine at RTS cameras, and the mapping from one to the other.
 - Prototype: `21c28f9`.
 - Survey and captures: 2026-11-23, stage 1 (M16.3).
 
-Status: stage 1 (survey, baseline gates, coast fixture). The engine's own pass costs are
-**not** measured here; they need the user's consent and the bench scenes (M16.10, M16.21).
+Status: complete (2026-11-25). The survey, the coast fixture, the tiers and the
+passes are in; M16.10's four coast scenes and M16.21's measurements are in
+"Benchmarks (M16.10, M16.21)" below. The engine's GPU times were measured with
+the user's consent on an idle machine.
 
 ## Captures
 
@@ -473,8 +475,7 @@ re-pinned).
 | [blasts, 1.2 s in](water/engine-d4-blast.png) | `--map coast --map-cells 768 --units 0 --capture-frames 10 --capture-seconds 1.2 --explode 3 --camera 4300,2400,160,0.35,0.85` |
 
 The GPU costs of the new passes (the blur's larger kernel, up to 65,536 particles drawn
-twice, the surface's extra texture reads) are not measured yet: they wait for the benchmark
-run with the user's consent, like the rest of M16.21.
+twice, the surface's extra texture reads) are in "Benchmarks (M16.10, M16.21)" below.
 
 ## Final coast captures (M16.21)
 
@@ -492,10 +493,154 @@ sail the lane, so the fleet and close cameras show open water.
 The last uses the `water-under` camera above, with 30 ticks and eight frames.
 
 The engine's pass costs, the reflection scale comparison, and the water mesh's triangle
-counts and pixel error are pending consent for the four coast benchmark scenes
-(`water-overview`, `water-fleet`, `water-close`, `water-under`). Budget sign-off follows
-those measurements. The current settings use a half-resolution reflection and an adaptive
-CBT surface.
+counts and error measure are in the next section, over the four coast benchmark scenes
+(`water-overview`, `water-fleet`, `water-close`, `water-under`). The current settings use a
+half-resolution reflection and an adaptive CBT surface; the budget is signed off there.
+
+## Benchmarks (M16.10, M16.21)
+
+The four coast scenes are `water-overview`, `water-fleet`, `water-close` and
+`water-under` (`ae-client --bench list`): the coast map at 768 cells, 1,000 units
+at tick 300, the fixed cameras above, and `full` water unless the run overrides
+the tier. `--bench-water-quality off|m7|reflect|refract|full` selects a tier and
+`--bench-reflection half|full` the reflection targets' divisor. The method:
+release, offscreen at 1280x720 with the SDR readback, 60 warm-up frames plus at
+least one second for the GPU clocks, then 300 measured frames, one process per
+scene. The machine was idle and committed to the run: RTX 3060 Ti, driver
+620.73.04, `AE_BENCH_MACHINE=rtx3060ti`. Two complete `full` runs produced
+identical records (192 of 192 metrics unchanged between them), so the numbers
+below are one run, not a best pick.
+
+```sh
+AE_BENCH_MACHINE=rtx3060ti ./target/release/ae-client \
+  --bench water-overview,water-fleet,water-close,water-under --bench-water-quality full
+AE_BENCH_MACHINE=rtx3060ti ./target/release/ae-client \
+  --bench water-overview,water-fleet,water-close,water-under --bench-reflection full
+```
+
+### The tiers' totals
+
+Median GPU time per frame, in µs, with the change against `m7`:
+
+| Scene | `m7` | `reflect` | `refract` | `full` |
+| --- | ---: | ---: | ---: | ---: |
+| water-overview | 740.6 | 831.8 (+12%) | 813.8 (+10%) | 1,272.5 (+72%) |
+| water-fleet | 678.2 | 707.4 (+4%) | 760.1 (+12%) | 1,162.0 (+71%) |
+| water-close | 614.8 | 663.7 (+8%) | 694.4 (+13%) | 1,133.5 (+84%) |
+| water-under | 283.3 | 313.2 (+11%) | 302.9 (+7%) | 907.8 (+221%) |
+
+`reflect`'s extra over `m7` is the mirrored terrain and units; `refract` replaces
+the surface with the refracting one and adds the underwater pass and the richer
+seabed, without the reflection passes, so it is not always above `reflect`.
+`full` adds both, the wave simulation, the displaced CBT surface, the volume and
+the underwater view.
+
+### `full` per pass
+
+Median µs per frame. "Water stack" is the blur, LOD, surface, underwater,
+volume, emit/splat/churn and the reflection passes together; the rest of the
+frame is the terrain, units, lights, exposure, bloom, tonemap and the readback
+copy (left out of `gpu_total`).
+
+| Pass | overview | fleet | close | under |
+| --- | ---: | ---: | ---: | ---: |
+| water emit + splat + churn | 5.3 | 5.2 | 5.2 | 5.3 |
+| water blur | 96.3 | 98.3 | 106.5 | 214.0 |
+| water lod (CBT) | 137.9 | 137.3 | 137.7 | 135.4 |
+| water surface (`water`) | 169.0 | 205.8 | 190.5 | 179.2 |
+| water underwater | 56.3 | 60.4 | 52.2 | 17.4 |
+| water volume | 20.5 | 21.5 | 20.5 | 47.1 |
+| reflection (cull + terrain + units) | 100.2 | 34.8 | 58.3 | 33.4 |
+| **water stack** | **585.3** | **563.3** | **570.9** | **631.8** |
+| terrain lod | 186.5 | 182.1 | 186.4 | 182.4 |
+| terrain | 385.0 | 304.1 | 275.5 | 8.2 |
+| units | 8.2 | 1.0 | 1.0 | 2.1 |
+| exposure meter | 33.8 | 43.0 | 32.8 | 17.4 |
+| tonemap | 15.4 | 15.4 | 15.4 | 14.3 |
+| CPU frame (render thread) | 228.5 | 231.3 | 235.2 | 223.5 |
+| **`gpu_total`** | **1,272.5** | **1,162.0** | **1,133.5** | **907.8** |
+
+The water stack is 0.56–0.63 ms of a 0.91–1.27 ms frame. The surface and the
+CBT are the two largest parts; the prototype's own blur (0.36 ms at 2048² over
+600 m) is 96–106 µs here above water and 214 µs below it, at 1024² and the
+patch's 300–1,600 m footprint. The underwater camera is the cheapest frame
+overall even with the most water work: no terrain or units fill the view.
+
+### Reflection resolution
+
+`full` reflects into half-resolution colour and depth. A full-resolution
+comparison (`--bench-reflection full`) measures the alternative:
+
+| Scene | total half → full | terrain reflect | frame change |
+| --- | ---: | ---: | ---: |
+| water-overview | 1,271.3 → 1,353.5 µs | 67.6 → 143.4 µs (+112%) | +82.2 µs (+6.5%) |
+| water-fleet | 1,161.9 → 1,160.7 | 9.2 → 11.3 | within the run's spread |
+| water-close | 1,130.7 → 1,157.8 | 30.7 → 53.2 (+73%) | +27.1 µs (+2.4%) |
+| water-under | 910.7 → 915.2 | 9.2 → 11.3 | within the run's spread |
+
+A capture of the overview camera with both settings differs on 3,779 of
+2,764,800 channels (0.14%), by a mean of 0.002 codes and at most 26; the close
+camera differs on 3,599 (0.13%), mean 0.004, at most 18. Half resolution stays:
+the full target costs up to 6.5% of the frame for a change that is invisible at
+these distances.
+
+### The surface mesh
+
+The water CBT's drawn triangles in the last measured frame, and its cost. The
+split target is a 1 px screen-space error; each leaf draws a 16-triangle
+submesh.
+
+| Scene | triangles | leaves | water lod | water surface |
+| --- | ---: | ---: | ---: | ---: |
+| water-overview | 21,440 | 1,340 | 137.9 µs | 169.0 µs |
+| water-fleet | 6,048 | 378 | 137.3 µs | 205.8 µs |
+| water-close | 3,824 | 239 | 137.7 µs | 190.5 µs |
+| water-under | 96 | 6 | 135.4 µs | 179.2 µs |
+
+As an error measure, the same frames were rendered with the split threshold at
+0.25 px (4× finer; 73,920 triangles, 4,620 leaves in the overview). At the
+overview camera 1.23% of channels changed (mean 0.019 codes, at most 29, p99 1);
+at the close camera 0.67% changed (mean 0.009, at most 9, p99 0). The finer mesh
+costs 212.0 µs in the surface pass against 169.0 and 1,306 µs in total against
+1,272 (+2.7%). The comparison is against a finer adaptive mesh, not a
+ground-truth surface, so it bounds the error rather than proving a pixel figure;
+the 1 px split target remains the design bound.
+
+### The waterline refinement
+
+M16 delivery 5 makes the terrain LOD refine where a node crosses the water
+level. Against the pre-M16 tree (`8c5cbb9`), on the same M7-water scenes, with
+the same 300-frame records (`leaves` and `drawn` are sums over the frames;
+divide by 300 for per frame):
+
+| Scene | leaves | drawn | terrain draw |
+| --- | ---: | ---: | ---: |
+| overview | 266,700 → 1,207,200 (4.53×) | 126,900 → 545,400 | 308.2 → 352.3 µs (+14.3%) |
+| orbit | 1,021,999 → 2,076,211 (2.03×) | 785,768 → 1,393,674 | 440.3 → 484.4 µs (+10.0%) |
+| army | 82,500 → 293,700 (3.56×) | 13,800 → 13,800 | 267.3 → 270.3 µs (+1.1%) |
+| close | 94,500 → 309,300 (3.27×) | 12,600 → 12,600 | 240.4 → 241.9 µs (+0.6%) |
+| battle | 95,700 → 306,900 (3.21×) | 15,000 → 15,000 | 448.5 → 457.7 µs (+2.1%) |
+| lights-low | 154,200 → 434,700 (2.82×) | 63,900 → 150,000 | within the spread |
+| scorched | 90,000 → 316,800 (3.52×) | 5,100 → 5,100 | 1,803.3 → 1,829.9 µs (+1.5%) |
+
+The extra leaves cost 10–14% of the terrain draw at the two cameras where the
+waterline is most of the view and 0.3–2.5% elsewhere; `gpu_total` is unchanged
+in every scene. `bench-diff` of the pre-M16 tree against this one reports 867
+metrics, 520 unchanged and 21 regressed: all 21 are these `leaves`/`drawn`
+counters and the overview and orbit terrain draws. They are the documented
+price of the shoreline fix, accepted because the frame total does not move.
+The CPU benches against the committed baseline report 707 metrics, 0 regressed.
+
+### Budget
+
+At 1280x720 on the reference GPU, the four coast scenes at `full` cost
+0.91–1.27 ms of GPU time, of which the water stack is 0.56–0.63 ms, and the
+render thread's CPU frame is 0.22–0.24 ms. That is the budget signed off here:
+the water stays on by default on wet maps, with `--water-quality m7|reflect|
+refract|off` as the fallback ladder and `--water-reflection half` (the default)
+kept over full resolution. A device that lacks a rich pass's format or usage
+still falls back to `m7`. Nothing in the sim digest changes: all water animation
+is view-side.
 
 ## Reproducing the captures
 
