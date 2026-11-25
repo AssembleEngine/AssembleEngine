@@ -1,0 +1,138 @@
+AssembleEngine text rendering comparison
+========================================
+
+The three renderers shared a single Parley layout. Fontique selected
+the font faces, including fallbacks, and HarfRust shaped the text.
+The layout supplied each resolved face, glyph ID, position, and style.
+Each renderer built its GPU resources from those same glyph runs.
+
+Traditional bitmap atlas
+------------------------
+
+Swash rasterized glyphs on the CPU into grayscale coverage masks.
+The cache distinguished the font face, glyph ID, raster size,
+variation coordinates, synthesis, and hinting. The atlas packed
+padded masks into an R8_UNORM texture with two reduced mip levels.
+
+The CPU built one quad per drawable glyph using the glyph's bearing
+and size to offset it from its Parley position. Vulkan instanced six
+vertices per quad from a storage buffer. The fragment shader used
+the sampled mask as alpha coverage and blended premultiplied color.
+The transform mapped the same quad coordinates into either screen
+space or a perspective-projected plane.
+
+Analytic Slug
+-------------
+
+The experiment used ash-slug 0.1.5 to extract each unique glyph's
+quadratic outline curves and pack the curves and band lookup tables.
+It uploaded the curves and bands into separate Vulkan textures.
+The Rust adapter consumed Parley's positioned glyphs and used glyph
+bounds to build one quad per drawable glyph. Outline data was shared
+across display sizes of the same face.
+
+A GLSL adaptation of Eric Lengyel's reference vertex shader expanded
+each quad to cover its antialiasing footprint under projection. The
+fragment shader used derivatives to estimate the pixel footprint,
+looked up the relevant horizontal and vertical bands, evaluated curve
+intersections, and combined their coverage. The shader performed this
+work for each fragment on every draw.
+
+References
+https://docs.rs/swash/0.2.10/swash/scale/
+https://docs.rs/ash-slug/0.1.5/ash_slug/
+https://github.com/EricLengyel/Slug
+
+MSDF comparison path
+--------------------
+
+Glyphux 0.5.0 generated a three-channel distance field on the CPU at
+32 texels per em, with a four-texel distance range. Each face/glyph
+tile was shared across sizes. The atlas stored linear RGBA8 with one
+mip level and a zeroed texel ring around each tile to prevent filtering
+artifacts under zoom. Vulkan used the same instanced quad path as the
+bitmap and recovered coverage from the RGB median and UV derivatives.
+
+Benchmark rerun
+---------------
+
+Source revision 3fe6073 includes the MSDF border fix. Release builds on
+Linux used an AMD Ryzen 9 5900X and NVIDIA GeForce RTX 3060 Ti, driver
+620.73.04. The desktop remained active. GPU utilization sampled before
+the three rounds was 34%, 7%, and 11%, respectively.
+
+Both orthographic and perspective-tilted scenes used pre-uploaded
+batches. The mixed scenes used DejaVu Sans and Serif, four real faces
+including bold and italic, and six sizes from 16 to 32 px. Per round,
+each renderer had 48 warm-up frames and 180 measured frames. Renderer
+order was interleaved and mirrored. GPU timings include attachment
+clear and draw. CPU preparation is a cold glyph/cache build from an
+already-shaped layout, including bitmap mip generation and MSDF field
+generation. GPU upload and pipeline creation are outside these timings.
+
+Values below are medians of three round medians, in milliseconds.
+
+Workload                   Glyphs   GPU bitmap/MSDF/Slug   CPU bitmap/MSDF/Slug
+1080p, 16 px                9,795   0.023 / 0.026 / 0.184  0.575 /  7.073 / 0.486
+4K, 16 px                  41,352   0.079 / 0.094 / 0.769  1.624 /  8.371 / 1.724
+4K, 32 px                  10,156   0.047 / 0.074 / 0.477  0.615 /  7.018 / 0.492
+4K, tilted 32 px           10,344   0.032 / 0.038 / 0.277  0.624 /  7.154 / 0.521
+4K, mixed                  16,403   0.044 / 0.058 / 0.455  1.332 / 17.020 / 1.078
+4K, tilted mixed           16,696   0.031 / 0.039 / 0.279  0.935 / 16.956 / 1.083
+
+On the 41,352-glyph block, shared Parley layout took 6.861 ms.
+MSDF used 133,120 image bytes and 1,984,896 instance bytes in that
+workload, versus 344,064 and 1,984,896 for bitmap and 131,072 and
+2,646,528 for Slug. The bitmap reserved a fixed 512 x 512 image with
+mips. MSDF allocated only the atlas rows it used.
+
+Historical reproduction
+-----------------------
+
+Check out 3fe6073 in a separate worktree, then run the following
+with the regular DejaVu Sans outline font path on your system.
+
+  cargo run --release -p ae_render --features text-compare \
+    --example text_renderers -- /path/to/DejaVuSans.ttf
+
+For the two mixed cases add the matching bold sans, regular serif,
+and italic serif paths.
+
+  --mixed /path/to/DejaVuSans-Bold.ttf /path/to/DejaVuSerif.ttf \
+    /path/to/DejaVuSerif-Italic.ttf
+
+Append --verify to run the historical image-readback checks.
+
+Atlas packing experiment
+------------------------
+
+Revision 05adbdf tried etagere 0.3.0's default per-allocation
+AtlasAllocator alongside the engine's append-only shelf packer.
+Both used the same MSDF generator, glyph insertion order, 512-texel
+width, no mipmaps, and the same zeroed borders. The upload included
+only rows up to the last used texel. The comparison measured texture
+size and ran Vulkan readback checks for all six workloads.
+
+Glyph set                    Engine shelf         etagere              Change
+DejaVu Sans regular          512 x 65 / 130 KiB    512 x 121 / 242 KiB    +86%
+Four DejaVu faces, 16-32 px   512 x 129 / 258 KiB   512 x 177 / 354 KiB    +37%
+
+Both allocators passed all six Vulkan readback checks. A CPU test
+also verified that etagere preserves existing tile texel coordinates
+and zeroed borders when later allocations add rows. The experiment
+used append-only batches. It did not exercise eviction or deallocation.
+
+The measured glyph sets fit in less texture memory with the engine's
+shelf packer. The etagere dependency, feature flag, and alternate
+packing path were removed.
+
+To reproduce, check out 05adbdf in a separate worktree and run
+
+  cargo run --release -p ae_render --features etagere \
+    --example text_renderers -- /path/to/DejaVuSans.ttf --etagere --verify
+
+Omit --etagere to use the engine's shelf packer. For the four-face
+case, put the --mixed arguments above before --etagere or --verify.
+
+Allocator reference
+https://docs.rs/etagere/0.3.0/etagere/struct.AtlasAllocator.html

@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 ae_framegraph.workspace = true
+ae_text.workspace = true
 ae_render_abi.workspace = true
 wasmtime.workspace = true
 rspirv = "0.13"

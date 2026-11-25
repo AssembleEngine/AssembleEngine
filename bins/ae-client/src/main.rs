@@ -1,7 +1,7 @@
 //! Windowed client.
 //!
 //! ```text
-//! ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X]
+//! ae-client [--map water|land|coast|generated|demo|text] [--map-cells N] [--relief X]
 //!           [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--mailbox]
 //!           [--frames-in-flight N] [--units N] [--workers N] [--ticks N]
 //!           [--render-module NAME|FILE.wasm|FILE.json] [--capture FILE.ppm]
@@ -136,7 +136,7 @@ mod watch;
 
 use ae_nav::terrain::{NO_WATER, Terrain};
 use ae_render::decals::{DecalDebug, DecalParallaxOverlapMode, DecalReliefMode, DecalReliefSettings};
-use ae_render::demo::DemoApp;
+use ae_render::demo::{DemoApp, TextZoom};
 use ae_render::particles::{ParticleFeed, ParticlesSetup};
 use ae_render::swapchain::{HdrRequest, PresentPolicy};
 use ae_render::terrain::app::{HdrSettings, TerrainApp, TerrainOutput, TerrainSource, TerrainView, VisionFeed};
@@ -163,6 +163,7 @@ enum MapKind {
     Coast,
     Generated,
     Demo,
+    Text,
     /// A map package's (`--package`).
     Package,
 }
@@ -352,7 +353,7 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--water-reflection half|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--decal-debug VIEW] [--decal-relief off|normal|rcsm] [--decal-relief-strength N] [--rcsm-overlap safe|dominant|independent] [--rcsm-steps N] [--rcsm-refine N] [--rcsm-min-pixels N] [--rcsm-full-pixels N] [--rcsm-min-view-dot N] [--rcsm-force] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+const USAGE: &str = "ae-client [--map water|land|coast|generated|demo|text] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--water-reflection half|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--decal-debug VIEW] [--decal-relief off|normal|rcsm] [--decal-relief-strength N] [--rcsm-overlap safe|dominant|independent] [--rcsm-steps N] [--rcsm-refine N] [--rcsm-min-pixels N] [--rcsm-full-pixels N] [--rcsm-min-view-dot N] [--rcsm-force] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
        ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH] [--bench-scars N] [--bench-scar-spread METRES] [--bench-water-quality off|m7|reflect|refract|full] [--bench-reflection half|full]";
 
 fn parse() -> Result<Options> {
@@ -374,7 +375,8 @@ fn parse() -> Result<Options> {
                     "coast" => MapKind::Coast,
                     "generated" => MapKind::Generated,
                     "demo" => MapKind::Demo,
-                    other => bail!("--map {other:?}: expected water, land, coast, generated or demo"),
+                    "text" => MapKind::Text,
+                    other => bail!("--map {other:?}: expected water, land, coast, generated, demo or text"),
                 }
             }
             "--map-cells" => o.map_cells = value("--map-cells", &mut args)?.parse().context("--map-cells")?,
@@ -733,7 +735,7 @@ fn sim_options(o: &Options) -> Option<sim::SimOptions> {
         MapKind::Land => Map::LandCrossing,
         MapKind::Coast => Map::Coast,
         MapKind::Package => Map::Loaded,
-        MapKind::Generated | MapKind::Demo => return None,
+        MapKind::Generated | MapKind::Demo | MapKind::Text => return None,
     };
     let mounts = o
         .mounts
@@ -829,7 +831,7 @@ fn terrain_source(o: &Options) -> Result<(TerrainSource, Option<Arc<Terrain>>)> 
             let side = (o.map_cells.max(2) as usize) | 1;
             (generate(side, side, 1), 3000.0 * o.relief, 0.0, None, 8.0)
         }
-        MapKind::Demo => unreachable!(),
+        MapKind::Demo | MapKind::Text => unreachable!(),
     };
     let generated = started.elapsed();
     let pyramid = build_pyramid(&heightmap, scale, offset);
@@ -1435,7 +1437,7 @@ fn run(o: Options) -> Result<ExitCode> {
         });
     }
     let (source, nav) = match o.map {
-        MapKind::Demo => (None, None),
+        MapKind::Demo | MapKind::Text => (None, None),
         _ => {
             let (source, nav) = terrain_source(&o)?;
             (Some(Arc::new(source)), nav)
@@ -1499,8 +1501,12 @@ fn run(o: Options) -> Result<ExitCode> {
     let ui: sim::UiQueue = Arc::default();
     let sim_speed = sim::SimSpeed::default();
     let mut vsync = o.present == PresentPolicy::Fifo;
+    let text_zoom = (o.map == MapKind::Text).then(TextZoom::default);
     let mut thread = match &source {
-        None => GpuRenderThread::start(&window, DemoApp::default(), config)?,
+        None => {
+            let app = text_zoom.clone().map(DemoApp::with_text).unwrap_or_default();
+            GpuRenderThread::start(&window, app, config)?
+        }
         Some(source) => {
             let (mut app, feed) = effects(
                 with_look(
@@ -1560,6 +1566,7 @@ fn run(o: Options) -> Result<ExitCode> {
         MapKind::Coast => "coast",
         MapKind::Generated => "generated",
         MapKind::Demo => "demo",
+        MapKind::Text => "text",
         MapKind::Package => "package map",
     };
     let started = Instant::now();
@@ -1577,6 +1584,9 @@ fn run(o: Options) -> Result<ExitCode> {
     let mut hdr_settle: Option<Instant> = None;
     loop {
         let events = window.pump();
+        if let Some(zoom) = text_zoom.as_ref().filter(|_| events.wheel != 0.0) {
+            zoom.scroll(events.wheel);
+        }
         if events.pressed & keys::PAUSE != 0 {
             let paused = sim_speed.toggle_pause();
             if let Some((view, _)) = &terrain {

@@ -175,6 +175,7 @@ captures and measurements: [docs/water.md](docs/water.md).
 | `crates/ae_nav` | Flow-field navigation, ORCA avoidance, collision; `NavService` over body columns; movement classes and water; `reference` = pathsim's own sim | pathsim (`reference` unchanged; service carved from it) |
 | `crates/ae_spatial` | Per-tick grid with batch radius / box / nearest-k / sweep queries as hit streams | new |
 | `crates/ae_framegraph` | Frame graph declare/bake/barriers (colour, depth, several writers per resource), plus the declaration decoder | ecs_sim `frame_graph` |
+| `crates/ae_text` | Rust text layout and font fallback with Parley and Fontique, plus Glyphux MSDF atlas preparation | new |
 | `crates/ae_render` | Vulkan side: device with validation counters, memory, uploads, swapchain, pipelines, frame graph executor, render thread, SDL3 window and the display/colour-space probe (`display`); adaptive terrain (`terrain`); GPU-culled unit instances (`units`); the pass library, render module host and fullscreen programs with SPIR-V reflection (`library`, `module`, `fullscreen`); shaders compiled by `build.rs` with `glslc` | ecs_sim `render/`; terrain from map-rendering |
 | `bins/ae-client` | Window plus render thread and sim thread: the crossing map's terrain and units with camera controls, or offscreen captures | new |
 | `crates/ae_render_abi` | Frame graph declaration wire format and builder; the render module contract and program table (no deps, builds for WASM) | new |
@@ -289,6 +290,7 @@ cargo run --release -p ae-client -- --units 0                            # terra
 cargo run --release -p ae-client -- --render-module post                 # graph from render/post; edit it while running (N: vignette)
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
 cargo run --release -p ae-client -- --units 0 --camera 10700,12800,350,2.5,0.45   # the lake by the causeway: waves, glints, foam (O: water)
+cargo run --release -p ae-client -- --map text --hdr off                  # Parley text on screen and on a tilted plane
 cargo run --release -p ae-client -- --map generated --units 0          # mountains and mesas casting the sun's shadows (H: shadows)
 cargo run --release -p ae-client -- --game skirmish                     # units fighting; those that die in view explode (X: an explosion under the mouse cursor)
 cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12 --capture boom.ppm   # explosions, a second in
@@ -305,6 +307,30 @@ AE_VK_VALIDATION=1 cargo run --release -p ae-client -- --seconds 8 --exercise   
 
 Set `AE_BENCH_MACHINE` on a dedicated benchmark machine so wall times are only ever compared against
 results from the same machine; deterministic counters are compared everywhere.
+
+The text demo uses installed fonts. On Linux, the default font discovery build uses Fontconfig.
+Application code can register bundled fonts through `ae_text::TextSystem::fonts`, retain a Parley
+layout for measurement or rewrapping, and append it to a glyph atlas for drawing. The optional
+`ae_text/complex-scripts` feature enables dictionary-based line breaking. The Vulkan renderer
+uploads an immutable atlas and accepts either a screen transform or a world-plane projection.
+
+The text map uses MSDF for HUD text and the tilted nameplate. Scroll to zoom the nameplate.
+
+```sh
+cargo run --release -p ae-client -- --map text --hdr off
+```
+
+To measure the MSDF renderer or check Vulkan readback, pass a regular outline font.
+
+```sh
+cargo run --release -p ae_render --example text_renderers -- /path/to/DejaVuSans.ttf --verify
+cargo run --release -p ae_render --example text_renderers -- /path/to/DejaVuSans.ttf
+```
+
+Add `--mixed SANS_BOLD.ttf SERIF_REGULAR.ttf SERIF_ITALIC.ttf` after the regular sans font
+to measure two 4K mixed-style scenes. The renderer shares each MSDF tile across sizes of
+a face and variation instance. It draws OpenType outlines. The retired renderer designs and three-way results are
+recorded in [Text rendering comparison](docs/text-rendering-comparison.txt).
 
 ## Client controls
 

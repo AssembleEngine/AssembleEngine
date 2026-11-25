@@ -239,15 +239,46 @@ pub fn build_demo_graph(extent: vk::Extent2D, output: DemoOutput) -> (FrameGraph
     )
 }
 
-pub use gpu::{DemoApp, DemoRenderer, record_readback};
+pub use gpu::{DemoApp, DemoRenderer, TextZoom, record_readback};
 
 mod gpu {
     use super::*;
     use crate::device::GpuDevice;
     use crate::executor::{PassContext, Recorder};
     use crate::pipeline::{self, Blend, GraphicsDesc, spirv};
+    use crate::text::{TextBatch, screen_to_clip};
+    use ae_text::parley::{FontStyle, FontWeight, style::StyleProperty};
+    use ae_text::{Atlas, Shadow, TextSystem};
     use anyhow::Result;
-    use std::sync::Arc;
+    use glam::{Mat4, Vec3};
+    use std::ops::Range;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    /// Shares the nameplate zoom between SDL's event thread and the renderer.
+    #[derive(Clone)]
+    pub struct TextZoom(Arc<AtomicU32>);
+
+    impl Default for TextZoom {
+        fn default() -> Self {
+            Self(Arc::new(AtomicU32::new(1.0_f32.to_bits())))
+        }
+    }
+
+    impl TextZoom {
+        pub fn scroll(&self, steps: f32) {
+            if steps.is_finite() {
+                let scale = (self.scale() * 1.25_f32.powf(steps)).clamp(0.35, 8.0);
+                self.0.store(scale.to_bits(), Ordering::Relaxed);
+            }
+        }
+
+        fn scale(&self) -> f32 {
+            f32::from_bits(self.0.load(Ordering::Relaxed))
+        }
+    }
 
     /// Pipelines for the demo passes. Every descriptor is a global-set
     /// handle (M15 step E): each pass pushes the graph's indices and the
@@ -260,6 +291,7 @@ mod gpu {
         filter: vk::Pipeline,
         composite: vk::Pipeline,
         composite_format: vk::Format,
+        text: Option<DemoText>,
     }
 
     impl DemoRenderer {
@@ -312,7 +344,17 @@ mod gpu {
                 filter,
                 composite,
                 composite_format: target_format,
+                text: None,
             })
+        }
+
+        pub fn with_text(self) -> Result<Self> {
+            self.with_text_zoom(TextZoom::default())
+        }
+
+        fn with_text_zoom(mut self, zoom: TextZoom) -> Result<Self> {
+            self.text = Some(DemoText::new(self.gpu.clone(), self.composite_format, zoom)?);
+            Ok(self)
         }
 
         pub fn target_format(&self) -> vk::Format {
@@ -386,6 +428,9 @@ mod gpu {
                     unsafe {
                         device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
                     }
+                    if let Some(text) = &self.text {
+                        text.draw(ctx)?;
+                    }
                 }
                 DemoPass::Readback { src, dst } => {
                     let (image, buffer) = (ctx.image(src)?, ctx.buffer(dst)?);
@@ -394,6 +439,72 @@ mod gpu {
                 DemoPass::HostRead | DemoPass::Present => {}
             }
             Ok(())
+        }
+    }
+
+    struct DemoText {
+        batch: TextBatch,
+        hud: Range<u32>,
+        plane: Range<u32>,
+        plane_width: f32,
+        zoom: TextZoom,
+    }
+
+    impl DemoText {
+        fn new(gpu: Arc<GpuDevice>, format: vk::Format, zoom: TextZoom) -> Result<Self> {
+            let mut text = TextSystem::new(true);
+            let mut atlas = Atlas::new(512)?;
+            let shadow = Shadow {
+                offset: [1.0, 2.0],
+                color: [0.0, 0.0, 0.0, 0.85],
+            };
+
+            let hud = "AssembleEngine\nMSDF  ·  مرحبا  ·  नमस्ते\nScroll to zoom the nameplate";
+            let mut builder = text.builder(hud, true);
+            builder.push_default(StyleProperty::FontSize(20.0));
+            builder.push(StyleProperty::FontSize(28.0), .."AssembleEngine".len());
+            builder.push(StyleProperty::FontWeight(FontWeight::BOLD), .."AssembleEngine".len());
+            let mut layout = builder.build(hud);
+            layout.break_all_lines(None);
+            let hud = atlas.append(&layout, Some(shadow))?;
+
+            let plane = "World-space text";
+            let mut builder = text.builder(plane, false);
+            builder.push_default(StyleProperty::FontSize(52.0));
+            builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
+            builder.push_default(StyleProperty::Underline(true));
+            builder.push_default(StyleProperty::Brush([1.0, 0.85, 0.45, 1.0]));
+            let mut layout = builder.build(plane);
+            layout.break_all_lines(None);
+            let plane_width = layout.width();
+            let plane = atlas.append(&layout, Some(shadow))?;
+            anyhow::ensure!(
+                !hud.is_empty() && !plane.is_empty(),
+                "the text demo needs installed sans-serif fonts"
+            );
+
+            let batch = TextBatch::new(gpu, &atlas, format, None)?;
+            Ok(Self {
+                batch,
+                hud,
+                plane,
+                plane_width,
+                zoom,
+            })
+        }
+
+        fn draw(&self, ctx: &PassContext<'_>) -> Result<()> {
+            let extent = ctx.render_area.extent;
+            let aspect = extent.width as f32 / extent.height as f32;
+            let projection = Mat4::perspective_rh(50.0_f32.to_radians(), aspect, 0.1, 100.0);
+            let plane_to_view = Mat4::from_translation(Vec3::new(0.0, 0.45, -4.0))
+                * Mat4::from_rotation_y(-0.62)
+                * Mat4::from_rotation_x(0.33)
+                * Mat4::from_scale(Vec3::splat(0.007 * self.zoom.scale()))
+                * Mat4::from_translation(Vec3::new(-self.plane_width * 0.5, 0.0, 0.0));
+            self.batch.draw(ctx, self.plane.clone(), projection * plane_to_view)?;
+            self.batch
+                .draw(ctx, self.hud.clone(), screen_to_clip(extent, [24.0, 20.0]))
         }
     }
 
@@ -435,6 +546,16 @@ mod gpu {
         staging: Vec<crate::memory::OwnedBuffer>,
         params_staging: Option<ResourceId>,
         frame: u64,
+        text: Option<TextZoom>,
+    }
+
+    impl DemoApp {
+        pub fn with_text(zoom: TextZoom) -> Self {
+            Self {
+                text: Some(zoom),
+                ..Self::default()
+            }
+        }
     }
 
     impl crate::thread::RenderApp for DemoApp {
@@ -448,7 +569,11 @@ mod gpu {
             frames_in_flight: usize,
         ) -> Result<()> {
             let format = target.format;
-            self.renderer = Some(DemoRenderer::new(gpu.clone(), bindless, format)?);
+            let renderer = DemoRenderer::new(gpu.clone(), bindless, format)?;
+            self.renderer = Some(match &self.text {
+                Some(zoom) => renderer.with_text_zoom(zoom.clone())?,
+                None => renderer,
+            });
             self.staging = (0..frames_in_flight)
                 .map(|slot| {
                     crate::memory::OwnedBuffer::new(
@@ -507,7 +632,12 @@ mod gpu {
         }
 
         fn status(&self) -> String {
-            "demo graph".into()
+            if self.text.is_some() {
+                "demo graph with MSDF text"
+            } else {
+                "demo graph"
+            }
+            .into()
         }
 
         fn destroy(&mut self, gpu: &Arc<GpuDevice>) {

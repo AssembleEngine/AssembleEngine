@@ -82,6 +82,8 @@ test_rect.vert 91d4a2bf7a43dd5c
 test_sample_shore.frag febabc646e19eb33
 test_sample_texel.comp 3f05284374cad937
 test_water_refract.comp 536f5a4def4ba70a
+text.vert 2a973f779af1f254
+text_msdf.frag c593d938d6834e17
 tonemap.frag eb4f55c5ffd7cf9b
 triangle.frag bccc77d5eafb8d38
 triangle.vert 3d670c9adafc86fb

@@ -117,6 +117,7 @@ fn run_demo(
     bake: BakeOptions,
     frames: usize,
     profile: bool,
+    text: bool,
 ) -> (Vec<u8>, usize) {
     let config = ExecutorConfig {
         frames_in_flight: 2,
@@ -145,7 +146,8 @@ fn run_demo(
     .unwrap();
     assert!(executor.set_graph(graph).unwrap());
     let physical = executor.baked().unwrap().physical.len();
-    let mut renderer = DemoRenderer::new(gpu.clone(), executor.bindless_mut(), target_desc.format).unwrap();
+    let renderer = DemoRenderer::new(gpu.clone(), executor.bindless_mut(), target_desc.format).unwrap();
+    let mut renderer = if text { renderer.with_text().unwrap() } else { renderer };
     let target_binding = Binding::Image(ImageBinding {
         initial: vk::ImageLayout::UNDEFINED,
         image: target.image,
@@ -238,10 +240,10 @@ fn demo_graph_renders_validation_clean_and_aliasing_is_invisible() {
         width: 256,
         height: 128,
     };
-    let (aliased, aliased_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, true);
-    let (plain, plain_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: false }, 5, true);
+    let (aliased, aliased_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, true, false);
+    let (plain, plain_physical) = run_demo(&gpu, extent, BakeOptions { aliasing: false }, 5, true, false);
     // R5: profiling changes no rendering behaviour.
-    let (unprofiled, _) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, false);
+    let (unprofiled, _) = run_demo(&gpu, extent, BakeOptions { aliasing: true }, 5, false, false);
     assert_eq!(fnv(&unprofiled), fnv(&aliased), "profiling must not change the image");
     assert!(
         aliased_physical < plain_physical,
@@ -256,6 +258,34 @@ fn demo_graph_renders_validation_clean_and_aliasing_is_invisible() {
     };
     assert_ne!(pixel(64, 80), pixel(192, 80));
     assert_ne!(pixel(64, 80), pixel(4, 4));
+    assert_clean(&gpu);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU and installed sans-serif fonts"]
+fn parley_text_renders_in_screen_and_world_space() {
+    let gpu = gpu();
+    let extent = vk::Extent2D {
+        width: 512,
+        height: 256,
+    };
+    let (plain, _) = run_demo(&gpu, extent, BakeOptions::default(), 2, false, false);
+    let (text, _) = run_demo(&gpu, extent, BakeOptions::default(), 2, false, true);
+    let row_bytes = extent.width as usize * 4;
+    for (top, bottom) in [(20, 100), (135, 210)] {
+        let range = top * row_bytes..bottom * row_bytes;
+        let changed = plain[range.clone()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(text[range].as_chunks::<4>().0)
+            .filter(|(before, after)| before[..3] != after[..3])
+            .count();
+        assert!(
+            changed > 100,
+            "only {changed} changed pixels between rows {top} and {bottom}"
+        );
+    }
     assert_clean(&gpu);
 }
 
