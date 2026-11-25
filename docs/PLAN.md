@@ -5790,7 +5790,8 @@ plan; this section records what exists, what is open and what was measured.
   coast takes the prototype's sea and runs a shipping lane. Riding hulls now cast and reflect
   from the waves, and the culls widen floating rows by `WAVE_BOUND`. `--capture-seconds`
   captures live wakes and rings. RTS-scale departures and captures are in
-  [water.md](water.md) "The prototype's pieces in `full`". The GPU costs are unmeasured (pending consent).
+  [water.md](water.md) "The prototype's pieces in `full`". The GPU costs are in
+  "M16.21 measurements" below.
 - **M16 delivery 5 (RTS-scale water fixes).** After delivery 4 the coast still read as clear
   water over a sharp seabed, with stripes, a weave, lane-like wakes and a sea that turned
   saturated from afar. Causes and fixes, in [water.md](water.md) "The prototype's pieces in
