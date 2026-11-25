@@ -54,10 +54,15 @@ layout(std140, set = AE_BINDLESS_SET, binding = AE_UNIFORM_BLOCKS) uniform Frame
     vec4 unitShadowScale[3];  // per cascade: 1/half-size x, y, 1/depth range; w: 1 = on
     uvec4 anim;               // x: the tick drawn from (the stream's - 1); y: the fraction past it (float bits); z: animation table writes
     vec4 photometry;          // x: exposure, y: unused, z: sun lux, w: sky lux
-#ifdef MIRROR
+    uvec4 lists;              // x: the placement records' first word in each visible list (placedUnit)
+// The mirror frame (src/water/reflect.rs) and the camera's inverse
+// view-projection: written whenever the scene has water (the cull reads
+// them only while it fills the reflection's lists).
+#if defined(MIRROR) || defined(CULL)
     mat4 mirrorProj;
     vec4 mirrorCamera;
     vec4 mirrorPlanes[6];
+    mat4 inverseViewProj; // the camera's (units_mirror_cull.glsl)
 #endif
 } ae_Frame[];
 #define u ae_Frame[AE_BUF(0)]
@@ -88,13 +93,27 @@ layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Vis
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint cmdWords[]; } ae_Indirect[];
 #define cmdWords ae_Indirect[UNIT_INDIRECT_INDEX].cmdWords
 #else
-layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; } ae_Indirect[];
+// The camera's command, then the water overlay's (overlayWord).
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer Indirect { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; uint overlay[4]; } ae_Indirect[];
 #define cmd ae_Indirect[UNIT_INDIRECT_INDEX]
 #endif
 #else
 layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Visible { uint visible[]; } ae_Visible[];
 #define visible ae_Visible[UNIT_VISIBLE_INDEX].visible
 #endif
+
+// Each visible list (the camera's and the reflection's) ends with the
+// units' placement records: two vec4 per row from word u.lists.x (a
+// multiple of 4), the cull's loadUnit once per unit (position, body
+// radius; rotation), so the draws do not rebuild it per vertex
+// (placedUnit). The camera's list has every row's; the reflection's, its
+// eligible rows' as the reflection places them.
+#ifdef CULL
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer Placed { vec4 placed[]; } ae_Placed[];
+#else
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) readonly buffer Placed { vec4 placed[]; } ae_Placed[];
+#endif
+uint placedAt(uint i) { return u.lists.x / 4u + 2u * i; }
 
 #define heightTex AE_S2D(0, 1)
 // Shadow heights (src/terrain/sun.rs), world units; used when counts.z & 1.
@@ -176,29 +195,17 @@ vec4 unitRotation(uint i, float alpha) {
     return slerp(unitQuat(prev), unitQuat(rot), alpha);
 }
 
-Unit loadUnit(uint i) {
-    Unit unit;
-    vec2 p = mix(vec2(attrf(ATTR_PREV_X, i), attrf(ATTR_PREV_Y, i)), vec2(attrf(ATTR_X, i), attrf(ATTR_Y, i)), u.map.w);
-    vec2 uv = (p / u.map.x + 0.5) * u.map.yz;
-    float h = textureLod(heightTex, uv, 0.0).r * u.height.x + u.height.y;
-#if defined(SUB) || defined(RIDE_WAVES)
-    float ground = h;
+#if defined(CULL) && !defined(MIRROR)
+// The unit's height in the reflection (loadUnit sets it): a floating hull
+// at the water level, a submerged row at its depth, as the MIRROR
+// variant places it.
+float unitMirrorY;
 #endif
-    unit.cls = min(attru(ATTR_CLASS, i), MAX_CLASSES - 1u);
-    if (u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
-        h = max(h, u.height.z);
-    }
-#ifdef MIRROR
-    h -= max(attrf(ATTR_WATER, i), 0.0);
-#elif defined(SUB)
-    if (u.height.w > 0.5 && attrf(ATTR_WATER, i) > 0.0) {
-        h = max(ground, u.height.z - attrf(ATTR_WATER, i));
-    }
-#endif
-    unit.pos = vec3(p.x, h, p.y);
-    unit.rot = unitRotation(i, u.map.w);
 
 #ifdef RIDE_WAVES
+// A floating hull (at p, over ground height `ground`, body radius `radius`)
+// tilted and lifted onto the full tier's waves.
+void rideWaves(inout Unit unit, uint i, vec2 p, float ground, float radius) {
     if (eligible(i) && u.height.w > 0.5 && ground < u.height.z && attrf(ATTR_WATER, i) <= 0.0
         && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
         vec4 wave = waterWave(p);
@@ -211,7 +218,7 @@ Unit loadUnit(uint i) {
         // Check the surface under the hull's ends. A local nonlinear
         // crest can rise above the tangent plane used to tilt the hull.
         float height = wave.z * weight;
-        vec2 axis = rotate(unit.rot, vec3(1.0, 0.0, 0.0)).xz * attrf(ATTR_RADIUS, i);
+        vec2 axis = rotate(unit.rot, vec3(1.0, 0.0, 0.0)).xz * radius;
         vec2 side = vec2(-axis.y, axis.x) * 0.8;
         float lift = 0.0;
         for (int k = 0; k < 4; ++k) {
@@ -220,12 +227,133 @@ Unit loadUnit(uint i) {
         }
         unit.pos.y = max(ground, u.height.z + height + min(lift, 0.2) + 0.06 * weight);
     }
+}
 #endif
-    float radius = attrf(ATTR_RADIUS, i);
+
+// The drawn radius: the body radius, enlarged to the minimum pixel size as
+// seen from the view.
+void sizeUnit(inout Unit unit, float radius) {
     float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, UNIT_VIEW_POS), 1e-3);
+    unit.size = radius * max(1.0, u.sun.w / max(pixels, 1e-6));
+}
+
+float groundAt(vec2 p) {
+    vec2 uv = (p / u.map.x + 0.5) * u.map.yz;
+    return textureLod(heightTex, uv, 0.0).r * u.height.x + u.height.y;
+}
+
+Unit loadUnit(uint i) {
+    Unit unit;
+    vec2 p = mix(vec2(attrf(ATTR_PREV_X, i), attrf(ATTR_PREV_Y, i)), vec2(attrf(ATTR_X, i), attrf(ATTR_Y, i)), u.map.w);
+    float h = groundAt(p);
+#if defined(SUB) || defined(RIDE_WAVES)
+    float ground = h;
+#endif
+    unit.cls = min(attru(ATTR_CLASS, i), MAX_CLASSES - 1u);
+    if (u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
+        h = max(h, u.height.z);
+    }
+#if defined(CULL) && !defined(MIRROR)
+    unitMirrorY = h - max(attrf(ATTR_WATER, i), 0.0);
+#endif
+#ifdef MIRROR
+    h -= max(attrf(ATTR_WATER, i), 0.0);
+#elif defined(SUB)
+    if (u.height.w > 0.5 && attrf(ATTR_WATER, i) > 0.0) {
+        h = max(ground, u.height.z - attrf(ATTR_WATER, i));
+    }
+#endif
+    unit.pos = vec3(p.x, h, p.y);
+    unit.rot = unitRotation(i, u.map.w);
+    float radius = attrf(ATTR_RADIUS, i);
+#ifdef RIDE_WAVES
+    rideWaves(unit, i, p, ground, radius);
+#endif
+    sizeUnit(unit, radius);
+    return unit;
+}
+
+#ifdef CULL
+// Row i's placement record in list `list` (a buffer handle): `unit` from
+// loadUnit(i) (or mirrorUnit), before any wave riding.
+void placeUnit(uint list, uint i, Unit unit) {
+    uint at = placedAt(i);
+    ae_Placed[list].placed[at] = vec4(unit.pos, attrf(ATTR_RADIUS, i));
+    ae_Placed[list].placed[at + 1u] = unit.rot;
+}
+#else
+// Row i as loadUnit places it, from the cull's placement record in this
+// pass's visible list (the reflection's for MIRROR); floating hulls then
+// ride the waves (RIDE_WAVES) and the size follows the view.
+Unit placedUnit(uint i) {
+    uint at = placedAt(i);
+    vec4 a = ae_Placed[UNIT_VISIBLE_INDEX].placed[at];
+    Unit unit;
+    unit.pos = a.xyz;
+    unit.rot = ae_Placed[UNIT_VISIBLE_INDEX].placed[at + 1u];
+    unit.cls = min(attru(ATTR_CLASS, i), MAX_CLASSES - 1u);
+#ifdef RIDE_WAVES
+    rideWaves(unit, i, unit.pos.xz, groundAt(unit.pos.xz), a.w);
+#endif
+    sizeUnit(unit, a.w);
+    return unit;
+}
+#endif
+
+#if defined(CULL) && !defined(MIRROR)
+// `unit` (from loadUnit(i)) as the MIRROR variant's loadUnit places and
+// sizes it: at unitMirrorY, its minimum pixel size seen from the mirrored
+// camera.
+Unit mirrorUnit(Unit unit, uint i) {
+    unit.pos.y = unitMirrorY;
+    float radius = attrf(ATTR_RADIUS, i);
+    float pixels = 2.0 * radius * u.camPos.w / max(distance(unit.pos, u.mirrorCamera.xyz), 1e-3);
     unit.size = radius * max(1.0, u.sun.w / max(pixels, 1e-6));
     return unit;
 }
+
+// The reflection's lists, filled by the same dispatch (`units.cull` with
+// the reflection's buffers): words.y = 1, words.z the visible list,
+// words.w the indirect arguments (water/reflect.rs push_buffers), in the
+// main lists' layout (the darts' count at word 1, then the commands).
+// Declared apart so the main lists' macros do not rename them.
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) writeonly buffer MirrorVisible { uint mirrorVisible[]; } ae_MirrorVisible[];
+layout(std430, set = AE_BINDLESS_SET, binding = AE_BUFFERS) buffer MirrorIndirect { uint mirrorWords[]; } ae_MirrorIndirect[];
+#define mirrorVisible ae_MirrorVisible[ae.words.z].mirrorVisible
+#define mirrorWords ae_MirrorIndirect[ae.words.w].mirrorWords
+bool mirrorListsBound() { return ae.words.y != 0u; }
+
+bool inMirrorView(vec3 centre, float r) {
+    for (int k = 0; k < 6; k++) {
+        if (dot(u.mirrorPlanes[k].xyz, centre) + u.mirrorPlanes[k].w < -r) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+// The water overlay's commands in the indirect buffer (models.rs
+// overlay_offset, in words): after the darts' command, the camera's model
+// commands and each shadow cascade's copy; laid out as the camera's. In
+// refraction frames the SUB cull splits the camera's lists by eligible():
+// Own and Seen rows from the front of each region under the camera's
+// commands (drawn before the water copy), blips and ghosts from the back
+// under the overlay's (drawn over the water, units.water_overlay).
+uint overlayWord() { return 4u + 5u * u.counts.w * (1u + uint(UNIT_CASCADES)); }
+
+#ifndef CULL
+// The row of instance `instance` in the list region at `base`: from the
+// back for the water overlay's draw (SUB, ae.words.x = 1).
+uint drawnRow(uint base, uint instance) {
+#ifdef SUB
+    if (ae.words.x != 0u) {
+        return visible[base + u.counts.y - 1u - instance];
+    }
+#endif
+    return visible[base + instance];
+}
+#endif
 
 // The class is drawn with a model (src/models.rs), not a dart.
 bool hasModel(uint cls) {

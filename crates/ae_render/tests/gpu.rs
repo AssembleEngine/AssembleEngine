@@ -14674,14 +14674,362 @@ fn coast_planar_reflection_is_clipped_and_observer_safe() {
     assert_clean(&gpu);
 }
 
+/// The mirror cull keeps only units whose reflection can land on water: on
+/// a map whose left half is dry land 20 m above the water and right half
+/// sea, a tower and a dart far inland are not drawn into the reflection
+/// (their mirrored boxes, widened by the water's sample shift, meet only
+/// dry ground), the same two over the sea are. Counted from the mirror's
+/// indirect arguments: the raised land would hide the inland pair in the
+/// reflection's pixels anyway.
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
+fn mirror_cull_drops_units_whose_reflection_misses_the_water() {
+    use ae_framegraph::{ResourceId, Role};
+    use ae_model::{Bone, Bounds, Joint, Material, Model};
+    use ae_render::library::{LibraryPass, WaterTiers};
+    use ae_render::terrain::app::{NATIVE, PassWork, ScenePass, TerrainApp, TerrainOutput, TerrainSource, lod_view};
+    use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
+    use ae_render::terrain::renderer::TerrainInfo;
+    use ae_render::thread::{RenderApp, TargetInfo};
+    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use glam::{Mat4, Vec2, Vec3};
+
+    let gpu = gpu();
+    // 256 x 256 cells of 4 m: the shore is the line x = 512 m.
+    let land = 20.0f32;
+    let (heightmap, scale, offset) = Heightmap::from_cells((256, 256), |x, _| if x < 128 { land } else { -20.0 }, None);
+    let pyramid = build_pyramid(&heightmap, scale, offset);
+    let info = TerrainInfo::new(&heightmap, &pyramid, 4.0, scale, offset, Some(0.0));
+    let source = Arc::new(TerrainSource {
+        heightmap,
+        pyramid,
+        info,
+        materials: None,
+    });
+    let identity = Mat4::IDENTITY.to_cols_array();
+    let mut tower = Model {
+        bones: vec![Bone {
+            name: "root".into(),
+            parent: None,
+            rest: identity,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }],
+        joints: vec![Joint {
+            bone: 0,
+            inverse_bind: identity,
+        }],
+        materials: vec![Material {
+            base_color: [1.0, 0.001, 0.001, 1.0],
+            ..Default::default()
+        }],
+        bounds: Bounds {
+            min: [-0.35, 0.0, -0.35],
+            max: [0.35, 1.6, 0.35],
+        },
+        ..Default::default()
+    };
+    model_box(&mut tower, [-0.35, 0.0, -0.35], [0.35, 1.6, 0.35], 0);
+    tower.validate().unwrap();
+    let feed = Arc::new(UnitFeed::default());
+    let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback)
+        .with_water()
+        .with_water_tiers(WaterTiers {
+            reflect: true,
+            ..Default::default()
+        })
+        .with_units(UnitsSetup {
+            feed: feed.clone(),
+            capacity: 16,
+            classes: vec![
+                UnitClass {
+                    color: [1.0, 0.001, 0.001],
+                    gamut: ae_render::colorspace::Gamut::Bt709,
+                    floats: true,
+                };
+                2
+            ],
+            min_pixels: 1.0,
+            models: vec![Some(Arc::new(tower)), None],
+            rigs: Vec::new(),
+        });
+    let extent = vk::Extent2D {
+        width: 321,
+        height: 241,
+    };
+    let (rw, rh) = (extent.width.div_ceil(2), extent.height.div_ceil(2));
+    let view = app.view();
+    let (center, camera) = {
+        let mut view = view.lock().unwrap();
+        view.camera.target = Vec2::new(400.0, 512.0);
+        view.camera.yaw = 0.0;
+        view.camera.pitch = 0.52;
+        view.camera.distance = 530.0;
+        view.fog = false;
+        view.time = Some(0.0);
+        (view.camera.target, view.camera)
+    };
+    // (x offset from the view's centre, z offset, class): the tower and
+    // the dart 248 m inland, then 24 m out to sea.
+    let units = [
+        (-136.0, -40.0, 0u32),
+        (-136.0, 40.0, 1),
+        (136.0, -40.0, 0),
+        (136.0, 40.0, 1),
+    ];
+    let radius = 8.0f32;
+    let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
+    for (dx, dz, class) in units {
+        let (x, z) = (center.x + dx, center.y + dz);
+        let words: [u32; ATTRIBUTE_COUNT] = [
+            x.to_bits(),
+            z.to_bits(),
+            x.to_bits(),
+            z.to_bits(),
+            0,
+            0,
+            0,
+            1.0f32.to_bits(),
+            0,
+            0,
+            0,
+            1.0f32.to_bits(),
+            radius.to_bits(),
+            class,
+            ae_render::units::NO_POSE,
+            0,
+            0,
+        ];
+        for (column, word) in columns.iter_mut().zip(words) {
+            column.push(word);
+        }
+    }
+    feed.publish(Arc::new(InstanceStream {
+        tick: 1,
+        published: std::time::Instant::now(),
+        tick_seconds: 0.0,
+        sim_seconds: 0.0,
+        columns,
+        anim: AnimWrites::default(),
+    }));
+
+    app.create_offscreen(&gpu, extent).unwrap();
+    let target = TargetInfo {
+        extent,
+        format: vk::Format::R8G8B8A8_SRGB,
+        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    };
+    let mut executor = Executor::new(
+        gpu.clone(),
+        ExecutorConfig {
+            frames_in_flight: 2,
+            profile: false,
+            bake: BakeOptions::default(),
+            record_threads: 2,
+        },
+    )
+    .unwrap();
+    app.create(&gpu, executor.bindless_mut(), target, 2).unwrap();
+    let (mut graph, _) = app.declare(target, executor.bindless_mut()).unwrap();
+    let image = ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == "water.reflection")
+            .unwrap() as u32,
+    );
+    let desc = BufferDesc {
+        size: u64::from(rw) * u64::from(rh) * 8,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let buffer = graph.buffer("reflection probe", desc, ResourceClass::External);
+    graph
+        .pass(
+            "reflection probe copy",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Readback { image, buffer },
+            },
+        )
+        .access(image, Role::TransferSrc)
+        .discard(buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass(
+            "reflection probe read",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Library(LibraryPass::HostRead),
+            },
+        )
+        .access(buffer, Role::HostRead)
+        .root();
+    // The mirrored units' indirect arguments: the darts' instance count,
+    // then one command per model primitive.
+    let draws = ResourceId(
+        graph
+            .resources
+            .iter()
+            .position(|r| r.name == ae_render_abi::module::UNITS_INDIRECT_REFLECT_NAME)
+            .unwrap() as u32,
+    );
+    let counts_desc = BufferDesc {
+        size: 4096,
+        usage: vk::BufferUsageFlags::TRANSFER_DST,
+    };
+    let counts_buffer = graph.buffer("mirror counts probe", counts_desc, ResourceClass::External);
+    graph
+        .pass(
+            "mirror counts copy",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::BufferReadback {
+                    source: draws,
+                    buffer: counts_buffer,
+                },
+            },
+        )
+        .access(draws, Role::TransferSrc)
+        .discard(counts_buffer, Role::TransferDst)
+        .id();
+    graph
+        .pass(
+            "mirror counts read",
+            PassKind::Transfer,
+            ScenePass {
+                program: NATIVE,
+                work: PassWork::Library(LibraryPass::HostRead),
+            },
+        )
+        .access(counts_buffer, Role::HostRead)
+        .root();
+    let mut readback = OwnedBuffer::new(&gpu, desc, MemoryLocation::GpuToCpu, "reflection probe").unwrap();
+    let mut counts = OwnedBuffer::new(&gpu, counts_desc, MemoryLocation::GpuToCpu, "mirror counts probe").unwrap();
+    // Past the source's end the copy leaves these zeros.
+    counts.mapped().unwrap().fill(0);
+    executor.set_graph(graph).unwrap();
+    view.lock().unwrap().frozen = Some(lod_view(&source, &camera, extent.width, extent.height));
+    let mut last = None;
+    for _ in 0..6 {
+        let token = executor.begin_frame().unwrap();
+        app.prepare(executor.bindless_mut(), token.slot).unwrap();
+        let mut externals = (0..executor.graph().resources.len() as u32)
+            .map(|index| app.external(ResourceId(index), token.slot))
+            .collect::<Vec<_>>();
+        externals[buffer.index()] = Some(Binding::Buffer(BufferBinding {
+            buffer: readback.buffer,
+            size: desc.size,
+            offset: 0,
+            identity: 0x5245464c,
+            storage: None,
+        }));
+        externals[counts_buffer.index()] = Some(Binding::Buffer(BufferBinding {
+            buffer: counts.buffer,
+            size: counts_desc.size,
+            offset: 0,
+            identity: 0x4d495252,
+            storage: None,
+        }));
+        executor
+            .execute(token, app.recorder(), &|id| externals[id.index()], &[], &[])
+            .unwrap();
+        last = Some(token);
+    }
+    executor.wait(last.unwrap()).unwrap();
+    let mirror = readback.mapped().unwrap().to_vec();
+    let words: Vec<u32> = counts
+        .mapped()
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
+        .collect();
+    // The darts' count (word 1), then each command's (word 4 + 5k + 1).
+    let mirrored = words[1] + (4..words.len() - 1).step_by(5).map(|k| words[k + 1]).sum::<u32>();
+    assert_eq!(mirrored, 2, "only the tower and the dart over the sea are mirrored");
+
+    let project = lod_view(&source, &camera, extent.width, extent.height).view_proj;
+    let red_pixels = |x: f32, y: f32, z: f32| {
+        let p = project * Vec3::new(x, -y, z).extend(1.0);
+        let cx = ((p.x / p.w * 0.5 + 0.5) * rw as f32) as i32;
+        let cy = ((p.y / p.w * 0.5 + 0.5) * rh as f32) as i32;
+        assert!((7..rw as i32 - 7).contains(&cx) && (7..rh as i32 - 7).contains(&cy));
+        (cy - 7..=cy + 7)
+            .flat_map(|y| (cx - 7..=cx + 7).map(move |x| (y * rw as i32 + x) as usize * 8))
+            .filter(|&i| {
+                let [r, g, b] = scrgb_pixel(&mirror, i);
+                r > 0.004 && r > 3.0 * g.max(b)
+            })
+            .count()
+    };
+    for (i, (dx, dz, _)) in units.into_iter().enumerate() {
+        let ground = if dx < 0.0 { land } else { 0.0 };
+        let red = red_pixels(center.x + dx, ground + radius * 0.5, center.y + dz);
+        if dx > 0.0 {
+            assert!(red >= 2, "unit {i} over the sea is mirrored ({red} red pixels)");
+        }
+    }
+    gpu.wait_idle();
+    drop(executor);
+    app.destroy(&gpu);
+    readback.destroy(&gpu);
+    counts.destroy(&gpu);
+    assert_clean(&gpu);
+}
+
 struct RefractionProbe {
     color: Vec<u8>,
     surface: Vec<u8>,
+    /// The last finished frame's rows and units the cull passed.
+    counts: Option<(u32, u32)>,
 }
 
 struct WaterDart {
     depth: f32,
     radius: f32,
+    /// The row's `ATTR_VIEW` (`RowState`: 0 own, 2 blip, 3 ghost).
+    view: u32,
+    /// Drawn as a red box model, not a dart.
+    model: bool,
+}
+
+/// A red box, one unit radius wide, with one bone.
+fn red_box_model() -> Arc<ae_model::Model> {
+    let identity = glam::Mat4::IDENTITY.to_cols_array();
+    let mut model = ae_model::Model {
+        bones: vec![ae_model::Bone {
+            name: "root".into(),
+            parent: None,
+            rest: identity,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }],
+        joints: vec![ae_model::Joint {
+            bone: 0,
+            inverse_bind: identity,
+        }],
+        materials: vec![ae_model::Material {
+            name: "red".into(),
+            base_color: [1.0, 0.005, 0.004, 1.0],
+            metallic: 0.0,
+            roughness: 0.8,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    model_box(&mut model, [-0.5, 0.0, -0.5], [0.5, 0.6, 0.5], 0);
+    model.bounds = ae_model::Bounds {
+        min: [-0.5, 0.0, -0.5],
+        max: [0.5, 0.6, 0.5],
+    };
+    model.validate().unwrap();
+    Arc::new(model)
 }
 
 fn refraction_probe(
@@ -14735,7 +15083,7 @@ fn refraction_probe(
             0,
             ae_render::units::NO_POSE,
             dart.depth.to_bits(),
-            0,
+            dart.view,
         ]
         .map(|word| vec![word]);
         feed.publish(Arc::new(InstanceStream {
@@ -14755,7 +15103,11 @@ fn refraction_probe(
                 floats: true,
             }],
             min_pixels: 0.0,
-            models: Vec::new(),
+            models: if dart.model {
+                vec![Some(red_box_model())]
+            } else {
+                Vec::new()
+            },
             rigs: Vec::new(),
         });
     }
@@ -14851,10 +15203,11 @@ fn refraction_probe(
     }
     let color = readback.mapped().unwrap().to_vec();
     let surface = app.readback().unwrap();
+    let counts = app.last_unit_counts();
     drop(executor);
     app.destroy(gpu);
     readback.destroy(gpu);
-    RefractionProbe { color, surface }
+    RefractionProbe { color, surface, counts }
 }
 
 #[test]
@@ -14930,6 +15283,8 @@ fn refractive_water_masks_above_water_hulls_and_shadows_caustics() {
         Some(WaterDart {
             depth: 0.0,
             radius: 8.0,
+            view: 0,
+            model: false,
         })
     };
     let open = refraction_probe(&gpu, 4.0, plain, hull(), false);
@@ -14971,6 +15326,53 @@ fn refractive_water_masks_above_water_hulls_and_shadows_caustics() {
 
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
+fn refraction_frames_draw_blips_and_ghosts_over_the_water_only() {
+    use ae_render::water::WaterParams;
+    let gpu = gpu();
+    let plain = WaterParams {
+        caustics: 0.0,
+        ..Default::default()
+    };
+    let hull = |view, model| {
+        Some(WaterDart {
+            depth: 0.0,
+            radius: 8.0,
+            view,
+            model,
+        })
+    };
+    let absent = refraction_probe(&gpu, 4.0, plain, None, false);
+    let red = |p: &RefractionProbe| {
+        p.surface
+            .chunks(4)
+            .filter(|c| c[0] > 60 && u32::from(c[0]) > 3 * u32::from(c[1]))
+            .count()
+    };
+    assert_eq!(red(&absent), 0);
+    // The SUB cull puts an Own row in the scene's list and a blip or ghost
+    // in the water overlay's (the darts' and the models' commands): each
+    // draws once, on the surface, and the count report has it either way.
+    for (view, model, what) in [
+        (0, false, "own dart"),
+        (2, false, "blip dart"),
+        (3, false, "ghost dart"),
+        (0, true, "own model"),
+        (2, true, "blip model"),
+        (3, true, "ghost model"),
+    ] {
+        let probe = refraction_probe(&gpu, 4.0, plain, hull(view, model), false);
+        assert!(red(&probe) > 50, "{what}: {} red pixels", red(&probe));
+        assert_eq!(probe.counts, Some((1, 1)), "{what}");
+        if view != 0 {
+            assert!(probe.color == absent.color, "{what} enters the refraction copy");
+        }
+    }
+    assert_eq!(gpu.instance.counters.errors(), 0);
+    assert_eq!(gpu.instance.counters.warnings(), 0);
+}
+
+#[test]
+#[ignore = "needs a Vulkan 1.3 GPU"]
 fn submerged_dart_keeps_paint_and_gets_only_the_requested_outline() {
     use ae_render::water::WaterParams;
     let gpu = gpu();
@@ -14992,6 +15394,8 @@ fn submerged_dart_keeps_paint_and_gets_only_the_requested_outline() {
         Some(WaterDart {
             depth: 4.0,
             radius: 2.6,
+            view: 0,
+            model: false,
         })
     };
     let base = refraction_probe(&gpu, 10.0, no_tint, sub(), false);

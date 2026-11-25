@@ -21,16 +21,13 @@ layout(location = 6) flat out float outSceneAlpha;
 
 void main() {
     DrawRecord d = draws[ae.words.y + uint(gl_DrawID)];
-    uint row = visible[d.visibleBase + uint(gl_InstanceIndex)];
+    // With SUB, the cull's split list: the scene's rows, or the water
+    // overlay's (ae.words.x).
+    uint row = drawnRow(d.visibleBase, uint(gl_InstanceIndex));
 #ifdef SUB
-    bool overlay = ae.words.x != 0u;
-    if (eligible(row) == overlay) {
-        gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
-        return;
-    }
     outSceneAlpha = attrf(ATTR_WATER, row) > 0.0 ? 0.5 : 1.0;
 #endif
-    Unit unit = loadUnit(row);
+    Unit unit = placedUnit(row);
     Skinned s = skinVertex(d, uint(gl_VertexIndex), poseOffset(row));
     vec3 world = place(unit, s.pos * modelClasses[d.cls].fit.x);
     outWorld = world;

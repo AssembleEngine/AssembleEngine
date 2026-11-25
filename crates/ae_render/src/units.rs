@@ -50,6 +50,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// The units' frame after [`FrameUbo`]: the mirror frame and the camera's
+/// inverse view-projection (units_common.glsl; the culls declare them).
+const MIRROR_BYTES: usize = size_of::<MirrorFrame>() + size_of::<[f32; 16]>();
+
 /// The attributes of an instance stream, in column order. Positions are on
 /// the ground plane in world units (the nav world's x and y; render world
 /// x and z); `rot` is the unit's rotation from its frame (forward +x, up
@@ -441,6 +445,19 @@ struct FrameUbo {
     anim: [u32; 4],
     /// x: exposure, y: unused, z: sun lux, w: sky lux.
     photometry: [f32; 4],
+    /// x: the placement records' first word in each visible list
+    /// ([`placement_base`]).
+    lists: [u32; 4],
+}
+
+/// Words a unit's placement record takes (units_common.glsl `placeUnit`:
+/// position and body radius, rotation).
+const PLACEMENT_WORDS: u64 = 8;
+
+/// The first word of the placement records after `lists` words of visible
+/// lists: on a vec4 boundary.
+fn placement_base(lists: u64) -> u64 {
+    lists.next_multiple_of(4)
 }
 
 /// Makes a graphics pipeline from a vertex and a fragment shader, with the
@@ -509,6 +526,8 @@ struct UnitRefraction {
 
 pub struct UnitRenderer {
     capacity: u32,
+    /// The placement records' first word in each visible list.
+    placement: u64,
     /// With models: their GPU side (the darts' pipelines then use the
     /// models' pipeline layout, and the cull is `units_models_cull.comp`).
     models: Option<Models>,
@@ -711,9 +730,9 @@ impl UnitRenderer {
                 OwnedBuffer::new(
                     gpu,
                     BufferDesc {
-                        size: (size_of::<FrameUbo>()
-                            + usize::from(terrain.info().water_level.is_some()) * size_of::<MirrorFrame>())
-                            as u64,
+                        // The culls declare the mirror tail whether or not
+                        // the scene has water (units_common.glsl).
+                        size: (size_of::<FrameUbo>() + MIRROR_BYTES) as u64,
                         usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                     },
                     MemoryLocation::CpuToGpu,
@@ -723,26 +742,29 @@ impl UnitRenderer {
             .collect::<Result<Vec<_>>>()?;
         // With models: regions of the visible list per model class after
         // the darts' (the camera's and each shadow cascade's), and their
-        // commands after the darts'.
+        // commands after the darts'. Then every row's placement record.
         let visible_len = model_set.as_ref().map_or(capacity as u64, |s| s.visible_len(capacity));
+        let placement = placement_base(visible_len);
         let visible = OwnedBuffer::new(
             gpu,
             BufferDesc {
-                size: visible_len * 4,
+                size: (placement + PLACEMENT_WORDS * capacity as u64) * 4,
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             },
             MemoryLocation::GpuOnly,
             "unit visible",
         )?;
-        let words = [UNIT_VERTICES, 0, 0, 0];
+        // Darts only: the camera's command, then the water overlay's.
+        let words = [UNIT_VERTICES, 0, 0, 0, UNIT_VERTICES, 0, 0, 0];
         let initial: &[u8] = match &model_set {
             Some(set) => &set.template,
             None => pipeline::push_bytes(&words),
         };
         let indirect = upload::buffer(gpu, initial, Self::indirect_usage(), "unit indirect")?;
+        // Zeroed: a slot read before its first frame reports no units.
         let counts = (0..frames_in_flight)
             .map(|_| {
-                OwnedBuffer::new(
+                let mut buffer = OwnedBuffer::new(
                     gpu,
                     BufferDesc {
                         size: initial.len() as u64,
@@ -750,7 +772,11 @@ impl UnitRenderer {
                     },
                     MemoryLocation::GpuToCpu,
                     "unit counts",
-                )
+                )?;
+                if let Some(bytes) = buffer.mapped() {
+                    bytes.fill(0);
+                }
+                Ok(buffer)
             })
             .collect::<Result<Vec<_>>>()?;
         let palette_usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC;
@@ -781,6 +807,8 @@ impl UnitRenderer {
         push.image(1, terrain.sun_shadow_index());
         push.image(2, terrain.unit_shadow_index());
         push.image(3, terrain.particle_shadow_index());
+        // The mirror cull's water test (units_mirror_cull.glsl).
+        push.image(5, terrain.pyramid_index());
         push.sampler(1, terrain.linear_sampler_index());
         push.sampler(3, terrain.shadow_color_sampler_index());
         push.sampler(4, terrain.shadow_compare_sampler_index());
@@ -873,6 +901,7 @@ impl UnitRenderer {
         push.table(table.index);
         Ok(Self {
             capacity,
+            placement,
             models,
             info: *terrain.info(),
             classes,
@@ -1055,8 +1084,14 @@ impl UnitRenderer {
             return 0;
         };
         let word = |w: usize| u32::from_le_bytes(bytes[w * 4..w * 4 + 4].try_into().unwrap());
-        // The darts', then each model class's (its first command's).
-        word(1) + first.iter().map(|&k| word(4 + 5 * k as usize + 1)).sum::<u32>()
+        // The darts', then each model class's (its first command's); the
+        // camera's, then the water overlay's (blips and ghosts in
+        // refraction frames).
+        let commands = self.models.as_ref().map_or(0, |m| m.set.commands());
+        [0, (models::overlay_offset(commands) / 4) as usize]
+            .into_iter()
+            .map(|at| word(at + 1) + first.iter().map(|&k| word(at + 4 + 5 * k as usize + 1)).sum::<u32>())
+            .sum()
     }
 
     /// Per model class (in class order), the units the cull found in each
@@ -1274,13 +1309,18 @@ impl UnitRenderer {
                 0,
             ],
             photometry: frame.photometry,
+            lists: [self.placement as u32, 0, 0, 0],
         };
         if let Some(bytes) = self.ubos[slot].mapped() {
             bytes[..size_of::<FrameUbo>()].copy_from_slice(pipeline::push_bytes(&ubo));
             if self.reflection.is_some()
                 && let Some(level) = i.water_level
             {
-                MirrorFrame::new(frame.view_proj, frame.cam_pos, level).write(bytes, size_of::<FrameUbo>());
+                let at = size_of::<FrameUbo>();
+                MirrorFrame::new(frame.view_proj, frame.cam_pos, level).write(bytes, at);
+                // The mirror cull unprojects the water's screen boxes.
+                let inverse = frame.view_proj.inverse().to_cols_array();
+                bytes[at + size_of::<MirrorFrame>()..at + MIRROR_BYTES].copy_from_slice(pipeline::push_bytes(&inverse));
             }
         }
     }
@@ -1593,7 +1633,16 @@ impl UnitRenderer {
         let refract = self.refraction.as_ref().context("unit refraction pipelines")?;
         let mut push = self.push;
         push.words[0] = u32::from(overlay);
-        self.draw_units(ctx, self.indirect(), push, refract.darts, refract.models);
+        // The SUB cull split the camera's lists: the scene's rows (Own and
+        // Seen) under the camera's commands, blips and ghosts under the
+        // overlay's.
+        let mut indirect = self.indirect();
+        if overlay {
+            let at = models::overlay_offset(self.models.as_ref().map_or(0, |m| m.set.commands()));
+            indirect.offset += at;
+            indirect.size -= at;
+        }
+        self.draw_units(ctx, indirect, push, refract.darts, refract.models);
         Ok(())
     }
 
@@ -1681,14 +1730,19 @@ impl UnitRenderer {
                     &[vk::BufferCopy::default().size(self.indirect.size)],
                 )
             },
-            None => unsafe { ctx.device.cmd_fill_buffer(ctx.cmd, self.indirect.buffer, 4, 4, 0) },
+            // The camera's and the water overlay's instance counts.
+            None => unsafe {
+                for count in [4, models::overlay_offset(0) + 4] {
+                    ctx.device.cmd_fill_buffer(ctx.cmd, self.indirect.buffer, count, 4, 0);
+                }
+            },
         }
     }
 
     /// Copy the indirect arguments to `slot`'s host buffer. Records inside a
     /// transfer pass that reads [`Self::indirect`] and writes [`Self::counts`].
     pub fn record_count(&self, ctx: &PassContext<'_>) {
-        let size = if self.models.is_some() { self.indirect.size } else { 16 };
+        let size = self.counts[ctx.slot].size;
         unsafe {
             ctx.device.cmd_copy_buffer(
                 ctx.cmd,
@@ -1798,18 +1852,30 @@ impl UnitRenderer {
         self.refraction.as_ref()
     }
 
-    pub fn record_cull(&self, ctx: &PassContext<'_>) {
+    /// With `mirror` (the reflection's visible list and indirect
+    /// arguments, reset before), the same dispatch also fills the
+    /// reflection's lists, as [`Self::record_cull_reflect`] would alone.
+    /// Ignored until the reflection is prepared (its frame is written then).
+    pub fn record_cull(&self, ctx: &PassContext<'_>, mirror: Option<(BufferBinding, BufferBinding)>) -> Result<()> {
         let rows = self.rows(ctx.slot);
         if rows == 0 {
-            return;
+            return Ok(());
+        }
+        let mut words = [0; 4];
+        if let Some((visible, indirect)) = mirror.filter(|_| self.reflection.is_some()) {
+            let mut push = self.push;
+            reflect::push_buffers(&mut push, visible, indirect)?;
+            words = push.words;
+            words[1] = 1;
         }
         let (device, cmd) = (ctx.device, ctx.cmd);
         unsafe {
             let cull = self.active_refraction(ctx.slot).map_or(self.cull, |r| r.cull);
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull);
-            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, [0; 4]);
+            self.bind_global(ctx, vk::PipelineBindPoint::COMPUTE, words);
             device.cmd_dispatch(cmd, rows.div_ceil(64), 1, 1);
         }
+        Ok(())
     }
 
     /// The visible units. Records inside a graphics pass that reads

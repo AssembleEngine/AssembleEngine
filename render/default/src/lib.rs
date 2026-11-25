@@ -217,12 +217,30 @@ impl RenderModule for Scene {
             g.pass("units reset", PassKind::Transfer, reset)
                 .access(draws, Role::TransferDst)
                 .id();
+            // One cull fills every view's lists: the camera's and the
+            // shadow cascades', and the reflection's when it draws.
+            let mirror = reflection.and_then(|(.., unit_buffers)| unit_buffers);
+            if let Some([_, mirror_draws]) = mirror {
+                g.pass(
+                    "units reset reflect",
+                    PassKind::Transfer,
+                    p.library("units.reset_reflect"),
+                )
+                .discard(mirror_draws, Role::TransferDst)
+                .id();
+            }
             let cull = p.library("units.cull");
-            g.pass("units cull", PassKind::Compute, cull)
+            let mut cull = g
+                .pass("units cull", PassKind::Compute, cull)
                 .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
                 .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
-                .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
-                .id();
+                .access(draws, Role::StorageBufferWrite(ShaderStage::Compute));
+            if let Some([mirror_visible, mirror_draws]) = mirror {
+                cull = cull
+                    .discard(mirror_visible, Role::StorageBufferWrite(ShaderStage::Compute))
+                    .access(mirror_draws, Role::StorageBufferWrite(ShaderStage::Compute));
+            }
+            cull.id();
         }
         // The lights' clusters, before anything lit.
         let cluster = p.library("lights.cluster");
@@ -269,20 +287,6 @@ impl RenderModule for Scene {
             .discard(leaves, Role::StorageBufferWrite(Compute))
             .discard(reflect_indirect, Role::StorageBufferWrite(Compute))
             .id();
-            if let (Some([instances, _, _, _, _]), Some([visible, draws])) = (units, unit_buffers) {
-                g.pass(
-                    "units reset reflect",
-                    PassKind::Transfer,
-                    p.library("units.reset_reflect"),
-                )
-                .discard(draws, Role::TransferDst)
-                .id();
-                g.pass("units cull reflect", PassKind::Compute, p.library("units.cull_reflect"))
-                    .access(instances, Role::StorageBufferRead(Compute))
-                    .discard(visible, Role::StorageBufferWrite(Compute))
-                    .access(draws, Role::StorageBufferWrite(Compute))
-                    .id();
-            }
             let mut terrain = g
                 .pass("terrain reflect", PassKind::Graphics, p.library("terrain.reflect"))
                 .access(leaves, Role::StorageBufferRead(Vertex))

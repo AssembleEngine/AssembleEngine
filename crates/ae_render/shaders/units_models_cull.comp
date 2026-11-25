@@ -5,12 +5,21 @@
 // turned_sphere) and appended to its
 // class's region of the visible list, counted in each of the class's
 // commands (one per primitive, classCommands); the others as darts.
-// With the units' shadow map on, a model unit is also tested against each
-// cascade and appended to the class's region for that cascade, counted in
-// that cascade's copy of the commands (the shadow caster draws those).
+// With the units' shadow map on, an eligible model unit (radar blips and
+// ghosts cast none) is also tested against each cascade and appended to
+// the class's region for that cascade, counted in that cascade's copy of
+// the commands (the shadow caster draws those).
 // Only the cascade's sides are tested, not its depth: a caster nearer the
 // sun than the cascade's box still shadows what is in it (and past the
 // box's depth the rasterizer clips it, as without the cull).
+// With SUB (refraction frames), blips and ghosts go to the water
+// overlay's commands instead of the camera's (appendOverlay).
+// Every row's placement goes to the end of the visible list (placeUnit,
+// units_common.glsl) for the draws.
+// With the reflection's lists bound (mirrorListsBound), the same dispatch
+// also fills them, each eligible unit placed as the reflection draws it and
+// kept by the units_mirror_cull.glsl test: what the MIRROR variant
+// (`units.cull_reflect`) does alone.
 #define CULL
 #define MODELS
 #include "units_common.glsl"
@@ -21,6 +30,7 @@
 // tier's waves, water_patch.glsl WAVE_BOUND): the cull widens its sphere by
 // it, so a hull riding a crest at the screen's edge is not culled early.
 #include "water_patch.glsl"
+#include "units_mirror_cull.glsl"
 float rideMargin(Unit unit) {
     return u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u ? WAVE_BOUND : 0.0;
 }
@@ -51,6 +61,34 @@ void append(uint i, ModelClass mc, uint l) {
     visible[draws[first].visibleBase + l * u.counts.y + slot] = i;
 }
 
+#if defined(SUB) && !defined(MIRROR)
+// Unit i (a blip or ghost, in a refraction frame) into the back of its
+// class's camera region, counted in the water overlay's copy of the
+// class's commands (overlayWord).
+void appendOverlay(uint i, ModelClass mc) {
+    uint at = overlayWord();
+    uint first = classCommands[mc.cmd.x];
+    uint slot = atomicAdd(cmdWords[at + countWord(first)], 1u);
+    for (uint k = 1u; k < mc.cmd.y; k++) {
+        atomicAdd(cmdWords[at + countWord(classCommands[mc.cmd.x + k])], 1u);
+    }
+    visible[draws[first].visibleBase + u.counts.y - 1u - slot] = i;
+}
+#endif
+
+#ifndef MIRROR
+// Unit i into its class's region of the reflection's list (list 0's
+// layout), counted in the reflection's copy of the class's commands.
+void appendMirror(uint i, ModelClass mc) {
+    uint first = classCommands[mc.cmd.x];
+    uint slot = atomicAdd(mirrorWords[countWord(first)], 1u);
+    for (uint k = 1u; k < mc.cmd.y; k++) {
+        atomicAdd(mirrorWords[countWord(classCommands[mc.cmd.x + k])], 1u);
+    }
+    mirrorVisible[draws[first].visibleBase + slot] = i;
+}
+#endif
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= u.counts.x) {
@@ -60,9 +98,45 @@ void main() {
     if (!eligible(i)) return;
 #endif
     Unit unit = loadUnit(i);
+    placeUnit(UNIT_VISIBLE_INDEX, i, unit);
     ModelClass mc = modelClasses[unit.cls];
+#ifndef MIRROR
+    if (mirrorListsBound() && eligible(i)) {
+        Unit m = mirrorUnit(unit, i);
+        placeUnit(ae.words.z, i, m);
+        if (mc.cmd.y == 0u) {
+            vec3 c = m.pos + vec3(0.0, 0.4 * m.size, 0.0);
+            float mr = 1.6 * m.size + rideMargin(m);
+            if (mirrorReachesWater(c, mr) && inMirrorView(c, mr)) {
+                mirrorVisible[atomicAdd(mirrorWords[1], 1u)] = i;
+            }
+        } else {
+            vec4 s = mc.sphere;
+            uint p = attru(ATTR_POSE, i);
+            if (mc.fit.y > 0.0 && p != NO_POSE && (p & POSE_MANUAL) != 0u) {
+                s = vec4(mc.sphere.xyz * mc.fit.z, mc.fit.y);
+            }
+            vec3 c = place(m, s.xyz);
+            float mr = s.w * m.size + rideMargin(m);
+            if (mirrorReachesWater(c, mr) && inMirrorView(c, mr)) {
+                appendMirror(i, mc);
+            }
+        }
+    }
+#endif
     if (mc.cmd.y == 0u) {
-        if (inView(unit.pos + vec3(0.0, 0.4 * unit.size, 0.0), 1.6 * unit.size + rideMargin(unit))) {
+        vec3 centre = unit.pos + vec3(0.0, 0.4 * unit.size, 0.0);
+        float r = 1.6 * unit.size + rideMargin(unit);
+#ifdef MIRROR
+        if (!mirrorReachesWater(centre, r)) return;
+#endif
+        if (inView(centre, r)) {
+#if defined(SUB) && !defined(MIRROR)
+            if (!eligible(i)) {
+                visible[u.counts.y - 1u - atomicAdd(cmdWords[overlayWord() + 1u], 1u)] = i;
+                return;
+            }
+#endif
             visible[atomicAdd(cmdWords[1], 1u)] = i;
         }
         return;
@@ -77,11 +151,20 @@ void main() {
     }
     vec3 centre = place(unit, sphere.xyz);
     float r = sphere.w * unit.size + rideMargin(unit);
+#ifdef MIRROR
+    if (!mirrorReachesWater(centre, r)) return;
+#endif
     if (inView(centre, r)) {
+#if defined(SUB) && !defined(MIRROR)
+        if (!eligible(i)) {
+            appendOverlay(i, mc);
+        } else
+#endif
         append(i, mc, 0u);
     }
 #ifndef MIRROR
-    if (u.unitShadowScale[0].w > 0.0) {
+    // Radar blips and ghosts cast no shadow (eligible: Own and Seen only).
+    if (u.unitShadowScale[0].w > 0.0 && eligible(i)) {
         vec2 l = vec2(dot(u.unitShadowAxes[0].xyz, centre), dot(u.unitShadowAxes[1].xyz, centre));
         for (uint k = 0u; k < uint(UNIT_CASCADES); k++) {
             vec2 scale = u.unitShadowScale[k].xy;

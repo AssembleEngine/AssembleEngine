@@ -32,6 +32,9 @@
 #ifdef REFRACT
 #include "water_refraction.glsl"
 #endif
+#ifdef REFLECT
+#include "water_reflect.glsl"
+#endif
 
 #ifdef WATER_MESH
 #define WAVE_SAMPLE 14
@@ -153,11 +156,13 @@ void main() {
 #ifdef REFLECT
     // Points on the water plane project to the same UV in both views.
     vec4 clip = u.viewProj * vec4(P, 1.0);
-    vec2 uv = clip.xy / clip.w * 0.5 + 0.5 + 0.025 * N.xz;
+    vec2 shift = 0.025 * N.xz;
 #ifdef WATER_MESH
     // Churned water breaks the reflection into fragments.
-    uv += ocean.detail * 0.035 + ocean.churnN * 0.03;
+    shift += ocean.detail * 0.035 + ocean.churnN * 0.03;
 #endif
+    // Bounded: the units' mirror cull keeps only what this can reach.
+    vec2 uv = clip.xy / clip.w * 0.5 + 0.5 + clamp(shift, -REFLECT_SHIFT, REFLECT_SHIFT);
     vec4 planar = texture(AE_S2D(12, 1), clamp(uv, vec2(0.0), vec2(1.0)));
     // The clear alpha is zero, so open sky keeps the analytic hemisphere.
     reflection = reflection * (1.0 - planar.a) + planar.rgb / max(u.photometry.x, 1e-6);

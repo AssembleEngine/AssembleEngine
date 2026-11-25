@@ -1883,6 +1883,12 @@ impl TerrainRenderer {
         self.sampled[1]
     }
 
+    /// The min/max pyramid (world heights; mip 0 is level
+    /// `PYRAMID_BASE_LEVEL`), updated with the heights on an edit.
+    pub fn pyramid_index(&self) -> u32 {
+        self.sampled[0]
+    }
+
     pub fn sun_shadow_index(&self) -> u32 {
         self.sampled[6]
     }

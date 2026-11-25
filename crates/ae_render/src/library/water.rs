@@ -35,16 +35,48 @@ pub(super) fn check<'a, R>(
     env: &LibraryEnv,
     libs: impl Fn(usize) -> Option<&'a str>,
 ) -> Result<WaterTiers, LibraryError> {
-    let reflect_passes: &[&str] = if env.units {
-        &[
+    // The reflection's unit lists come from `units.cull_reflect`, or from
+    // `units.cull` writing them in the same dispatch; never both.
+    let mirror_writes = |i: usize| {
+        graph.passes[i]
+            .intents
+            .iter()
+            .filter(|intent| intent.role == Role::StorageBufferWrite(ShaderStage::Compute))
+            .filter(|intent| {
+                matches!(
+                    graph.resources[intent.resource.index()].name.as_str(),
+                    UNITS_VISIBLE_REFLECT_NAME | UNITS_INDIRECT_REFLECT_NAME
+                )
+            })
+            .count()
+    };
+    let combined = (0..graph.passes.len())
+        .find(|&i| libs(i) == Some("units.cull"))
+        .map_or(0, mirror_writes);
+    let separate = (0..graph.passes.len()).any(|i| libs(i) == Some("units.cull_reflect"));
+    if separate && combined > 0 {
+        return Err(error(format!(
+            "`units.cull` and `units.cull_reflect` both fill the lists of `{WATER_REFLECTION_NAME}`; declare one"
+        )));
+    }
+    let mirror_cull = if separate { "units.cull_reflect" } else { "units.cull" };
+    // The passes whose presence asks for the tier (`units.cull` runs
+    // without it too; the order checks below place it).
+    let reflect_passes: &[&str] = match (env.units, separate) {
+        (true, true) => &[
             "terrain.cull_reflect",
             "terrain.reflect",
             "units.reset_reflect",
             "units.cull_reflect",
             "units.reflect",
-        ]
-    } else {
-        &["terrain.cull_reflect", "terrain.reflect"]
+        ],
+        (true, false) => &[
+            "terrain.cull_reflect",
+            "terrain.reflect",
+            "units.reset_reflect",
+            "units.reflect",
+        ],
+        (false, _) => &["terrain.cull_reflect", "terrain.reflect"],
     };
     let reflect_buffers: &[&str] = if env.units {
         &[
@@ -127,8 +159,14 @@ pub(super) fn check<'a, R>(
         before("terrain.lod", "terrain.cull_reflect", WATER_REFLECTION_NAME)?;
         before("terrain.cull_reflect", "terrain.reflect", WATER_REFLECTION_NAME)?;
         if env.units {
-            before("units.reset_reflect", "units.cull_reflect", WATER_REFLECTION_NAME)?;
-            before("units.cull_reflect", "units.reflect", WATER_REFLECTION_NAME)?;
+            if !separate && combined < 2 {
+                return Err(error(format!(
+                    "`units.reflect` needs its lists: `units.cull` must write `{UNITS_VISIBLE_REFLECT_NAME}` and \
+                     `{UNITS_INDIRECT_REFLECT_NAME}` (or declare `units.cull_reflect`)"
+                )));
+            }
+            before("units.reset_reflect", mirror_cull, WATER_REFLECTION_NAME)?;
+            before(mirror_cull, "units.reflect", WATER_REFLECTION_NAME)?;
             before("terrain.reflect", "units.reflect", WATER_REFLECTION_NAME)?;
         }
     }

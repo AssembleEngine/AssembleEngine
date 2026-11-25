@@ -53,6 +53,14 @@ pub const COMMAND_BYTES: u64 = 20;
 /// Bytes before the first model command in the indirect buffer: the darts'
 /// `VkDrawIndirectCommand`.
 pub const DART_COMMAND_BYTES: u64 = 16;
+
+/// Where the water overlay's commands start in the units' indirect buffer
+/// with `commands` model commands: after the darts' command, the camera's
+/// model commands and each shadow cascade's copy (units_common.glsl
+/// `overlayWord`). The overlay's commands follow in the camera's layout.
+pub const fn overlay_offset(commands: u32) -> u64 {
+    DART_COMMAND_BYTES + COMMAND_BYTES * commands as u64 * (1 + crate::shadow::CASCADES as u64)
+}
 /// Bytes of a palette matrix: 3x4, the rows of an affine transform.
 pub const PALETTE_ENTRY_BYTES: u64 = 48;
 /// The cull sphere of a model with clips covers its clips' frames and this
@@ -190,7 +198,8 @@ pub struct ModelSet {
     rest: Vec<f32>,
     /// The indirect buffer's initial contents: the darts' command, then
     /// the models' (instance counts 0), then the models' again for each
-    /// shadow cascade.
+    /// shadow cascade, then the darts' and the models' for the water
+    /// overlay (at [`overlay_offset`]).
     pub template: Vec<u8>,
     /// Model class (index into `classes`) of each unit class.
     pub class_model: Vec<Option<usize>>,
@@ -714,11 +723,17 @@ impl ModelSet {
             draws.push(draw);
         }
         // Each cascade's copy of the commands (counted by the cull, drawn by
-        // the shadow caster).
+        // the shadow caster), then the water overlay's darts' and models'
+        // (refraction frames: blips and ghosts, drawn after the water).
         let camera = template[DART_COMMAND_BYTES as usize..].to_vec();
         for _ in 0..crate::shadow::CASCADES {
             template.extend_from_slice(&camera);
         }
+        debug_assert_eq!(template.len() as u64, overlay_offset(draws.len() as u32));
+        for w in [crate::units::UNIT_VERTICES, 0, 0, 0] {
+            template.extend_from_slice(&w.to_le_bytes());
+        }
+        template.extend_from_slice(&camera);
         let mut class_commands = Vec::new();
         for mc in &classes {
             table[mc.class as usize].cmd[0] = class_commands.len() as u32;

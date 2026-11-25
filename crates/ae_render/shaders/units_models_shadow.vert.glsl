@@ -20,12 +20,8 @@ layout(location = 2) flat out uint outMaterial;
 void main() {
     DrawRecord d = draws[ae.words.y + uint(gl_DrawID)];
     uint row = visible[d.visibleBase + (ae.words.x + 1u) * u.counts.y + uint(gl_InstanceIndex)];
-    // Radar blips and ghosts cast no shadow (eligible: Own and Seen only).
-    if (!eligible(row)) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-    }
-    Unit unit = loadUnit(row);
+    // Only eligible rows are in the cascades' lists (units_models_cull.comp).
+    Unit unit = placedUnit(row);
     Skinned s = skinVertex(d, uint(gl_VertexIndex), poseOffset(row));
     vec3 world = place(unit, s.pos * modelClasses[d.cls].fit.x);
 #ifdef MASKED

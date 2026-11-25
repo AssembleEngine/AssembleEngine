@@ -13,18 +13,13 @@ layout(location = 3) flat out float outSceneAlpha;
 #endif
 
 void main() {
+    // With SUB, the cull's split list: the scene's rows, or the water
+    // overlay's (ae.words.x).
+    uint row = drawnRow(0u, uint(gl_InstanceIndex));
 #ifdef SUB
-    uint row = visible[gl_InstanceIndex];
-    bool overlay = ae.words.x != 0u;
-    if (eligible(row) == overlay) {
-        gl_Position = vec4(2.0, 0.0, 0.0, 1.0);
-        return;
-    }
     outSceneAlpha = attrf(ATTR_WATER, row) > 0.0 ? 0.5 : 1.0;
-    Unit unit = loadUnit(row);
-#else
-    Unit unit = loadUnit(visible[gl_InstanceIndex]);
 #endif
+    Unit unit = placedUnit(row);
     uint face = uint(gl_VertexIndex) / 3u;
     vec3 a = place(unit, CORNERS[FACES[face * 3u]]);
     vec3 b = place(unit, CORNERS[FACES[face * 3u + 1u]]);

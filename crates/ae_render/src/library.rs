@@ -1296,6 +1296,19 @@ pub fn check<R>(
     } else {
         Vec::new()
     };
+    // `units.cull` may fill the reflection's lists in the same dispatch
+    // (in place of `units.cull_reflect`; library/water.rs checks the pair).
+    if lib == LibraryPass::UnitsCull {
+        allowed.extend(
+            [
+                LibraryResource::UnitVisibleReflect,
+                LibraryResource::UnitIndirectReflect,
+            ]
+            .into_iter()
+            .filter(|r| map.contains(&Some(*r)))
+            .map(|r| (r, Role::StorageBufferWrite(ShaderStage::Compute))),
+        );
+    }
 
     if map.contains(&Some(LibraryResource::WaterWaves)) {
         if lib == LibraryPass::WaterDraw {
@@ -2117,6 +2130,53 @@ mod tests {
             error.contains("units.reflect") && error.contains("water.reflection"),
             "{error}"
         );
+    }
+
+    /// The reflection's unit lists come from one cull: `units.cull` writing
+    /// them (the default graphs), or a module's own `units.cull_reflect`
+    /// after it; never both, never neither.
+    #[test]
+    fn the_reflections_unit_lists_come_from_one_cull() {
+        use crate::terrain::app::native_graph_with_water_tiers;
+        let env = env();
+        let tiers = WaterTiers {
+            reflect: true,
+            ..Default::default()
+        };
+        let combined = native_graph_with_water_tiers(&env, TerrainOutput::Present, tiers);
+        assert!(wire(combined.clone(), &env).is_ok());
+        let cull = pass(&combined, LibraryPass::UnitsCull);
+        let reflect_list = |graph: &FrameGraph<LibraryPass>, i: &ae_framegraph::Intent| {
+            matches!(
+                graph.resources[i.resource.index()].name.as_str(),
+                ae_render_abi::module::UNITS_VISIBLE_REFLECT_NAME | ae_render_abi::module::UNITS_INDIRECT_REFLECT_NAME
+            )
+        };
+        // `units.cull_reflect` right after `units.cull`, reading the
+        // instances and writing the lists.
+        let mut separate = combined.passes[cull].clone();
+        separate.name = "units cull reflect".into();
+        separate.record = LibraryPass::UnitsCullReflect;
+        let instances = separate.intents[0];
+        separate.intents.retain(|i| reflect_list(&combined, i));
+        separate.intents.insert(0, instances);
+        let with_separate = |mut graph: FrameGraph<LibraryPass>| {
+            graph.passes.insert(cull + 1, separate.clone());
+            for root in &mut graph.roots {
+                if root.0 as usize > cull {
+                    root.0 += 1;
+                }
+            }
+            graph
+        };
+        let mut neither = combined.clone();
+        neither.passes[cull].intents.retain(|i| !reflect_list(&combined, i));
+
+        assert!(wire(with_separate(neither.clone()), &env).is_ok());
+        let error = wire(with_separate(combined), &env).unwrap_err().0;
+        assert!(error.contains("both fill"), "{error}");
+        let error = wire(neither, &env).unwrap_err().0;
+        assert!(error.contains("needs its lists"), "{error}");
     }
 
     #[test]

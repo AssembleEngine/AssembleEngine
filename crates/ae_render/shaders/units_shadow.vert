@@ -13,7 +13,7 @@ void main() {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
-    Unit unit = loadUnit(uint(gl_InstanceIndex));
+    Unit unit = placedUnit(uint(gl_InstanceIndex));
     if (hasModel(unit.cls)) {
         // Cast by its model (units_models_shadow.vert): outside the clip
         // volume.

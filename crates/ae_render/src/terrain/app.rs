@@ -284,6 +284,9 @@ pub enum PassWork {
     /// The units' shadow casters, floating hulls riding the full tier's
     /// waves.
     ShadowsWaves(ResourceId),
+    /// [`LibraryPass::UnitsCull`] that also fills the reflection's lists
+    /// (visible, indirect) in the same dispatch, while the water draws.
+    UnitsCullMirror([ResourceId; 2]),
     WaterSurface {
         reflection: Option<ResourceId>,
         refraction: Option<ResourceId>,
@@ -323,6 +326,13 @@ pub enum PassWork {
     /// [`LibraryPass::ReadbackCopy`] with its source image and buffer.
     Readback {
         image: ResourceId,
+        buffer: ResourceId,
+    },
+    /// Copy `source` into the start of `buffer` (as much as fits), for a
+    /// test's host readback of a graph buffer (a transfer pass that reads
+    /// `source` and writes `buffer`).
+    BufferReadback {
+        source: ResourceId,
         buffer: ResourceId,
     },
     /// A module's fullscreen program (by payload), sampling `sampled` in
@@ -2299,6 +2309,16 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 LibraryPass::UnitsWaterOverlay => {}
                 _ => anyhow::bail!("invalid refraction pass {}", pass.name()),
             },
+            PassWork::UnitsCullMirror([visible, indirect]) => {
+                // With the water off the reflection's draws skip, and so
+                // does filling their lists.
+                let mirror = if self.water {
+                    Some((ctx.buffer(*visible)?, ctx.buffer(*indirect)?))
+                } else {
+                    None
+                };
+                units()?.record_cull(ctx, mirror)?
+            }
             PassWork::ShadowsWaves(waves) => {
                 let riding = if self.water {
                     let image = ctx.image(*waves)?.sampled.context("caster wave sample")?;
@@ -2343,7 +2363,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 | LibraryPass::UnitsCullReflect
                 | LibraryPass::UnitsReflect => anyhow::bail!("reflection pass needs graph buffers"),
                 LibraryPass::UnitsReset => units()?.record_reset(ctx),
-                LibraryPass::UnitsCull => units()?.record_cull(ctx),
+                LibraryPass::UnitsCull => units()?.record_cull(ctx, None)?,
                 LibraryPass::UnitsPose => units()?.record_pose(ctx),
                 LibraryPass::UnitsDraw => units()?.record_draw(ctx),
                 LibraryPass::UnitsCount => units()?.record_count(ctx),
@@ -2450,6 +2470,17 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
             PassWork::Readback { image, buffer } => {
                 let (image, buffer) = (ctx.image(*image)?, ctx.buffer(*buffer)?);
                 crate::demo::record_readback(ctx, image, buffer);
+            }
+            PassWork::BufferReadback { source, buffer } => {
+                let (source, buffer) = (ctx.buffer(*source)?, ctx.buffer(*buffer)?);
+                let region = vk::BufferCopy::default()
+                    .src_offset(source.offset)
+                    .dst_offset(buffer.offset)
+                    .size(source.size.min(buffer.size));
+                unsafe {
+                    ctx.device
+                        .cmd_copy_buffer(ctx.cmd, source.buffer, buffer.buffer, &[region])
+                };
             }
         }
         Ok(())
@@ -2763,12 +2794,30 @@ pub fn native_graph_with_water_tiers(
             .pass("units reset", PassKind::Transfer, LibraryPass::UnitsReset)
             .access(draws, Role::TransferDst)
             .id();
-        graph
+        // One cull fills every view's lists: the camera's and the shadow
+        // cascades', and the reflection's when it draws.
+        let mirror = reflection.and_then(|(.., unit_buffers)| unit_buffers);
+        if let Some([_, mirror_draws]) = mirror {
+            graph
+                .pass(
+                    "units reset reflect",
+                    PassKind::Transfer,
+                    LibraryPass::UnitsResetReflect,
+                )
+                .discard(mirror_draws, Role::TransferDst)
+                .id();
+        }
+        let mut cull = graph
             .pass("units cull", PassKind::Compute, LibraryPass::UnitsCull)
             .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
             .access(visible, Role::StorageBufferWrite(ShaderStage::Compute))
-            .access(draws, Role::StorageBufferWrite(ShaderStage::Compute))
-            .id();
+            .access(draws, Role::StorageBufferWrite(ShaderStage::Compute));
+        if let Some([mirror_visible, mirror_draws]) = mirror {
+            cull = cull
+                .discard(mirror_visible, Role::StorageBufferWrite(ShaderStage::Compute))
+                .access(mirror_draws, Role::StorageBufferWrite(ShaderStage::Compute));
+        }
+        cull.id();
     }
     // The lights' clusters, before anything lit.
     let write = Role::StorageBufferWrite(ShaderStage::Compute);
@@ -2816,22 +2865,6 @@ pub fn native_graph_with_water_tiers(
             .discard(leaves, Role::StorageBufferWrite(Compute))
             .discard(reflect_indirect, Role::StorageBufferWrite(Compute))
             .id();
-        if let (Some([instances, _, _, _, _]), Some([visible, draws])) = (units, unit_buffers) {
-            graph
-                .pass(
-                    "units reset reflect",
-                    PassKind::Transfer,
-                    LibraryPass::UnitsResetReflect,
-                )
-                .discard(draws, Role::TransferDst)
-                .id();
-            graph
-                .pass("units cull reflect", PassKind::Compute, LibraryPass::UnitsCullReflect)
-                .access(instances, Role::StorageBufferRead(Compute))
-                .discard(visible, Role::StorageBufferWrite(Compute))
-                .access(draws, Role::StorageBufferWrite(Compute))
-                .id();
-        }
         let mut terrain = graph
             .pass("terrain reflect", PassKind::Graphics, LibraryPass::TerrainReflect)
             .access(leaves, Role::StorageBufferRead(Vertex))
@@ -3618,6 +3651,17 @@ impl TerrainApp {
                                     .then(|| resource_id(LibraryResource::WaterWaves))
                                     .transpose()?,
                             }
+                        }
+                        // The reflection's lists when this pass writes them.
+                        LibraryPass::UnitsCull
+                            if pass.intents.iter().any(|i| {
+                                resources[i.resource.index()] == Some(LibraryResource::UnitVisibleReflect)
+                            }) =>
+                        {
+                            PassWork::UnitsCullMirror([
+                                resource_id(LibraryResource::UnitVisibleReflect)?,
+                                resource_id(LibraryResource::UnitIndirectReflect)?,
+                            ])
                         }
                         LibraryPass::ShadowsDraw if water_tiers.waves && env.units => {
                             PassWork::ShadowsWaves(resource_id(LibraryResource::WaterWaves)?)
