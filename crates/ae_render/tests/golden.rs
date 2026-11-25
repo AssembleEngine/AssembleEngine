@@ -64,6 +64,7 @@ fn env_with(units: bool, water: bool, shadows: bool, particles: bool, encoding: 
         levels: LEVELS,
         working: Default::default(),
         gamut: encoding.default_gamut(),
+        reflection_scale: 2,
     }
 }
 

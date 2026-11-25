@@ -758,6 +758,10 @@ pub struct LibraryEnv {
     /// The output gamut the display intermediate is mapped to (unused in
     /// SDR, whose tonemap maps to BT.709 itself).
     pub gamut: crate::colorspace::Gamut,
+    /// The reflection targets' divisor against the output extent: 2 for the
+    /// default half-resolution reflection, 1 for a full-resolution comparison
+    /// (`--water-reflection full`; M16.21).
+    pub reflection_scale: u32,
 }
 
 impl LibraryEnv {
@@ -1093,7 +1097,7 @@ pub fn image_desc(lib: LibraryResource, env: &LibraryEnv) -> Result<ImageDesc, L
             if !env.water {
                 return Err(missing("the scene draws no water"));
             }
-            let extent = crate::water::reflect::half_extent(env.extent);
+            let extent = crate::water::reflect::scaled_extent(env.extent, env.reflection_scale);
             if lib == R::WaterReflection {
                 ImageDesc::color_2d(
                     env.scene_format,
@@ -1996,6 +2000,7 @@ mod tests {
             levels: crate::encode::DisplayLevels::default(),
             working: Default::default(),
             gamut: Default::default(),
+            reflection_scale: 2,
         }
     }
 
@@ -2070,6 +2075,24 @@ mod tests {
             pass(&graph, LibraryPass::WaterDraw),
         );
         assert!(water > units, "the water is declared after the units");
+    }
+
+    #[test]
+    fn reflection_scale_one_makes_the_targets_full_size() {
+        let mut env = env();
+        env.water = true;
+        env.reflection_scale = 1;
+        env.extent = vk::Extent2D {
+            width: 1280,
+            height: 720,
+        };
+        let full = image_desc(LibraryResource::WaterReflection, &env).unwrap();
+        let depth = image_desc(LibraryResource::WaterReflectionDepth, &env).unwrap();
+        assert_eq!((full.width, full.height), (1280, 720));
+        assert_eq!((depth.width, depth.height), (1280, 720));
+        env.reflection_scale = 2;
+        let half = image_desc(LibraryResource::WaterReflection, &env).unwrap();
+        assert_eq!((half.width, half.height), (640, 360));
     }
 
     #[test]

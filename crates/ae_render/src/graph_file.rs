@@ -948,6 +948,7 @@ mod tests {
             levels: DisplayLevels::default(),
             working: WorkingSpace::Bt709,
             gamut: Gamut::Bt709,
+            reflection_scale: 2,
         };
         let map = resolve(&mut graph, &env, |_| {
             Some(ae_framegraph::BufferDesc {

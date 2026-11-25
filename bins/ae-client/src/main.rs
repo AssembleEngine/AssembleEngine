@@ -217,6 +217,9 @@ struct Options {
     water_quality: WaterQuality,
     /// The loaded map's water settings (a map package's `water` object).
     water_look: Option<ae_map::WaterLook>,
+    /// The reflection targets' divisor (`--water-reflection`): 2 is the
+    /// default half resolution, 1 the full-resolution comparison.
+    reflection_scale: u32,
     /// The sun's shadows.
     shadows: bool,
     /// The tonemap's exposure, bloom and sun.
@@ -309,6 +312,7 @@ impl Default for Options {
             water: true,
             water_quality: WaterQuality::Full,
             water_look: None,
+            reflection_scale: 2,
             shadows: true,
             tone: ae_render::tonemap::ToneParams {
                 auto: true,
@@ -348,8 +352,8 @@ impl Default for Options {
     }
 }
 
-const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--decal-debug VIEW] [--decal-relief off|normal|rcsm] [--decal-relief-strength N] [--rcsm-overlap safe|dominant|independent] [--rcsm-steps N] [--rcsm-refine N] [--rcsm-min-pixels N] [--rcsm-full-pixels N] [--rcsm-min-view-dot N] [--rcsm-force] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
-       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH] [--bench-scars N] [--bench-scar-spread METRES]";
+const USAGE: &str = "ae-client [--map water|land|coast|generated|demo] [--map-cells N] [--relief X] [--camera X,Z,DIST,YAW,PITCH[,FOCUS_Y]] [--seconds S] [--exercise] [--probe-display] [--mailbox] [--frames-in-flight N] [--units N] [--workers N] [--ticks N] [--render-module NAME|FILE.wasm|FILE.json] [--quake TICK] [--tileset temperate|desert|none] [--tileset-size N] [--weights] [--no-water] [--water-quality off|m7|reflect|refract|full] [--water-reflection half|full] [--no-shadows] [--ev100 X] [--auto-exposure] [--sun-lux X] [--no-particles] [--no-decals] [--decal-debug VIEW] [--decal-relief off|normal|rcsm] [--decal-relief-strength N] [--rcsm-overlap safe|dominant|independent] [--rcsm-steps N] [--rcsm-refine N] [--rcsm-min-pixels N] [--rcsm-full-pixels N] [--rcsm-min-view-dot N] [--rcsm-force] [--scars DIR|generated] [--particles-full] [--particle-blend sorted|moments|slices|froxels|packets] [--working-space bt709|bt2020] [--display-gamut bt709|p3|bt2020] [--hdr off|auto|hdr10|scrgb] [--paper-white N] [--peak N] [--explode N] [--capture-frames N] [--capture-seconds S] [--lights N] [--record-threads N] [--teams N] [--observer K|all] [--game crossing|skirmish|scripted] [--content DIR] [--package SPEC|PATH ... [--packages DIR]] [--param N] [--model [CLASS=]FILE.aemodel|.glb|.gltf ...] [--capture FILE.ppm]
+       ae-client --bench SCENE[,SCENE...]|all|list [--frames N] [--warmup N] [--label NAME] [--out DIR] [--no-save] [--bench-output sdr|hdr10|scrgb] [--bench-size WxH] [--bench-scars N] [--bench-scar-spread METRES] [--bench-water-quality off|m7|reflect|refract|full] [--bench-reflection half|full]";
 
 fn parse() -> Result<Options> {
     let mut o = Options::default();
@@ -446,6 +450,13 @@ fn parse() -> Result<Options> {
             }
             "--weights" => o.weights = true,
             "--no-water" => o.water = false,
+            "--water-reflection" => {
+                o.reflection_scale = match value("--water-reflection", &mut args)?.as_str() {
+                    "half" => 2,
+                    "full" => 1,
+                    other => bail!("--water-reflection {other:?}: expected half or full"),
+                }
+            }
             "--water-quality" => {
                 o.water_quality = match value("--water-quality", &mut args)?.as_str() {
                     "off" => WaterQuality::Off,
@@ -588,6 +599,25 @@ fn parse() -> Result<Options> {
                     w.parse().context("--bench-size W")?,
                     h.parse().context("--bench-size H")?,
                 );
+            }
+            "--bench-water-quality" => {
+                o.bench.get_or_insert_with(Default::default).water_quality =
+                    Some(match value("--bench-water-quality", &mut args)?.as_str() {
+                        "off" => WaterQuality::Off,
+                        "m7" => WaterQuality::M7,
+                        "reflect" => WaterQuality::Reflect,
+                        "refract" => WaterQuality::Refract,
+                        "full" => WaterQuality::Full,
+                        other => bail!("--bench-water-quality {other:?}: expected off, m7, reflect, refract or full"),
+                    });
+            }
+            "--bench-reflection" => {
+                o.bench.get_or_insert_with(Default::default).reflection_scale =
+                    match value("--bench-reflection", &mut args)?.as_str() {
+                        "half" => 2,
+                        "full" => 1,
+                        other => bail!("--bench-reflection {other:?}: expected half or full"),
+                    };
             }
             "--teams" => o.teams = value("--teams", &mut args)?.parse().context("--teams")?,
             "--game" => o.game = value("--game", &mut args)?,
@@ -1006,7 +1036,8 @@ fn with_look(mut app: TerrainApp, tileset: Option<Arc<Tileset>>, o: &Options) ->
             // prototype's sea.
             matches!(o.map, MapKind::Coast).then(ae_map::WaterLook::prototype)
         })))
-        .with_water_tiers(o.water_quality.tiers());
+        .with_water_tiers(o.water_quality.tiers())
+        .with_reflection_scale(o.reflection_scale);
     if o.shadows {
         app = app.with_shadows();
     }

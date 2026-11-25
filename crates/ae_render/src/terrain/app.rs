@@ -600,6 +600,8 @@ pub struct TerrainApp {
     water_renderer: Option<crate::water::WaterRenderer>,
     /// The engine's own graph bakes the water data (opt-in; M7 does not).
     water_data: bool,
+    /// The reflection targets' divisor against the output extent (M16.21).
+    reflection_scale: u32,
     water_feed: Option<Arc<WaterFeed>>,
     waves: Option<Waves>,
     water_mesh: Option<WaterMesh>,
@@ -698,6 +700,7 @@ impl TerrainApp {
             water_params: crate::water::WaterParams::default(),
             water_renderer: None,
             water_data: false,
+            reflection_scale: 2,
             water_feed: None,
             waves: None,
             water_mesh: None,
@@ -745,6 +748,15 @@ impl TerrainApp {
     /// none; the rich tiers turn it on.
     pub fn with_water_data(mut self) -> Self {
         self.water_data = true;
+        self
+    }
+
+    /// The reflection targets' divisor against the output extent: 2 for the
+    /// default half-resolution reflection, 1 for the full-resolution
+    /// comparison (M16.21).
+    pub fn with_reflection_scale(mut self, divisor: u32) -> Self {
+        assert!(matches!(divisor, 1 | 2), "reflection scale is 1 or 2");
+        self.reflection_scale = divisor;
         self
     }
 
@@ -1032,6 +1044,13 @@ impl TerrainApp {
     pub fn last_unit_counts(&mut self) -> Option<(u32, u32)> {
         let units = self.unit_renderer.as_mut()?;
         Some((units.rows(self.last_slot), units.read_visible(self.last_slot)))
+    }
+
+    /// The water surface's drawn triangles in the last recorded frame (the
+    /// water CBT's leaves, each a 16-triangle submesh; after the device is
+    /// idle). `None` without the waves tier.
+    pub fn last_water_triangles(&self) -> Option<u32> {
+        self.water_mesh.as_ref()?.drawn_triangles()
     }
 
     /// Cells the last frame uploaded into the units' animation table, and
@@ -3349,6 +3368,7 @@ impl TerrainApp {
             levels: self.levels,
             working: self.working,
             gamut: self.gamut(),
+            reflection_scale: self.reflection_scale,
         })
     }
 

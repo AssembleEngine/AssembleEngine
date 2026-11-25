@@ -124,6 +124,7 @@ fn the_default_module_declares_the_native_graph() {
                 levels,
                 working: Default::default(),
                 gamut: encoding.default_gamut(),
+                reflection_scale: 2,
             };
             let target = target_for(
                 1280,
@@ -285,6 +286,7 @@ fn the_display_rule_is_enforced_on_module_graphs() {
         levels: DisplayLevels::default(),
         working: Default::default(),
         gamut: Default::default(),
+        reflection_scale: 2,
     };
     let mut g = FrameGraph::<()>::new();
     let target = g.image(

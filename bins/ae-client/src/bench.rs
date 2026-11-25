@@ -20,7 +20,15 @@
 //!   `units_cascade0..2`, the model units in each shadow cascade),
 //!   `lights` (the clustered lights in view, in the last frame with any),
 //!   `frames`, `width`, `height`: the workload; a change means times are
-//!   not comparable.
+//!   not comparable. Water scenes also report `water_triangles` (the
+//!   surface's drawn triangles in the last frame), `water_tier` (0 off,
+//!   1 m7, 2 reflect, 3 refract, 4 full) and `reflection_scale` (2 is half
+//!   resolution, 1 full).
+//!
+//! `--bench-water-quality off|m7|reflect|refract|full` overrides a scene's
+//! water tier (the coast scenes default to `full`) and `--bench-reflection
+//! half|full` selects the reflection targets' divisor, for the M16.21 tier
+//! and reflection comparisons.
 //!
 //! `--bench-output sdr|hdr10|scrgb` renders the readback in that encoding
 //! (M13: the HDR graph adds `post.encode` and a 10-bit or 16F target); the
@@ -99,6 +107,12 @@ pub struct BenchOptions {
     pub output: OutputEncoding,
     /// `--bench-size`: the offscreen extent.
     pub size: (u32, u32),
+    /// `--bench-water-quality`: the water tier, overriding the scene's own
+    /// (the coast scenes default to `full`).
+    pub water_quality: Option<super::WaterQuality>,
+    /// `--bench-reflection`: the reflection targets' divisor (2 is the
+    /// half-resolution default, 1 full).
+    pub reflection_scale: u32,
 }
 
 impl Default for BenchOptions {
@@ -118,6 +132,8 @@ impl Default for BenchOptions {
             scar_spread: None,
             output: OutputEncoding::Sdr,
             size: (1280, 720),
+            water_quality: None,
+            reflection_scale: 2,
         }
     }
 }
@@ -606,11 +622,12 @@ fn options_for(scene: &Scene, b: &BenchOptions, fox: Option<ClassModel>) -> Opti
         o.particles = false;
     }
     o.map = scene.map;
-    o.water_quality = if matches!(scene.map, MapKind::Coast) {
+    o.water_quality = b.water_quality.unwrap_or(if matches!(scene.map, MapKind::Coast) {
         super::WaterQuality::Full
     } else {
         super::WaterQuality::M7
-    };
+    });
+    o.reflection_scale = b.reflection_scale;
     o.map_cells = scene.map_cells;
     o.units = scene.units;
     o.tileset = scene.tileset.map(str::to_string);
@@ -975,6 +992,9 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     // The GPU cull's count of the last frame: read once everything has
     // finished, since during the run it can come from an earlier frame.
     let visible = app.last_unit_counts().map_or(0, |(_, v)| v as u64);
+    // The water surface's leaf count of the last recorded frame, from the
+    // mesh pass's own copy of the indirect arguments.
+    let water_triangles = app.last_water_triangles().map_or(0, u64::from);
     // Model units drawn into each shadow cascade (summed over classes).
     let cascades = app
         .last_unit_cascade_counts()
@@ -1070,6 +1090,19 @@ fn measure(gpu: &Arc<GpuDevice>, cache: &mut Cache, scene: &Scene, b: &BenchOpti
     report.time_with_tolerance("cpu_record", ns(&mut cpu_record), CPU_TOLERANCE);
     report.counter("leaves", leaves, "");
     report.counter("drawn", drawn, "");
+    report.info("water_triangles", water_triangles, "triangles/frame");
+    report.info(
+        "water_tier",
+        match o.water_quality {
+            super::WaterQuality::Off => 0,
+            super::WaterQuality::M7 => 1,
+            super::WaterQuality::Reflect => 2,
+            super::WaterQuality::Refract => 3,
+            super::WaterQuality::Full => 4,
+        },
+        "off=0 m7=1 reflect=2 refract=3 full=4",
+    );
+    report.info("reflection_scale", o.reflection_scale as u64, "divisor");
     report.info("units_visible", visible, "");
     // The clustered lights listed (in view) in the last frame with any.
     report.info("lights", app.light_stats().lock().unwrap().lights as u64, "");

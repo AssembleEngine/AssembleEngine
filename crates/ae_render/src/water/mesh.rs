@@ -14,6 +14,10 @@ use anyhow::{Context, Result};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 
+const IND_DRAW_INSTANCES: u64 = 4;
+/// Triangles each CBT leaf's submesh draws.
+const LEAF_TRIANGLES: u32 = 16;
+
 const DEPTH: u32 = 16;
 const TREE_DEPTH: u32 = DEPTH - 5;
 const LEAVES: u32 = 1 << DEPTH;
@@ -28,7 +32,11 @@ pub(crate) fn leaves_desc() -> BufferDesc {
 pub(crate) fn indirect_desc() -> BufferDesc {
     BufferDesc {
         size: 9 * 4,
-        usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
+        usage: vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::INDIRECT_BUFFER
+            // The drawn-instance counter is copied out for the benches
+            // (`drawn_triangles`).
+            | vk::BufferUsageFlags::TRANSFER_SRC,
     }
 }
 
@@ -40,6 +48,9 @@ pub(crate) struct WaterMesh {
     update: vk::Pipeline,
     reduce: vk::Pipeline,
     layout: vk::PipelineLayout,
+    /// The last frame's drawn-instance count (`ind[IND_DRAW_INSTANCES]`),
+    /// copied out of the indirect buffer for the benches.
+    drawn: OwnedBuffer,
 }
 
 impl WaterMesh {
@@ -53,6 +64,15 @@ impl WaterMesh {
             };
             compute_pipeline(&gpu.device, code, layout)
         })?;
+        let mut drawn = OwnedBuffer::new(
+            gpu,
+            BufferDesc {
+                size: 4,
+                usage: vk::BufferUsageFlags::TRANSFER_DST,
+            },
+            MemoryLocation::GpuToCpu,
+            "water mesh drawn",
+        )?;
         let mut scratch = Vec::with_capacity(3);
         let result = (|| {
             let cbt = Cbt::new(DEPTH);
@@ -90,6 +110,7 @@ impl WaterMesh {
                 for mut buffer in scratch {
                     buffer.destroy(gpu);
                 }
+                drawn.destroy(gpu);
                 return Err(error);
             }
         };
@@ -97,6 +118,7 @@ impl WaterMesh {
             scratch: scratch.try_into().ok().expect("three CBT buffers"),
             table,
             group,
+            drawn,
             prepare,
             update,
             reduce,
@@ -173,7 +195,33 @@ impl WaterMesh {
             }
         }
         dispatch(self.prepare, [1, 0, 0, 0], 1);
+        // The drawn leaf count, for the benches; every dispatch was followed
+        // by a full barrier, so the indirect buffer is visible to the copy.
+        unsafe {
+            device.cmd_copy_buffer(
+                cmd,
+                indirect.buffer,
+                self.drawn.buffer,
+                &[vk::BufferCopy::default()
+                    .src_offset(indirect.offset + IND_DRAW_INSTANCES * 4)
+                    .size(4)],
+            );
+            let after = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+            device.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&after));
+        }
         Ok(())
+    }
+
+    /// The last recorded frame's drawn triangles (the water CBT's leaves,
+    /// each a 16-triangle submesh), read after the GPU has finished it.
+    pub fn drawn_triangles(&self) -> Option<u32> {
+        let bytes = self.drawn.mapped_read(0, 4)?;
+        let instances = u32::from_ne_bytes(bytes.try_into().ok()?);
+        instances.checked_mul(LEAF_TRIANGLES)
     }
 
     pub fn retire(&self, bindless: &mut Bindless) {
@@ -188,5 +236,6 @@ impl WaterMesh {
         for buffer in &mut self.scratch {
             buffer.destroy(gpu);
         }
+        self.drawn.destroy(gpu);
     }
 }

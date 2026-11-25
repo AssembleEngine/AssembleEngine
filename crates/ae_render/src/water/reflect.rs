@@ -33,10 +33,13 @@ impl MirrorFrame {
     }
 }
 
-pub(crate) fn half_extent(extent: vk::Extent2D) -> vk::Extent2D {
+/// The reflection targets' extent for `divisor` (2 is the default half
+/// resolution, 1 a full-resolution comparison; M16.21).
+pub(crate) fn scaled_extent(extent: vk::Extent2D, divisor: u32) -> vk::Extent2D {
+    let divisor = divisor.max(1);
     vk::Extent2D {
-        width: extent.width.div_ceil(2),
-        height: extent.height.div_ceil(2),
+        width: extent.width.div_ceil(divisor),
+        height: extent.height.div_ceil(divisor),
     }
 }
 

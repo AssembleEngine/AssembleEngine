@@ -15,8 +15,12 @@
 #
 # NVIDIA GeForce RTX 3060 Ti, driverVersion 0x9b124100 (620.73.4.0), Linux
 # 7.3.5, loader 1.4.363, VK_LAYER_KHRONOS_validation.
+# Re-pinned 2026-11-25 after the decal relief commit (ac4747c) changed every
+# frame the gate draws: its sky specular is roughness-aware and its scars
+# carry heightfields and signed normals. The M16 water frames themselves are
+# unchanged by M16's closing benchmark work.
 # NVIDIA GeForce RTX 3060 Ti | 0x9b124100
-dry 90466494cd8fd501
-wet f788822fbec8b6b3
-observer 7a98580fd243fcf7
-off ff142070860e9211
+dry 9e740f2cbc5b8090
+wet 59d224d6a630d03c
+observer 9290fa751cdc6843
+off b89acc7652dad45c

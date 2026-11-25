@@ -12941,6 +12941,7 @@ fn shore_env((w, h): (u32, u32)) -> ae_render::library::LibraryEnv {
         levels: ae_render::encode::DisplayLevels::default(),
         working: Default::default(),
         gamut: Default::default(),
+        reflection_scale: 2,
     }
 }
 

@@ -1154,7 +1154,9 @@ impl DecalSet {
             .live
             .iter()
             .enumerate()
-            .filter(|(_, p)| f32::from_bits(p.words[7]) > 0.0)
+            // Only decals with a relief height occlude a cone trace; word 13
+            // is the height range (word 7 is opacity, which every decal has).
+            .filter(|(_, p)| f32::from_bits(p.words[13]) > 0.0)
             .map(|(i, p)| (i, p.bounds))
             .collect();
         by_x.sort_unstable_by(|a, b| a.1[0].total_cmp(&b.1[0]));

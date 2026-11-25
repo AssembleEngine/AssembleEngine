@@ -21,14 +21,23 @@
 //!   fixtures (`test_post.frag`, `test_post_storage.frag`), plus M16.5's
 //!   fullscreen shore reader (`test_sample_shore.frag`), which exercises
 //!   that form with one sampled intent;
-//! - `upload.rs`'s mip generator, which stays as it is.
+//! - `upload.rs`'s mip generator, which stays as it is;
+//! - `decals_relief.rs`'s cone generator (the decal relief feature's RCSM
+//!   cones), a one-shot upload-time pass like the mip generator; it keeps
+//!   its own two-buffer set and never records in a frame.
 
 use std::fs;
 use std::path::Path;
 
 /// Sources allowed to own sets: the registry itself, the pipeline helpers,
 /// and the files listed above.
-const SOURCE_EXCEPTIONS: &[&str] = &["bindless.rs", "pipeline.rs", "fullscreen.rs", "upload.rs"];
+const SOURCE_EXCEPTIONS: &[&str] = &[
+    "bindless.rs",
+    "pipeline.rs",
+    "fullscreen.rs",
+    "upload.rs",
+    "decals_relief.rs",
+];
 
 /// Shaders still declaring numbered sets or pinning the global set off 0
 /// (see the module docs).
@@ -38,6 +47,8 @@ const SHADER_EXCEPTIONS: &[&str] = &[
     "test_post.frag",
     "test_post_storage.frag",
     "test_sample_shore.frag",
+    "decal_cones.comp",
+    "decal_relief_probe.comp",
 ];
 
 fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
