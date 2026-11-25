@@ -8,7 +8,7 @@
 // a blend lerped over what is below, an additive layer's change from the
 // clip's first frame added; then a bone with a manual entry shown takes its
 // rest transform with the entries' values. The bone is drawn between the
-// two records' transforms at the drawn tick (lerp, rotations nlerp the
+// two records' transforms at the drawn tick (lerp, rotations slerp the
 // short way; held at the older before it and the newer past it) into the
 // unit's scratch range; a bone neither posed keeps its rest matrix. Then
 // walked into model space (parents come first), and the palette range gets
@@ -165,6 +165,27 @@ bool evalBone(uint rec, uint b, uint bones, uint clipsAt, out Trs p) {
     return posed;
 }
 
+// Use the newer value at both endpoints for each zero-speed manual entry.
+// Each entry affects only its own component of the bone's transform.
+bool applyInstant(uint rec, uint entries, uint bone, inout Trs a, inout Trs b) {
+    bool applied = false;
+    while (entries != 0u) {
+        uint k = uint(findLSB(entries));
+        uint word = records[rec + 5u + (k >> 2u)][k & 3u];
+        if ((word & 0xffffu) == bone) {
+            vec4 value = uintBitsToFloat(records[rec + 7u + k]);
+            switch (word >> 16u) {
+                case 1u: a.r = b.r = value; break;
+                case 3u: a.t = b.t = value.xyz; break;
+                case 4u: a.s = b.s = value.xyz; break;
+            }
+            applied = true;
+        }
+        entries &= entries - 1u;
+    }
+    return applied;
+}
+
 void main() {
     uint job = gl_GlobalInvocationID.x;
     if (job >= ae.words.x) {
@@ -180,6 +201,9 @@ void main() {
     int span = int(records[recB].x - ta);
     float frac = uintBitsToFloat(u.anim.y);
     float s = span == 0 ? 1.0 : clamp((float(int(u.anim.x - ta)) + frac) / float(span), 0.0, 1.0);
+    uint newer = span < 0 ? recA : recB;
+    // Apply the snap from the start of the interval leading into its tick.
+    uint instant = int(u.anim.x - records[newer].x) >= -1 ? records[newer].z & 0xffu : 0u;
     uint bones = mc.pose.y;
     for (uint k = 0u; k < bones; k++) {
         Trs a, b;
@@ -195,7 +219,16 @@ void main() {
             bool pb = evalBone(recB, k, bones, mc.pose.w, b);
             posed = pa || pb;
         }
-        palette[scratch + k] = posed ? trsRows(lerpTrs(a, b, s)) : rowsAt(mc.pose.x + 4u * k);
+        bool snap = applyInstant(newer, instant, k, a, b);
+        if (posed || snap) {
+            // Clip evaluation matches the sim. Interpolate the resulting poses
+            // on the render clock with shortest-arc SLERP.
+            vec4 rotation = all(equal(a.r, b.r)) ? qnorm(a.r) : slerp(qnorm(a.r), qnorm(b.r), s);
+            Trs drawn = Trs(a.t + (b.t - a.t) * s, rotation, a.s + (b.s - a.s) * s);
+            palette[scratch + k] = trsRows(drawn);
+        } else {
+            palette[scratch + k] = rowsAt(mc.pose.x + 4u * k);
+        }
     }
     // Parents come before their children (roots have none).
     for (uint k = 0u; k < bones; k++) {

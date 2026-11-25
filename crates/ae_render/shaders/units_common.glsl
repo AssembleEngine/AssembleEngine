@@ -12,18 +12,23 @@
 #define ATTR_PREV_X 2u
 #define ATTR_PREV_Y 3u
 // The unit's rotation from its frame (forward +x, up +y, right +z) to the
-// world's: a quaternion (x, y, z, w), zero for the identity.
+// world's: a quaternion (x, y, z, w), zero for the identity; the previous
+// tick's, which loadUnit slerps to this one by the frame's alpha.
 #define ATTR_ROT_X 4u
 #define ATTR_ROT_Y 5u
 #define ATTR_ROT_Z 6u
 #define ATTR_ROT_W 7u
-#define ATTR_RADIUS 8u
-#define ATTR_CLASS 9u
+#define ATTR_PREV_ROT_X 8u
+#define ATTR_PREV_ROT_Y 9u
+#define ATTR_PREV_ROT_Z 10u
+#define ATTR_PREV_ROT_W 11u
+#define ATTR_RADIUS 12u
+#define ATTR_CLASS 13u
 // The unit's first animation record cell (ae_render::units::NO_POSE: at rest),
 // POSE_MANUAL set when either record shows a manual joint.
-#define ATTR_POSE 10u
-#define ATTR_WATER 11u
-#define ATTR_VIEW 12u
+#define ATTR_POSE 14u
+#define ATTR_WATER 15u
+#define ATTR_VIEW 16u
 #define VIEW_SEEN 1u
 #define NO_POSE 0xffffffffu
 #define POSE_MANUAL 0x80000000u
@@ -139,6 +144,38 @@ vec3 rotate(vec4 q, vec3 v) {
     return v + q.w * t + cross(q.xyz, t);
 }
 
+vec4 quatAt(uint a, uint i) {
+    return vec4(attrf(a, i), attrf(a + 1u, i), attrf(a + 2u, i), attrf(a + 3u, i));
+}
+
+vec4 unitQuat(vec4 q) {
+    return dot(q, q) > 1e-12 ? normalize(q) : vec4(0.0, 0.0, 0.0, 1.0);
+}
+
+// Shortest-arc SLERP of two unit quaternions. Keep b when the dot is zero
+// so a 180-degree turn chooses one of the two equally short arcs.
+vec4 slerp(vec4 a, vec4 b, float t) {
+    float cosHalfTheta = dot(a, b);
+    if (cosHalfTheta < 0.0) {
+        b = -b;
+        cosHalfTheta = -cosHalfTheta;
+    }
+    if (cosHalfTheta >= 1.0 - 0.005) return normalize(mix(a, b, t));
+
+    float halfTheta = acos(cosHalfTheta);
+    // Normalisation supplies the common factor 1 / sin(halfTheta).
+    return normalize(a * sin((1.0 - t) * halfTheta) + b * sin(t * halfTheta));
+}
+
+vec4 unitRotation(uint i, float alpha) {
+    vec4 rot = quatAt(ATTR_ROT_X, i);
+    if (alpha >= 1.0) return unitQuat(rot);
+    vec4 prev = quatAt(ATTR_PREV_ROT_X, i);
+    if (alpha <= 0.0 || all(equal(prev, rot))) return unitQuat(prev);
+
+    return slerp(unitQuat(prev), unitQuat(rot), alpha);
+}
+
 Unit loadUnit(uint i) {
     Unit unit;
     vec2 p = mix(vec2(attrf(ATTR_PREV_X, i), attrf(ATTR_PREV_Y, i)), vec2(attrf(ATTR_X, i), attrf(ATTR_Y, i)), u.map.w);
@@ -159,8 +196,7 @@ Unit loadUnit(uint i) {
     }
 #endif
     unit.pos = vec3(p.x, h, p.y);
-    vec4 rot = vec4(attrf(ATTR_ROT_X, i), attrf(ATTR_ROT_Y, i), attrf(ATTR_ROT_Z, i), attrf(ATTR_ROT_W, i));
-    unit.rot = dot(rot, rot) > 1e-12 ? normalize(rot) : vec4(0.0, 0.0, 0.0, 1.0);
+    unit.rot = unitRotation(i, u.map.w);
 
 #ifdef RIDE_WAVES
     if (eligible(i) && u.height.w > 0.5 && ground < u.height.z && attrf(ATTR_WATER, i) <= 0.0

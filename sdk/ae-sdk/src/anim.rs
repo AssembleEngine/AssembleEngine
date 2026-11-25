@@ -281,7 +281,8 @@ impl Anim {
     }
 
     /// Turn `bone` about `axis` to `angle` radians from its rest pose, at
-    /// up to `speed` radians a second (0: at once). From where the bone is
+    /// up to `speed` radians a second (0: snap in the sim and renderer).
+    /// From where the bone is
     /// to `angle` as the numbers say: from -100° to 170° is 270° the long
     /// way. A bone a clip or a spin left is taken as within ±180°. Less
     /// than a full turn; more is a spin.
@@ -293,6 +294,11 @@ impl Anim {
             [axis.v[0], axis.v[1], axis.v[2], angle],
             speed,
         )
+    }
+
+    /// Snap `bone` to `angle` about `axis`, in the sim and renderer.
+    pub fn turn_now(&mut self, bone: u16, axis: Axis, angle: f32) -> ManualSet<'_> {
+        self.turn(bone, axis, angle, 0.0)
     }
 
     /// Turn `bone` by `angle` from where it is.
@@ -385,7 +391,7 @@ impl Anim {
     }
 
     /// Move `bone` to `offset` from its rest position, in the unit's frame,
-    /// at up to `speed` a second (0: at once).
+    /// at up to `speed` a second (0: snap in the sim and renderer).
     pub fn move_to(&mut self, bone: u16, offset: [f32; 3], speed: f32) -> ManualSet<'_> {
         self.command(
             bone,
@@ -396,8 +402,13 @@ impl Anim {
         )
     }
 
+    /// Snap `bone` to `offset` from its rest position, in the unit's frame.
+    pub fn move_now(&mut self, bone: u16, offset: [f32; 3]) -> ManualSet<'_> {
+        self.move_to(bone, offset, 0.0)
+    }
+
     /// Scale `bone` to `factor` times its rest scale (on its own axes), at
-    /// up to `speed` a second (0: at once).
+    /// up to `speed` a second (0: snap in the sim and renderer).
     pub fn scale_to(&mut self, bone: u16, factor: [f32; 3], speed: f32) -> ManualSet<'_> {
         self.command(
             bone,
@@ -406,6 +417,11 @@ impl Anim {
             [factor[0], factor[1], factor[2], 0.0],
             speed,
         )
+    }
+
+    /// Snap `bone` to `factor` times its rest scale, on its own axes.
+    pub fn scale_now(&mut self, bone: u16, factor: [f32; 3]) -> ManualSet<'_> {
+        self.scale_to(bone, factor, 0.0)
     }
 
     /// Give `bone` back to the clips (its manual entries cleared).

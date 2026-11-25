@@ -1914,6 +1914,10 @@ fn validation_text(on: bool, errors: u64, warnings: u64) -> String {
 #[cfg(test)]
 mod death_gpu;
 
+// Flecs uses one column allocator per process.
+#[cfg(test)]
+static ONE_RUNTIME: Mutex<()> = Mutex::new(());
+
 fn main() -> ExitCode {
     match parse().and_then(run) {
         Ok(code) => code,
@@ -2039,12 +2043,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scripted_foxes_snap_their_heading_when_they_reverse() -> Result<()> {
+        use ae_render::units::{ATTR_PREV_ROT_X, ATTR_PREV_X, ATTR_ROT_X, ATTR_X, InstanceStream};
+
+        let _one = ONE_RUNTIME.lock().unwrap_or_else(|p| p.into_inner());
+        let options = Options {
+            game: "scripted".into(),
+            units: 8,
+            workers: 1,
+            map_cells: 512,
+            ..Default::default()
+        };
+        let mut sim = sim::Sim::new(&sim_options(&options).unwrap(), None)?;
+        let mut previous: Option<InstanceStream> = None;
+        let mut reversals = 0;
+        for _ in 0..151 {
+            sim.tick()?;
+            let next = sim.stream(ae_nav::math::TICK_SECONDS)?;
+            if let Some(prev) = previous {
+                for row in 0..next.len() {
+                    // Upright scripted units face either +x or -x.
+                    if next.columns[ATTR_ROT_X + 3][row] == prev.columns[ATTR_ROT_X + 3][row] {
+                        continue;
+                    }
+                    for k in 0..4 {
+                        assert_eq!(
+                            next.columns[ATTR_PREV_ROT_X + k][row],
+                            next.columns[ATTR_ROT_X + k][row]
+                        );
+                    }
+                    assert_ne!(next.columns[ATTR_PREV_X][row], next.columns[ATTR_X][row]);
+                    reversals += 1;
+                }
+            }
+            previous = Some(next);
+        }
+        assert!(reversals >= options.units, "one full walk/stand cycle");
+        Ok(())
+    }
+
     /// The observer's vision hand-off (M16.1): a real sim publishes its
     /// observer's line of sight and explored cells into the feed the
     /// renderer reads, and an app given that feed shades by vision (the
     /// water pixels are pinned by `ae_render`'s observer baseline).
     #[test]
     fn the_observer_vision_hand_off_publishes_frames() {
+        let _one = ONE_RUNTIME.lock().unwrap_or_else(|p| p.into_inner());
         let o = sim::SimOptions {
             map: Map::Coast,
             map_cells: 256,

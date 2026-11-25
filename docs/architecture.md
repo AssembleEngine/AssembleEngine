@@ -82,11 +82,13 @@ Three rules explain most of the code:
                      └────────────┴──────────────┴──▸ capture ─▸ view build ──┐
                                                                               │
  render thread  ◂─────────────────────────────────────────────────────────────┘  free-running frame loop
-                     each frame: read the last stream, lerp previous → latest
+                     each frame: interpolate the previous → latest transform
 ```
 
 Nothing in the render path can stall a tick: the renderer reads the last published capture and
-interpolates between previous and latest positions when it runs ahead or behind.
+interpolates unit positions and rotations between the two ticks. Position uses linear
+interpolation. Whole-unit rotation and bone rotations between tick poses use shortest-arc
+spherical linear interpolation (SLERP), with normalized linear interpolation for nearby rotations.
 
 ---
 
@@ -455,7 +457,7 @@ tick's positions declares `after(spatial)`.
  └──────┬───────────────────────────────────────────────────────────┘
         │ ViewTable (typed columns)
         ▼
-   instance stream: x, y, prev_x, prev_y  ──▸ lerped in the shader
+   instance stream: x/y, prev_x/prev_y, rot, prev_rot ──▸ interpolated in the shader
 ```
 
 **Catalogue spawning (`ae_services::catalog`)**
@@ -607,7 +609,7 @@ Two rules keep this from tangling:
    Body.x/y/vx/vy, NavAgent.mode   written in place, in the guest's columns
    end of tick                  capture Body.x/y/vx/vy + radius + profile
    ae_services::view            coverage → per-observer ViewTable + wobble
-   ae-client                    upload instance stream (x/y, prev_x/prev_y)
+   ae-client                    publish current and previous positions and rotations
    units.cull (GPU)             frustum cull, indirect args
    units.draw                   interpolate, draw
 ```

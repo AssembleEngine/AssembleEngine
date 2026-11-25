@@ -301,6 +301,7 @@ fn centroid(scene: &Scene, frame: &[u8], at: (f32, f32), half: i32) -> Option<(f
 #[test]
 #[ignore = "needs a Vulkan GPU"]
 fn the_duel_death_sequence_is_drawn_where_the_sim_puts_it() -> Result<()> {
+    let _one = ONE_RUNTIME.lock().unwrap_or_else(|p| p.into_inner());
     // Flashes with particles, on a unit that walks forwards and one that
     // walks backwards.
     for backwards in [false, true] {

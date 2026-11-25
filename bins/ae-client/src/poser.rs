@@ -254,14 +254,23 @@ pub fn record(a: &Anim, tick: u32) -> [Cell; RECORD_CELLS] {
         }
     }
     let mut n = 0;
+    let mut instant = 0;
     for k in 0..MANUAL {
         if a.manual_kind[k] != manual_kind::NONE && a.manual_flags[k] & manual_flags::FRESH == 0 {
             r[5 + n / 4][n % 4] = a.bone[k] as u32 | (a.manual_kind[k] as u32) << 16;
             r[7 + n] = a.value[k].map(f32::to_bits);
+            if matches!(
+                a.manual_kind[k],
+                manual_kind::TURN | manual_kind::MOVE | manual_kind::SCALE
+            ) && a.top_speed[k] <= 0.0
+                && a.manual_flags[k] & manual_flags::PENDING == 0
+            {
+                instant |= 1 << n;
+            }
             n += 1;
         }
     }
-    r[0] = [tick, n as u32, 0, 0];
+    r[0] = [tick, n as u32, instant, 0];
     r
 }
 

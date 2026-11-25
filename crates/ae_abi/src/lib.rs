@@ -387,6 +387,9 @@ pub mod engine {
     /// excluded by `without(Dying)` from spatial and nav (M14;
     /// `ae_sdk::life::Dying`).
     pub const DYING: u64 = 0xAE00_0000_0000_0015;
+    /// `RotationSnap { sequence: u32 }`: a change skips interpolation into a
+    /// unit's current rotation (`ae_sdk::rotation::RotationSnap`).
+    pub const ROTATION_SNAP: u64 = 0xAE00_0000_0000_0016;
 }
 
 /// The sim's own names (`ae_lookup` scope [`SCOPE`](sim::SCOPE)), the same

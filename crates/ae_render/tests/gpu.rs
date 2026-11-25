@@ -989,16 +989,21 @@ fn fill_the_uniform_array(
 /// buffer. The cull passes three (the fourth is behind the camera: the
 /// instance count read back is 3); each shows its class colour at its
 /// projected position; the previous position of a moved unit (alpha 1
-/// shows the latest) shows none; validation stays silent.
+/// shows the latest) shows none. A turn at a quarter tick draws the
+/// silhouette a quarter of the way around the shortest arc.
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
 fn units_render_over_terrain() {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::thread::{TargetInfo, run_headless};
-    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::thread::{Headless, TargetInfo};
+    use ae_render::units::{
+        ATTR_PREV_ROT_X, ATTR_PREV_X, ATTR_RADIUS, ATTR_ROT_X, ATTR_X, AnimWrites, InstanceStream, UnitClass, UnitFeed,
+        UnitsSetup,
+    };
     use glam::{Vec2, Vec4};
+    use std::time::{Duration, Instant};
 
     let gpu = gpu();
     // Flat ground at 50 with water at 60 (class 1 floats on it).
@@ -1054,6 +1059,10 @@ fn units_render_over_terrain() {
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             4.0f32.to_bits(),
             class,
         ]
@@ -1064,16 +1073,20 @@ fn units_render_over_terrain() {
         }
     }
     let feed = Arc::new(UnitFeed::default());
-    feed.publish(Arc::new(InstanceStream {
-        tick: 7,
-        published: std::time::Instant::now(),
-        tick_seconds: 0.0,
-        sim_seconds: 0.0,
-        columns: at_rest(columns),
-        anim: AnimWrites::default(),
-    }));
+    let columns = at_rest(columns);
+    let publish = |tick, columns, published, tick_seconds| {
+        feed.publish(Arc::new(InstanceStream {
+            tick,
+            published,
+            tick_seconds,
+            sim_seconds: 0.0,
+            columns,
+            anim: AnimWrites::default(),
+        }))
+    };
+    publish(7, columns.clone(), Instant::now(), 0.0);
     let setup = UnitsSetup {
-        feed,
+        feed: feed.clone(),
         capacity: 64,
         classes,
         min_pixels: 28.0,
@@ -1106,7 +1119,9 @@ fn units_render_over_terrain() {
         bake: BakeOptions::default(),
         record_threads: 1,
     };
-    run_headless(&gpu, &mut app, target, 12, config).unwrap();
+    let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+    run.frames(&mut app, 12).unwrap();
+    run.wait().unwrap();
     let pixels = app.readback().unwrap();
     if let Ok(path) = std::env::var("AE_TEST_CAPTURE") {
         let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
@@ -1143,6 +1158,48 @@ fn units_render_over_terrain() {
         Some((4, 3)),
         "four rows uploaded, three pass the cull"
     );
+
+    let render_turn = |app: &mut TerrainApp, run: &mut Headless<_>, tick, rot: [f32; 4], quarter_tick: bool| {
+        let mut columns = columns.clone();
+        columns[ATTR_PREV_X][0] = columns[ATTR_X][0];
+        columns[ATTR_RADIUS][0] = 80.0f32.to_bits();
+        for (k, word) in rot.map(f32::to_bits).into_iter().enumerate() {
+            columns[ATTR_ROT_X + k][0] = word;
+            columns[ATTR_PREV_ROT_X + k][0] = 0; // Identity encoded as zero.
+        }
+        // Keep alpha close to 0.25 even if a frame takes a while to prepare.
+        let now = Instant::now();
+        if quarter_tick {
+            publish(tick, columns, now - Duration::from_secs(900), 3600.0);
+        } else {
+            publish(tick, columns, now, 0.0);
+        }
+        run.frames(app, 1).unwrap();
+        run.wait().unwrap();
+        app.readback()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| u16::from(p[0]) > 2 * u16::from(p[1]) && u16::from(p[0]) > 2 * u16::from(p[2]))
+            .collect::<Vec<_>>()
+    };
+    // Exact 180-degree turns have a zero dot product. SLERP gives 45 degrees
+    // at a quarter tick, while NLERP would give about 37 degrees.
+    let quarter = render_turn(&mut app, &mut run, 8, [0.0, -2.0, 0.0, 0.0], true);
+    let expected = render_turn(&mut app, &mut run, 9, yaw(1.0, 1.0), false);
+    // The negative representative of a 160-degree turn takes the same arc.
+    let (sin, cos) = 160.0f32.to_radians().sin_cos();
+    let opposite = render_turn(&mut app, &mut run, 10, yaw(cos, sin).map(|c| -2.0 * c), true);
+    let (sin, cos) = 40.0f32.to_radians().sin_cos();
+    let expected_opposite = render_turn(&mut app, &mut run, 11, yaw(cos, sin), false);
+    let different_pixels = |a: &[bool], b: &[bool]| a.iter().zip(b).filter(|(a, b)| a != b).count();
+    for (got, want) in [(&quarter, &expected), (&opposite, &expected_opposite)] {
+        let error = different_pixels(got, want);
+        assert!(error <= 5, "quarter-tick silhouette differs by {error} red pixels");
+    }
+
+    run.finish().unwrap();
     ae_render::thread::RenderApp::destroy(&mut app, &gpu);
     assert_clean(&gpu);
 }
@@ -1187,6 +1244,10 @@ fn terrain_edits_reach_the_heightfield() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             0.0f32.to_bits(),
@@ -1976,6 +2037,10 @@ fn model_lights_light_the_ground() {
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             5.0f32.to_bits(),
             class,
         ]
@@ -2502,6 +2567,10 @@ fn cull_on_gpu(
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -2642,6 +2711,10 @@ fn units_cull_matches_the_cpu_reference() {
                         y.to_bits(),
                         x.to_bits(),
                         y.to_bits(),
+                        0.0f32.to_bits(),
+                        0.0f32.to_bits(),
+                        0.0f32.to_bits(),
+                        1.0f32.to_bits(),
                         0.0f32.to_bits(),
                         0.0f32.to_bits(),
                         0.0f32.to_bits(),
@@ -3239,6 +3312,10 @@ fn scene_app_with(
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
+            0.0f32.to_bits(),
+            (-0.5f32 / (1.25f32).sqrt()).to_bits(),
+            0.0f32.to_bits(),
+            (1.0f32 / (1.25f32).sqrt()).to_bits(),
             0.0f32.to_bits(),
             (-0.5f32 / (1.25f32).sqrt()).to_bits(),
             0.0f32.to_bits(),
@@ -4078,6 +4155,10 @@ fn water_covers_the_low_ground_only() {
                 0.0f32.to_bits(),
                 0.0f32.to_bits(),
                 1.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                1.0f32.to_bits(),
                 8.0f32.to_bits(),
                 class,
             ]
@@ -4468,6 +4549,10 @@ fn hills_shade_away_from_the_sun() {
                 0.0f32.to_bits(),
                 0.0f32.to_bits(),
                 1.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                1.0f32.to_bits(),
                 6.0f32.to_bits(),
                 0,
             ]
@@ -4846,6 +4931,7 @@ fn units_cast_shadows() {
                 .map(f32::to_bits)
                 .into_iter()
                 .chain(yaw(hx, hz).map(f32::to_bits))
+                .chain(yaw(hx, hz).map(f32::to_bits))
                 .chain([r.to_bits(), 0])
                 .enumerate()
             {
@@ -5131,6 +5217,7 @@ fn particles_cast_coloured_shadows() {
         for (k, word) in [x, z, x, z]
             .map(f32::to_bits)
             .into_iter()
+            .chain(yaw(hx, hz).map(f32::to_bits))
             .chain(yaw(hx, hz).map(f32::to_bits))
             .chain([r.to_bits(), 0])
             .enumerate()
@@ -6785,6 +6872,7 @@ fn decals_wrap_over_cliffs() {
             .map(f32::to_bits)
             .into_iter()
             .chain([0.0, 0.0, 0.0, 1.0].map(f32::to_bits))
+            .chain([0.0, 0.0, 0.0, 1.0].map(f32::to_bits))
             .chain([4.0f32.to_bits(), 0])
             .enumerate()
         {
@@ -8149,6 +8237,10 @@ fn units_draw_models() {
             yaw(hx, hy)[1].to_bits(),
             yaw(hx, hy)[2].to_bits(),
             yaw(hx, hy)[3].to_bits(),
+            yaw(hx, hy)[0].to_bits(),
+            yaw(hx, hy)[1].to_bits(),
+            yaw(hx, hy)[2].to_bits(),
+            yaw(hx, hy)[3].to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -8466,6 +8558,10 @@ fn units_model_shadows_culled() {
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             radius.to_bits(),
             class,
         ]
@@ -8570,11 +8666,12 @@ fn units_model_shadows_culled() {
 /// Units with animation records: the pose pass's palettes match the sim's
 /// (`ae_model::anim`: `Rig::pose` of each record's channels, lerped
 /// between the two at the drawn tick, then `Rig::globals` and
-/// `Rig::palette`), drawn half way between the records (ticks 5 and 7,
+/// `Rig::palette`), drawn three quarters through the records (ticks 3 and 7,
 /// drawn at 6) and on the newer; units without records, or whose records
 /// are not in the table, on the rest palette. Layers blended, weighted,
 /// masked (the sim's rig's mask) and additive, every play mode, a loop
-/// across its wrap, manual turns, moves and scales (one not shown yet),
+/// across its wrap, manual turns, moves and scales, including snaps at
+/// the start of their tick and one pending move,
 /// records newer first, rotations on opposite hemispheres. For a model
 /// built here (a base and an arm, two clips through the hierarchy), the
 /// Fox (skinned) and BoxAnimated (animated pieces); the arm is drawn where
@@ -8770,6 +8867,7 @@ fn units_pose_models() {
         bone,
         kind,
         value,
+        speed: 1.0,
         ..Default::default()
     };
     let about_y = |deg: f32| Quat::from_rotation_y(deg.to_radians()).to_array();
@@ -8840,32 +8938,45 @@ fn units_pose_models() {
                     &[layer(1, looped, 0.5)],
                     &[
                         entry(2, manual_kind::TURN, about_y(30.0)),
+                        entry(2, manual_kind::MOVE, [0.0, 1.0, 0.0, 0.0]),
                         entry(1, manual_kind::MOVE, [0.0, 0.5, 0.0, 0.0]),
                     ],
                 )),
                 Box::new(with(
                     &[layer(1, looped, 0.5)],
                     &[
-                        entry(2, manual_kind::TURN, about_y(60.0)),
+                        Manual {
+                            speed: 0.0,
+                            ..entry(2, manual_kind::TURN, about_y(120.0))
+                        },
+                        entry(2, manual_kind::MOVE, [0.0, 1.5, 0.0, 0.0]),
+                        Manual {
+                            speed: 0.0,
+                            ..entry(2, manual_kind::SCALE, [1.0, 1.25, 1.0, 0.0])
+                        },
+                        Manual {
+                            speed: 0.0,
+                            ..entry(1, manual_kind::MOVE, [0.0, 0.75, 0.0, 0.0])
+                        },
                         entry(1, manual_kind::SCALE, [1.5, 1.0, 1.0, 0.0]),
                         Manual {
                             flags: manual_flags::FRESH,
-                            ..entry(1, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0])
+                            ..entry(0, manual_kind::MOVE, [0.0, 9.0, 0.0, 0.0])
                         },
                     ],
                 )),
-                false,
+                true,
             ),
         ),
-        // A turn whose records are on opposite hemispheres (a spin).
+        // A wide turn whose records are on opposite hemispheres.
         (
             (580.0, 480.0),
             (1.0, 0.0),
             20.0,
             0,
             Spec::Records(
-                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0))])),
-                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(-170.0).map(|v| -v))])),
+                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(10.0))])),
+                Box::new(with(&[], &[entry(2, manual_kind::SPIN, about_y(170.0).map(|v| -v))])),
                 true,
             ),
         ),
@@ -8983,6 +9094,7 @@ fn units_pose_models() {
             ];
         }
         let mut n = 0;
+        let mut instant = 0;
         for m in ch
             .manual
             .iter()
@@ -8990,19 +9102,26 @@ fn units_pose_models() {
         {
             r[5 + n / 4][n % 4] = m.bone as u32 | (m.kind as u32) << 16;
             r[7 + n] = m.value.map(f32::to_bits);
+            if matches!(m.kind, manual_kind::TURN | manual_kind::MOVE | manual_kind::SCALE)
+                && m.speed == 0.0
+                && m.flags & manual_flags::PENDING == 0
+            {
+                instant |= 1 << n;
+            }
             n += 1;
         }
-        r[0] = [tick, n as u32, 0, 0];
+        r[0] = [tick, n as u32, instant, 0];
         r
     };
-    let (older, newer) = (5u32, 7u32);
+    let (older, newer) = (3u32, 7u32);
     let mut table: Vec<Cell> = Vec::new();
     let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
     for ((x, y), (hx, hy), radius, class, spec) in &units {
         let pose = match spec {
             Spec::Records(a, b, swapped) if (*class as usize) < rigs.len() => {
                 let first = table.len() as u32;
-                let (a, b) = (record(a, older), record(b, newer));
+                let b = record(b, newer);
+                let a = record(a, if b[0][2] != 0 { newer - 1 } else { older });
                 match swapped {
                     true => table.extend(b.iter().chain(&a)),
                     false => table.extend(a.iter().chain(&b)),
@@ -9021,6 +9140,10 @@ fn units_pose_models() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
+            yaw(*hx, *hy)[0].to_bits(),
+            yaw(*hx, *hy)[1].to_bits(),
+            yaw(*hx, *hy)[2].to_bits(),
+            yaw(*hx, *hy)[3].to_bits(),
             yaw(*hx, *hy)[0].to_bits(),
             yaw(*hx, *hy)[1].to_bits(),
             yaw(*hx, *hy)[2].to_bits(),
@@ -9055,7 +9178,7 @@ fn units_pose_models() {
     let setup_models: Vec<_> = models.iter().map(|m| Some(Arc::new(m.clone()))).collect();
     let setup_rigs: Vec<_> = rigs.iter().map(|r| Some(Arc::new(r.clone()))).collect();
     // Frame, counts and poses; `behind`: drawn a tick behind the stream
-    // (published in the future: interpolation weight 0), half way between
+    // (published in the future: interpolation weight 0), three quarters through
     // the records; else at the stream's tick, on the newer.
     let render = |behind: bool| {
         let feed = Arc::new(UnitFeed::default());
@@ -9134,14 +9257,6 @@ fn units_pose_models() {
         rig.pose(ch, &mut p);
         p
     };
-    let nlerp = |a: [f32; 4], b: [f32; 4], s: f32| {
-        let b = if Vec4::from(a).dot(Vec4::from(b)) < 0.0 {
-            b.map(|v| -v)
-        } else {
-            b
-        };
-        Vec4::from(a).lerp(Vec4::from(b), s).normalize().to_array()
-    };
     let lerp3 = |a: [f32; 3], b: [f32; 3], s: f32| Vec3::from(a).lerp(Vec3::from(b), s).to_array();
 
     for behind in [false, true] {
@@ -9152,8 +9267,7 @@ fn units_pose_models() {
             "every unit drawn (behind: {behind})"
         );
         assert_eq!(poses.len(), units.len());
-        // Drawn at tick 6 (half way) or 7 (the newer).
-        let s = if behind { 0.5 } else { 1.0 };
+        // Drawn at tick 6 (three quarters through) or 7 (the newer).
         for (r, (.., class, spec)) in units.iter().enumerate() {
             let Some(model) = models.get(*class as usize) else {
                 assert!(poses[r].is_empty(), "row {r}: a dart has no palette");
@@ -9163,14 +9277,44 @@ fn units_pose_models() {
             let want: Vec<[f32; 12]> = match spec {
                 Spec::Records(a, b, _) => {
                     let (pa, pb) = (pose_of(rig, a), pose_of(rig, b));
+                    let s = if !behind {
+                        1.0
+                    } else if record(b, newer)[0][2] != 0 {
+                        0.0
+                    } else {
+                        0.75
+                    };
                     let local = pa
                         .local
                         .iter()
                         .zip(&pb.local)
-                        .map(|(a, b)| Trs {
-                            t: lerp3(a.t, b.t, s),
-                            r: nlerp(a.r, b.r, s),
-                            s: lerp3(a.s, b.s, s),
+                        .enumerate()
+                        .map(|(bone, (old, new))| {
+                            let snaps = |kind| {
+                                b.manual.iter().any(|m| {
+                                    m.bone as usize == bone && m.kind == kind && m.speed == 0.0 && m.flags == 0
+                                })
+                            };
+                            Trs {
+                                t: if snaps(manual_kind::MOVE) {
+                                    new.t
+                                } else {
+                                    lerp3(old.t, new.t, s)
+                                },
+                                r: if snaps(manual_kind::TURN) {
+                                    new.r
+                                } else {
+                                    Quat::from_array(old.r)
+                                        .normalize()
+                                        .slerp(Quat::from_array(new.r).normalize(), s)
+                                        .to_array()
+                                },
+                                s: if snaps(manual_kind::SCALE) {
+                                    new.s
+                                } else {
+                                    lerp3(old.s, new.s, s)
+                                },
+                            }
                         })
                         .collect();
                     let pose = Pose {
@@ -9370,6 +9514,10 @@ fn speculars_follow_material_and_lights() {
         512.0f32.to_bits(),
         512.0f32.to_bits(),
         512.0f32.to_bits(),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
         0.0f32.to_bits(),
         0.0f32.to_bits(),
         0.0f32.to_bits(),
@@ -9824,6 +9972,10 @@ fn lights_clusters_match_the_unculled_reference() {
             y.to_bits(),
             x.to_bits(),
             y.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             0.0f32.to_bits(),
@@ -12609,6 +12761,10 @@ fn m16_frame(gpu: &Arc<GpuDevice>, wet: bool, observer: bool, surface: bool) -> 
             (-0.5f32 / (1.25f32).sqrt()).to_bits(),
             0.0f32.to_bits(),
             (1.0f32 / (1.25f32).sqrt()).to_bits(),
+            0.0f32.to_bits(),
+            (-0.5f32 / (1.25f32).sqrt()).to_bits(),
+            0.0f32.to_bits(),
+            (1.0f32 / (1.25f32).sqrt()).to_bits(),
             6.0f32.to_bits(),
             class,
         ]
@@ -14364,6 +14520,10 @@ fn coast_planar_reflection_is_clipped_and_observer_safe() {
                 0,
                 0,
                 1.0f32.to_bits(),
+                0,
+                0,
+                0,
+                1.0f32.to_bits(),
                 radius.to_bits(),
                 u32::from(i != 0),
                 ae_render::units::NO_POSE,
@@ -14570,6 +14730,10 @@ fn refraction_probe(
             xy,
             xy,
             xy,
+            0,
+            0,
+            0,
+            1.0f32.to_bits(),
             0,
             0,
             0,

@@ -14,8 +14,9 @@
 //!   renderer takes them, each cell once (its newest value) however many
 //!   streams passed; a renderer that missed writes asks the producer for
 //!   its whole table.
-//! * Positions are interpolated between the previous and the latest tick
-//!   (`prev_x/prev_y` → `x/y`) by the time since the stream was published.
+//! * Positions and rotations are interpolated between the previous and the
+//!   latest tick (`prev_x/prev_y` → `x/y`, `prev_rot` → `rot`) by the time
+//!   since the stream was published.
 //!
 //! The passes: `units pose` (`units.pose`, compute: the skinning palettes
 //! of the units with animation records into `units.palette`, which the
@@ -53,34 +54,55 @@ use std::time::Instant;
 /// the ground plane in world units (the nav world's x and y; render world
 /// x and z); `rot` is the unit's rotation from its frame (forward +x, up
 /// +y, right +z) to the world's, a quaternion (x, y, z, w; need not be
-/// normalised, zero: the identity); `class` is a `u32` indexing
-/// [`UnitsSetup::classes`]. `pose` (a `u32`) is where a unit with a model
-/// finds its two animation records in the animation table (what the
-/// streams' [`InstanceStream::anim`] wrote; see [`RECORD_CELLS`]), with
-/// [`POSE_MANUAL`] set when either record shows a manual joint, or
-/// [`NO_POSE`] for the rest pose. `water` is depth in metres below the
-/// surface (zero on land or at the surface). `view` is the `u32` observer
-/// state: Own=0, Seen=1, Blip=2, Ghost=3. Unfiltered streams use Own.
-/// All attributes other than `class`, `pose` and `view` are `f32`.
-pub const ATTRIBUTES: [&str; 13] = [
-    "x", "y", "prev_x", "prev_y", "rot_x", "rot_y", "rot_z", "rot_w", "radius", "class", "pose", "water", "view",
+/// normalised, zero: the identity), and `prev_rot` the previous tick's,
+/// which the shaders slerp to `rot` by the frame's interpolation alpha;
+/// `class` is a `u32` indexing [`UnitsSetup::classes`]. `pose` (a `u32`)
+/// is where a unit with a model finds its two animation records in the
+/// animation table (what the streams' [`InstanceStream::anim`] wrote; see
+/// [`RECORD_CELLS`]), with [`POSE_MANUAL`] set when either record shows a
+/// manual joint, or [`NO_POSE`] for the rest pose. `water` is depth in
+/// metres below the surface (zero on land or at the surface). `view` is
+/// the `u32` observer state: Own=0, Seen=1, Blip=2, Ghost=3. Unfiltered
+/// streams use Own. All attributes other than `class`, `pose` and `view`
+/// are `f32`.
+pub const ATTRIBUTES: [&str; 17] = [
+    "x",
+    "y",
+    "prev_x",
+    "prev_y",
+    "rot_x",
+    "rot_y",
+    "rot_z",
+    "rot_w",
+    "prev_rot_x",
+    "prev_rot_y",
+    "prev_rot_z",
+    "prev_rot_w",
+    "radius",
+    "class",
+    "pose",
+    "water",
+    "view",
 ];
 pub const ATTRIBUTE_COUNT: usize = ATTRIBUTES.len();
 /// The position's columns (`x`, `y`), the previous tick's (`prev_x`,
-/// `prev_y`), and the `radius` column.
+/// `prev_y`), the rotation's (`rot_x` .. `rot_w`), the previous tick's
+/// (`prev_rot_x` .. `prev_rot_w`), and the `radius` column.
 pub const ATTR_X: usize = 0;
 pub const ATTR_Y: usize = 1;
 pub const ATTR_PREV_X: usize = 2;
 pub const ATTR_PREV_Y: usize = 3;
-pub const ATTR_RADIUS: usize = 8;
+pub const ATTR_ROT_X: usize = 4;
+pub const ATTR_PREV_ROT_X: usize = 8;
+pub const ATTR_RADIUS: usize = 12;
 /// The `class` attribute's column.
-pub const ATTR_CLASS: usize = 9;
+pub const ATTR_CLASS: usize = 13;
 /// The `pose` attribute's column.
-pub const ATTR_POSE: usize = 10;
+pub const ATTR_POSE: usize = 14;
 /// The `water` attribute's column.
-pub const ATTR_WATER: usize = 11;
+pub const ATTR_WATER: usize = 15;
 /// The `view` attribute's column.
-pub const ATTR_VIEW: usize = 12;
+pub const ATTR_VIEW: usize = 16;
 /// The highest `view` state whose position is current (Own=0, Seen=1).
 /// `units_common.glsl`'s `eligible` accepts the states up to it.
 pub const VIEW_SEEN: u32 = 1;
@@ -108,7 +130,7 @@ pub type Cell = [u32; 4];
 /// tick; it is drawn between their poses at the drawn tick (`tick - 1 +
 /// alpha`; before the older or past the newer, at that one). The cells
 /// (`shaders/units_pose.comp` reads them):
-/// * 0: (tick, manual entries shown `n`, 0, 0);
+/// * 0: (tick, manual entries shown `n`, bit mask of instant manual entries, 0);
 /// * 1..=4: per layer (clip `| mask << 16`, mode `| kind << 8`, weight,
 ///   phase), floats as their bits; clip 0 is an empty layer;
 /// * 5, 6: per manual entry `k < n` word `k`: bone `| kind << 16`;
@@ -210,7 +232,7 @@ impl InstanceStream {
         self.columns[0].is_empty()
     }
 
-    /// Interpolation weight of the latest position at `now`.
+    /// Interpolation weight of the latest position and rotation at `now`.
     pub fn alpha(&self, now: Instant) -> f32 {
         if self.tick_seconds <= 0.0 {
             return 1.0;
@@ -2077,7 +2099,7 @@ pub fn cull_margins(
             );
             let class = stream.columns[ATTR_CLASS][r].min(MAX_CLASSES as u32 - 1);
             let pos = Vec3::new(x, ground(x, y, class), y);
-            let radius = f(8, r);
+            let radius = f(ATTR_RADIUS, r);
             let pixels = 2.0 * radius * frame.proj_scale / pos.distance(frame.cam_pos).max(1e-3);
             let size = radius * (min_pixels / pixels.max(1e-6)).max(1.0);
             let centre = pos + Vec3::new(0.0, 0.4 * size, 0.0);
@@ -2102,6 +2124,8 @@ mod tests {
             (ATTR_Y, "y"),
             (ATTR_PREV_X, "prev_x"),
             (ATTR_PREV_Y, "prev_y"),
+            (ATTR_ROT_X, "rot_x"),
+            (ATTR_PREV_ROT_X, "prev_rot_x"),
             (ATTR_RADIUS, "radius"),
             (ATTR_CLASS, "class"),
             (ATTR_POSE, "pose"),

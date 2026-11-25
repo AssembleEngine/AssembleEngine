@@ -36,6 +36,9 @@ pub mod nav;
 #[cfg(feature = "water")]
 pub mod water;
 
+#[cfg(feature = "rotation-snap")]
+pub mod rotation;
+
 #[cfg(feature = "catalog")]
 pub mod catalog;
 

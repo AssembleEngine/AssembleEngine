@@ -23,8 +23,9 @@ pub struct ViewPipeline {
     capture_spec: CaptureSpec,
     capture: Capture,
     pub coverage: Coverage,
-    dive: Option<WaterColumn>,
-    sonar: Option<WaterColumn>,
+    dive: Option<OptionalColumn>,
+    sonar: Option<OptionalColumn>,
+    rotation_snap: Option<OptionalColumn>,
     /// `(component, field)` of each spec field.
     pub names: Vec<(String, String)>,
     ally: usize,
@@ -39,13 +40,16 @@ pub struct ViewPipeline {
 }
 
 /// Capture an optional component separately so entities that lack it stay in the view.
-pub struct WaterColumn {
+pub struct OptionalColumn {
     spec: CaptureSpec,
     capture: Capture,
     words: HashMap<u64, u32>,
 }
 
-impl WaterColumn {
+/// The optional column reader used for dive depth and sonar radius.
+pub type WaterColumn = OptionalColumn;
+
+impl OptionalColumn {
     pub fn new(schema: &Schema, component: &str, field: &str) -> Result<Option<Self>> {
         if !schema.components.iter().any(|c| c.name == component) {
             return Ok(None);
@@ -73,6 +77,10 @@ impl WaterColumn {
     pub fn get(&self, entity: u64) -> Option<u32> {
         self.words.get(&entity).copied()
     }
+
+    pub fn rows(&self, entities: &[u64]) -> Vec<u32> {
+        entities.iter().map(|&e| self.get(e).unwrap_or_default()).collect()
+    }
 }
 
 impl ViewPipeline {
@@ -81,7 +89,12 @@ impl ViewPipeline {
     /// square map of `extent` world units.
     pub fn new(schema: &Schema, extra: &[&str], allies: usize, extent: f32) -> Result<Self> {
         let mut components = vec!["Body", "Team", "Sensor"];
-        components.extend(extra.iter().copied().filter(|c| !matches!(*c, "Dive" | "Sonar")));
+        components.extend(
+            extra
+                .iter()
+                .copied()
+                .filter(|c| !matches!(*c, "Dive" | "Sonar" | "RotationSnap")),
+        );
         let mut names = Vec::new();
         let mut fields = Vec::new();
         for &c in &components {
@@ -123,13 +136,18 @@ impl ViewPipeline {
         );
         let refs: Vec<(&str, &str)> = names.iter().map(|(c, f)| (c.as_str(), f.as_str())).collect();
         let capture_spec = CaptureSpec::new(schema, &refs)?;
-        let dive = WaterColumn::new(schema, "Dive", "depth")?;
-        let sonar = WaterColumn::new(schema, "Sonar", "radius")?;
+        let dive = OptionalColumn::new(schema, "Dive", "depth")?;
+        let sonar = OptionalColumn::new(schema, "Sonar", "radius")?;
+        let rotation_snap = OptionalColumn::new(schema, "RotationSnap", "sequence")?;
         let submerged = dive.as_ref().map(|_| {
             names.push(("Dive".into(), "depth".into()));
             fields.push(("Dive.depth".into(), ViewClass::Los));
             fields.len() - 1
         });
+        if rotation_snap.is_some() {
+            names.push(("RotationSnap".into(), "sequence".into()));
+            fields.push(("RotationSnap.sequence".into(), ViewClass::Los));
+        }
         ensure!(
             fields.len() <= 32,
             "{} viewed fields; a view table takes 32",
@@ -149,6 +167,7 @@ impl ViewPipeline {
             capture_spec,
             dive,
             sonar,
+            rotation_snap,
             capture: Capture::default(),
             coverage: Coverage::new(grid, allies),
             names,
@@ -168,13 +187,11 @@ impl ViewPipeline {
         rt.capture(world, &self.capture_spec, &mut self.capture)?;
         if let Some(dive) = &mut self.dive {
             dive.capture(rt, world)?;
-            self.capture.columns.push(
-                self.capture
-                    .entities
-                    .iter()
-                    .map(|&e| dive.get(e).unwrap_or_default())
-                    .collect(),
-            );
+            self.capture.columns.push(dive.rows(&self.capture.entities));
+        }
+        if let Some(snap) = &mut self.rotation_snap {
+            snap.capture(rt, world)?;
+            self.capture.columns.push(snap.rows(&self.capture.entities));
         }
         let c = &self.capture;
         let sonar = if let Some(sonar) = &mut self.sonar {

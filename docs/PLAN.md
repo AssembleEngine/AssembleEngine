@@ -5872,6 +5872,23 @@ M16.21)".
   guard also now names `decals_relief.rs` and its two one-shot cone shaders as exceptions,
   since that upload-time pass still owns its set; it is not a frame pass.
 
+## Unit rotation interpolation
+
+The client matches unit rows across ticks by key and writes the previous rotation as four
+quaternion columns. A new row or a row whose observer state changes starts at its current
+rotation. The renderer uses shortest-arc SLERP with the same alpha as position interpolation.
+Darts, models, culling, and shadow casting read the same blended transform. The GPU pose pass
+also uses SLERP for bone rotations between evaluated tick poses. Both paths use normalized
+linear interpolation for nearby rotations. The GPU terrain fixture checks a dart's silhouette
+a quarter of the way through a turn.
+
+Games can call `RotationSnap::snap()` on the tick they change a unit's facing. The client then
+uses the new rotation for both endpoints, so position and bone animation still interpolate.
+The scripted Foxes use it when they resume walking in the opposite direction.
+`Anim::turn_now`, `move_now`, and `scale_now` snap a bone's rotation, translation, or scale,
+respectively. Each command is equivalent to a zero-speed target and applies independently
+when several commands affect the same bone.
+
 ## TODO (open, not a priority now)
 
 - M15: drop the per-pass fullscreen form at the next contract version (`MODULE_VERSION` 4):
@@ -5879,11 +5896,6 @@ M16.21)".
   `test_post.frag`/`test_post_storage.frag` and `render/legacy`, and refuse version-2 modules.
 - M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
   of the names, to remove the ~3% `cpu_frame` cost measured after step B.
-- **Units: interpolate rotation (required).** The instance stream carries `prev_x`/`prev_y` but
-  only the latest `rot`, so a unit's heading jumps once per tick (30 Hz) while its position moves
-  smoothly. Add `prev_rot` (4 columns, filled by `stream_rows` from the matched previous row, the
-  rotation itself for a new unit) and nlerp it by the same alpha in `units_common.glsl`, in the
-  darts', the models' and the shadow casters' vertex paths.
 - Shared frame constants (borrowed from Recoil's `UniformConstants`): one per-slot std140 block,
   written once per frame at a fixed reserved uniform-array index that every shader reads through a
   common include without a handle-table lookup. Contents: the camera's view, projection and

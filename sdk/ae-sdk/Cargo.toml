@@ -18,6 +18,8 @@ libm = { version = "0.2.16", optional = true }
 nav = []
 # Submerged movement and sonar components.
 water = []
+# Explicit discontinuities in a unit's rendered orientation.
+rotation-snap = []
 # Catalogue spawning (`ae_sdk::catalog`): spawn requests and def ids. Needs nav.
 catalog = ["nav"]
 # Animation channels (`ae_sdk::anim`, M14), advanced by the engine's `anim`

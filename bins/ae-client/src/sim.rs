@@ -32,7 +32,7 @@ use ae_services::anim::AnimPlugin;
 use ae_services::fx::{FxFeed, FxPlugin};
 use ae_services::nav::{GroundFeed, Map, NavPlugin};
 use ae_services::spatial::SpatialPlugin;
-use ae_services::view::{SENSOR_CELL, ViewPipeline, WaterColumn};
+use ae_services::view::{OptionalColumn, SENSOR_CELL, ViewPipeline};
 use ae_sim::capture::{Capture, CaptureSpec};
 use ae_sim::input::{Command, TickBundle};
 use ae_sim::runtime::{Runtime, RuntimeConfig, World};
@@ -60,6 +60,7 @@ const F_VY: usize = 3;
 const F_RADIUS: usize = 4;
 const F_PROFILE: usize = 5;
 const F_WATER: usize = 6;
+const F_ROTATION_SNAP: usize = 7;
 
 #[derive(Clone, Debug)]
 pub struct SimOptions {
@@ -348,7 +349,8 @@ pub struct Sim {
     workers: usize,
     spec: CaptureSpec,
     capture: Capture,
-    dive: Option<WaterColumn>,
+    dive: Option<OptionalColumn>,
+    rotation_snap: Option<OptionalColumn>,
     streamer: Streamer,
     view: Option<ViewState>,
     classes: u32,
@@ -496,7 +498,8 @@ impl Sim {
             None => None,
         };
         let classes = o.own_classes().len() as u32;
-        let dive = WaterColumn::new(&rt.schema, "Dive", "depth")?;
+        let dive = OptionalColumn::new(&rt.schema, "Dive", "depth")?;
+        let rotation_snap = OptionalColumn::new(&rt.schema, "RotationSnap", "sequence")?;
         let (bots, unit_command) = if o.skirmish() {
             let bots = ae_bot::SkirmishBot::pair(&rt)?
                 .into_iter()
@@ -520,6 +523,7 @@ impl Sim {
             spec,
             capture: Capture::default(),
             dive,
+            rotation_snap,
             streamer: Streamer {
                 poser,
                 ..Streamer::default()
@@ -741,13 +745,7 @@ impl Sim {
             if self.capture.columns[F_PROFILE].is_empty() {
                 self.capture.columns[F_PROFILE].resize(self.capture.entities.len(), 0);
             }
-            self.capture.columns.push(
-                self.capture
-                    .entities
-                    .iter()
-                    .map(|&e| dive.get(e).unwrap_or_default())
-                    .collect(),
-            );
+            self.capture.columns.push(dive.rows(&self.capture.entities));
         }
         let mut dying = Vec::new();
         if self.has_dying {
@@ -761,6 +759,11 @@ impl Sim {
         }
         let Some(v) = self.view.as_mut() else {
             let t0 = Instant::now();
+            if let Some(snap) = &mut self.rotation_snap {
+                snap.capture(&self.rt, &self.world)?;
+                self.capture.columns.resize_with(F_ROTATION_SNAP, Vec::new);
+                self.capture.columns.push(snap.rows(&self.capture.entities));
+            }
             // The `Anim` rows borrowed from the world, by entity.
             let mut anims: Vec<(u64, &Anim)> = Vec::new();
             if self.streamer.poser.is_some() {
@@ -825,6 +828,10 @@ impl Sim {
             .fields
             .map(|f| t.fields.iter().position(|&c| c == f).expect("viewed field"));
         let depth = v.pipeline.spec.submerged.and_then(|f| t.column(f));
+        let rotation_snap = v
+            .pipeline
+            .field("RotationSnap", "sequence")
+            .and_then(|f| t.fields.iter().position(|&col| col == f));
         let rows: Vec<UnitRow> = (0..t.len())
             .map(|r| {
                 let shown = |c: usize| t.mask[r] & (1 << c) != 0;
@@ -844,6 +851,7 @@ impl Sim {
                     radius: if shown(fr) { word(fr) } else { BLIP_RADIUS.to_bits() },
                     class,
                     water_depth: depth.map_or(0.0, |col| f32::from_bits(col[r])),
+                    rotation_snap: rotation_snap.filter(|&col| shown(col)).map_or(0, word),
                     state: t.state[r],
                 }
             })
@@ -1001,11 +1009,19 @@ impl Sim {
 
 /// Row `r`'s nav profile (0 without the field).
 fn profile(c: &Capture, r: usize) -> u32 {
-    c.columns.get(F_PROFILE).map_or(0, |col| col[r])
+    capture_word(c, F_PROFILE, r)
 }
 
 fn water_depth(c: &Capture, row: usize) -> f32 {
-    c.columns.get(F_WATER).map_or(0.0, |col| f32::from_bits(col[row]))
+    f32::from_bits(capture_word(c, F_WATER, row))
+}
+
+fn capture_word(c: &Capture, field: usize, row: usize) -> u32 {
+    c.columns
+        .get(field)
+        .and_then(|col| col.get(row))
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Entity, world x/z, radius and submerged depth.
@@ -1278,6 +1294,8 @@ pub struct UnitRow {
     pub class: u32,
     /// Metres below the water surface. Zero for surfaced and land units.
     pub water_depth: f32,
+    /// A change to a nonzero sequence snaps the rotation.
+    pub rotation_snap: u32,
     /// Changing state (a blip seen, a unit lost to radar) snaps instead of
     /// interpolating.
     pub state: RowState,
@@ -1291,6 +1309,8 @@ struct Shown {
     y: f32,
     hx: f32,
     hy: f32,
+    rot: [f32; 4],
+    rotation_snap: u32,
     state: RowState,
 }
 
@@ -1318,10 +1338,10 @@ impl Streamer {
 
     /// The stream of `capture` (rows in entity order), units posed by their
     /// channels in `anims` and turned by their `orientations` (both by
-    /// entity). A unit's previous position is its position in the previous
-    /// capture (its current one if it is new); a unit with an
-    /// `Orientation` is drawn by it, any other by its velocity's turn or
-    /// its last one while it stands still.
+    /// entity). A unit interpolates from its previous position and rotation.
+    /// A new unit starts at its current transform. The current rotation comes
+    /// from its `Orientation` or its velocity, with standing units keeping
+    /// their last velocity heading.
     pub fn stream(
         &mut self,
         capture: &Capture,
@@ -1348,6 +1368,7 @@ impl Streamer {
                     radius: capture.columns[F_RADIUS][r],
                     class: profile(capture, r),
                     water_depth: water_depth(capture, r),
+                    rotation_snap: capture_word(capture, F_ROTATION_SNAP, r),
                     state: RowState::Own,
                 }
             })
@@ -1356,8 +1377,9 @@ impl Streamer {
     }
 
     /// The stream of `rows` (ascending by key), matched to the previous
-    /// stream by key; a row whose state changed starts where it is. Rows
-    /// whose key has channels in `anims` (ascending by key) are posed;
+    /// stream by key; a new row or a row whose state changed starts at its
+    /// current position and rotation. Rows whose key has channels in
+    /// `anims` (ascending by key) are posed;
     /// rows whose key has an `Orientation` (ascending too) are drawn by it.
     pub fn stream_rows(
         &mut self,
@@ -1402,6 +1424,9 @@ impl Streamer {
                 .get(o)
                 .filter(|x| x.0 == row.key)
                 .map_or_else(|| Orientation::along(hx, hy).rot, |x| x.1.rot);
+            let prev_rot = moved
+                .filter(|b| row.rotation_snap == 0 || b.rotation_snap == row.rotation_snap)
+                .map_or(rot, |b| b.rot);
             let words: [u32; ATTRIBUTE_COUNT] = [
                 x.to_bits(),
                 y.to_bits(),
@@ -1411,6 +1436,10 @@ impl Streamer {
                 rot[1].to_bits(),
                 rot[2].to_bits(),
                 rot[3].to_bits(),
+                prev_rot[0].to_bits(),
+                prev_rot[1].to_bits(),
+                prev_rot[2].to_bits(),
+                prev_rot[3].to_bits(),
                 row.radius,
                 row.class,
                 NO_POSE,
@@ -1426,6 +1455,8 @@ impl Streamer {
                 y,
                 hx,
                 hy,
+                rot,
+                rotation_snap: row.rotation_snap,
                 state: row.state,
             });
         }
@@ -1629,7 +1660,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ae_render::units::{ATTR_VIEW, ATTRIBUTES};
+    use ae_render::units::{ATTR_CLASS, ATTR_PREV_ROT_X, ATTR_ROT_X, ATTR_VIEW, ATTRIBUTES};
 
     fn capture(tick: u64, rows: &[(u64, f32, f32, f32, f32)]) -> Capture {
         let mut c = Capture {
@@ -1712,20 +1743,55 @@ mod tests {
             ),
             "4 keeps its turn (+x), 7 gets the default (+x), 9 keeps its velocity's (+y)"
         );
-        assert_eq!(second.columns[9], [1, 1, 0], "class = profile");
+        assert_eq!(
+            (column(&second, "prev_rot_y"), column(&second, "prev_rot_w"),),
+            (vec![0.0, 0.0, -half], vec![1.0, 1.0, half]),
+            "the previous tick's rotation: 4 and 9 keep theirs, 7 starts at its own"
+        );
+        assert_eq!(second.columns[ATTR_CLASS], [1, 1, 0], "class = profile");
         assert_eq!(second.tick, 2);
-        assert_eq!(second.columns[10], [NO_POSE; 3], "no poses without models");
+        assert_eq!(second.columns[ATTR_POSE], [NO_POSE; 3], "no poses without models");
         assert_eq!(column(&second, "water"), [0.0; 3]);
         assert_eq!(second.columns[ATTR_VIEW], [0; 3], "unfiltered stream");
         // 9 left.
         let third = s.stream(
-            &capture(3, &[(4, 41.0, 0.0, 1.0, 0.0), (7, 70.0, 5.0, 0.0, 0.0)]),
+            &capture(3, &[(4, 40.0, 1.0, 0.0, 1.0), (7, 70.0, 5.0, 0.0, 0.0)]),
             &[],
             &[],
             now,
             0.1,
         );
         assert_eq!(column(&third, "prev_x"), [40.0, 70.0]);
+        assert_eq!(
+            (column(&third, "rot_y"), column(&third, "prev_rot_y")),
+            (vec![-half, 0.0], vec![0.0, 0.0]),
+            "4 turned +x -> +y: the shaders interpolate from its old turn"
+        );
+    }
+
+    #[test]
+    fn a_rotation_snap_preserves_position_interpolation_and_applies_once() {
+        let mut streamer = Streamer::default();
+        let now = Instant::now();
+        let frame = |tick, x, vx, vy, sequence| {
+            let mut capture = capture(tick, &[(4, x, 0.0, vx, vy)]);
+            capture.columns.resize_with(F_ROTATION_SNAP, Vec::new);
+            capture.columns.push(vec![sequence]);
+            capture
+        };
+        streamer.stream(&frame(1, 4.0, 1.0, 0.0, 1), &[], &[], now, 0.1);
+        let snap = streamer.stream(&frame(2, 3.0, -1.0, 0.0, 2), &[], &[], now, 0.1);
+        assert_eq!(column(&snap, "prev_x"), [4.0]);
+        assert_eq!(
+            snap.columns[ATTR_PREV_ROT_X..ATTR_PREV_ROT_X + 4],
+            snap.columns[ATTR_ROT_X..ATTR_ROT_X + 4]
+        );
+        let smooth = streamer.stream(&frame(3, 3.0, 0.0, 1.0, 2), &[], &[], now, 0.1);
+        assert_eq!(
+            smooth.columns[ATTR_PREV_ROT_X..ATTR_PREV_ROT_X + 4],
+            snap.columns[ATTR_ROT_X..ATTR_ROT_X + 4]
+        );
+        assert_ne!(column(&smooth, "rot_y"), column(&smooth, "prev_rot_y"));
     }
 
     #[test]
@@ -1739,9 +1805,11 @@ mod tests {
             radius: 1.0f32.to_bits(),
             class: 0,
             water_depth: if state == RowState::Seen { 4.5 } else { 0.0 },
+            rotation_snap: 0,
             state,
         });
-        let stream = Streamer::default().stream_rows(1, &rows, &[], &[], Instant::now(), 0.0);
+        let mut streamer = Streamer::default();
+        let stream = streamer.stream_rows(1, &rows, &[], &[], Instant::now(), 0.0);
         assert_eq!(column(&stream, "water"), [0.0, 4.5, 0.0, 0.0]);
         assert_eq!(stream.columns[ATTR_VIEW], [0, 1, 2, 3]);
         // The shaders' `eligible` (`view <= VIEW_SEEN`) takes Own and Seen,
@@ -1749,6 +1817,20 @@ mod tests {
         let eligible = |state: RowState| state as u32 <= ae_render::units::VIEW_SEEN;
         assert!(eligible(RowState::Own) && eligible(RowState::Seen));
         assert!(!eligible(RowState::Blip) && !eligible(RowState::Ghost));
+
+        let revealed = UnitRow {
+            state: RowState::Seen,
+            x: 5.0,
+            vy: 1.0,
+            ..rows[2]
+        };
+        let stream = streamer.stream_rows(2, &[revealed], &[], &[], Instant::now(), 0.0);
+        assert_eq!(column(&stream, "prev_x"), [5.0]);
+        assert_eq!(
+            stream.columns[ATTR_PREV_ROT_X..ATTR_PREV_ROT_X + 4],
+            stream.columns[ATTR_ROT_X..ATTR_ROT_X + 4],
+            "a revealed blip starts at its current rotation"
+        );
     }
 
     /// A unit with an `Orientation` is drawn by it, not by its velocity:
@@ -1777,9 +1859,9 @@ mod tests {
         let forward = Orientation::along(1.0, 0.0).rot;
         let expected = [back.rot, tilt.rot, forward, forward];
         for k in 0..4 {
-            let words: Vec<u32> = stream.columns[4 + k].clone();
+            let words = &stream.columns[ATTR_ROT_X + k];
             assert_eq!(
-                words,
+                *words,
                 expected.map(|r| r[k].to_bits()),
                 "row rotation {k}: 1 and 2 drawn by their `Orientation` bit-exact, not by their velocity; 3 and 4 by theirs"
             );
@@ -1793,7 +1875,7 @@ mod tests {
     #[test]
     fn streams_carry_poses() {
         use ae_render::units::{Cell, POSE_CELLS, POSE_MANUAL, RECORD_CELLS};
-        use ae_sdk::anim::{manual_flags, manual_kind};
+        use ae_sdk::anim::{Axis, manual_flags, manual_kind};
         let arm = model_id("arm");
         // Class = entity % 3: class 0 is drawn with the arm, class 1 not.
         let mut s = Streamer {
@@ -1803,6 +1885,7 @@ mod tests {
         let turned = |angle: f32, model: u64| {
             let mut a = Anim::new(model);
             (a.bone[0], a.manual_kind[0]) = (1, manual_kind::TURN);
+            a.top_speed[0] = 1.0;
             let (sn, c) = (angle * 0.5).sin_cos();
             a.value[0] = [0.0, sn, 0.0, c];
             // Not shown yet: not in the record.
@@ -1813,6 +1896,19 @@ mod tests {
         };
         let record = crate::poser::record(&turned(0.1, arm), 7);
         assert_eq!(record[0], [7, 1, 0, 0], "the tick, one entry shown");
+        let mut instant = turned(0.1, arm);
+        instant.top_speed[0] = 0.0;
+        assert_eq!(crate::poser::record(&instant, 7)[0], [7, 1, 1, 0]);
+        instant.manual_flags[0] = manual_flags::PENDING;
+        assert_eq!(crate::poser::record(&instant, 7)[0], [7, 1, 0, 0]);
+        let mut now_commands = Anim::new(arm);
+        now_commands.turn_now(1, Axis::UP, 0.5);
+        now_commands.move_now(1, [1.0, 0.0, 0.0]);
+        now_commands.scale_now(1, [1.0, 2.0, 1.0]);
+        now_commands.spin(2, Axis::UP, 0.0);
+        assert_eq!(crate::poser::record(&now_commands, 7)[0], [7, 0, 0, 0]);
+        now_commands.manual_flags.fill(0); // The simulation has applied the commands.
+        assert_eq!(crate::poser::record(&now_commands, 7)[0], [7, 4, 0b0111, 0]);
         assert_eq!(
             record[3],
             [3 | 1 << 16, 2 | 1 << 8, 0.5f32.to_bits(), 0.25f32.to_bits()],

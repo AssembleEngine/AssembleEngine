@@ -11,7 +11,8 @@
 //! * `start` (tick 0): the units in a grid, each with a `Walker`, a `Body`
 //!   and an `Anim` on [`MODEL`].
 //! * `steer`: a unit walks for [`WALK_TICKS`], then stands for
-//!   [`STAND_TICKS`] (staggered by entity), turning back each time.
+//!   [`STAND_TICKS`] (staggered by entity), snapping to the reverse heading
+//!   when it walks again.
 //! * `animate`: the clips and manual joints from what the unit does, with
 //!   no script: the standing clip always on layer 0, the walking clip on
 //!   layer 1 by the metre while it walks (blended in and out), the head
@@ -25,6 +26,7 @@
 
 use ae_sdk::anim::{self, Anim, Axis, Bounds, model_id};
 use ae_sdk::nav::Body;
+use ae_sdk::rotation::RotationSnap;
 use ae_sdk::{Component, Run, Spawn, schedule, system};
 
 /// The units' model.
@@ -88,16 +90,21 @@ fn start(run: &Run) {
             })
             .with(&anim)
             .with(&bounds)
+            .with(&RotationSnap::default())
             .submit();
     }
 }
 
-#[system(write(Body, Walker))]
+#[system(write(Body, Walker, RotationSnap))]
 fn steer(run: &Run) {
     let (bodies, walkers, ids) = (run.write::<Body>(), run.write::<Walker>(), run.entities());
+    let snaps = run.write::<RotationSnap>();
     for i in run.rows() {
         let (b, w) = (&mut bodies[i], &mut walkers[i]);
         if walking(run.tick(), ids[i]) {
+            if b.vx == 0.0 {
+                snaps[i].snap();
+            }
             b.vx = w.dir * WALK_SPEED * b.radius;
         } else {
             if b.vx != 0.0 {
