@@ -10,8 +10,8 @@ use ae_render::library::{LibraryEnv, LibraryPass, LibraryResource, check, resolv
 use ae_render::module::{DeclareTarget, RenderModule, build, engine};
 use ae_render::terrain::app::{TerrainOutput, native_graph};
 use ae_render_abi::module::{
-    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, Program,
-    ProgramTable,
+    DECLARE_PARTICLES, DECLARE_READBACK, DECLARE_SHADOWS, DECLARE_UNITS, DECLARE_WATER, FrameInput, MODULE_VERSION,
+    Program, ProgramTable,
 };
 use ash::vk;
 
@@ -217,13 +217,30 @@ fn broken_modules_are_rejected() {
     // An old-ABI module is refused by number, before any other export is
     // read (its `declare` has the old signature).
     let e = load(&wat_v1()).unwrap_err();
-    assert_eq!(e, "render module ABI version 1; this host runs 3 (rebuild the module)");
+    assert_eq!(
+        e,
+        format!("render module ABI version 1; this host runs {MODULE_VERSION} (rebuild the module)")
+    );
     let e = load(&wat(7, "i32.const 0", "i32.const 0", "")).unwrap_err();
-    assert!(e.contains("version 7") && e.contains("runs 3"), "{e}");
-    // Version 2 is still accepted while its per-pass programs work.
-    let e =
-        load(r#"(module (memory (export "memory") 1) (func (export "ae_render_version") (result i32) i32.const 2))"#)
-            .unwrap_err();
+    assert!(
+        e.contains("version 7") && e.contains(&format!("runs {MODULE_VERSION}")),
+        "{e}"
+    );
+    // Version 2 is refused: its per-pass fullscreen form was dropped in
+    // contract version 4.
+    let bare = |version: u32| {
+        format!(
+            r#"(module (memory (export "memory") 1) (func (export "ae_render_version") (result i32) i32.const {version}))"#
+        )
+    };
+    let e = load(&bare(2)).unwrap_err();
+    assert!(
+        e.contains("version 2") && e.contains(&format!("runs {MODULE_VERSION}")),
+        "{e}"
+    );
+    // Version 3 still loads (its programs use the global set), so the next
+    // missing export is the error.
+    let e = load(&bare(3)).unwrap_err();
     assert!(e.contains("ae_render_declare_input"), "{e}");
 
     let target = |width, height, format| DeclareTarget {
@@ -237,20 +254,28 @@ fn broken_modules_are_rejected() {
         gamut: Default::default(),
     };
     // Loads, but hands back pointers outside its memory, or traps.
-    let mut m = RenderModule::load(&engine, wat(2, "i32.const 70000", "unreachable", "").as_bytes()).unwrap();
+    let mut m = RenderModule::load(
+        &engine,
+        wat(MODULE_VERSION, "i32.const 70000", "unreachable", "").as_bytes(),
+    )
+    .unwrap();
     let e = format!("{:#}", m.declare(&target(8, 8, vk::Format::B8G8R8A8_SRGB)).unwrap_err());
     assert!(e.contains("outside the module's memory"), "{e}");
     let e = format!("{:#}", m.frame(&FrameInput::default()).unwrap_err());
     assert!(e.contains("ae_render_frame") || e.contains("unreachable"), "{e}");
     // `declare` returning 0 declines the target.
-    let mut m = RenderModule::load(&engine, wat(2, "i32.const 0", "i32.const 0", "").as_bytes()).unwrap();
+    let mut m = RenderModule::load(
+        &engine,
+        wat(MODULE_VERSION, "i32.const 0", "i32.const 0", "").as_bytes(),
+    )
+    .unwrap();
     assert_eq!(m.declare(&target(8, 8, vk::Format::B8G8R8A8_SRGB)).unwrap(), None);
     // A graph pointer in bounds but garbage behind it reaches the decoder,
     // which rejects it (not this layer's job; checked here end to end).
     let mut m = RenderModule::load(
         &engine,
         wat(
-            2,
+            MODULE_VERSION,
             "i32.const 16",
             "i32.const 0",
             r#"(data (i32.const 16) "\40\00\00\00\08\00\00\00\40\00\00\00\08\00\00\00")"#,

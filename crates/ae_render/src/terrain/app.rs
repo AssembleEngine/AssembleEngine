@@ -575,10 +575,8 @@ pub struct TerrainApp {
     module: Option<ModuleState>,
     gpu: Option<Arc<GpuDevice>>,
     frames_in_flight: usize,
-    /// Linear, clamped: what fullscreen programs sample with.
-    sampler: vk::Sampler,
-    /// Its global sampler-array index once registered (the post passes use
-    /// it instead of the object).
+    /// The module's sampler in the global sampler array once registered
+    /// (the fullscreen programs push its index).
     sampler_handle: Option<crate::bindless::SamplerHandle>,
     pending_module: Arc<Mutex<Option<Vec<u8>>>>,
     module_status: Arc<Mutex<ModuleStatus>>,
@@ -685,7 +683,6 @@ impl TerrainApp {
             module: None,
             gpu: None,
             frames_in_flight: 1,
-            sampler: vk::Sampler::null(),
             sampler_handle: None,
             pending_module: Arc::default(),
             module_status: Arc::default(),
@@ -1269,7 +1266,6 @@ impl RenderApp for TerrainApp {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let handle = bindless.sampler(&info)?;
-        self.sampler = bindless.sampler_object(handle);
         self.sampler_handle = Some(handle);
         self.create_output(gpu, bindless, target, frames_in_flight)?;
         self.bloom = Some(Bloom::new(gpu, bindless, frames_in_flight).context("bloom")?);
@@ -1876,9 +1872,8 @@ impl RenderApp for TerrainApp {
 
     fn destroy(&mut self, gpu: &Arc<GpuDevice>) {
         self.destroy_module_programs(gpu);
-        // The registry owns the sampler object; this is only the handle
-        // recording passes use.
-        self.sampler = vk::Sampler::null();
+        // The registry owns the sampler; this is only the handle recording
+        // passes use.
         if let Some(mut tonemap) = self.tonemap.take() {
             tonemap.destroy(gpu);
         }
@@ -2133,7 +2128,6 @@ impl TerrainApp {
             wave_patch: self.wave_patch,
             lights: self.lights.as_ref(),
             programs: self.module.as_ref().map(|m| m.programs.as_slice()),
-            sampler: self.sampler,
             sampler_index: self.sampler_handle.map_or(0, |h| h.index),
             update_lod: self.update_lod,
             wireframe: self.wireframe,
@@ -2157,7 +2151,6 @@ struct SceneRecorder<'a> {
     wave_patch: Option<WavePatch>,
     lights: Option<&'a LightRenderer>,
     programs: Option<&'a [Option<(FullscreenProgram, usize)>]>,
-    sampler: vk::Sampler,
     sampler_index: u32,
     update_lod: bool,
     wireframe: Wireframe,
@@ -2409,7 +2402,6 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                     ctx,
                     &images,
                     crate::fullscreen::Sampler {
-                        object: self.sampler,
                         index: self.sampler_index,
                     },
                 )?;
@@ -3192,8 +3184,8 @@ impl TerrainApp {
         key: DeclareKey,
         bindless: &mut crate::bindless::Bindless,
     ) -> Result<ModuleGraph> {
-        // Contract 2 modules keep the per-pass form; 3 may use either.
-        let legacy_only = module.version() < 3;
+        // Contract 4 has one fullscreen form: the global set's bindless
+        // arrays.
         let flags = if env.units { DECLARE_UNITS } else { 0 }
             | if self.output == TerrainOutput::Readback {
                 DECLARE_READBACK
@@ -3308,7 +3300,6 @@ impl TerrainApp {
                             *sampled,
                             formats,
                             self.frames_in_flight,
-                            legacy_only,
                         )?,
                         offset,
                     ));

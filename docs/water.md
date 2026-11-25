@@ -168,7 +168,7 @@ barriers are inferred):
 
 Ownership is decided by the baked graph, not the flags: `terrain.frag` loses the tint and
 caustics only in a graph with `water.underwater`; `water.draw` samples refraction only in
-a graph with `water.refraction`; a v3 module, `render/post` or `render/legacy` therefore
+a graph with `water.refraction`; `render/post`, which declares no water pass, therefore
 keeps M7 water byte for byte. The M7 shaders never read `WaterLook`, so their SPIR-V and
 frames stay identical (`tests/spirv.rs`, `tests/gpu.rs` `m16_baseline_*`).
 

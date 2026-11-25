@@ -21,7 +21,8 @@ use std::time::Instant;
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// What a module is asked to declare for: the target, the scene's flags and
-/// the output's display spec (contract version 2).
+/// the output's display spec (contract version 2 added the display spec;
+/// version 4 is current).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeclareTarget {
     pub width: u32,
@@ -177,10 +178,11 @@ impl WasmModule {
             .context("render module version")?;
         // The version comes first: a module built for another ABI is refused
         // by number, never called with the wrong signature. Version 2 is
-        // still accepted while its fullscreen programs keep the per-pass
-        // form; the next contract version drops it.
+        // refused because the per-pass fullscreen form it needs was dropped
+        // in contract version 4; version 3 is still accepted (its programs
+        // use the global set).
         ensure!(
-            (2..=abi::MODULE_VERSION).contains(&v),
+            (3..=abi::MODULE_VERSION).contains(&v),
             "render module ABI version {v}; this host runs {} (rebuild the module)",
             abi::MODULE_VERSION
         );

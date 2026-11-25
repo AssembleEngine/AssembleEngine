@@ -74,12 +74,9 @@ test_flat.frag f905f2e6571b8399
 test_mixed.frag d768aa0745d7c8b4
 test_mrt.frag 9b3f96dec6ab67df
 test_oob.frag 2ccf1e6ec29d18a7
-test_post.frag 4a289b977e8b4c04
-test_post_push.frag 6d55c3fbf667a570
-test_post_storage.frag 4a326063aa77657c
 test_program.frag bb0c82c752d59f20
 test_rect.vert 91d4a2bf7a43dd5c
-test_sample_shore.frag febabc646e19eb33
+test_sample_shore.frag 8656aceacaa24ef1
 test_sample_texel.comp 3f05284374cad937
 test_water_refract.comp 536f5a4def4ba70a
 text.vert 2a973f779af1f254

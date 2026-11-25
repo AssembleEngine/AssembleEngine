@@ -4769,9 +4769,9 @@ change expected).
 one global descriptor set per frame slot, and `std140` blocks and the handle tables are uniform
 buffers in a uniform array sized from the device. The remaining GPU cost against the pre-M15
 baseline `335e770` (`gpu_total` +0.8% to +5.7%, the lights list +10% on `lights-200`; step G
-has the numbers and conditions) was accepted as the price of the global set. Open follow-ups
-are under TODO (the per-pass fullscreen form at contract version 4, the graph-name hash). The
-text below is the design as written before step A, with each step's record.
+has the numbers and conditions) was accepted as the price of the global set. The two follow-ups
+left by step B are done in the leftovers below. The text below is the design as written before
+step A, with each step's record.
 
 Where the renderer is today: every pass's descriptor set layout is its shader's set/binding
 contract (`pipeline::set_layout`), image views are written into per-pass sets per frame slot,
@@ -5400,10 +5400,12 @@ set at index 2 next to their old sets. How handles reach a shader:
     scenes report none.
 
   Built (2026-11-23). Every fullscreen program now reads the global set; no shader pins
-  `AE_BINDLESS_SET` off 0 and the per-pass form survives only for contract-2 modules.
+  `AE_BINDLESS_SET` off 0 and the per-pass form survives only for contract-2 modules (both the
+  form and version 2 were removed at contract 4; see the leftovers below).
   - `MODULE_VERSION` is 3 and the host accepts 2 and 3. `RenderModule::version()` gates the
     form: a version-2 module's programs must use the per-pass form, a version-3 module may use
-    either. `tests/module.rs` checks that a version-2 module still loads.
+    either. `tests/module.rs` checks that a version-2 module still loads. (Contract 4 keeps
+    only version 3 and the bindless form; the leftovers below record the change.)
   - `reflect` reads runtime arrays (`OpTypeRuntimeArray`), separate `OpTypeImage` and
     `OpTypeSampler`, and a push block's size (`push_bytes`, replacing the `push_constants`
     flag); aliasing declarations at one binding are deduplicated. `check` returns the
@@ -5424,11 +5426,11 @@ set at index 2 next to their old sets. How handles reach a shader:
   - Programs are built at `declare` (the trait now takes the registry) and register their
     handles in a group: `FullscreenProgram` and the engine `BindlessProgram` (tonemap, bloom,
     encode) own their uniforms' and table's slotted handles and retire them when a
-    declaration is replaced. `render/legacy` is a contract-2 fixture module; its shaders
-    compile with the engine's include path (`render/post/build.rs` and
-    `graph_file::inline` add it).
-  - Tests: `a_contract_2_module_renders_its_per_pass_programs` (tint 0.5/0.25/0.75 through a
-    gain of 1/0.5/1 reads back as expected), `a_mixed_program_form_fails_at_load`,
+    declaration is replaced. `render/legacy` is a contract-2 fixture module (deleted with the
+    form at contract 4); its shaders compile with the engine's include path
+    (`render/post/build.rs` and `graph_file::inline` add it).
+  - Tests: `a_contract_2_module_renders_its_per_pass_programs` (deleted with the form; tint
+    0.5/0.25/0.75 through a gain of 1/0.5/1 reads back as expected), `a_mixed_program_form_fails_at_load`,
     `a_program_samples_64_images` (one pass, 64 sampled intents),
     `a_retired_handle_draws_the_fallback_and_logs_once` (white, one log line) and
     `gpu_assisted_validation_reports_an_unbound_handle` (`AE_VK_GPU_AV=1` reports "Descriptor
@@ -5497,6 +5499,29 @@ set at index 2 next to their old sets. How handles reach a shader:
     The runs are under `bench/results/m15-g` (before the fix), `m15-g-fix` (blocks as uniform
     buffers), `m15-g-tables` (the handle tables too) and `m15-g-locals` (the reverted locals
     variant).
+
+##### Leftovers (done 2026-11-25)
+
+- **Contract 4 drops the per-pass fullscreen form.** `MODULE_VERSION` is 4; the host accepts 3
+  and 4 and refuses 2 at load. `fullscreen.rs` has only the bindless `Form`; `check` refuses a
+  per-pass binding (the uniform block or a combined image sampler) by binding and names contract
+  version 4. `test_post.frag`, `test_post_storage.frag`, `test_post_push.frag` and
+  `render/legacy` are deleted; M16.5's shore reader moved to the bindless form, and
+  `tests/bindless_only` no longer exempts `fullscreen.rs`, `test_sample_shore.frag` or the
+  `test_post*` fixtures. `tests/module.rs` checks that version 2 is refused and version 3 still
+  loads.
+- **The graph-name hash is cached.** `Executor` keeps an FNV-1a hash of the reachable resources'
+  ids and names and the handles by resource id. `set_graph` compares one hash instead of
+  building a `BTreeSet` from the names, and `execute` indexes the handles instead of hashing each
+  resource's name into the map. A rename with an unchanged topology still re-keys the handles
+  (the hash differs); a rebake rebuilds both. Step B measured the old check at ~3% of
+  `cpu_frame`; no benchmark was run for this change.
+- `tests/bindless_only` also lists `text.rs` and its two MSDF shaders, which own a small fixed
+  set by design.
+- Tests: `cargo test --workspace`, `tools/fmt.sh --check` and clippy are clean. The four affected
+  GPU tests pass: `graph_handles_survive_resize_and_rebake` (now with a rename),
+  `a_per_pass_program_fails_at_load`, `a_program_samples_64_images` and
+  `a_unique_water_shore_consumer_keeps_its_bake_live`.
 
 ##### Not part of M15
 
@@ -5891,11 +5916,6 @@ when several commands affect the same bone.
 
 ## TODO (open, not a priority now)
 
-- M15: drop the per-pass fullscreen form at the next contract version (`MODULE_VERSION` 4):
-  delete `Form::Legacy`, its `Legacy` struct in `fullscreen.rs` and the `legacy_only` check,
-  `test_post.frag`/`test_post_storage.frag` and `render/legacy`, and refuse version-2 modules.
-- M15: replace the per-frame graph-name check in `Executor::set_graph`/`execute` with a cached hash
-  of the names, to remove the ~3% `cpu_frame` cost measured after step B.
 - Shared frame constants (borrowed from Recoil's `UniformConstants`): one per-slot std140 block,
   written once per frame at a fixed reserved uniform-array index that every shader reads through a
   common include without a handle-table lookup. Contents: the camera's view, projection and

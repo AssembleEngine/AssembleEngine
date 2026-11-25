@@ -255,6 +255,13 @@ pub struct Executor<R> {
     slots: Vec<Slot>,
     bindless: Bindless,
     graph_handles: BTreeMap<String, GraphHandles>,
+    /// A hash of the reachable resource names of the baked graph, and each
+    /// resource's handles by id. The names are not in the topology
+    /// signature; the hash catches a rename without building a name map
+    /// every frame, and the vector replaces the per-frame name lookup in
+    /// [`Self::execute`] (M15 leftovers).
+    graph_name_hash: u64,
+    graph_handles_by_id: Vec<GraphHandles>,
     external_states: BTreeMap<u64, AccessState>,
     frame: u64,
     stats: ExecutorStats,
@@ -317,6 +324,8 @@ impl<R> Executor<R> {
             slots,
             bindless,
             graph_handles: BTreeMap::new(),
+            graph_name_hash: 0,
+            graph_handles_by_id: Vec::new(),
             external_states: BTreeMap::new(),
             frame: 0,
             stats: ExecutorStats::default(),
@@ -391,9 +400,10 @@ impl<R> Executor<R> {
         {
             // Names are not part of the signature, so a renamed resource
             // still needs its handles re-keyed even though nothing rebaked.
-            // That writes descriptors directly and needs an idle device; the
-            // common case (every frame, the same names) touches nothing.
-            if !self.graph_names_match(&graph, &baked) {
+            // The cached hash makes the common case (every frame, the same
+            // names) one comparison; the re-key writes descriptors directly
+            // and needs an idle device.
+            if name_hash(&graph, &baked) != self.graph_name_hash {
                 self.gpu.wait_idle();
                 self.sync_graph_handles(&graph, &baked)?;
             }
@@ -467,19 +477,6 @@ impl<R> Executor<R> {
         self.baked = Some(baked);
         self.graph = graph;
         Ok(true)
-    }
-
-    /// Whether `graph` names exactly the resources the registry holds
-    /// handles for (the same names `sync_graph_handles` would key).
-    fn graph_names_match(&self, graph: &FrameGraph<R>, baked: &BakedGraph) -> bool {
-        let names: BTreeSet<&str> = baked
-            .resources
-            .iter()
-            .enumerate()
-            .filter(|(_, resource)| resource.reachable && resource.physical.is_some())
-            .map(|(index, _)| graph.resource_name(ResourceId(index as u32)))
-            .collect();
-        names.len() == self.graph_handles.len() && names.iter().all(|name| self.graph_handles.contains_key(*name))
     }
 
     /// Keep each graph resource's name and handles across bakes. The GPU is
@@ -619,6 +616,16 @@ impl<R> Executor<R> {
                 self.bindless.retire_buffer(handle);
             }
         }
+        let mut by_id = vec![GraphHandles::default(); graph.resources.len()];
+        for (index, resource) in baked.resources.iter().enumerate() {
+            if !resource.reachable || resource.physical.is_none() {
+                continue;
+            }
+            let name = graph.resource_name(ResourceId(index as u32));
+            by_id[index] = new.get(name).copied().unwrap_or_default();
+        }
+        self.graph_handles_by_id = by_id;
+        self.graph_name_hash = name_hash(graph, baked);
         self.graph_handles = new;
         Ok(())
     }
@@ -749,11 +756,7 @@ impl<R> Executor<R> {
                 Some(physical) => {
                     let entry = &slot.physical[physical as usize];
                     let identity = (u64::from(token.slot as u32) << 32) | physical as u64;
-                    let handles = self
-                        .graph_handles
-                        .get(graph.resource_name(ResourceId(index as u32)))
-                        .copied()
-                        .unwrap_or_default();
+                    let handles = self.graph_handles_by_id.get(index).copied().unwrap_or_default();
                     if let Some(image) = &entry.image {
                         Some(Binding::Image(ImageBinding {
                             initial: vk::ImageLayout::UNDEFINED,
@@ -1204,6 +1207,28 @@ impl<R> Drop for Executor<R> {
             }
         }
     }
+}
+
+/// FNV-1a over the reachable resources' ids and names in declaration order.
+/// The topology signature excludes names; `set_graph` compares this so a
+/// rename re-keys the handles without building a name set every frame.
+fn name_hash<R>(graph: &FrameGraph<R>, baked: &BakedGraph) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for (index, resource) in baked.resources.iter().enumerate() {
+        if !resource.reachable || resource.physical.is_none() {
+            continue;
+        }
+        hash ^= index as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        let name = graph.resource_name(ResourceId(index as u32)).as_bytes();
+        hash ^= name.len() as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for &byte in name {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 fn destroy_pass_cmds(device: &ash::Device, cmds: &mut Vec<(vk::CommandPool, vk::CommandBuffer)>) {

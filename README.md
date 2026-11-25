@@ -48,7 +48,7 @@ end-of-tick capture of `Body`/`NavAgent` feeds an instance stream, and the GPU c
 waiting for the sim. The frame graph can come from a render module (WASM): it wires engine library
 passes (terrain, units) and its own fullscreen shaders (reflected and checked against the declared
 passes), and is swapped while running when its sources change (`ae-client --render-module post`). The
-render ABI (contract version 2) carries the output's display spec, so a module declares the same HDR
+render ABI (contract version 4) carries the output's display spec, so a module declares the same HDR
 tail as the native graph (`--render-module post --hdr auto`).
 Terrain edits the sim makes reach the render heightfield (`ae-client --quake 60`): the nav service
 publishes landed ground changes, and the renderer patches its textures and error pyramid in place.
@@ -134,8 +134,9 @@ samplers, buffers and storage images from one global descriptor set per frame sl
 Frames are byte-identical to before (all 61 GPU-test captures). Every engine pipeline and every
 fullscreen program (the engine's tonemap, bloom and encode, and a render module's own shaders)
 reads the global set at 0: a program's std140 block, its sampled images and its sampler are
-handles in a small per-program table, reached through a 16-byte push block. A contract-2 module
-may still use the old per-pass form for one version. `bench-diff` against the pre-M15 baseline
+handles in a small per-program table, reached through a 16-byte push block. Contract version 4
+dropped the old per-pass form; a version-3 module that still declares it is refused at program
+build, and a version-2 module at load. `bench-diff` against the pre-M15 baseline
 (`335e770`): `gpu_total` is within +0.8% to +5.7%, and 2 of 749 metrics regress (a noisy water
 pass and the lights list at +10% on one scene), accepted as the cost of the global set. Details: [docs/PLAN.md](docs/PLAN.md)
 "M15 — design".

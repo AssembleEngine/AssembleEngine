@@ -54,25 +54,24 @@
 //! fullscreen pass (name = a label, data = fragment shader SPIR-V;
 //! `uniform bytes` = the size of its std140 block, 0 for none).
 //!
-//! A fullscreen shader has one of two forms, and the host reflects which
-//! (they cannot be mixed):
+//! A fullscreen shader has the bindless form (contract version 4; version 3
+//! also used it), and nothing else:
 //!
-//! * **Per-pass** (contract version 2 only): set 0 binding 0 is the
-//!   uniform block, bindings 1.. are one combined image sampler per
-//!   `Sampled` intent, in intent order.
-//! * **Bindless** (contract version 3): only the global set. Binding 0 is
-//!   `texture2D images[]`, binding 1 `sampler samplers[]`, and binding 4 the
-//!   `std140` blocks: the program's block and its handle table
-//!   (`uvec4 handles[]`). Both are uniform buffers (`uniform` blocks are
-//!   uniform buffers, not storage buffers: the driver's uniform path is
-//!   cheaper). A push block of at most 16 bytes
-//!   carries `uniforms` (the block's index in the array), `sampler` (the
-//!   sampler's index), `handles` (the table's index) and a pad word. The
-//!   table holds the pass's sampled-image indices in intent order, written
-//!   by the host once per bake: the indices are the same in every frame
-//!   slot.
+//! * **Bindless**: only the global set. Binding 0 is `texture2D images[]`,
+//!   binding 1 `sampler samplers[]`, and binding 4 the `std140` blocks: the
+//!   program's block and its handle table (`uvec4 handles[]`). Both are
+//!   uniform buffers (`uniform` blocks are uniform buffers, not storage
+//!   buffers: the driver's uniform path is cheaper). A push block of at most
+//!   16 bytes carries `uniforms` (the block's index in the array), `sampler`
+//!   (the sampler's index), `handles` (the table's index) and a pad word.
+//!   The table holds the pass's sampled-image indices in intent order,
+//!   written by the host once per bake: the indices are the same in every
+//!   frame slot.
 //!
-//! The next contract version drops the per-pass form.
+//! The per-pass form (set 0: the uniform block, then a combined image
+//! sampler per sampled intent) ended at contract version 3. A version-4
+//! module that declares it is refused at program build, naming the binding;
+//! a version-2 module is refused at load.
 
 pub const EXPORT_VERSION: &str = "ae_render_version";
 pub const EXPORT_DECLARE_INPUT: &str = "ae_render_declare_input";
@@ -82,10 +81,11 @@ pub const EXPORT_FRAME: &str = "ae_render_frame";
 /// The contract version: 2 adds [`DeclareInput`] (the display spec) and the
 /// display rule; 3 moves a fullscreen program's resources into the global
 /// bindless set (the program table is unchanged; the shader's form is
-/// reflected, and either form is accepted for version 3 only). A version 1
-/// module (its `declare` took the four scalars) is refused at load, never
-/// called with the new signature.
-pub const MODULE_VERSION: u32 = 3;
+/// reflected); 4 drops the per-pass form, so only the bindless form remains.
+/// A version 1 module (its `declare` took the four scalars) and a version 2
+/// module (it needs the per-pass form) are refused at load, never called
+/// with the wrong signature.
+pub const MODULE_VERSION: u32 = 4;
 
 /// `declare` flag: the scene has units (`units.*` resources and passes exist).
 pub const DECLARE_UNITS: u32 = 1 << 0;

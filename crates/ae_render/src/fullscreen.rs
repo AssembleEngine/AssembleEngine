@@ -3,17 +3,10 @@
 //! its pass's colour attachments, with the engine's `fullscreen.vert`.
 //!
 //! The shader is reflected ([`reflect`]) and checked against the pass
-//! ([`check`]) before a pipeline is made. Two forms exist, and a shader
-//! uses exactly one (contract version 3 accepts both; version 2 modules
-//! may only use the first, and the next version drops it):
+//! ([`check`]) before a pipeline is made. Contract version 4 has one form
+//! ([`Form::Bindless`]); the per-pass form that version 3 still accepted was
+//! dropped, and a shader that declares it is refused by binding.
 //!
-//! * **Per-pass** ([`Form::Legacy`]): set 0, binding 0 is the uniform block
-//!   when the program declares `uniform_bytes > 0`: from the end of its
-//!   last member up to that rounded to 16 bytes (std140), so a module may
-//!   send the bare struct or it padded; set 0, bindings 1..=n are one
-//!   combined image sampler (2D) per `Sampled` intent of the pass, in
-//!   intent order (sampled linearly, clamped). Nothing else: no storage
-//!   buffers or images, no push constants.
 //! * **Bindless** ([`Form::Bindless`]): only the global set (M15 F).
 //!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`, and
 //!   binding 4 the `std140` blocks: the program's block and its handle
@@ -23,7 +16,7 @@
 //!   index), `handles` (the table's index) and a pad word. The table holds
 //!   the pass's sampled-image indices, in intent order.
 //!
-//! Either form writes one fragment output per colour attachment, at
+//! The program writes one fragment output per colour attachment, at
 //! locations 0..n. Colour attachments blend with straight alpha
 //! (`src_alpha, one_minus_src_alpha`), so a shader writing alpha 1 replaces
 //! and an overlay writing less blends over what the target holds.
@@ -43,12 +36,9 @@ use std::collections::HashMap;
 /// Which interface a checked program's shader uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Form {
-    /// Set 0: the uniform block at binding 0 and a combined image sampler
-    /// per sampled intent at 1.. (contract version 2).
-    Legacy,
     /// Only the global set: sampled images at 0, samplers at 1, the std140
-    /// blocks and the handle table at 3, and a push block (contract
-    /// version 3).
+    /// blocks and the handle table at 4, and a push block (contract
+    /// version 4; version 3 also used it).
     Bindless,
 }
 
@@ -292,16 +282,10 @@ pub fn reflect(spirv: &[u8]) -> Result<Reflection> {
 pub const PUSH_BYTES: u32 = 16;
 
 /// Check a reflected shader against its pass: `uniform_bytes` declared,
-/// `sampled` inputs, `colors` attachments. The form is detected and the
-/// two cannot be mixed. `legacy_only` is set for a contract-2 module, whose
-/// programs must use the per-pass form.
-pub fn check(
-    r: &Reflection,
-    uniform_bytes: u32,
-    sampled: usize,
-    colors: usize,
-    legacy_only: bool,
-) -> Result<Form, String> {
+/// `sampled` inputs, `colors` attachments. Contract version 4 has only the
+/// bindless form; the per-pass form that version 3 still accepted was
+/// dropped, so a shader that declares it is refused by binding.
+pub fn check(r: &Reflection, uniform_bytes: u32, sampled: usize, colors: usize) -> Result<Form, String> {
     if !r.fragment_main {
         return Err("no fragment entry point `main`".into());
     }
@@ -312,33 +296,19 @@ pub fn check(
             r.outputs
         ));
     }
-    // A mix of the two forms names the binding that starts it.
-    let bindless_kind = |kind: &BindingKind| {
-        matches!(
-            kind,
-            BindingKind::SampledImageArray
-                | BindingKind::SamplerArray
-                | BindingKind::StorageBufferArray
-                | BindingKind::UniformBufferArray
-        )
-    };
-    let any_bindless = r.bindings.iter().any(|(_, _, kind)| bindless_kind(kind));
-    let any_per_pass = r
+    // The per-pass form (set 0: the uniform block, then a combined image
+    // sampler per sampled intent) ended at contract version 3.
+    if let Some((set, binding, kind)) = r
         .bindings
         .iter()
-        .any(|(_, _, kind)| matches!(kind, BindingKind::UniformBuffer(_) | BindingKind::CombinedImageSampler));
-    if any_bindless && any_per_pass {
-        let (set, binding, kind) = r
-            .bindings
-            .iter()
-            .find(|(_, _, kind)| bindless_kind(kind))
-            .expect("a bindless binding");
+        .find(|(_, _, kind)| matches!(kind, BindingKind::UniformBuffer(_) | BindingKind::CombinedImageSampler))
+    {
         return Err(format!(
-            "set {set} binding {binding} ({kind:?}) mixes the bindless arrays with the per-pass form"
+            "set {set} binding {binding} ({kind:?}) is the per-pass fullscreen form, which contract version 4 dropped; use the global set's bindless arrays"
         ));
     }
     // The bindless form: the global set's arrays and a small push block.
-    let bindless = r.bindings.iter().all(|(set, binding, kind)| {
+    let bindless = |set: &u32, binding: &u32, kind: &BindingKind| {
         *set == 0
             && matches!(
                 (binding, kind),
@@ -347,120 +317,67 @@ pub fn check(
                     | (3, BindingKind::StorageBufferArray)
                     | (4, BindingKind::UniformBufferArray)
             )
-    });
-    if bindless && !r.bindings.is_empty() {
-        if legacy_only {
-            return Err("uses the bindless form; a contract-2 module's programs take the per-pass one".into());
-        }
-        if r.push_bytes > PUSH_BYTES {
-            return Err(format!(
-                "the push block is {} bytes; the bindless form takes at most {PUSH_BYTES}",
-                r.push_bytes
-            ));
-        }
-        let has = |binding: u32, want: &BindingKind| {
-            r.bindings
-                .iter()
-                .any(|(set, b, kind)| *set == 0 && *b == binding && kind == want)
-        };
-        if sampled > 0 {
-            for (binding, want) in [(0, BindingKind::SampledImageArray), (1, BindingKind::SamplerArray)] {
-                if !has(binding, &want) {
-                    return Err(format!(
-                        "the pass samples {sampled} image(s); the bindless form declares set 0 binding {binding} ({want:?})"
-                    ));
-                }
-            }
-        }
-        // The block and the handle table are both blocks in the uniform
-        // array (binding 4). A std140 block written as a storage buffer at
-        // binding 3 reflects as one; name it, because that is the mistake
-        // this catches (the table moved there in F and to binding 4 in G).
-        if has(3, &BindingKind::StorageBufferArray) {
-            return Err(
-                "set 0 binding 3 is a storage buffer; a program's std140 block and its handle table are uniform blocks at binding 4"
-                    .into(),
-            );
-        }
-        if (sampled > 0 || uniform_bytes > 0) && !has(4, &BindingKind::UniformBufferArray) {
-            return Err(format!(
-                "the program declares a {uniform_bytes}-byte std140 block and {sampled} sampled image(s); the bindless form reaches both through set 0 binding 4 (UniformBufferArray)"
-            ));
-        }
-        if r.push_bytes == 0 && (sampled > 0 || uniform_bytes > 0) {
-            return Err(format!(
-                "declares no push block; the bindless form takes up to {PUSH_BYTES} bytes (uniforms, sampler, handles)"
-            ));
-        }
-        return Ok(Form::Bindless);
-    }
-    // The per-pass form (contract version 2): set 0, the block then the
-    // samplers.
-    if r.push_bytes > 0 {
+    };
+    if let Some((set, binding, kind)) = r
+        .bindings
+        .iter()
+        .find(|(set, binding, kind)| !bindless(set, binding, kind))
+    {
         return Err(format!(
-            "uses a {}-byte push block; the per-pass form takes a uniform block at binding 0",
+            "set {set} binding {binding} ({kind:?}) is not part of the bindless fullscreen form (set 0 bindings 0, 1, 3 and 4, and a 16-byte push block)"
+        ));
+    }
+    if r.push_bytes > PUSH_BYTES {
+        return Err(format!(
+            "the push block is {} bytes; the bindless form takes at most {PUSH_BYTES}",
             r.push_bytes
         ));
     }
-    let mut want: Vec<(u32, u32, BindingKind)> = Vec::new();
-    if uniform_bytes > 0 {
-        want.push((0, 0, BindingKind::UniformBuffer(uniform_bytes)));
-    }
-    want.extend((1..=sampled as u32).map(|b| (0, b, BindingKind::CombinedImageSampler)));
-    for b in &r.bindings {
-        match want.iter().find(|w| (w.0, w.1) == (b.0, b.1)) {
-            Some(w) if w.2 == b.2 => {}
-            Some((_, _, BindingKind::UniformBuffer(declared))) if matches!(b.2, BindingKind::UniformBuffer(end) if (end..=end.next_multiple_of(16)).contains(declared)) =>
-                {}
-            Some((_, _, BindingKind::UniformBuffer(declared))) => {
-                let BindingKind::UniformBuffer(end) = b.2 else {
-                    return Err(format!(
-                        "set {} binding {} is {:?}; the pass declares a uniform block",
-                        b.0, b.1, b.2
-                    ));
-                };
+    let has = |binding: u32, want: &BindingKind| {
+        r.bindings
+            .iter()
+            .any(|(set, b, kind)| *set == 0 && *b == binding && kind == want)
+    };
+    if sampled > 0 {
+        for (binding, want) in [(0, BindingKind::SampledImageArray), (1, BindingKind::SamplerArray)] {
+            if !has(binding, &want) {
                 return Err(format!(
-                    "the uniform block is {end} bytes ({} padded); the program declares {declared}",
-                    end.next_multiple_of(16)
-                ));
-            }
-            Some(w) => {
-                return Err(format!(
-                    "set {} binding {} is {:?}; the pass declares {:?}",
-                    b.0, b.1, b.2, w.2
-                ));
-            }
-            None => {
-                let declared = match b.2 {
-                    BindingKind::StorageBuffer | BindingKind::StorageImage => " (the pass declares no storage access)",
-                    BindingKind::SampledImageArray
-                    | BindingKind::SamplerArray
-                    | BindingKind::StorageBufferArray
-                    | BindingKind::UniformBufferArray => {
-                        " (the bindless arrays cannot be mixed with the per-pass form)"
-                    }
-                    _ => "",
-                };
-                return Err(format!(
-                    "set {} binding {} ({:?}) is not declared by the pass{declared}",
-                    b.0, b.1, b.2
+                    "the pass samples {sampled} image(s); the bindless form declares set 0 binding {binding} ({want:?})"
                 ));
             }
         }
     }
-    Ok(Form::Legacy)
+    // The block and the handle table are both blocks in the uniform array
+    // (binding 4). A std140 block written as a storage buffer at binding 3
+    // reflects as one; name it, because that is the mistake this catches
+    // (the table moved there in F and to binding 4 in G).
+    if has(3, &BindingKind::StorageBufferArray) {
+        return Err(
+            "set 0 binding 3 is a storage buffer; a program's std140 block and its handle table are uniform blocks at binding 4"
+                .into(),
+        );
+    }
+    if (sampled > 0 || uniform_bytes > 0) && !has(4, &BindingKind::UniformBufferArray) {
+        return Err(format!(
+            "the program declares a {uniform_bytes}-byte std140 block and {sampled} sampled image(s); the bindless form reaches both through set 0 binding 4 (UniformBufferArray)"
+        ));
+    }
+    if r.push_bytes == 0 && (sampled > 0 || uniform_bytes > 0) {
+        return Err(format!(
+            "declares no push block; the bindless form takes up to {PUSH_BYTES} bytes (uniforms, sampler, handles)"
+        ));
+    }
+    Ok(Form::Bindless)
 }
 
-/// The pass's sampler as each form needs it: the object for a per-pass
-/// program's combined image sampler, the global index for a bindless one.
+/// The pass's sampler as a bindless program needs it: its index in the
+/// global sampler array.
 #[derive(Clone, Copy, Debug)]
 pub struct Sampler {
-    pub object: vk::Sampler,
     pub index: u32,
 }
 
-/// A checked fullscreen program: its pipeline and, by form, the per-pass
-/// sets or the global-set handles.
+/// A checked fullscreen program: its pipeline and its global-set handles.
 pub struct FullscreenProgram {
     pub label: String,
     pub uniform_bytes: u32,
@@ -468,18 +385,7 @@ pub struct FullscreenProgram {
     /// The pass's sampled intents (the bindless form's table size).
     sampled: usize,
     pipeline: vk::Pipeline,
-    legacy: Option<Legacy>,
     bindless: Option<BindlessState>,
-}
-
-/// The per-pass form: a layout, a set per frame slot and a uniform buffer
-/// per slot.
-struct Legacy {
-    set_layout: vk::DescriptorSetLayout,
-    layout: vk::PipelineLayout,
-    pool: vk::DescriptorPool,
-    sets: Vec<vk::DescriptorSet>,
-    ubos: Vec<OwnedBuffer>,
 }
 
 /// The bindless form's state, shared by a module's program and the engine's
@@ -497,7 +403,7 @@ struct BindlessState {
 }
 
 impl FullscreenProgram {
-    /// Reflect and check `spirv`, then build the program for its form.
+    /// Reflect and check `spirv`, then build the program.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &GpuDevice,
@@ -508,37 +414,20 @@ impl FullscreenProgram {
         sampled: usize,
         color_formats: &[vk::Format],
         frames_in_flight: usize,
-        legacy_only: bool,
     ) -> Result<Self> {
         let reflection = reflect(spirv).with_context(|| format!("program `{label}`"))?;
-        let form = check(&reflection, uniform_bytes, sampled, color_formats.len(), legacy_only)
+        let form = check(&reflection, uniform_bytes, sampled, color_formats.len())
             .map_err(|e| anyhow::anyhow!("program `{label}`: {e}"))?;
         let device = &gpu.device;
         let (mut this, group) = bindless.group(|bindless| -> Result<Self> {
-            let (legacy, bindless_state) = match form {
-                Form::Legacy => (Some(Legacy::new(gpu, uniform_bytes, sampled, frames_in_flight)?), None),
-                Form::Bindless => (
-                    None,
-                    Some(BindlessState::new(
-                        gpu,
-                        bindless,
-                        label,
-                        uniform_bytes,
-                        sampled.max(1),
-                        frames_in_flight,
-                    )?),
-                ),
-            };
-            let layout = match (&legacy, &bindless_state) {
-                (Some(legacy), _) => legacy.layout,
-                _ => bindless.pipeline_layout(),
-            };
+            let bindless_state =
+                BindlessState::new(gpu, bindless, label, uniform_bytes, sampled.max(1), frames_in_flight)?;
             let pipeline = pipeline::graphics_pipeline(
                 device,
                 &GraphicsDesc {
                     vertex: spirv!("fullscreen.vert"),
                     fragment: spirv,
-                    layout,
+                    layout: bindless.pipeline_layout(),
                     color_formats,
                     depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
@@ -553,15 +442,10 @@ impl FullscreenProgram {
                 form,
                 sampled,
                 pipeline,
-                legacy,
-                bindless: bindless_state,
+                bindless: Some(bindless_state),
             })
         })?;
-        match this.bindless.as_mut() {
-            Some(state) => state.group = Some(group),
-            // Nothing to retire: the group is empty.
-            None => bindless.retire_group(group),
-        }
+        this.bindless.as_mut().expect("a checked program has a form").group = Some(group);
         Ok(this)
     }
 
@@ -572,12 +456,8 @@ impl FullscreenProgram {
 
     /// This frame's uniform block for `slot` (its previous use completed).
     pub fn write_uniforms(&mut self, slot: usize, bytes: &[u8]) {
-        let ubos = match (&mut self.legacy, &mut self.bindless) {
-            (Some(legacy), _) => &mut legacy.ubos,
-            (_, Some(state)) => &mut state.ubos,
-            _ => return,
-        };
-        if let Some(mapped) = ubos.get_mut(slot).and_then(|u| u.mapped()) {
+        let Some(state) = &mut self.bindless else { return };
+        if let Some(mapped) = state.ubos.get_mut(slot).and_then(|u| u.mapped()) {
             let n = bytes.len().min(self.uniform_bytes as usize);
             mapped[..n].copy_from_slice(&bytes[..n]);
         }
@@ -593,18 +473,10 @@ impl FullscreenProgram {
             self.sampled,
             images.len()
         );
-        match &self.legacy {
-            Some(legacy) => {
-                legacy.record(ctx, self.pipeline, images, sampler.object);
-                Ok(())
-            }
-            None => {
-                let state = self.bindless.as_ref().expect("a checked program has a form");
-                let indices: Vec<u32> = images.iter().map(|image| image.sampled.unwrap_or(0)).collect();
-                state.record(ctx, self.pipeline, &indices, sampler.index);
-                Ok(())
-            }
-        }
+        let state = self.bindless.as_ref().expect("a checked program has a form");
+        let indices: Vec<u32> = images.iter().map(|image| image.sampled.unwrap_or(0)).collect();
+        state.record(ctx, self.pipeline, &indices, sampler.index);
+        Ok(())
     }
 
     /// Give the bindless form's handles back; the device objects stay until
@@ -618,9 +490,6 @@ impl FullscreenProgram {
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         unsafe {
             gpu.device.destroy_pipeline(self.pipeline, None);
-        }
-        if let Some(mut legacy) = self.legacy.take() {
-            legacy.destroy(gpu);
         }
         if let Some(mut state) = self.bindless.take() {
             state.destroy(gpu);
@@ -711,152 +580,6 @@ impl BindlessProgram {
             gpu.device.destroy_pipeline(self.pipeline, None);
         }
         self.state.destroy(gpu);
-    }
-}
-
-impl Legacy {
-    fn new(gpu: &GpuDevice, uniform_bytes: u32, sampled: usize, frames_in_flight: usize) -> Result<Self> {
-        let device = &gpu.device;
-        let stages = vk::ShaderStageFlags::FRAGMENT;
-        let mut kinds = Vec::new();
-        if uniform_bytes > 0 {
-            kinds.push((0u32, vk::DescriptorType::UNIFORM_BUFFER));
-        }
-        kinds.extend((1..=sampled as u32).map(|b| (b, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)));
-        let bindings: Vec<_> = kinds
-            .iter()
-            .map(|&(b, ty)| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(b)
-                    .descriptor_type(ty)
-                    .descriptor_count(1)
-                    .stage_flags(stages)
-            })
-            .collect();
-        let n = frames_in_flight as u32;
-        unsafe {
-            let set_layout = device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
-                None,
-            )?;
-            let layout = pipeline::pipeline_layout(device, &[set_layout], 0, vk::ShaderStageFlags::empty())?;
-            let mut sizes = vec![vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: n * (sampled as u32).max(1),
-            }];
-            if uniform_bytes > 0 {
-                sizes.push(vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: n,
-                });
-            }
-            let pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes),
-                None,
-            )?;
-            let layouts = vec![set_layout; frames_in_flight];
-            let sets = device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&layouts),
-            )?;
-            let ubos = if uniform_bytes > 0 {
-                (0..frames_in_flight)
-                    .map(|_| {
-                        OwnedBuffer::new(
-                            gpu,
-                            BufferDesc {
-                                size: uniform_bytes as u64,
-                                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                            },
-                            MemoryLocation::CpuToGpu,
-                            "fullscreen program",
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            };
-            for (slot, &set) in sets.iter().enumerate() {
-                if let Some(ubo) = ubos.get(slot) {
-                    let info = [vk::DescriptorBufferInfo {
-                        buffer: ubo.buffer,
-                        offset: 0,
-                        range: vk::WHOLE_SIZE,
-                    }];
-                    device.update_descriptor_sets(
-                        &[vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(0)
-                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                            .buffer_info(&info)],
-                        &[],
-                    );
-                }
-            }
-            Ok(Self {
-                set_layout,
-                layout,
-                pool,
-                sets,
-                ubos,
-            })
-        }
-    }
-
-    fn record(&self, ctx: &PassContext<'_>, pipeline: vk::Pipeline, images: &[ImageBinding], sampler: vk::Sampler) {
-        let set = self.sets[ctx.slot];
-        let infos: Vec<[vk::DescriptorImageInfo; 1]> = images
-            .iter()
-            .map(|i| {
-                [vk::DescriptorImageInfo {
-                    sampler,
-                    image_view: i.view,
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                }]
-            })
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = infos
-            .iter()
-            .enumerate()
-            .map(|(k, info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(1 + k as u32)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(info)
-            })
-            .collect();
-        unsafe {
-            if !writes.is_empty() {
-                // The slot's previous frame has completed: the set is idle.
-                ctx.device.update_descriptor_sets(&writes, &[]);
-            }
-            ctx.device
-                .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            if !self.sets.is_empty() {
-                ctx.device.cmd_bind_descriptor_sets(
-                    ctx.cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &[set],
-                    &[],
-                );
-            }
-            ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
-        }
-    }
-
-    fn destroy(&mut self, gpu: &GpuDevice) {
-        unsafe {
-            gpu.device.destroy_pipeline_layout(self.layout, None);
-            gpu.device.destroy_descriptor_pool(self.pool, None);
-            gpu.device.destroy_descriptor_set_layout(self.set_layout, None);
-        }
-        for ubo in &mut self.ubos {
-            ubo.destroy(gpu);
-        }
     }
 }
 
@@ -976,54 +699,12 @@ impl BindlessState {
 mod tests {
     use super::*;
 
-    /// The per-pass form of `test_post.frag` (a uniform block of 28 bytes,
-    /// two sampled inputs, one output) passes; every difference from what
-    /// a pass declares is named.
-    #[test]
-    fn the_per_pass_form_is_checked_against_its_pass() {
-        let ok = reflect(spirv!("test_post.frag")).unwrap();
-        assert_eq!(
-            ok.bindings,
-            [
-                (0, 0, BindingKind::UniformBuffer(28)),
-                (0, 1, BindingKind::CombinedImageSampler),
-                (0, 2, BindingKind::CombinedImageSampler)
-            ]
-        );
-        assert_eq!(ok.outputs, [0]);
-        assert!(ok.fragment_main && ok.push_bytes == 0);
-        assert_eq!(check(&ok, 32, 2, 1, false).unwrap(), Form::Legacy);
-        check(&ok, 28, 2, 1, false).unwrap();
-        let e = check(&ok, 48, 2, 1, false).unwrap_err();
-        assert!(e.contains("28 bytes (32 padded)") && e.contains("declares 48"), "{e}");
-        assert!(check(&ok, 24, 2, 1, false).is_err());
-        assert!(check(&ok, 32, 1, 1, false).unwrap_err().contains("binding 2"));
-        assert!(
-            check(&ok, 32, 3, 1, false).is_ok(),
-            "an unused declared input is allowed"
-        );
-        assert!(check(&ok, 32, 2, 2, false).unwrap_err().contains("colour attachment"));
-        assert!(check(&ok, 0, 2, 1, false).unwrap_err().contains("binding 0"));
-
-        let storage = reflect(spirv!("test_post_storage.frag")).unwrap();
-        let e = check(&storage, 0, 1, 1, false).unwrap_err();
-        assert!(e.contains("no storage access"), "{e}");
-
-        let pushes = reflect(spirv!("test_post_push.frag")).unwrap();
-        assert_eq!(pushes.push_bytes, 16);
-        assert!(check(&pushes, 0, 0, 1, false).unwrap_err().contains("push block"));
-
-        assert!(reflect(&[1, 2, 3, 4]).is_err());
-        let vertex = reflect(spirv!("fullscreen.vert")).unwrap();
-        assert!(check(&vertex, 0, 0, 0, false).unwrap_err().contains("fragment"));
-    }
-
     /// The bindless form: the global set's arrays, the std140 block and the
-    /// handle table at 4 and a 16-byte push block. A mix of the two forms, a
-    /// block or table at binding 3 or a bindless shader in a contract-2
-    /// module is refused with the binding named.
+    /// handle table at 4 and a 16-byte push block. A per-pass binding (with
+    /// or without the global set's arrays), a block or table at binding 3
+    /// and a push block over its size are refused with the binding named.
     #[test]
-    fn the_bindless_form_is_checked_and_forms_do_not_mix() {
+    fn the_bindless_form_is_checked_and_the_per_pass_form_is_refused() {
         let program = reflect(spirv!("test_program.frag")).unwrap();
         assert_eq!(program.push_bytes, PUSH_BYTES);
         assert_eq!(
@@ -1034,27 +715,47 @@ mod tests {
                 (0, 4, BindingKind::UniformBufferArray),
             ]
         );
-        assert_eq!(check(&program, 32, 2, 1, false).unwrap(), Form::Bindless);
-        assert!(check(&program, 32, 2, 1, true).unwrap_err().contains("contract-2"));
+        assert_eq!(check(&program, 32, 2, 1).unwrap(), Form::Bindless);
+        assert!(check(&program, 32, 2, 2).unwrap_err().contains("colour attachment"));
 
-        // A contract-2 module keeps the per-pass form; a version-3 module
-        // may still use it.
-        let legacy = reflect(spirv!("test_post.frag")).unwrap();
-        assert_eq!(check(&legacy, 32, 2, 1, false).unwrap(), Form::Legacy);
-        assert_eq!(check(&legacy, 32, 2, 1, true).unwrap(), Form::Legacy);
-
-        // A shader that mixes the two forms names the bindless binding.
+        // The per-pass form ended at contract version 3, whether it comes
+        // alone or beside the global set's arrays; the binding is named.
+        let per_pass = Reflection {
+            bindings: vec![
+                (0, 0, BindingKind::UniformBuffer(28)),
+                (0, 1, BindingKind::CombinedImageSampler),
+            ],
+            outputs: vec![0],
+            fragment_main: true,
+            ..Default::default()
+        };
+        let e = check(&per_pass, 28, 1, 1).unwrap_err();
+        assert!(
+            e.contains("per-pass") && e.contains("version 4") && e.contains("binding 0"),
+            "{e}"
+        );
         let mut mixed = program.clone();
         mixed.bindings.push((0, 2, BindingKind::CombinedImageSampler));
         mixed.bindings.sort_by_key(|b| (b.0, b.1));
-        let e = check(&mixed, 32, 2, 1, false).unwrap_err();
-        assert!(e.contains("mixes") && e.contains("binding 0"), "{e}");
+        let e = check(&mixed, 32, 2, 1).unwrap_err();
+        assert!(
+            e.contains("per-pass") && e.contains("version 4") && e.contains("binding 2"),
+            "{e}"
+        );
+
+        // A program that declares nothing needs no global-set binding.
+        let empty = Reflection {
+            outputs: vec![0],
+            fragment_main: true,
+            ..Default::default()
+        };
+        assert_eq!(check(&empty, 0, 0, 1).unwrap(), Form::Bindless);
 
         // A program without its uniform array cannot reach its block or its
         // images.
         let mut missing = program.clone();
         missing.bindings.retain(|(_, binding, _)| *binding != 4);
-        let e = check(&missing, 32, 2, 1, false).unwrap_err();
+        let e = check(&missing, 32, 2, 1).unwrap_err();
         assert!(e.contains("binding 4"), "{e}");
 
         // A std140 block at binding 3 is a storage buffer: refused, and the
@@ -1067,12 +768,16 @@ mod tests {
             }
         }
         storage_block.bindings.sort_by_key(|b| (b.0, b.1));
-        let e = check(&storage_block, 32, 2, 1, false).unwrap_err();
+        let e = check(&storage_block, 32, 2, 1).unwrap_err();
         assert!(e.contains("binding 3") && e.contains("binding 4"), "{e}");
 
         // The push block is at most 16 bytes.
         let mut wide = program.clone();
         wide.push_bytes = 32;
-        assert!(check(&wide, 32, 2, 1, false).unwrap_err().contains("at most 16"));
+        assert!(check(&wide, 32, 2, 1).unwrap_err().contains("at most 16"));
+
+        assert!(reflect(&[1, 2, 3, 4]).is_err());
+        let vertex = reflect(spirv!("fullscreen.vert")).unwrap();
+        assert!(check(&vertex, 0, 0, 0).unwrap_err().contains("fragment"));
     }
 }

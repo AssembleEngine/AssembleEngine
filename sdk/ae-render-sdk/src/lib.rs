@@ -43,20 +43,16 @@
 //! # Fullscreen programs
 //!
 //! [`Program::Fullscreen`] is one fragment shader drawn as a fullscreen
-//! triangle into its pass's colour attachments. It has two forms, and a
-//! shader uses exactly one (the host reflects the SPIR-V and refuses a mix):
+//! triangle into its pass's colour attachments. Contract version 4 has one
+//! form, and the host reflects the SPIR-V:
 //!
-//! * **Per-pass** (contract version 2, accepted by 3 for one version): set
-//!   0, binding 0 is the `uniform` block (`uniform_bytes` long, std140),
-//!   bindings 1.. are one combined image sampler per `Sampled` intent of the
-//!   pass, in intent order.
-//! * **Bindless** (contract version 3): only the engine's global set.
-//!   Binding 0 is `texture2D images[]`, binding 1 `sampler samplers[]`, and
-//!   binding 4 the `std140` blocks: the program's block and its handle
-//!   table (`uvec4 handles[]`; `AE_BUF(k)` reads slot `k`). Both are
-//!   uniform buffers: they cost less per access than storage buffers. The
-//!   push block is at most 16 bytes: `uniforms` (the block's index),
-//!   `samplerIndex`, `handles` (the table's index) and a pad word.
+//! * **Bindless**: only the engine's global set. Binding 0 is
+//!   `texture2D images[]`, binding 1 `sampler samplers[]`, and binding 4 the
+//!   `std140` blocks: the program's block and its handle table
+//!   (`uvec4 handles[]`; `AE_BUF(k)` reads slot `k`). Both are uniform
+//!   buffers: they cost less per access than storage buffers. The push block
+//!   is at most 16 bytes: `uniforms` (the block's index), `samplerIndex`,
+//!   `handles` (the table's index) and a pad word.
 //!
 //! A bindless shader includes the engine's interface headers
 //! (`crates/ae_render/shaders/bindless.glsl` and `program.glsl`; add that
@@ -75,14 +71,17 @@
 //! #define scene AE_PROGRAM_IMAGE(0)
 //! ```
 //!
+//! The per-pass form that contract version 3 still accepted ended with
+//! version 3: a shader that declares it is refused at program build, naming
+//! the binding, and a version-2 module is refused at load.
+//!
 //! The host writes the program's table with the pass's sampled-image
 //! indices before the pass records; the indices are the same in every frame
 //! slot. `FrameOutput::uniforms` still carries each program's block in
 //! program order, `uniform_bytes` long.
 //!
 //! `RenderModule::VERSION` pins the contract version a module is built for
-//! (the SDK's current one by default); `render/legacy` is a contract-2
-//! fixture.
+//! (the SDK's current one by default).
 
 pub use ae_render_abi as abi;
 pub use ae_render_abi::module::{
@@ -212,8 +211,8 @@ impl FrameOutput {
 pub trait RenderModule: Default {
     /// The contract version this module is built for: the SDK's current one
     /// ([`abi::module::MODULE_VERSION`]), unless a module pins an older one
-    /// it still wants to run under (a contract-2 module keeps the per-pass
-    /// fullscreen form).
+    /// it still wants to run under (version 3 is still accepted, but its
+    /// fullscreen programs must use the global set; version 2 is refused).
     const VERSION: u32 = abi::module::MODULE_VERSION;
 
     /// The graph for this target, or `None` if the module cannot render it.

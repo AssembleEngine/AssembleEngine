@@ -85,8 +85,16 @@ fn graph_handles_survive_resize_and_rebake() {
         .pass("sample2", PassKind::Compute, ())
         .sampled(other, ShaderStage::Compute)
         .root();
-    assert!(executor.set_graph(graph).unwrap());
+    assert!(executor.set_graph(graph.clone()).unwrap());
     assert_eq!(executor.graph_index("tex"), Some([Some(3), None, None]));
+    assert_eq!(executor.graph_index("other"), Some([Some(4), None, None]));
+    // A rename with the same topology re-keys the handles without a rebake
+    // (names are not in the signature; the cached name hash catches it).
+    let mut renamed = graph;
+    renamed.resources[0].name = "renamed".into();
+    assert!(!executor.set_graph(renamed).unwrap());
+    assert!(executor.graph_index("renamed").is_some());
+    assert_eq!(executor.graph_index("tex"), None);
     assert_eq!(executor.graph_index("other"), Some([Some(4), None, None]));
     assert_clean(&gpu);
 }
@@ -2825,39 +2833,6 @@ fn the_default_module_renders_like_the_native_graph() {
     assert_clean(&gpu);
 }
 
-/// A contract-2 module still loads and renders: its fullscreen programs use
-/// the per-pass form (set 0: the block, then the sampled images), which
-/// version 3 accepts for one contract version (M15 F).
-#[test]
-#[ignore = "needs a Vulkan 1.3 GPU"]
-fn a_contract_2_module_renders_its_per_pass_programs() {
-    let gpu = gpu();
-    let wasm = ae_render::module::build("legacy").expect("build render/legacy");
-    let (pixels, _) = scene_pixels(&gpu, Some(wasm), 2);
-    // The fill's tint through the copy's gain, sRGB-encoded by the target.
-    let tint = [0.5f32, 0.25, 0.75];
-    let gain = [1.0f32, 0.5, 1.0];
-    let encode = |c: f32| {
-        if c <= 0.003_130_8 {
-            c * 12.92
-        } else {
-            1.055 * c.powf(1.0 / 2.4) - 0.055
-        }
-    };
-    let want: Vec<f32> = (0..3).map(|i| encode((tint[i] * gain[i]).min(1.0))).collect();
-    // Every pixel is the same colour: the middle one stands for them.
-    let middle = (SCENE_EXTENT.width * (SCENE_EXTENT.height / 2) + SCENE_EXTENT.width / 2) as usize * 4;
-    for (c, want) in pixels[middle..middle + 3].iter().zip(&want) {
-        assert!(
-            (*c as f32 / 255.0 - want).abs() < 0.02,
-            "pixel {c} vs {:.3} (want {:?})",
-            want * 255.0,
-            want
-        );
-    }
-    assert_clean(&gpu);
-}
-
 /// The default module's HDR10 readback is the native graph's: the same
 /// display intermediate and `post.encode` (M13 stage 6), within one PQ code
 /// per channel (the two paths bake the same plan, so the tolerance is for
@@ -3092,7 +3067,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         buffer: ResourceId,
         program: FullscreenProgram,
         encode: Encode,
-        sampler: vk::Sampler,
         sampler_index: u32,
         uniforms: [u8; 32],
         value: [f32; 4],
@@ -3110,7 +3084,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
                         ctx,
                         &[ctx.image(self.display)?],
                         ae_render::fullscreen::Sampler {
-                            object: self.sampler,
                             index: self.sampler_index,
                         },
                     )?;
@@ -3243,7 +3216,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         .mag_filter(vk::Filter::NEAREST)
         .min_filter(vk::Filter::NEAREST);
     let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
-    let sampler = executor.bindless().sampler_object(sampler_handle);
     let program = FullscreenProgram::new(
         gpu,
         executor.bindless_mut(),
@@ -3253,7 +3225,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         1,
         &[DISPLAY_FORMAT],
         2,
-        false,
     )
     .unwrap();
     let sampler_index = sampler_handle.index;
@@ -3269,7 +3240,6 @@ fn grade_values(gpu: &Arc<GpuDevice>, grade: &[u8], values: &[[f32; 4]]) -> Vec<
         buffer,
         program,
         encode,
-        sampler,
         sampler_index,
         uniforms: uniforms.try_into().unwrap(),
         value: [0.0; 4],
@@ -11886,11 +11856,12 @@ fn p3_authored_effect_survives_post_encode() {
     assert_clean(&gpu);
 }
 
-/// A shader that mixes the two program forms fails when its program is
-/// built, and the error names the binding (M15 F).
+/// A shader with a per-pass binding (here beside the global set's arrays)
+/// fails when its program is built, and the error names the binding and the
+/// contract version that dropped it.
 #[test]
 #[ignore = "needs a Vulkan 1.3 GPU"]
-fn a_mixed_program_form_fails_at_load() {
+fn a_per_pass_program_fails_at_load() {
     use ae_render::fullscreen::FullscreenProgram;
 
     let gpu = gpu();
@@ -11904,12 +11875,14 @@ fn a_mixed_program_form_fails_at_load() {
         1,
         &[vk::Format::R8G8B8A8_UNORM],
         2,
-        false,
     ) {
-        Ok(_) => panic!("a mixed form built a program"),
+        Ok(_) => panic!("a per-pass program built"),
         Err(error) => format!("{error:#}"),
     };
-    assert!(error.contains("mixes") && error.contains("binding"), "{error}");
+    assert!(
+        error.contains("per-pass") && error.contains("version 4") && error.contains("binding"),
+        "{error}"
+    );
     assert_clean(&gpu);
 }
 
@@ -12048,7 +12021,6 @@ fn a_program_samples_64_images() {
         .min_filter(vk::Filter::NEAREST);
     let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
     let sampler = Sampler {
-        object: executor.bindless().sampler_object(sampler_handle),
         index: sampler_handle.index,
     };
     let program = FullscreenProgram::new(
@@ -12060,7 +12032,6 @@ fn a_program_samples_64_images() {
         COUNT,
         &[format],
         2,
-        false,
     )
     .unwrap();
     // tint 0.5 (grey 0.502 becomes 0.753), no offset.
@@ -12181,7 +12152,6 @@ fn a_retired_handle_draws_the_fallback_and_logs_once() {
         .min_filter(vk::Filter::NEAREST);
     let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
     let sampler = Sampler {
-        object: executor.bindless().sampler_object(sampler_handle),
         index: sampler_handle.index,
     };
     let program = FullscreenProgram::new(
@@ -12194,7 +12164,6 @@ fn a_retired_handle_draws_the_fallback_and_logs_once() {
         2,
         &[format],
         2,
-        false,
     )
     .unwrap();
     // tint 0 and no offset: the result is the sampled texel alone.
@@ -12371,7 +12340,6 @@ fn a_revived_sampler_keeps_its_settings() {
         2,
         &[format],
         2,
-        false,
     )
     .unwrap();
     // tint 0 and no offset: the result is the sampled texel alone.
@@ -12381,10 +12349,7 @@ fn a_revived_sampler_keeps_its_settings() {
         target,
         buffer,
         program,
-        sampler: Sampler {
-            object: executor.bindless().sampler_object(revived),
-            index: revived.index,
-        },
+        sampler: Sampler { index: revived.index },
         uniforms: uniforms.try_into().unwrap(),
     };
     let bindings = [
@@ -12562,7 +12527,6 @@ fn gpu_assisted_validation_reports_an_unbound_handle() {
         .min_filter(vk::Filter::NEAREST);
     let sampler_handle = executor.bindless_mut().sampler(&sampler_info).unwrap();
     let sampler = Sampler {
-        object: executor.bindless().sampler_object(sampler_handle),
         index: sampler_handle.index,
     };
     let program = FullscreenProgram::new(
@@ -12574,7 +12538,6 @@ fn gpu_assisted_validation_reports_an_unbound_handle() {
         1,
         &[format],
         2,
-        false,
     )
     .unwrap();
     let bindings = [

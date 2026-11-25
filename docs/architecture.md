@@ -277,17 +277,23 @@ levels (`DisplayLevels {paper_white, peak}`) are signal nits, relative to the re
 swapchain's image description carries (203 on Wayland), and the client applies them to the
 `vkSetHdrMetadataEXT` call after every recreate.
 
-### The render module ABI (contract version 2)
+### The render module ABI (contract version 4)
 
 `ae_render_declare` reads a `DeclareInput` the host writes at `ae_render_declare_input`: the
 target's size/format and scene flags, and the output's display spec — the encoding (`Sdr`,
 `Hdr10Pq`, `ScRgb`), the levels, the working space and the output gamut. A module built for
-contract 1 is refused at load by number. The display rule follows from the encoding: an HDR
+contract 1 is refused at load by number, and so is version 2 now that its per-pass fullscreen
+form is gone. The display rule follows from the encoding: an HDR
 module declares `display` (`display_spec()`), has `post.tonemap` write it, runs its colour
 passes on it and ends in `post.encode`; an SDR module has neither and lets `post.tonemap` write
 the target. `library::check_graph` enforces that on module graphs and names the encoding and the
 missing or extra pass. A module stays loaded across a swapchain pair change and redeclares for
 the new display spec.
+
+A module's fullscreen programs read the global bindless set: their `std140` block and sampled
+images are reached through a 16-byte push block, not per-pass descriptors. Contract version 4
+dropped the per-pass form; a version-3 module that still declares it fails when the program is
+built, naming the binding.
 
 ### Draw sources are data
 

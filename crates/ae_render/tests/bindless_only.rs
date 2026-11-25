@@ -12,43 +12,32 @@
 //!
 //! Uniform buffers (binding 4, the former `uniform` blocks) are the
 //! registry's too: `Bindless::uniform_buffer` and its slotted and per-slot
-//! forms are the only makers of a `UNIFORM_BUFFER` descriptor outside the
-//! per-pass form in `fullscreen.rs`.
+//! forms are the only makers of a `UNIFORM_BUFFER` descriptor.
 //!
 //! Still on their own sets, by design:
-//! - `fullscreen.rs`: the per-pass form a contract-2 module's program may
-//!   still use (M15 F keeps it for one version), and its reflection
-//!   fixtures (`test_post.frag`, `test_post_storage.frag`), plus M16.5's
-//!   fullscreen shore reader (`test_sample_shore.frag`), which exercises
-//!   that form with one sampled intent;
 //! - `upload.rs`'s mip generator, which stays as it is;
 //! - `decals_relief.rs`'s cone generator (the decal relief feature's RCSM
 //!   cones), a one-shot upload-time pass like the mip generator; it keeps
-//!   its own two-buffer set and never records in a frame.
+//!   its own two-buffer set and never records in a frame;
+//! - `text.rs`'s MSDF text batch, which uploads one atlas and its quads
+//!   once and draws them through a small fixed set.
 
 use std::fs;
 use std::path::Path;
 
 /// Sources allowed to own sets: the registry itself, the pipeline helpers,
 /// and the files listed above.
-const SOURCE_EXCEPTIONS: &[&str] = &[
-    "bindless.rs",
-    "pipeline.rs",
-    "fullscreen.rs",
-    "upload.rs",
-    "decals_relief.rs",
-];
+const SOURCE_EXCEPTIONS: &[&str] = &["bindless.rs", "pipeline.rs", "upload.rs", "decals_relief.rs", "text.rs"];
 
 /// Shaders still declaring numbered sets or pinning the global set off 0
 /// (see the module docs).
 const SHADER_EXCEPTIONS: &[&str] = &[
     "mipgen.comp",
     "test_mixed.frag",
-    "test_post.frag",
-    "test_post_storage.frag",
-    "test_sample_shore.frag",
     "decal_cones.comp",
     "decal_relief_probe.comp",
+    "text.vert",
+    "text_msdf.frag",
 ];
 
 fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
@@ -131,7 +120,7 @@ fn only_the_global_set_outside_the_exceptions() {
     }
     assert!(
         found.is_empty(),
-        "per-pass descriptor sets outside the exceptions:\n{}",
+        "descriptor sets outside the exceptions:\n{}",
         found.join("\n")
     );
 }
