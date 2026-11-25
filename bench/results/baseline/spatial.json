@@ -1,35 +1,35 @@
 {
   "suite": "spatial",
-  "commit": "06fa4c4",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "units50000_queries10000/rebuild",
       "kind": "time",
-      "value": 478411.0,
+      "value": 478467.0,
       "unit": "ns",
-      "spread": 0.03195996747566423
+      "spread": 0.026166903882608415
     },
     {
       "metric": "units50000_queries10000/radius160_1t",
       "kind": "time",
-      "value": 11874861.0,
+      "value": 11651497.0,
       "unit": "ns",
-      "spread": 0.023946132927366477
+      "spread": 0.028086605523736565
     },
     {
       "metric": "units50000_queries10000/nearest8_1t",
       "kind": "time",
-      "value": 9711462.0,
+      "value": 9673188.0,
       "unit": "ns",
-      "spread": 0.03385041304800451
+      "spread": 0.016785055764449115
     },
     {
       "metric": "units50000_queries10000/sweep360_1t",
       "kind": "time",
-      "value": 5982877.0,
+      "value": 5770091.0,
       "unit": "ns",
-      "spread": 0.0600794567563398
+      "spread": 0.02306809372677138
     },
     {
       "metric": "units50000_queries10000/radius_hits",
@@ -55,23 +55,23 @@
     {
       "metric": "units50000_queries10000/radius160_8t",
       "kind": "time",
-      "value": 1973676.0,
+      "value": 1963438.0,
       "unit": "ns",
-      "spread": 0.19345525810720707
+      "spread": 0.18596614713578938
     },
     {
       "metric": "units50000_queries10000/nearest8_8t",
       "kind": "time",
-      "value": 1429423.0,
+      "value": 1418960.0,
       "unit": "ns",
-      "spread": 0.21782075704672446
+      "spread": 0.22304434233523143
     },
     {
       "metric": "units50000_queries10000/sweep360_8t",
       "kind": "time",
-      "value": 941491.0,
+      "value": 844039.0,
       "unit": "ns",
-      "spread": 0.20424411916842541
+      "spread": 0.21868302294088307
     }
   ]
 }

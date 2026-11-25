@@ -1,6 +1,6 @@
 {
   "suite": "ecs-structural",
-  "commit": "06fa4c4",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
@@ -27,23 +27,23 @@
     {
       "metric": "50k_5000cmd/populate",
       "kind": "time",
-      "value": 12633357.0,
+      "value": 12757945.0,
       "unit": "ns",
-      "spread": 0.08084660316335555
+      "spread": 0.05796560496224117
     },
     {
       "metric": "50k_5000cmd/apply_tick_commands",
       "kind": "time",
-      "value": 424940.0,
+      "value": 417657.0,
       "unit": "ns",
-      "spread": 0.02419400385936838
+      "spread": 0.036395894238573756
     },
     {
       "metric": "50k_5000cmd/digest_scan",
       "kind": "time",
-      "value": 23031.0,
+      "value": 23941.0,
       "unit": "ns",
-      "spread": 0.011723329425556858
+      "spread": 0.22643164445929576
     }
   ]
 }

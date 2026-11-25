@@ -1,21 +1,21 @@
 {
   "suite": "gpu-orbit",
-  "commit": "335e770",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "gpu_total",
       "kind": "time",
-      "value": 810496.0018245038,
+      "value": 874335.9927102574,
       "unit": "ns",
-      "spread": 0.2637710067195704
+      "spread": 0.2910704880165593
     },
     {
       "metric": "pass/units reset",
       "kind": "time",
       "value": 1056.0000082477927,
       "unit": "ns",
-      "spread": 0.03030304032501041,
+      "spread": 0.09090912097503123,
       "tolerance": 1.9393939242464782
     },
     {
@@ -23,54 +23,54 @@
       "kind": "time",
       "value": 1023.9999974146485,
       "unit": "ns",
-      "spread": 0.06250002131628213,
+      "spread": 0.031250010658141064,
       "tolerance": 2.0000000050495146
     },
     {
       "metric": "pass/units pose",
       "kind": "time",
-      "value": 96.0000033956021,
+      "value": 63.99999983841553,
       "unit": "ns",
-      "spread": 0.33333335859707414,
-      "tolerance": 21.333332578755115
+      "spread": 0.500000056843419,
+      "tolerance": 32.00000008079223
     },
     {
       "metric": "pass/terrain lod",
       "kind": "time",
-      "value": 231327.99565792084,
+      "value": 242880.00166416168,
       "unit": "ns",
-      "spread": 0.7461613218468066
+      "spread": 0.03873522714116918
     },
     {
       "metric": "pass/units cull",
       "kind": "time",
-      "value": 4544.000141322613,
+      "value": 5855.9998869895935,
       "unit": "ns",
-      "spread": 0.2112675681065479,
-      "tolerance": 0.4507042113347939
+      "spread": 0.1693989279611796,
+      "tolerance": 0.34972678270539037
     },
     {
       "metric": "pass/units count",
       "kind": "time",
       "value": 2080.0000056624413,
       "unit": "ns",
-      "spread": 0.39999996641865726,
+      "spread": 0.36923072531670564,
       "tolerance": 0.984615381934939
     },
     {
       "metric": "pass/units count read",
       "kind": "time",
-      "value": 1760.0000137463212,
+      "value": 1695.9999920800328,
       "unit": "ns",
-      "spread": 0.03636364839001249,
-      "tolerance": 1.163636354547887
+      "spread": 0.03773586200775658,
+      "tolerance": 1.2075471754503149
     },
     {
       "metric": "pass/shadows",
       "kind": "time",
-      "value": 38176.000118255615,
+      "value": 38047.999143600464,
       "unit": "ns",
-      "spread": 0.04861691181866298
+      "spread": 0.04793941938419916
     },
     {
       "metric": "pass/lights",
@@ -83,54 +83,54 @@
     {
       "metric": "pass/terrain",
       "kind": "time",
-      "value": 431104.00438308716,
+      "value": 480255.99122047424,
       "unit": "ns",
-      "spread": 0.08076008696583929
+      "spread": 0.09808102742356567
     },
     {
       "metric": "pass/units",
       "kind": "time",
       "value": 6144.000217318535,
       "unit": "ns",
-      "spread": 4.333333188066824,
+      "spread": 30.499999602096082,
       "tolerance": 0.3333333215430487
     },
     {
       "metric": "pass/water",
       "kind": "time",
-      "value": 28672.000393271446,
+      "value": 29696.00073993206,
       "unit": "ns",
-      "spread": 0.5357143297969365
+      "spread": 0.51724129063191
     },
     {
       "metric": "pass/exposure meter",
       "kind": "time",
       "value": 23552.000522613525,
       "unit": "ns",
-      "spread": 0.5652173328491131
+      "spread": 0.521739058225375
     },
     {
       "metric": "pass/exposure adapt",
       "kind": "time",
-      "value": 9216.000325977802,
+      "value": 10239.999741315842,
       "unit": "ns",
-      "spread": 0.11111114479609888,
-      "tolerance": 0.22222221436203243
+      "spread": 0.10000003637978899,
+      "tolerance": 0.2000000050524251
     },
     {
       "metric": "pass/bloom downsample",
       "kind": "time",
-      "value": 7168.000098317862,
+      "value": 8191.999979317188,
       "unit": "ns",
-      "spread": 0.14285712429602676,
-      "tolerance": 0.2857142817953659
+      "spread": 0.12499998578914524,
+      "tolerance": 0.2500000006311893
     },
     {
       "metric": "pass/bloom blur x",
       "kind": "time",
       "value": 4095.999989658594,
       "unit": "ns",
-      "spread": 0.0,
+      "spread": 0.2499999715782905,
       "tolerance": 0.5000000012623786
     },
     {
@@ -138,31 +138,31 @@
       "kind": "time",
       "value": 4095.999989658594,
       "unit": "ns",
-      "spread": 0.0,
+      "spread": 0.2499999715782905,
       "tolerance": 0.5000000012623786
     },
     {
       "metric": "pass/tonemap",
       "kind": "time",
-      "value": 16383.999958634377,
+      "value": 15359.999611973763,
       "unit": "ns",
-      "spread": 0.06250002131628213,
-      "tolerance": 0.12500000031559466
+      "spread": 0.06666669091985933,
+      "tolerance": 0.13333333670161673
     },
     {
       "metric": "pass/copy",
       "kind": "time",
-      "value": 155583.99260044098,
+      "value": 173311.9934797287,
       "unit": "ns",
-      "spread": 0.5711641484848529,
+      "spread": 0.6251846932589422,
       "tolerance": 0.5
     },
     {
       "metric": "pass/host read",
       "kind": "time",
-      "value": 7007.999811321497,
+      "value": 7615.999784320593,
       "unit": "ns",
-      "spread": 0.27853881490926813,
+      "spread": 0.5588235204202202,
       "tolerance": 0.5
     },
     {
@@ -175,31 +175,52 @@
     {
       "metric": "cpu_frame",
       "kind": "time",
-      "value": 100292.97213363642,
+      "value": 131306.98948287978,
       "unit": "ns",
-      "spread": 0.3853610143007835,
+      "spread": 0.31302277688345326,
       "tolerance": 0.5
     },
     {
       "metric": "cpu_record",
       "kind": "time",
-      "value": 66350.99649429321,
+      "value": 69652.9969573021,
       "unit": "ns",
-      "spread": 0.41009181986821597,
+      "spread": 0.32304429069941204,
       "tolerance": 0.5
     },
     {
       "metric": "leaves",
       "kind": "counter",
-      "value": 1021999.0,
+      "value": 2076211.0,
       "unit": "",
       "spread": 0.0
     },
     {
       "metric": "drawn",
       "kind": "counter",
-      "value": 785768.0,
+      "value": 1393674.0,
       "unit": "",
+      "spread": 0.0
+    },
+    {
+      "metric": "water_triangles",
+      "kind": "info",
+      "value": 0.0,
+      "unit": "triangles/frame",
+      "spread": 0.0
+    },
+    {
+      "metric": "water_tier",
+      "kind": "info",
+      "value": 1.0,
+      "unit": "off=0 m7=1 reflect=2 refract=3 full=4",
+      "spread": 0.0
+    },
+    {
+      "metric": "reflection_scale",
+      "kind": "info",
+      "value": 2.0,
+      "unit": "divisor",
       "spread": 0.0
     },
     {

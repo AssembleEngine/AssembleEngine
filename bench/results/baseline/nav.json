@@ -1,14 +1,14 @@
 {
   "suite": "nav",
-  "commit": "06fa4c4",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "map2560/terrain_generate",
       "kind": "time",
-      "value": 922942209.0,
+      "value": 900920112.0,
       "unit": "ns",
-      "spread": 0.016857758642177346
+      "spread": 0.01972987922374187
     },
     {
       "metric": "map2560/terrain_digest_low32",
@@ -20,16 +20,16 @@
     {
       "metric": "map2560/hierarchy_build_1t",
       "kind": "time",
-      "value": 4301601548.0,
+      "value": 3702550863.0,
       "unit": "ns",
-      "spread": 0.01049528681265018
+      "spread": 0.011719290998434016
     },
     {
       "metric": "map2560/hierarchy_build_8t",
       "kind": "time",
-      "value": 745014986.0,
+      "value": 665459024.0,
       "unit": "ns",
-      "spread": 0.025890269809955204
+      "spread": 0.021251436211645693
     },
     {
       "metric": "map2560/abstract_nodes",
@@ -62,9 +62,9 @@
     {
       "metric": "map2560/context_build",
       "kind": "time",
-      "value": 651125.0,
+      "value": 617834.0,
       "unit": "ns",
-      "spread": 0.01735611441735458
+      "spread": 0.02717558438027043
     },
     {
       "metric": "map2560/field_expansions",
@@ -83,23 +83,23 @@
     {
       "metric": "map2560/flow_field_build",
       "kind": "time",
-      "value": 288547.0,
+      "value": 245659.0,
       "unit": "ns",
-      "spread": 0.021625593057630125
+      "spread": 0.034279224453408995
     },
     {
       "metric": "orca10000/step_1t",
       "kind": "time",
-      "value": 6276263.0,
+      "value": 6218919.0,
       "unit": "ns",
-      "spread": 0.03003602621496263
+      "spread": 0.03177031249321626
     },
     {
       "metric": "orca10000/step_8t",
       "kind": "time",
-      "value": 1230488.0,
+      "value": 1223847.0,
       "unit": "ns",
-      "spread": 0.2517757182516205
+      "spread": 0.20386453535450103
     }
   ]
 }

@@ -1,40 +1,40 @@
 {
   "suite": "sim-dispatch",
-  "commit": "06fa4c4",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "sandbox_default_units50000_ticks600/setup_tick_1t",
       "kind": "time",
-      "value": 23401194.0,
+      "value": 26909519.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_1t",
       "kind": "time",
-      "value": 1390261.0,
+      "value": 1396700.0,
       "unit": "ns",
-      "spread": 0.22891816716429506
+      "spread": 0.2384205627550655
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_mean_1t",
       "kind": "time",
-      "value": 1296097.368948247,
+      "value": 1317839.328881469,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/systems_1t",
       "kind": "time",
-      "value": 1303007.6133333333,
+      "value": 1325841.3933333333,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/apply_1t",
       "kind": "time",
-      "value": 21061.678333333333,
+      "value": 25022.548333333332,
       "unit": "ns",
       "spread": 0.0
     },
@@ -62,140 +62,140 @@
     {
       "metric": "sandbox_default_units50000_ticks600/setup_tick_2t",
       "kind": "time",
-      "value": 22581255.0,
+      "value": 23424804.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_2t",
       "kind": "time",
-      "value": 718376.0,
+      "value": 718966.0,
       "unit": "ns",
-      "spread": 0.287238159403989
+      "spread": 0.3678324148847094
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_mean_2t",
       "kind": "time",
-      "value": 685946.3789649416,
+      "value": 718058.021702838,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/systems_2t",
       "kind": "time",
-      "value": 691413.145,
+      "value": 723998.93,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/apply_2t",
       "kind": "time",
-      "value": 21590.493333333332,
+      "value": 22491.43,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/setup_tick_4t",
       "kind": "time",
-      "value": 22963075.0,
+      "value": 23356951.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_4t",
       "kind": "time",
-      "value": 376879.0,
+      "value": 377333.0,
       "unit": "ns",
-      "spread": 0.3569925625996673
+      "spread": 0.370031245610641
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_mean_4t",
       "kind": "time",
-      "value": 367079.23205342237,
+      "value": 372814.8697829716,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/systems_4t",
       "kind": "time",
-      "value": 372592.28833333333,
+      "value": 378510.6766666667,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/apply_4t",
       "kind": "time",
-      "value": 22391.741666666665,
+      "value": 22746.15,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/setup_tick_8t",
       "kind": "time",
-      "value": 22702309.0,
+      "value": 25988595.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_8t",
       "kind": "time",
-      "value": 229745.0,
+      "value": 225448.0,
       "unit": "ns",
-      "spread": 0.5001762824000522
+      "spread": 0.5360615308186367
     },
     {
       "metric": "sandbox_default_units50000_ticks600/tick_mean_8t",
       "kind": "time",
-      "value": 236780.87979966612,
+      "value": 237732.24207011686,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/systems_8t",
       "kind": "time",
-      "value": 236509.415,
+      "value": 241629.57166666666,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_default_units50000_ticks600/apply_8t",
       "kind": "time",
-      "value": 23622.88,
+      "value": 25359.666666666668,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/setup_tick_1t",
       "kind": "time",
-      "value": 25230826.0,
+      "value": 24022825.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_1t",
       "kind": "time",
-      "value": 1378822.0,
+      "value": 1402490.0,
       "unit": "ns",
-      "spread": 0.4577494411896532
+      "spread": 0.46857517700660967
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_mean_1t",
       "kind": "time",
-      "value": 1462403.9549248747,
+      "value": 1475670.0734557596,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/systems_1t",
       "kind": "time",
-      "value": 1399043.955,
+      "value": 1403918.935,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/apply_1t",
       "kind": "time",
-      "value": 80388.15666666666,
+      "value": 86214.775,
       "unit": "ns",
       "spread": 0.0
     },
@@ -223,105 +223,105 @@
     {
       "metric": "sandbox_stress_units50000_ticks600/setup_tick_2t",
       "kind": "time",
-      "value": 22534284.0,
+      "value": 23272847.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_2t",
       "kind": "time",
-      "value": 729487.0,
+      "value": 736336.0,
       "unit": "ns",
-      "spread": 0.6537772434601302
+      "spread": 0.6888662241150779
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_mean_2t",
       "kind": "time",
-      "value": 819512.2821368949,
+      "value": 833836.0868113523,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/systems_2t",
       "kind": "time",
-      "value": 739392.7166666667,
+      "value": 747515.385,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/apply_2t",
       "kind": "time",
-      "value": 92630.12333333334,
+      "value": 99213.56166666666,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/setup_tick_4t",
       "kind": "time",
-      "value": 22506194.0,
+      "value": 23148553.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_4t",
       "kind": "time",
-      "value": 415809.0,
+      "value": 390044.0,
       "unit": "ns",
-      "spread": 0.9710684472919057
+      "spread": 1.0041021013013915
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_mean_4t",
       "kind": "time",
-      "value": 500099.0801335559,
+      "value": 491390.24373956595,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/systems_4t",
       "kind": "time",
-      "value": 411524.67,
+      "value": 409829.63166666665,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/apply_4t",
       "kind": "time",
-      "value": 99104.57666666666,
+      "value": 93776.63,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/setup_tick_8t",
       "kind": "time",
-      "value": 23113287.0,
+      "value": 23423571.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_8t",
       "kind": "time",
-      "value": 238766.0,
+      "value": 241118.0,
       "unit": "ns",
-      "spread": 1.8590125897322065
+      "spread": 1.9691478860972635
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/tick_mean_8t",
       "kind": "time",
-      "value": 389398.12520868116,
+      "value": 400653.8614357262,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/systems_8t",
       "kind": "time",
-      "value": 279714.8016666667,
+      "value": 286373.99666666664,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "sandbox_stress_units50000_ticks600/apply_8t",
       "kind": "time",
-      "value": 114574.15333333334,
+      "value": 119065.065,
       "unit": "ns",
       "spread": 0.0
     }

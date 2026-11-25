@@ -1,19 +1,19 @@
 {
   "suite": "nav-sim",
-  "commit": "06fa4c4",
+  "commit": "ce6f6b1",
   "machine": "rtx3060ti",
   "records": [
     {
       "metric": "land_units10000_map2560_ticks600/tick_1t",
       "kind": "time",
-      "value": 16869265.0,
+      "value": 16455276.0,
       "unit": "ns",
-      "spread": 0.13272783372601
+      "spread": 0.13176558083863193
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_p95_1t",
       "kind": "time",
-      "value": 18112694.0,
+      "value": 17506065.0,
       "unit": "ns",
       "spread": 0.0
     },
@@ -76,84 +76,84 @@
     {
       "metric": "land_units10000_map2560_ticks600/tick_2t",
       "kind": "time",
-      "value": 9461226.0,
+      "value": 9318780.0,
       "unit": "ns",
-      "spread": 0.18101565272830392
+      "spread": 0.23971292379474565
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_p95_2t",
       "kind": "time",
-      "value": 10583191.0,
+      "value": 11084768.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_4t",
       "kind": "time",
-      "value": 5560677.0,
+      "value": 5457564.0,
       "unit": "ns",
-      "spread": 0.2731672780130909
+      "spread": 0.257959961623904
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_p95_4t",
       "kind": "time",
-      "value": 6611761.0,
+      "value": 6536655.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_8t",
       "kind": "time",
-      "value": 3921930.0,
+      "value": 3825092.0,
       "unit": "ns",
-      "spread": 0.22058272330204773
+      "spread": 0.23259152982464212
     },
     {
       "metric": "land_units10000_map2560_ticks600/tick_p95_8t",
       "kind": "time",
-      "value": 4515893.0,
+      "value": 4455736.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/phase_steer_8t",
       "kind": "time",
-      "value": 852325.8166666669,
+      "value": 763686.8683333332,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/phase_avoidance_8t",
       "kind": "time",
-      "value": 1819444.4233333347,
+      "value": 1807916.9833333318,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/phase_physics_8t",
       "kind": "time",
-      "value": 977591.2000000011,
+      "value": 975713.2400000006,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "land_units10000_map2560_ticks600/phase_jobs_wait_8t",
       "kind": "time",
-      "value": 42485.80499999998,
+      "value": 34665.66499999993,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_1t",
       "kind": "time",
-      "value": 16801983.0,
+      "value": 16187485.0,
       "unit": "ns",
-      "spread": 0.14164006712779081
+      "spread": 0.14482811875964674
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_p95_1t",
       "kind": "time",
-      "value": 18209055.0,
+      "value": 17395458.0,
       "unit": "ns",
       "spread": 0.0
     },
@@ -216,70 +216,70 @@
     {
       "metric": "water_units10000_map2560_ticks600/tick_2t",
       "kind": "time",
-      "value": 9335393.0,
+      "value": 9053249.0,
       "unit": "ns",
-      "spread": 0.1959136589107711
+      "spread": 0.17851359219215113
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_p95_2t",
       "kind": "time",
-      "value": 11445311.0,
+      "value": 10414158.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_4t",
       "kind": "time",
-      "value": 5471575.0,
+      "value": 5476128.0,
       "unit": "ns",
-      "spread": 0.2414533292516323
+      "spread": 0.2512777276206838
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_p95_4t",
       "kind": "time",
-      "value": 6532259.0,
+      "value": 6532426.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_8t",
       "kind": "time",
-      "value": 3908009.0,
+      "value": 3835587.0,
       "unit": "ns",
-      "spread": 0.2336998200362384
+      "spread": 0.2180213875998641
     },
     {
       "metric": "water_units10000_map2560_ticks600/tick_p95_8t",
       "kind": "time",
-      "value": 4604176.0,
+      "value": 4445541.0,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/phase_steer_8t",
       "kind": "time",
-      "value": 817955.4249999999,
+      "value": 739781.6966666656,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/phase_avoidance_8t",
       "kind": "time",
-      "value": 1804874.873333334,
+      "value": 1780704.6416666675,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/phase_physics_8t",
       "kind": "time",
-      "value": 992907.5050000012,
+      "value": 997637.8516666673,
       "unit": "ns",
       "spread": 0.0
     },
     {
       "metric": "water_units10000_map2560_ticks600/phase_jobs_wait_8t",
       "kind": "time",
-      "value": 63823.6483333335,
+      "value": 54011.20333333333,
       "unit": "ns",
       "spread": 0.0
     }
