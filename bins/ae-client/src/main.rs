@@ -30,10 +30,10 @@
 //! by caustics; `--no-water` leaves only the tint. The hills cast the
 //! sun's shadows over the ground, the units and the water; `--no-shadows`
 //! turns them off. Units that die where the observer sees explode
-//! (particles: flash, fire, sparks, smoke; X sets one off at the camera
-//! target, `--explode N` sets off N around it before a capture, each only
-//! where the observer sees: an explosion is seen whole or not at all;
-//! `--no-particles` turns them off; they draw at half resolution,
+//! (particles: flash, fire, sparks, smoke; X sets one off under the mouse
+//! cursor, `--explode N` sets off N around the camera target before a
+//! capture, each only where the observer sees: an explosion is seen whole or
+//! not at all; `--no-particles` turns them off; they draw at half resolution,
 //! `--particles-full` at full) and leave a scar on the ground (a decal,
 //! relit by its micro-height, its centre glowing like hot metal for up to
 //! two seconds; `--no-decals`). The scars are Recoil's
@@ -1663,10 +1663,18 @@ fn run(o: Options) -> Result<ExitCode> {
                 &sim_speed,
                 o.water && o.water_quality.tiers().volume,
             );
-            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0)
-                && explode_around(feed, view.camera.target, 1, started.elapsed().as_nanos() as u32) == 0
-            {
-                println!("X: the camera target is out of sight; no explosion");
+            if let Some(feed) = effects_feed.as_ref().filter(|_| events.pressed & keys::X != 0) {
+                let at = window
+                    .cursor()
+                    .and_then(|(x, y)| ground_at(&view, source, window.pixel_size(), x, y));
+                match at {
+                    Some(at) => {
+                        if explode_around(feed, at, 1, started.elapsed().as_nanos() as u32) == 0 {
+                            println!("X: the point under the cursor is out of sight; no explosion");
+                        }
+                    }
+                    None => println!("X: the cursor is not over the map; no explosion"),
+                }
             }
             // The exercise keeps particles alive through its resizes.
             if let Some(feed) = effects_feed

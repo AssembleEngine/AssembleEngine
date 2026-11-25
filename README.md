@@ -86,7 +86,7 @@ live wakes and rings. The hills cast the
 sun's shadows over the ground, the units and the water (a heightfield, exact at any distance; H
 toggles, `--no-shadows`), and the units cast theirs through a cascaded shadow map (to become a virtual
 shadow map later). Units that die where the player sees explode: GPU particles (flash, fire, sparks,
-smoke) sorted back to front and faded softly into the ground (X sets one off at the camera target if it is in sight, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`; comparison blends with `--particle-blend moments|slices|froxels|packets`); smoke and
+smoke) sorted back to front and faded softly into the ground (X sets one off under the mouse cursor, `--no-particles`; drawn at half resolution and composited with a depth-aware upsample, `--particles-full`; comparison blends with `--particle-blend moments|slices|froxels|packets`); smoke and
 dust cast coloured shadows on the ground, the units and the water (with the units' shadows). Each
 explosion leaves a scar (Recoil's, in `assets/decals/scars`), a decal the terrain's shader paints
 and wraps over cliff edges, relit by its normal map, its centre glowing like hot metal for up to two
@@ -274,7 +274,7 @@ cargo run --release -p ae-client -- --render-module post                 # graph
 cargo run --release -p ae-client -- --tileset desert                     # another surface library on the same map (M: palette, B: blend weights)
 cargo run --release -p ae-client -- --units 0 --camera 10700,12800,350,2.5,0.45   # the lake by the causeway: waves, glints, foam (O: water)
 cargo run --release -p ae-client -- --map generated --units 0          # mountains and mesas casting the sun's shadows (H: shadows)
-cargo run --release -p ae-client -- --game skirmish                     # units fighting; those that die in view explode (X: an explosion at the camera target, if in sight)
+cargo run --release -p ae-client -- --game skirmish                     # units fighting; those that die in view explode (X: an explosion under the mouse cursor)
 cargo run --release -p ae-client -- --map land --units 0 --camera 6000,6000,350,0.6,0.45 --explode 12 --capture boom.ppm   # explosions, a second in
 cargo run --release -p ae-client -- --quake 60                           # the crossing game's quake at tick 60: rock, then raised ground, on screen
 cargo run --release -p ae-client -- --probe-display                      # the display's HDR state and the surface's colour spaces, then exit
@@ -295,7 +295,7 @@ results from the same machine; deterministic counters are compared everywhere.
 WASD / arrows pan, the wheel zooms, right- or middle-drag orbits and tilts, Q/E orbit, R/F tilt,
 Page Up/Page Down raise and lower the orbit point (Home returns it to the ground), shift moves faster; `+`/`-` sim speed, Pause pauses the sim and the animation clocks, `[`/`]` terrain detail,
 T wireframe, L colour by LOD depth, G fog, C freeze the LOD, P print the camera, V v-sync, N render
-module flag 0, M tileset, B blend weights, O water, H shadows, Z bloom, X explosion, **U HDR/SDR**,
+module flag 0, M tileset, B blend weights, O water, H shadows, Z bloom, X explosion under the mouse, **U HDR/SDR**,
 Esc quits.
 
 `--capture` always writes the SDR readback (the offscreen path), so a capture shows neither the HDR

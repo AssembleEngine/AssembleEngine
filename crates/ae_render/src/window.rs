@@ -182,6 +182,23 @@ impl SdlWindow {
         (width.max(0) as u32, height.max(0) as u32)
     }
 
+    /// The mouse cursor's position as fractions of the window (0..1 from the
+    /// top-left, in the same units as [`Click`]). A position is available only
+    /// when this window has mouse focus and the cursor is within its bounds.
+    pub fn cursor(&self) -> Option<(f32, f32)> {
+        if unsafe { sdl::SDL_GetMouseFocus() } != self.window {
+            return None;
+        }
+        let (mut x, mut y) = (0.0, 0.0);
+        unsafe { sdl::SDL_GetMouseState(&mut x, &mut y) };
+        let (mut width, mut height) = (0, 0);
+        if !unsafe { sdl::SDL_GetWindowSize(self.window, &mut width, &mut height) } {
+            return None;
+        }
+        let (width, height) = (width as f32, height as f32);
+        ((0.0..width).contains(&x) && (0.0..height).contains(&y)).then(|| (x / width, y / height))
+    }
+
     /// The SDL window handle, for display queries (`crate::display`).
     pub(crate) fn raw(&self) -> *mut sdl::SDL_Window {
         self.window
