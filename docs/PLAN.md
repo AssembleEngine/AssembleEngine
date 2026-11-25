@@ -5854,8 +5854,11 @@ M16.21)".
   the terrain draw rises 10.0–14.3% in those two views and 0.3–2.5% elsewhere; `gpu_total`
   does not move. `bench-diff` (pre-M16 against this tree) reports 867 metrics, 520
   unchanged, 21 regressed, all of them these leaf/drawn counters and the overview/orbit
-  terrain draw. The CPU benches report 707 metrics, 0 regressed against the committed
-  baseline. The budget is signed off at 0.91–1.27 ms per frame with 0.56–0.63 ms of water.
+  terrain draw. The CPU benches report 707 metrics, 0 regressed against the previous
+  baseline. `bench/results/baseline` is re-recorded at this closing commit with all 24 GPU
+  scenes (the four water scenes and the three scar scenes included) and the CPU suites, so
+  the next milestone diffs against M16. The budget is signed off at 0.91–1.27 ms per frame
+  with 0.56–0.63 ms of water.
 - Deliberate test-data change: the four M16 frame-gate hashes were re-pinned. They had
   already changed at `0bc8f83` (the decal relief commit's roughness-aware sky specular and
   heightfield scars); the M16 water frames themselves are unchanged by this work.
