@@ -159,7 +159,7 @@ barriers are inferred):
 | Static displacement + blur | `water.blur` | `water_waves` | `water.waves` (height + normal) |
 | Adaptive mesh | `water.lod` | `water_waves` | `water.mesh.*` (indirect list) |
 | - | `water.shore` | data | `water.shore` (R16F travel time), `water.caustics` |
-| Reflection | `terrain.cull_reflect`, `units.reset_reflect`, `units.cull_reflect`, `terrain.reflect`, `units.reflect` | `water_reflect` | `water.reflection` (scene format, scale 0.5) + depth |
+| Reflection | `terrain.cull_reflect`, `units.reset_reflect`, `terrain.reflect`, `units.reflect`; `units.cull` also writes the reflection's unit lists (or a module declares `units.cull_reflect`) | `water_reflect` | `water.reflection` (scene format, scale 0.5) + depth |
 | Underwater pass | `water.underwater` | `water_refract` | `water.refraction` (scene format, full size) |
 | Bubbles | `particles.underwater` (the split's below-water run) | `water_refract` | `water.refraction` (load) |
 | Water surface | `water.draw` (RICH adds the underside) | tier-specific variants | `scene`, `glow`, depth read |
@@ -269,7 +269,11 @@ and adds a soft outline when requested by the map.
 
 Crossing's coast places submarines among its ships. Enemy submerged hulls require sonar
 coverage. Radar-only, explored-only and ghost rows contribute no geometry, lights or
-shadows to the water copies. Blips and ghosts draw over the surface in their own pass.
+shadows to the water copies. Blips and ghosts draw over the surface in their own pass
+(`units.water_overlay`). The units' cull sorts each row once by its state: Own and Seen rows
+into the scene's lists and the shadow cascades', blips and ghosts into the overlay's (the
+back of each camera region, under their own indirect commands), so neither draw runs the
+other's vertices.
 Submerged effects use sonar and surface effects use line of sight. Switching allyteams with
 Y clears pending impacts and particle bursts, retires live particles and starts fresh
 explored and ghost history for the new observer.
@@ -586,6 +590,44 @@ A capture of the overview camera with both settings differs on 3,779 of
 camera differs on 3,599 (0.13%), mean 0.004, at most 18. Half resolution stays:
 the full target costs up to 6.5% of the frame for a change that is invisible at
 these distances.
+
+### Which units the reflection draws
+
+The default graphs fill the reflection's unit lists in the main cull
+(`units.cull`, which also writes `units.visible_reflect` and
+`units.indirect_reflect` after `units.reset_reflect`). One dispatch loads
+each unit once and tests the camera, the shadow cascades and the
+mirror. A module may instead declare the separate `units.cull_reflect`,
+which runs the `MIRROR` variants, but it may not declare both. Either way
+the mirror test is `units_mirror_cull.glsl`. It keeps an observer-eligible
+unit only when its reflection can land on a water pixel:
+
+- its bounding sphere reaches above the water level, since the mirror draws
+  clip there;
+- its mirrored screen box, widened by the water's largest sample shift, meets
+  the map through the wave slab (level ± `WAVE_BOUND`) over ground that is
+  below the slab's top somewhere. The terrain's min pyramid answers that with at
+  most 6 × 6 blocks.
+
+The shift bound is `REFLECT_SHIFT` (`water_reflect.glsl`, 0.08 UV per axis).
+`water.frag` clamps its ripple, detail and churn offsets to it, so the cull
+stays conservative. The test keeps the unit when the eye is inside the slab,
+a box corner is behind the eye, or a widened corner looks at or above the
+horizon. A low camera therefore keeps the units near the top of the screen.
+Occlusion is not tested.
+
+Offscreen captures (1280×720, release, single frames; not benchmarks):
+
+- The fox camera of the M16 regression report
+  (`--game scripted --units 10000 --model …/Fox.glb --camera 2900,17900,600,0.4,0.7`)
+  shows no water. `units reflect` falls from 1.75 ms to 0.003 ms, and the image
+  is bit-identical.
+- Three coast views with 2,000 Foxes across beach and shallows are bit-identical
+  to the tree without the cull.
+- The clamp changes one pixel by one code in two of four coast views.
+
+The GPU test `mirror_cull_drops_units_whose_reflection_misses_the_water` counts
+the mirror's instances on a half-land, half-sea map.
 
 ### The surface mesh
 

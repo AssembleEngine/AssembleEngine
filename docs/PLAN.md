@@ -5914,7 +5914,156 @@ The scripted Foxes use it when they resume walking in the opposite direction.
 respectively. Each command is equivalent to a zero-speed target and applies independently
 when several commands affect the same bone.
 
+## Reflection unit cull (2026-11-25)
+
+The M16 `full` tier, the client's default since M16, drew every observer-eligible
+unit a second time into the planar reflection. The mirror cull tested the mirrored
+frustum only. With the 10k-Fox camera from the regression report (`--game scripted
+--units 10000 --model …/Fox.glb --camera 2900,17900,600,0.4,0.7`), no water is on
+screen, yet `units reflect` took 1.75 ms of a 1280×720 offscreen frame. The fox
+bench scenes did not show this because they default to `m7` (`bench.rs`
+`options_for`).
+
+The mirror cull now keeps a unit only when its sphere reaches above the water level
+and its mirrored screen box can land on water. The box is widened by the water's
+clamped sample shift (`REFLECT_SHIFT`, 0.08 UV per axis) and tested against the
+terrain's min pyramid through the wave slab. [water.md](water.md) "Which units the
+reflection draws" has the test and its limits.
+
+On the report's camera, `units reflect` falls to 0.003 ms and the frame is
+bit-identical. Three coast captures with 2,000 Foxes across beach and shallows are
+bit-identical to the tree without the cull. The clamp alone moves one pixel by one
+code in two coast views.
+
+The pinned SPIR-V list was re-recorded for the mirror shaders (their UBO gained the
+camera's inverse view-projection), the culls and the `REFLECT` water variants. The
+GPU test `mirror_cull_drops_units_whose_reflection_misses_the_water` reads the
+mirror's indirect counts through the new `PassWork::BufferReadback`. Wall-clock fps
+was not re-measured.
+
+### One cull for every view
+
+`units.cull` now also fills the reflection's lists in the same dispatch. Each
+unit is loaded and placed once, then tested against the camera, the shadow
+cascades and the mirror. The mirror test uses its own placement and size: the
+submerged depth, and the minimum pixel size seen from the mirrored camera.
+Push word `y` turns the mirror test on, `z` and `w` select the reflection's
+lists, and there is no fourth shader variant.
+
+The three default graphs agree, and their goldens were re-recorded:
+- `units.reset_reflect` moved ahead of `units.cull`;
+- `units.cull` gained `units.visible_reflect` and `units.indirect_reflect`;
+- `units cull reflect` is gone.
+
+A module may still declare `units.cull_reflect`, whose `MIRROR` variants
+compile to the same SPIR-V as before. `library/water.rs` rejects a graph whose
+reflection lists come from both passes or from neither, and
+`the_reflections_unit_lists_come_from_one_cull` covers the four cases.
+
+Checked against the previous commit with offscreen captures (1280×720, release,
+single frames): the fox regression camera, three coast fox scenes and the
+overview, fleet and close coast views are all bit-identical. Merging saves one
+dispatch and the second load of each unit's attributes and height, tens of
+microseconds at most. No fps change is claimed, and none was measured.
+
+Only the four main culls (`units_cull`, `units_models_cull` and their `_sub`
+variants) were re-pinned in `m16_spirv.txt`. An occlusion bit from the previous
+frame's depth, and per-view counts in the client's report, would build on this
+pass.
+
+The committed baseline (`bench/results/baseline/gpu-water-*.json`) still has the
+split passes:
+- `pass/units cull reflect` shows as `removed` in `bench-diff`;
+- `pass/units cull` now includes the mirror test on the water scenes and will read
+  as `REGRESSED`, because no floor exempts a pass of a few microseconds from the
+  10% tolerance;
+- `pass/units reflect` falls where units stand far from water.
+
+Re-record those four records, with the user's consent, before the next milestone
+diffs against them.
+
+## Units placed once per frame (2026-11-25)
+
+The 10k-Fox camera ran at about 126 fps at `afe4e62` and 92 fps at the M16 end
+(`full` tier) or 104 fps (`m7`). Bisected on `near-fox` at `--bench-water-quality
+m7` (offscreen, 1280×720, 120 frames, one run per commit; the end points twice,
+within 0.5%):
+
+| Commit | `gpu_total` | `pass/shadows` | `units pose` |
+|---|---|---|---|
+| `afe4e62` (before M15) | 6.63 ms | 4.33 ms | 306 µs |
+| `9bc550f` (M15 end, bindless) | 7.02 ms | 4.60 ms | 326 µs |
+| `4cc4fed` (M16 water; `full`) | — | 4.90 ms | 325 µs |
+| `a1f5cea` (rotation interpolation) | 7.67 ms | 5.19 ms | 373 µs |
+| `5fb47ed` | 7.65 ms | 5.18 ms | 373 µs |
+
+Each step added work to `loadUnit` or around it in the model shadow caster,
+which ran it per vertex (about 1,700 per Fox, per cascade): bindless handle
+lookups (M15), the `eligible` check (M16), and four more attribute reads and
+the rotation slerp (`a1f5cea`). Removing the slerp and then the check at
+`5fb47ed` gave 4.88 and 4.63 ms, but that run was noisy (two plain reruns:
+5.31 and 5.67 ms, ±12%).
+
+The cull now places each unit once. After loadUnit it writes the row's
+placement record (position and body radius, rotation; two vec4) after the
+visible list's regions (`u.lists.x`, a multiple of 4), and the reflection's
+placement into the reflection's list. The draws, shadow casters and mirror
+draws read it (`placedUnit`); wave riding and the view's minimum-size scale
+stay per draw. The model cull leaves radar blips and ghosts out of the
+cascades' lists, and the model shadow caster no longer checks them. The
+lights' compute pass still calls `loadUnit`.
+
+Checked against `5fb47ed` with offscreen captures (1280×720, release): the
+m16 frame-identity gate is unchanged. The fleet and close coast views
+(ships, submarines) are bit-identical at all four tiers. The 10k-Fox camera
+differs by at most 2 levels on about 3% of pixels, at every tier: the
+walking units' position lerp moved from the vertex stage to compute. The
+units' SPIR-V hashes were re-pinned. Not measured yet.
+
+The pose pass's bone slerp (+50 µs at `a1f5cea`) is unchanged.
+
+### The water overlay's own list
+
+In refraction frames (`refract` and `full`), `units.draw` drew the scene's units
+before the water copy and `units.water_overlay` drew blips and ghosts over it. Both
+read the camera's list and dropped the other half per vertex, so with 10k Foxes the
+overlay ran every Fox vertex to draw nothing: 0.73 ms of the `full` frame on
+`near-fox`.
+
+The `SUB` cull, used exactly in refraction frames, now sorts each row by
+`eligible()`, the same test that already keeps blips and ghosts out of the shadow
+cascades and the reflection:
+- Own and Seen rows go to the front of their camera region, under the camera's
+  commands;
+- blips and ghosts go to the back, under a copy of the commands after the
+  cascades' (`models::overlay_offset`, `overlayWord`).
+
+The overlay draws from that offset and reads its rows from the back (`drawnRow`).
+Darts-only renderers get a second dart command. The count report adds the
+overlay's, and the host count buffers start zeroed.
+
+Captures are bit-identical to the placement commit. The new GPU test
+`refraction_frames_draw_blips_and_ghosts_over_the_water_only` checks own, blip and
+ghost darts and models: on the surface, in the count, and kept out of the
+refraction copy. With the overlay's indirect offset or the model overlay count
+broken, it fails.
+
+Windowed, on the user's machine (the 10k-Fox camera, `full` tier, 200 lights):
+92 fps at `5fb47ed`, about 115 fps after the placement change and 124 fps after the
+overlay split. `afe4e62`, before M15 and the water, ran about 126 fps.
+
 ## TODO (open, not a priority now)
+
+- **Measure the unit placement and overlay changes.** `near-fox` at `m7` against `afe4e62`
+  (6.63 ms) and `5fb47ed` (7.65 ms), and the windowed 10k-Fox fps, with the
+  user's consent. If the size's per-vertex cost shows, the cull could store
+  the final size for non-wave lists.
+- **Bench the client's default water tier.** `near-fox` and `live-fox` default to `m7`
+  while `ae-client` defaults to `full`, so `bench-diff` cannot catch a regression in
+  `full` with dense units. Add a `full` fox scene, or make those scenes use `full`.
+- **Low cameras and the mirror cull.** A widened screen box that reaches the horizon keeps
+  the unit, so a low camera keeps the units near the top of the screen. Bounding those
+  rays by the far distance or the map edge would tighten the test.
 
 - Shared frame constants (borrowed from Recoil's `UniformConstants`): one per-slot std140 block,
   written once per frame at a fixed reserved uniform-array index that every shader reads through a

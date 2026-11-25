@@ -236,10 +236,10 @@ Render modules wire these; the engine owns their implementations.
 | `terrain.lod` | compute | heightfield, error pyramid, camera | `terrain.leaves`, `terrain.indirect` |
 | `terrain.draw` | graphics | leaves, indirect, tilesets | colour 1, depth (write) |
 | `units.reset` | transfer | — | `units.indirect` (reset) |
-| `units.cull` | compute | `units.instances`, camera | `units.visible`, `units.indirect` |
+| `units.cull` | compute | `units.instances`, camera, shadow cascades; with reflection the mirror frame and terrain pyramid | `units.visible` (the lists, then every row's placement record), `units.indirect` (with refraction, blips and ghosts under the water overlay's commands); with reflection also `units.visible_reflect`, `units.indirect_reflect` |
 | `units.draw` | graphics | instances, visible, indirect | colour 1, depth (write) |
 | `units.count` | transfer | `units.indirect` | `units.counts` |
-| `shadows.draw` | graphics | instances (all units) | `shadows.map` (depth) |
+| `shadows.draw` | graphics | instances (all units), placement records in `units.visible` | `shadows.map` (depth) |
 | `shadows.particles` | graphics | particle state, keys, indirect | `shadows.particles` (colour) |
 | `water.draw` | graphics | depth (read), water tier inputs, sky and fog | scene and glow |
 | `water.volume` | graphics | scene, depth, refraction, optional displacement | `water.volume.out` |
