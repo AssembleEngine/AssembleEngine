@@ -146,10 +146,12 @@ hulls, a displaced CBT surface, Kelvin wakes and impact rings from the view stre
 spray and bubbles, and an underwater view with Snell's window. The four coast benchmark
 scenes (`water-overview`, `water-fleet`, `water-close`, `water-under`) cost 0.91-1.27 ms
 per frame at 1280x720 (0.56-0.63 ms of it water) on the reference RTX 3060 Ti, with two
-runs producing identical records. The reflection stays half resolution (full costs up to
-6.5% for a 0.14% channel change) and the surface's 1 px CBT target is confirmed against a
-4x finer mesh. The shoreline terrain refinement raises terrain leaves 2.0-4.5x and the
-terrain draw 10-14% at the two overview cameras, with the frame total unchanged.
+runs agreeing within 0.3% on the frame total. The reflection stays half resolution (full
+costs up to 6.5% for a 0.14% channel change) and the surface's 1 px CBT target is confirmed
+against a 4x finer mesh; the surface pass is bound by its per-pixel shading, not its
+triangles. The shoreline terrain refinement raises terrain leaves 2.0-4.5x and the terrain
+draw 10-14% (about +44 µs) at the two overview cameras; its effect on the frame total is
+within `bench-diff`'s 10% tolerance and not yet measured on its own.
 `--bench-water-quality` and `--bench-reflection` select the comparisons. Full write-up,
 captures and measurements: [docs/water.md](docs/water.md).
 

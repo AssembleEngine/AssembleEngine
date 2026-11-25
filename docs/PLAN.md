@@ -5829,8 +5829,9 @@ plan; this section records what exists, what is open and what was measured.
 
 Measured with the user's consent on an idle machine (RTX 3060 Ti, driver 620.73.04,
 `AE_BENCH_MACHINE=rtx3060ti`), release, offscreen at 1280x720, 60 warm-up frames plus one
-second, 300 measured frames, one process per scene. Two complete `full` runs gave identical
-records. The full write-up and the commands are in [water.md](water.md) "Benchmarks (M16.10,
+second, 300 measured frames, one process per scene. Two complete `full` runs agree within
+`bench-diff`'s 10% tolerance on all 192 metrics: `gpu_total` within 0.3%, GPU passes over
+20 µs within 1.9%, the CPU frame within 5%. The full write-up and the commands are in [water.md](water.md) "Benchmarks (M16.10,
 M16.21)".
 
 - `ae-client --bench water-overview,water-fleet,water-close,water-under` gained
@@ -5853,7 +5854,8 @@ M16.21)".
 - Waterline terrain refinement, against the pre-M16 tree on the same M7 scenes: leaves rise
   2.0–4.5× (overview 266,700 → 1,207,200 over 300 frames, orbit 1,021,999 → 2,076,211) and
   the terrain draw rises 10.0–14.3% in those two views and 0.3–2.5% elsewhere; `gpu_total`
-  does not move. `bench-diff` (pre-M16 against this tree) reports 867 metrics, 520
+  stays under the 10% time tolerance, which hides a rise of about 6% (+44 µs of terrain at
+  overview), and the 8c5cbb9 records were not kept to read the change back. `bench-diff` (pre-M16 against this tree) reports 867 metrics, 520
   unchanged, 21 regressed, all of them these leaf/drawn counters and the overview/orbit
   terrain draw. The CPU benches report 707 metrics, 0 regressed against the previous
   baseline. `bench/results/baseline` is re-recorded at this closing commit with all 24 GPU
@@ -6203,6 +6205,28 @@ From M13 stage 7 (2026-11-22):
   `sdr|hdr10|scrgb` (the readback already supports all three), writes the packed 10-bit or 16F
   pixels (or a PNG beside the raw), and a test decodes a known display value through the chosen
   encoding.
+
+From the M16.21 measurements (2026-11-25; [water.md](water.md) "Benchmarks (M16.10,
+M16.21)"). Each needs a measurement run, which needs the user's consent first.
+
+- **The waterline refinement's cost to the frame.** The M16.21 write-up said `gpu_total`
+  "does not move", but `bench-diff`'s 10% time tolerance hides the +44 µs (about 6%) of
+  terrain draw at overview and orbit, and the 8c5cbb9 records were not kept. Against the
+  335e770 baseline, overview's `gpu_total` is 650.7 → 719.2 µs and orbit's 810.5 → 874.3 µs,
+  with the M15 and decal work in between. Measure 8c5cbb9 against the M16 tree with the same
+  scenes and keep both records; state the frame change, not only the tolerance verdict.
+- **Close's surface pass costs 2.65× `m7` per pixel**, against about 2.15× at overview and
+  fleet once triangles are taken out. Guesses to test: the churned-water branch near the
+  units (up to 18 more texture reads), or the sharper texture mips up close missing the
+  cache. A probe run of `water-close` with the churn forced off separates the two.
+- **The water CBT LOD costs a fixed ~137 µs** (135.4–137.9 µs) whether it keeps 6 leaves or
+  1,340, so the cost is not in the mesh work. Find the fixed part (a full-tree reduction, a
+  chain of dependent dispatches and barriers) from the pass's dispatches. It is about 22% of
+  the water stack.
+- **The blur doubles under the surface** (214.0 µs against 96.3–106.5 µs above it) at the
+  same 1024² dispatch. The patch's footprint (300–1,600 m) changes with the camera, but
+  nothing yet shows why that should double a fixed-size blur. Find out what the under camera
+  does differently (static displacement folded over more of the patch, more particle stamps).
 
 Pie in the sky, some time:
 

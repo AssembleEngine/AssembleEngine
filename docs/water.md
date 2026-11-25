@@ -507,9 +507,12 @@ the tier. `--bench-water-quality off|m7|reflect|refract|full` selects a tier and
 release, offscreen at 1280x720 with the SDR readback, 60 warm-up frames plus at
 least one second for the GPU clocks, then 300 measured frames, one process per
 scene. The machine was idle and committed to the run: RTX 3060 Ti, driver
-620.73.04, `AE_BENCH_MACHINE=rtx3060ti`. Two complete `full` runs produced
-identical records (192 of 192 metrics unchanged between them), so the numbers
-below are one run, not a best pick.
+620.73.04, `AE_BENCH_MACHINE=rtx3060ti`. Two complete `full` runs
+(`m16-full`, `m16-full-2`) agree within `bench-diff`'s default 10% time
+tolerance on all 192 metrics. They are close, not identical: `gpu_total` differs
+by at most 0.3% (fleet 1,161.9 against 1,158.8 µs), any GPU pass over 20 µs by
+at most 1.9%, and the CPU frame by up to 5%. The numbers below are one run, not
+a best pick.
 
 ```sh
 AE_BENCH_MACHINE=rtx3060ti ./target/release/ae-client \
@@ -601,10 +604,46 @@ As an error measure, the same frames were rendered with the split threshold at
 0.25 px (4× finer; 73,920 triangles, 4,620 leaves in the overview). At the
 overview camera 1.23% of channels changed (mean 0.019 codes, at most 29, p99 1);
 at the close camera 0.67% changed (mean 0.009, at most 9, p99 0). The finer mesh
-costs 212.0 µs in the surface pass against 169.0 and 1,306 µs in total against
-1,272 (+2.7%). The comparison is against a finer adaptive mesh, not a
-ground-truth surface, so it bounds the error rather than proving a pixel figure;
-the 1 px split target remains the design bound.
+costs 212.0 µs in the surface pass against 169.0 (+25% on the pass) and
+1,306 µs in total against 1,272 (+2.7% on the frame). The comparison is against
+a finer adaptive mesh, not a ground-truth surface, so it bounds the error rather
+than proving a pixel figure; the 1 px split target remains the design bound.
+
+The surface pass is bound by its per-pixel shading, not by its triangles. The
+`m7` surface is one map-sized quad of two triangles, so its pass time measures
+how much water each camera covers at a fixed, light per-pixel cost. The `full`
+surface follows it scene for scene (median µs per frame, from the `m16-m7` and
+`m16-full` records):
+
+| Scene | `m7` surface (2 triangles) | `full` surface | `full` triangles | `full` / `m7` |
+| --- | ---: | ---: | ---: | ---: |
+| water-overview | 69.6 | 169.0 | 21,440 | 2.43 |
+| water-fleet | 94.2 | 205.8 | 6,048 | 2.18 |
+| water-close | 70.7 | 190.5 | 3,824 | 2.69 |
+| water-under | 9.2 | 179.2 | 96 | — |
+
+- Fleet costs the most because its camera sees the most water: its `m7` quad
+  already costs 35% more than overview's.
+- The 0.25 px run bounds the triangle cost: 52,480 more triangles for +43 µs,
+  at most 0.82 ns each. That bound includes the extra shading of small
+  triangles' partly covered 2×2 quads, so the real geometry cost is lower. It
+  puts triangles at no more than 18 µs of overview's 169 µs and 5 µs of fleet's
+  206 µs.
+- Without the triangles, overview and fleet shade at the same cost per pixel,
+  about 2.15× `m7` (151 / 69.6 and 201 / 94.2). Close shades at 2.65× `m7`,
+  which is not explained yet (PLAN.md TODO).
+- Under the surface the `m7` shader discards every pixel (9.2 µs), while the
+  `full` underside covers the whole screen.
+
+Blending and output writes are a small part of this: two 1280x720 targets and
+no depth write. The cost is the fragment shader. Before any churn, `water.frag`
+with `water_ocean.glsl` reads about 20 textures per pixel: two wave-patch
+reads, four animated-normal reads, three fine-ripple reads, the churn, two foam
+and shore reads, the shadows and clustered lights, the planar reflection and
+two refraction reads. Churned water adds up to 18 more reads for its aged churn
+octaves. The underside block that the `full` variants run on every pixel costs
+one matrix multiply, one wave-patch read and an `fwidth` with the camera above
+the water.
 
 ### The waterline refinement
 
@@ -624,11 +663,17 @@ divide by 300 for per frame):
 | scorched | 90,000 → 316,800 (3.52×) | 5,100 → 5,100 | 1,803.3 → 1,829.9 µs (+1.5%) |
 
 The extra leaves cost 10–14% of the terrain draw at the two cameras where the
-waterline is most of the view and 0.3–2.5% elsewhere; `gpu_total` is unchanged
-in every scene. `bench-diff` of the pre-M16 tree against this one reports 867
-metrics, 520 unchanged and 21 regressed: all 21 are these `leaves`/`drawn`
-counters and the overview and orbit terrain draws. They are the documented
-price of the shoreline fix, accepted because the frame total does not move.
+waterline is most of the view and 0.3–2.5% elsewhere. `bench-diff` of the
+pre-M16 tree against this one reports 867 metrics, 520 unchanged and 21
+regressed: all 21 are these `leaves`/`drawn` counters and the overview and orbit
+terrain draws. `gpu_total` is not among them, but that only means it rose by
+less than the 10% time tolerance: +44 µs of terrain draw is about 6% of the
+overview's frame. The 8c5cbb9 records were not kept, so the size of the
+`gpu_total` change cannot be read back. Against the last committed baseline
+before M16 (335e770, which also predates the M15 and decal work), overview's
+`gpu_total` is 650.7 → 719.2 µs (+10.5%) and orbit's 810.5 → 874.3 µs (+7.9%).
+The extra leaves are the price of the shoreline fix; how much of the frame
+total they account for is open (PLAN.md TODO).
 The CPU benches against the committed baseline report 707 metrics, 0 regressed.
 
 ### Budget
