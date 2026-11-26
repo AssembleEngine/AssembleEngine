@@ -1,0 +1,153 @@
+#version 460
+#include "units_common.glsl"
+#include "shadow_storage.glsl"
+#include "shadow_cache.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Image slot 5 is the terrain's min/max pyramid (src/terrain/heightmap.rs,
+// world heights; level GROUND_PYRAMID_BASE at mip 0). Terrain edits update it.
+#define groundPyramid AE_S2D(5, 1)
+const int GROUND_PYRAMID_BASE = 2;
+const float NO_GROUND_FLOOR = -1.0e30;
+
+// The lowest and highest ground over cells [a, b] (clamped to the map),
+// from the pyramid level whose blocks are at least half the box's longer
+// side: at most 3 x 3 blocks.
+vec2 groundRange(vec2 a, vec2 b) {
+    int root = textureSize(groundPyramid, 0).x << GROUND_PYRAMID_BASE;
+    int coarsest = findMSB(root);
+    float extent = max(max(b.x - a.x, b.y - a.y) * 0.5, 1.0);
+    int level = clamp(int(ceil(log2(extent))), GROUND_PYRAMID_BASE, coarsest);
+    int n = root >> level;
+    ivec2 t0 = clamp(ivec2(floor(a / float(1 << level))), ivec2(0), ivec2(n - 1));
+    ivec2 t1 = clamp(ivec2(floor(b / float(1 << level))), ivec2(0), ivec2(n - 1));
+    int mip = level - GROUND_PYRAMID_BASE;
+    vec2 range = vec2(1.0e30, -1.0e30);
+    for (int y = t0.y; y <= t1.y; y++) {
+        for (int x = t0.x; x <= t1.x; x++) {
+            vec2 block = texelFetch(groundPyramid, ivec2(x, y), mip).rg;
+            range = vec2(min(range.x, block.x), max(range.y, block.y));
+        }
+    }
+    return range;
+}
+
+// The lowest receiver height in a page column: light-space rectangle
+// `centre` +- `halfExtent` (x along the right axis, y along the up axis).
+// Receivers stand on the ground or above it. From a receiver, the ray away
+// from the sun keeps its light-space x and y and meets the ground no higher
+// than the receiver. So the lowest ground whose light-space position lies
+// in the rectangle bounds every receiver there. That ground lies in the
+// rectangle's horizontal footprint between the lowest and highest ground,
+// and each footprint's range bounds a smaller footprint. Three refinements
+// start from the whole map's range.
+float pageGroundFloor(vec2 centre, vec2 halfExtent, mat3 axes) {
+    vec3 right = axes[0];
+    vec3 up = axes[1];
+    // Ground xz at height y solves right.p = x, up.p = y. The system's
+    // determinant is -sun.y: a grazing sun's footprint is unbounded.
+    if (abs(axes[2].y) < 1.0e-3) return NO_GROUND_FLOOR;
+    mat2 toGround = inverse(mat2(right.x, up.x, right.z, up.z));
+    // How far the footprint moves per unit of height.
+    vec2 lift = toGround * vec2(right.y, up.y);
+    vec2 reachXY = abs(toGround[0]) * halfExtent.x + abs(toGround[1]) * halfExtent.y;
+    int coarsest = textureQueryLevels(groundPyramid) - 1;
+    vec2 range = texelFetch(groundPyramid, ivec2(0), coarsest).rg;
+    for (int i = 0; i < 3; ++i) {
+        vec2 mid = toGround * centre - lift * (0.5 * (range.x + range.y));
+        vec2 reach = reachXY + abs(lift) * (0.5 * (range.y - range.x));
+        range = groundRange((mid - reach) / u.map.x, (mid + reach) / u.map.x);
+    }
+    return range.x;
+}
+
+// Whether a point of the light-space box (centre `world`, `halfSize` along
+// `axes`) is inside all `planes`, with a page column's xy footprint and
+// `terrainMargin` of height as slack on each plane.
+bool intersectsFrustum(vec3 world, vec3 halfSize, mat3 axes, float terrainMargin, vec4 planes[6]) {
+    vec2 depth = vec2(-halfSize.z, halfSize.z);
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = planes[i];
+        vec3 n = plane.xyz;
+        vec3 projected = n * axes;
+        float reach = dot(abs(projected.xy), halfSize.xy) + abs(n.y) * terrainMargin;
+        float inside = dot(n, world) + plane.w + reach;
+        // A point in the page needs the same light-space depth to satisfy
+        // all planes. Testing each plane against the whole column separately
+        // admits pages whose intersections are at disjoint depths.
+        if (projected.z > 1e-6) {
+            depth.x = max(depth.x, -inside / projected.z);
+        } else if (projected.z < -1e-6) {
+            depth.y = min(depth.y, -inside / projected.z);
+        } else if (inside + abs(projected.z) * halfSize.z < 0.0) {
+            return false;
+        }
+        if (depth.x > depth.y) return false;
+    }
+    return true;
+}
+
+// Whether a receiver the camera sees can fall in the page. The camera's
+// projection has no far plane, so the column is also clipped below by the
+// page's ground floor. Without it, columns that pass under the visible
+// terrain request pages nothing can sample. The water reflection requests
+// nothing: its receivers do not sample unit shadows (unit_shadows.glsl).
+bool pageIntersectsView(ivec2 localPage, int level) {
+    vec4 origin = u.unitShadowOrigin[level];
+    vec3 scale = u.unitShadowScale[level].xyz;
+    mat3 axes = mat3(u.unitShadowAxes[0].xyz, u.unitShadowAxes[1].xyz, u.unitShadowAxes[2].xyz);
+    vec2 offset = (vec2(localPage) + 0.5) * (2.0 / float(SHADOW_LEVEL_PAGES)) - 1.0;
+    vec3 light = origin.xyz + vec3(offset, 0.5) / scale;
+    vec3 world = axes * light;
+    // The page's receiver volume includes the bias and filter footprint.
+    vec3 halfSize = vec3(vec2(1.0 / float(SHADOW_LEVEL_PAGES)), 0.5) / scale
+        + SHADOW_RECEIVER_PAD_TEXELS * origin.w;
+    float terrainMargin = shadowTerrainHeightMargin(u.unitShadowOrigin[UNIT_CASCADES - 1].w);
+    // The plane's slack adds one margin. Terrain receivers can sit that far
+    // from the heightfield. A second margin covers model feet and roundoff.
+    float floorHeight = pageGroundFloor(light.xy, halfSize.xy, axes) - terrainMargin;
+    vec4 planes[6] = vec4[6](u.frustum[0], u.frustum[1], u.frustum[2], u.frustum[3], u.frustum[4],
+                             vec4(0.0, 1.0, 0.0, -floorHeight));
+    return intersectsFrustum(world, halfSize, axes, terrainMargin, planes);
+}
+
+void main() {
+    ivec2 page = ivec2(gl_GlobalInvocationID.xy);
+    bool enabled = u.unitShadowScale[0].w != 0.0;
+    int level = UNIT_CASCADES - 1 - page.y / SHADOW_LEVEL_PAGES;
+    ivec2 localPage = ivec2(page.x, page.y % SHADOW_LEVEL_PAGES);
+    uint flags = enabled && pageIntersectsView(localPage, level) ? SHADOW_REQUEST_VIEW : 0u;
+    if (flags != 0u && level > 0 && (level != 1 || u.unitShadowAxes[1].w >= 1.0)) {
+        vec4 coarse = u.unitShadowOrigin[level];
+        vec4 fine = u.unitShadowOrigin[level - 1];
+        vec2 scale = u.unitShadowScale[level].xy;
+        vec2 offset = (vec2(localPage) + 0.5) * (2.0 / float(SHADOW_LEVEL_PAGES)) - 1.0;
+        vec2 centre = coarse.xy + offset / scale;
+        // Preserve coarse pages under the finer level's transition band.
+        // Pad both levels' bias and filtering before pruning the interior.
+        vec2 farthest = abs(centre - fine.xy) + 1.0 / (float(SHADOW_LEVEL_PAGES) * scale)
+            + SHADOW_RECEIVER_PAD_TEXELS * (coarse.w + fine.w);
+        if (all(lessThan(farthest, SHADOW_EDGE_START / u.unitShadowScale[level - 1].xy))) {
+            flags |= SHADOW_REQUEST_INNER;
+        }
+    }
+    imageStore(shadowStorage, page + ivec2(SHADOW_LEVEL_PAGES, SHADOW_LEVEL_SIZE), uvec4(flags));
+    if (all(equal(page, ivec2(0)))) {
+        bool reuse = shadowCache.valid != 0u && enabled;
+        if (reuse) {
+            for (int level = 0; level < UNIT_CASCADES; ++level) {
+                reuse = reuse && all(equal(shadowCache.origin[level], u.unitShadowOrigin[level]))
+                    && all(equal(shadowCache.scale[level], u.unitShadowScale[level]));
+            }
+        }
+        shadowCache.previousRows = reuse ? shadowCache.casterCount : 0u;
+        shadowCache.reuse = uint(reuse);
+        shadowCache.casterCount = enabled ? u.counts.x : 0u;
+        for (int level = 0; level < UNIT_CASCADES; ++level) {
+            shadowCache.origin[level] = u.unitShadowOrigin[level];
+            shadowCache.scale[level] = u.unitShadowScale[level];
+        }
+        shadowCache.valid = 1u;
+    }
+}

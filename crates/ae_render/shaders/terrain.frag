@@ -410,7 +410,7 @@ void main() {
     }
 #endif
 
-    // The shading normal under the decals (shadows keep the ground's).
+    // The shading normal under the decals.
     vec3 shadeN = n;
     vec3 glow = vec3(0.0);
     if (DECALS) {
@@ -447,7 +447,11 @@ void main() {
     // LOD mesh's height. The darker one wins (they are the same sun).
     vec3 ground = vec3(inWorld.x, sampleHeight(inWorld.xz / u.map.w), inWorld.z);
     vec3 tint;
-    float units = unitSunAt(ground, n, tint);
+    // Bias from the heightfield surface, so texture normals cannot bend
+    // or break the edges of a nearby unit's shadow.
+    float margin = shadowTerrainHeightMargin(u.unitShadowOrigin[UNIT_CASCADES - 1].w);
+    vec3 receiver = vec3(ground.x, clamp(ground.y, inWorld.y - margin, inWorld.y + margin), ground.z);
+    float units = unitSunAt(receiver, heightNormal, tint);
     // Direct sun and sky as illuminance (lux), before the receiver cosine;
     // the sky is the hemispherical approximation (half on verticals). The
     // terrain is a rough dielectric (F0 0.04, the tileset's roughness);

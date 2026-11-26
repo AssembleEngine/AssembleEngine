@@ -5,6 +5,7 @@
 #define MODELS
 #include "units_common.glsl"
 #include "units_models.glsl"
+#include "shadow_write.glsl"
 
 layout(location = 0) in vec4 inUv;
 layout(location = 1) in float inAlpha;
@@ -27,4 +28,5 @@ void main() {
     if (alpha < m.emissive.w) {
         discard;
     }
+    storeShadowDepth();
 }

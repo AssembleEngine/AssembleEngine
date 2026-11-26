@@ -13,7 +13,8 @@
 //! resources and roles, gives it other resources, or declares a library
 //! resource as something else; errors name the pass and the resource.
 //!
-//! The units' shadow map (`shadows.map`, written by `shadows.draw`) is
+//! The units' virtual shadow map (`shadows.map`, prepared by
+//! `shadows.prepare` and rasterized by `shadows.draw`) is
 //! the graph's choice: a graph that declares it must have every receiver
 //! (`terrain.draw`, `units.draw`, `water.draw`) sample it
 //! ([`LibraryPass::receives`], [`check_graph`]), and the host then
@@ -265,8 +266,9 @@ pub enum LibraryPass {
     UnitsDraw,
     UnitsWaterOverlay,
     UnitsCount,
-    /// The units' shadow map: every unit (not only the visible ones) drawn
-    /// from the sun into [`LibraryResource::ShadowMap`], depth only.
+    /// Request, allocate and clear virtual shadow pages.
+    ShadowsPrepare,
+    /// Rasterize unit casters into the virtual shadow pages.
     ShadowsDraw,
     /// The particles' coloured shadows: every live particle that is not
     /// emissive (the simulation lists them after the visible keys, with
@@ -357,7 +359,7 @@ pub enum DepthUse {
 }
 
 impl LibraryPass {
-    pub const ALL: [LibraryPass; 39] = [
+    pub const ALL: [LibraryPass; 40] = [
         Self::TerrainLod,
         Self::TerrainDraw,
         Self::TerrainCullReflect,
@@ -371,6 +373,7 @@ impl LibraryPass {
         Self::UnitsDraw,
         Self::UnitsWaterOverlay,
         Self::UnitsCount,
+        Self::ShadowsPrepare,
         Self::ShadowsDraw,
         Self::ShadowsParticles,
         Self::WaterDraw,
@@ -414,6 +417,7 @@ impl LibraryPass {
             Self::UnitsDraw => "units.draw",
             Self::UnitsWaterOverlay => "units.water_overlay",
             Self::UnitsCount => "units.count",
+            Self::ShadowsPrepare => "shadows.prepare",
             Self::ShadowsDraw => "shadows.draw",
             Self::ShadowsParticles => "shadows.particles",
             Self::WaterDraw => "water.draw",
@@ -454,6 +458,7 @@ impl LibraryPass {
             | Self::UnitsCullReflect
             | Self::UnitsCull
             | Self::UnitsPose
+            | Self::ShadowsPrepare
             | Self::WaterShore
             | Self::WaterEmit
             | Self::WaterBlur
@@ -561,12 +566,18 @@ impl LibraryPass {
                 (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
             ],
             Self::UnitsCount => &[(R::UnitIndirect, Role::TransferSrc), (R::UnitCounts, Role::TransferDst)],
+            Self::ShadowsPrepare => &[
+                (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Compute)),
+                (R::UnitVisible, Role::StorageBufferReadWrite(ShaderStage::Compute)),
+                (R::UnitIndirect, Role::StorageBufferReadWrite(ShaderStage::Compute)),
+                (R::ShadowMap, Role::StorageImageReadWrite(ShaderStage::Compute)),
+            ],
             Self::ShadowsDraw => &[
                 (R::UnitInstances, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitVisible, Role::StorageBufferRead(ShaderStage::Vertex)),
                 (R::UnitIndirect, Role::IndirectBuffer),
                 (R::UnitPalette, Role::StorageBufferRead(ShaderStage::Vertex)),
-                (R::ShadowMap, Role::DepthAttachment(ae_framegraph::LoadOp::Clear)),
+                (R::ShadowMap, Role::StorageImageReadWrite(ShaderStage::Fragment)),
             ],
             Self::ShadowsParticles => &[
                 (R::ParticleState, Role::StorageBufferRead(ShaderStage::Vertex)),
@@ -660,6 +671,7 @@ impl LibraryPass {
                 | Self::UnitsDraw
                 | Self::UnitsWaterOverlay
                 | Self::UnitsCount
+                | Self::ShadowsPrepare
                 | Self::ShadowsDraw
         )
     }
@@ -835,10 +847,10 @@ pub fn resolve<R>(
                 if image.format != format
                     || image.width != m::SHADOW_MAP_WIDTH
                     || image.height != m::SHADOW_MAP_HEIGHT
-                    || !image.aspect.contains(vk::ImageAspectFlags::DEPTH)
+                    || image.aspect != vk::ImageAspectFlags::COLOR
                 {
                     return Err(error(format!(
-                        "`{}` is {:?} {}x{}; the library's is {format:?} {}x{} with a depth aspect (shadow_map_spec)",
+                        "`{}` is {:?} {}x{}; the library's is {format:?} {}x{} with a color aspect (shadow_map_spec)",
                         resource.name,
                         image.format,
                         image.width,
@@ -1033,14 +1045,12 @@ pub fn image_desc(lib: LibraryResource, env: &LibraryEnv) -> Result<ImageDesc, L
             if !env.shadows {
                 return Err(missing("its units cast no shadows"));
             }
-            let mut desc = ImageDesc::color_2d(
+            ImageDesc::color_2d(
                 vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32),
                 m::SHADOW_MAP_WIDTH,
                 m::SHADOW_MAP_HEIGHT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-            );
-            desc.aspect = vk::ImageAspectFlags::DEPTH;
-            desc
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            )
         }
         R::ParticleShadows => {
             if !(env.shadows && env.particles) {
@@ -1222,7 +1232,11 @@ pub fn check<R>(
             "pass `{name}` (water.draw) needs water; this scene draws none"
         )));
     }
-    if matches!(lib, LibraryPass::ShadowsDraw | LibraryPass::ShadowsParticles) && !env.shadows {
+    if matches!(
+        lib,
+        LibraryPass::ShadowsPrepare | LibraryPass::ShadowsDraw | LibraryPass::ShadowsParticles
+    ) && !env.shadows
+    {
         return Err(error(format!(
             "pass `{name}` ({}) needs units that cast shadows; this scene's cast none",
             lib.name()
@@ -1774,7 +1788,7 @@ fn check_bloom<R>(graph: &FrameGraph<R>, pass: usize, lib: LibraryPass, env: &Li
 
 /// Graph-wide: a graph that draws the units (or their shadows) poses them
 /// (`units.pose`, which alone writes their palettes); a graph that declares
-/// the units' shadow map has a `shadows.draw` pass write it, and one that
+/// the units' shadow map runs `shadows.prepare` before `shadows.draw`, and one that
 /// declares the particles' coloured shadows declares the map too and has a
 /// `shadows.particles` pass write them (`libs`: each pass's library pass).
 /// An HDR output has a `post.encode` pass and an SDR one has none (the
@@ -1813,10 +1827,47 @@ pub(crate) fn check_graph_named<'a, R>(
         map.contains(&Some(LibraryResource::ShadowMap)),
         map.contains(&Some(LibraryResource::ParticleShadows)),
     );
-    if units && !written(LibraryPass::ShadowsDraw) {
-        return Err(error(
-            "the graph declares `shadows.map` but no `shadows.draw` pass writes it".into(),
-        ));
+    if let Some(shadow_map) = map.iter().position(|r| *r == Some(LibraryResource::ShadowMap)) {
+        let writer = |lib: LibraryPass| {
+            let mut passes = (0..graph.passes.len()).filter(|&i| libs(i) == Some(lib.name()));
+            let index = passes.next().ok_or_else(|| {
+                error(format!(
+                    "the graph declares `shadows.map` but no `{}` pass writes it",
+                    lib.name()
+                ))
+            })?;
+            let pass = &graph.passes[index];
+            if pass.conditional || passes.next().is_some() {
+                return Err(error(format!(
+                    "the graph needs one unconditional `{}` pass",
+                    lib.name()
+                )));
+            }
+            if pass
+                .intents
+                .iter()
+                .any(|intent| intent.resource.index() == shadow_map && intent.discard)
+            {
+                return Err(error(format!(
+                    "`{}` must preserve the cached pages in `shadows.map`",
+                    lib.name()
+                )));
+            }
+            Ok(index)
+        };
+        let draw = writer(LibraryPass::ShadowsDraw)?;
+        let prepare = writer(LibraryPass::ShadowsPrepare)?;
+        if prepare > draw
+            || graph.passes[..draw].iter().any(|pass| {
+                pass.intents
+                    .iter()
+                    .any(|intent| intent.resource.index() == shadow_map && matches!(intent.role, Role::Sampled(_)))
+            })
+        {
+            return Err(error(
+                "the graph must run `shadows.prepare` before `shadows.draw` and its receivers".into(),
+            ));
+        }
     }
     if particles && !units {
         return Err(error(

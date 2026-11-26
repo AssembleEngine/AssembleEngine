@@ -5,13 +5,6 @@
 // turned_sphere) and appended to its
 // class's region of the visible list, counted in each of the class's
 // commands (one per primitive, classCommands); the others as darts.
-// With the units' shadow map on, an eligible model unit (radar blips and
-// ghosts cast none) is also tested against each cascade and appended to
-// the class's region for that cascade, counted in that cascade's copy of
-// the commands (the shadow caster draws those).
-// Only the cascade's sides are tested, not its depth: a caster nearer the
-// sun than the cascade's box still shadows what is in it (and past the
-// box's depth the rasterizer clips it, as without the cull).
 // With SUB (refraction frames), blips and ghosts go to the water
 // overlay's commands instead of the camera's (appendOverlay).
 // Every row's placement goes to the end of the visible list (placeUnit,
@@ -46,20 +39,7 @@ bool inView(vec3 centre, float r) {
     return true;
 }
 
-// The instance count of model command k.
-uint countWord(uint k) { return 4u + 5u * k + 1u; }
-
-// Unit i into its class's region of list l (0: the camera's, k + 1:
-// cascade k's), counted in each of the class's commands of that list.
-void append(uint i, ModelClass mc, uint l) {
-    uint shift = l * u.counts.w;
-    uint first = classCommands[mc.cmd.x];
-    uint slot = atomicAdd(cmdWords[countWord(first + shift)], 1u);
-    for (uint k = 1u; k < mc.cmd.y; k++) {
-        atomicAdd(cmdWords[countWord(classCommands[mc.cmd.x + k] + shift)], 1u);
-    }
-    visible[draws[first].visibleBase + l * u.counts.y + slot] = i;
-}
+#include "units_models_lists.glsl"
 
 #if defined(SUB) && !defined(MIRROR)
 // Unit i (a blip or ghost, in a refraction frame) into the back of its
@@ -162,16 +142,4 @@ void main() {
 #endif
         append(i, mc, 0u);
     }
-#ifndef MIRROR
-    // Radar blips and ghosts cast no shadow (eligible: Own and Seen only).
-    if (u.unitShadowScale[0].w > 0.0 && eligible(i)) {
-        vec2 l = vec2(dot(u.unitShadowAxes[0].xyz, centre), dot(u.unitShadowAxes[1].xyz, centre));
-        for (uint k = 0u; k < uint(UNIT_CASCADES); k++) {
-            vec2 scale = u.unitShadowScale[k].xy;
-            if (all(lessThanEqual(abs(l - u.unitShadowOrigin[k].xy) * scale, vec2(1.0) + r * scale))) {
-                append(i, mc, k + 1u);
-            }
-        }
-    }
-#endif
 }

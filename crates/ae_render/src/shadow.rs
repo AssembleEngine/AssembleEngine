@@ -1,33 +1,10 @@
-//! The units' shadows (M7): a shadow map of the units only, in cascades.
+//! Virtual shadow maps for opaque unit casters. Overlapping light clipmaps
+//! share an R32_UINT physical page pool. A compute pass requests pages from
+//! conservative caster bounds and assigns physical slots coarse first.
+//! Pages keep their depth while the projection, physical slot and casters
+//! are unchanged. Rasterization updates dirty pages with atomic max.
 //!
-//! The hills shade by their shadow heights ([`crate::terrain::sun`]); what
-//! moves, the units, is drawn from the sun into a depth map that the
-//! terrain, the units and the water surface look up. The map is the
-//! `shadows.map` library image, [`CASCADES`] square cascades side by side,
-//! written by the `shadows.draw` library pass (every unit, not only the
-//! ones in view: one just off screen casts into it).
-//!
-//! Each cascade covers a slice of the view by depth from the camera
-//! ([`cascades`]): an orthographic box along the sun around the slice's
-//! bounding sphere, its centre snapped to whole texels so the shadows do
-//! not crawl as the camera pans, and stretched toward the sun so casters
-//! outside the slice (and outside the view) still land in it. Depth grows
-//! toward the sun (cleared to 0, the nearest kept with `GREATER_OR_EQUAL`,
-//! as the main view's reverse-Z), so a receiver is lit where its depth is
-//! at least the stored one. Receivers pick the first cascade that holds
-//! them; past the last the shadows fade out.
-//!
-//! The particles' coloured shadows (`shadows.color`, written by
-//! `shadows.particles`, [`crate::particles`]) share the cascades at a
-//! quarter of the resolution (384 texels a side: rasterising big smoke
-//! quads is the pass's cost, and smoke shadows are soft). Per texel: the
-//! particles' optical depth per channel (summed, so in any order) and, in
-//! alpha, the depth toward the sun of the sunward surface of the particle
-//! nearest the sun (kept by a max). A receiver farther from the sun than
-//! that surface multiplies its sunlight by `exp(-optical depth)`; one
-//! nearer the sun (a unit above the smoke) is not tinted. Recoil (after
-//! WickedEngine) multiplies a colour cleared to white instead, which is
-//! the same product, but keeps no depth.
+//! Particle optical depth uses the same projections in a small dense atlas.
 
 use crate::bindless::{Bindless, Sampled2D};
 use crate::device::GpuDevice;
@@ -41,14 +18,9 @@ use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
 
 pub const CASCADES: usize = m::SHADOW_CASCADES as usize;
-/// One cascade's side in texels.
-pub const CASCADE_TEXELS: u32 = m::SHADOW_MAP_HEIGHT;
-/// The view slices' far ends, in multiples of the camera's distance to
-/// what it looks at (the RTS camera sees from about 0.7 to 2 of it on
-/// flat ground).
-pub const SLICES: [f32; CASCADES] = [0.95, 1.55, 2.8];
-/// How far toward the sun past a slice's sphere a caster still lands in
-/// its cascade (world units).
+/// One virtual clipmap's side in texels.
+pub const CASCADE_TEXELS: u32 = m::SHADOW_LEVEL_TEXELS;
+/// Additional light-space depth toward the sun for offscreen casters.
 pub const CASTER_REACH: f32 = 400.0;
 
 const IDENTITY: u64 = (0xAE7 << 40) | (3 << 32);
@@ -64,15 +36,16 @@ pub fn color_format() -> vk::Format {
 }
 
 /// The shadow map image and the particles' coloured shadows (or 1x1
-/// stand-ins, so receivers always have them to bind), the comparison
+/// stand-ins, so receivers always have them to bind), the nearest
 /// sampler receivers read the map with and the linear one for the colour.
 pub struct ShadowMap {
     image: OwnedImage,
     color: OwnedImage,
-    /// The global indices: both images, the comparison sampler and the
+    /// The global indices: both images, the depth sampler and the
     /// colour sampler.
     sampled: Sampled2D,
     color_sampled: Sampled2D,
+    storage_index: u32,
     sampler_index: u32,
     color_sampler_index: u32,
     real: bool,
@@ -88,11 +61,21 @@ impl ShadowMap {
         } else {
             (1, 1)
         };
-        let desc = ImageDesc::depth_2d(
+        if real
+            && !(gpu.fragment_stores
+                && gpu
+                    .optimal_format_features(format())
+                    .contains(vk::FormatFeatureFlags2::STORAGE_IMAGE_ATOMIC))
+        {
+            anyhow::bail!(
+                "virtual shadow maps require Vulkan fragmentStoresAndAtomics and R32_UINT storage image atomics"
+            );
+        }
+        let desc = ImageDesc::color_2d(
             format(),
             w,
             h,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
         );
         let image = OwnedImage::new(gpu, desc, "unit shadow map")?;
         let (cw, ch) = if real {
@@ -132,17 +115,23 @@ impl ShadowMap {
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .compare_enable(true)
-            .compare_op(vk::CompareOp::GREATER_OR_EQUAL)
             .max_lod(0.0);
         let sampled = bindless.sampled_2d(image.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         let color_sampled = bindless.sampled_2d(color.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
-        let sampler_index = bindless.sampler(&info)?.index;
-        let color_sampler_index = bindless.sampler(&info.compare_enable(false))?.index;
+        let storage_index = if real {
+            bindless.storage_image(image.view, vk::ImageLayout::GENERAL)?.index
+        } else {
+            0
+        };
+        let sampler_index = bindless
+            .sampler(&info.mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST))?
+            .index;
+        let color_sampler_index = bindless.sampler(&info)?.index;
         Ok(Self {
             image,
             color,
             sampled,
+            storage_index,
             color_sampled,
             sampler_index,
             color_sampler_index,
@@ -159,11 +148,15 @@ impl ShadowMap {
         self.sampled.0.index
     }
 
+    pub fn storage_index(&self) -> u32 {
+        self.storage_index
+    }
+
     pub fn color_sampled_index(&self) -> u32 {
         self.color_sampled.0.index
     }
 
-    /// The comparison sampler, for `sampler2DShadow` over `sampled_index`.
+    /// The nearest sampler for the unsigned depth pool.
     pub fn sampler_index(&self) -> u32 {
         self.sampler_index
     }
@@ -174,7 +167,10 @@ impl ShadowMap {
 
     /// The `shadows.map` library image.
     pub fn binding(&self) -> ImageBinding {
-        Self::bind(&self.image, IDENTITY)
+        ImageBinding {
+            initial: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ..Self::bind(&self.image, IDENTITY)
+        }
     }
 
     /// The `shadows.color` library image.
@@ -225,6 +221,8 @@ pub struct Cascades {
     /// The particles' coloured shadows are drawn this frame (receivers
     /// read them).
     pub tinted: bool,
+    /// Weight of the finest clipmap after crossing a zoom octave.
+    pub finest_weight: f32,
 }
 
 /// The cascades as the shaders' uniforms (`unit_shadows.glsl`), `std140`.
@@ -232,7 +230,7 @@ pub struct Cascades {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CascadeUniforms {
     /// Right, up, toward the sun; `axes[0].w` 1 when the particles'
-    /// coloured shadows are drawn ([`Cascades::tinted`]).
+    /// coloured shadows are drawn. `axes[1].w` carries the finest clipmap weight.
     axes: [[f32; 4]; 3],
     /// Per cascade: centre x, y, depth origin; `w` the world texel size.
     origin: [[f32; 4]; CASCADES],
@@ -247,7 +245,11 @@ impl Cascades {
             return CascadeUniforms::default();
         };
         CascadeUniforms {
-            axes: std::array::from_fn(|k| c.axes[k].extend(if k == 0 && c.tinted { 1.0 } else { 0.0 }).to_array()),
+            axes: [
+                c.axes[0].extend(if c.tinted { 1.0 } else { 0.0 }).to_array(),
+                c.axes[1].extend(c.finest_weight).to_array(),
+                c.axes[2].extend(0.0).to_array(),
+            ],
             origin: std::array::from_fn(|k| c.origin[k].extend(c.texel[k]).to_array()),
             scale: std::array::from_fn(|k| c.scale[k].extend(1.0).to_array()),
         }
@@ -261,16 +263,28 @@ fn light_basis(sun: Vec3) -> (Vec3, Vec3) {
     (right, sun.cross(right))
 }
 
-/// The cascades for a camera at `eye` looking along `forward` (unit
-/// length, the up vector world +y), the tangents of its half field of view
-/// across and up `tan_half`, `focus` world units from what it looks at,
-/// and the sun in direction `sun`. A slice's sphere depends on the field
-/// of view and the depths only, so it is the same wherever the camera is
-/// and however it turns (no float noise resizing it).
+/// Nested light clipmaps centered on the camera focus and snapped to pages.
+/// The coarsest clipmap covers the same range of camera depths as the old
+/// shadow slices. All levels share the light-space depth interval.
 pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun: Vec3) -> Cascades {
     let sun = sun.normalize();
     let (right, up) = light_basis(sun);
-    let diagonal = tan_half.0 * tan_half.0 + tan_half.1 * tan_half.1;
+    let diagonal = tan_half.0.hypot(tan_half.1);
+    let focus_point = eye + forward * focus;
+    let coverage = focus * (1.8f32.hypot(2.8 * diagonal));
+    // Quantize size in octaves so small zoom changes leave the page grid fixed.
+    let size_log = (coverage * 1.05).log2();
+    let octave = size_log.ceil();
+    let outer_radius = octave.exp2();
+    // At the octave boundary the previous finest grid becomes the new
+    // middle grid. Fade in the newly available resolution over the next
+    // tenth of an octave, keeping the old grid at full weight at the switch.
+    let t = ((octave - size_log) / 0.1).clamp(0.0, 1.0);
+    let finest_weight = t * t * (3.0 - 2.0 * t);
+    let cz = focus_point.dot(sun);
+    let depth_snap = outer_radius * 2.0 / m::SHADOW_LEVEL_PAGES as f32;
+    let zmin = (cz / depth_snap).round() * depth_snap - outer_radius;
+    let depth = 2.0 * outer_radius + CASTER_REACH;
     let mut out = Cascades {
         matrices: [Mat4::IDENTITY; CASCADES],
         texel: [0.0; CASCADES],
@@ -278,18 +292,14 @@ pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun:
         origin: [Vec3::ZERO; CASCADES],
         scale: [Vec3::ZERO; CASCADES],
         tinted: false,
+        finest_weight,
     };
-    let mut near = 0.0f32;
-    for (k, slice) in SLICES.iter().enumerate() {
-        let far = slice * focus;
-        // Centred on the axis halfway: its farthest points are the far corners.
-        let centre = eye + forward * (0.5 * (near + far));
-        let radius = (0.25 * (far - near) * (far - near) + diagonal * far * far).sqrt();
+    for k in 0..CASCADES {
+        let radius = outer_radius / (1u32 << (CASCADES - 1 - k)) as f32;
         let texel = 2.0 * radius / CASCADE_TEXELS as f32;
-        let snap = |v: f32| (v / texel).round() * texel;
-        let (cx, cy, cz) = (snap(centre.dot(right)), snap(centre.dot(up)), centre.dot(sun));
-        let (zmin, zmax) = (cz - radius, cz + radius + CASTER_REACH);
-        let depth = zmax - zmin;
+        let page = texel * m::SHADOW_PAGE_TEXELS as f32;
+        let snap = |v: f32| (v / page).round() * page;
+        let (cx, cy) = (snap(focus_point.dot(right)), snap(focus_point.dot(up)));
         let rows = [
             (right / radius).extend(-cx / radius),
             (up / radius).extend(-cy / radius),
@@ -300,7 +310,6 @@ pub fn cascades(eye: Vec3, forward: Vec3, tan_half: (f32, f32), focus: f32, sun:
         out.texel[k] = texel;
         out.origin[k] = Vec3::new(cx, cy, zmin);
         out.scale[k] = Vec3::new(1.0 / radius, 1.0 / radius, 1.0 / depth);
-        near = far;
     }
     out
 }
@@ -361,20 +370,43 @@ mod tests {
         assert!(c.texel[0] < c.texel[1] && c.texel[1] < c.texel[2], "{:?}", c.texel);
     }
 
-    /// Panning moves the cascades by whole texels (no crawling edges), and
-    /// turning the camera keeps their size.
     #[test]
-    fn panning_snaps_to_texels_and_turning_keeps_the_size() {
+    fn zoom_octave_retains_the_previous_grid_during_the_transition() {
+        let tan_half = (0.75f32, 0.42f32);
+        let boundary = 128.0 / (1.05 * 1.8f32.hypot(2.8 * tan_half.0.hypot(tan_half.1)));
+        let target = Vec3::new(2_900.0, 50.0, 17_900.0);
+        let forward = Vec3::new(0.0, -0.6, 0.8);
+        let at = |focus| {
+            cascades(
+                target - forward * focus,
+                forward,
+                tan_half,
+                focus,
+                crate::terrain::sun::direction(),
+            )
+        };
+        let before = at(boundary * 1.0001);
+        let after = at(boundary * 0.9999);
+        assert_eq!(before.finest_weight, 1.0);
+        assert!(after.finest_weight < 0.001);
+        assert_eq!(before.texel[0], after.texel[1]);
+        assert_eq!(before.origin[0].truncate(), after.origin[1].truncate());
+        assert_eq!(at(boundary * 0.9).finest_weight, 1.0);
+    }
+
+    /// Panning moves the clipmaps by whole pages, and rotating keeps their size.
+    #[test]
+    fn panning_snaps_to_pages_and_turning_keeps_the_size() {
         let (_, _, a) = camera(0.4, Vec2::new(500.0, 800.0));
         let (_, _, b) = camera(0.4, Vec2::new(503.7, 801.3));
         for k in 0..CASCADES {
             assert_eq!(a.texel[k], b.texel[k]);
-            // The same world point moves by a whole number of texels.
+            // The same world point moves by a whole number of pages.
             let p = Vec4::new(510.0, 3.0, 790.0, 1.0);
-            let shift =
-                ((a.matrices[k] * p).truncate() - (b.matrices[k] * p).truncate()) * (CASCADE_TEXELS as f32 / 2.0);
+            let shift = ((a.matrices[k] * p).truncate() - (b.matrices[k] * p).truncate())
+                * (m::SHADOW_LEVEL_PAGES as f32 / 2.0);
             for v in [shift.x, shift.y] {
-                assert!((v - v.round()).abs() < 1e-2, "cascade {k}: shift {v} texels");
+                assert!((v - v.round()).abs() < 1e-2, "cascade {k}: shift {v} pages");
             }
         }
         let (_, _, c) = camera(1.9, Vec2::new(500.0, 800.0));

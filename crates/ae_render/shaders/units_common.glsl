@@ -122,7 +122,7 @@ uint placedAt(uint i) { return u.lists.x / 4u + 2u * i; }
 #include "unit_shadows.glsl"
 
 // Sunlight reaching world point p (normal n) past the units; `tint` past
-// the particles. Handles: the units' shadow map 2 with the comparison
+// the particles. Handles: the units' shadow map 2 with the nearest
 // sampler 4, the particles' coloured shadows 3 with sampler 3 (each a
 // 1x1 stand-in when off).
 float unitSunAt(vec3 p, vec3 n, out vec3 tint) {

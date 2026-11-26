@@ -1,3 +1,7 @@
 #version 460
-// Depth only (units_shadow.vert).
-void main() {}
+#include "bindless.glsl"
+#include "shadow_write.glsl"
+
+void main() {
+    storeShadowDepth();
+}

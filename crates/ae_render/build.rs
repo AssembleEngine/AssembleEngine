@@ -96,6 +96,7 @@ fn main() {
         Some("REFLECT"),
     ));
     for (source, name, defines) in [
+        ("shadow_mark.comp", "shadow_mark_models.comp", "MODELS"),
         ("terrain.frag", "terrain_refract_owner.frag", "WATER_REFRACT_OWNER"),
         ("water.frag", "water_refract.frag", "REFRACT"),
         ("water.frag", "water_full.frag", "REFRACT,REFLECT"),

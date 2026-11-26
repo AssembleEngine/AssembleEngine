@@ -2377,6 +2377,7 @@ impl SharedRecorder<ScenePass> for SceneRecorder<'_> {
                 | LibraryPass::UnitsWaterOverlay => {
                     anyhow::bail!("refraction pass needs graph resources")
                 }
+                LibraryPass::ShadowsPrepare => units()?.record_shadow_pages(ctx),
                 LibraryPass::ShadowsDraw => units()?.record_shadows(ctx),
                 LibraryPass::ShadowsParticles => particles()?.record_shadows(ctx),
                 LibraryPass::WaterDraw => {
@@ -2829,6 +2830,13 @@ pub fn native_graph_with_water_tiers(
     // The units' shadows: the units drawn from the sun, before anything
     // that samples the map.
     if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
+        graph
+            .pass("shadow pages", PassKind::Compute, LibraryPass::ShadowsPrepare)
+            .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+            .access(visible, Role::StorageBufferReadWrite(ShaderStage::Compute))
+            .access(draws, Role::StorageBufferReadWrite(ShaderStage::Compute))
+            .access(map, Role::StorageImageReadWrite(ShaderStage::Compute))
+            .id();
         // Floating hulls cast from where they ride the waves.
         let mut shadows = graph
             .pass("shadows", PassKind::Graphics, LibraryPass::ShadowsDraw)
@@ -2839,7 +2847,9 @@ pub fn native_graph_with_water_tiers(
         if let Some((waves, ..)) = waves {
             shadows = shadows.sampled(waves, ShaderStage::Vertex);
         }
-        shadows.depth(map, LoadOp::Clear).id();
+        shadows
+            .access(map, Role::StorageImageReadWrite(ShaderStage::Fragment))
+            .id();
     }
     // The particles' coloured shadows: this frame's particles (the
     // simulation, declared later, is their state's only writer, so this
@@ -3143,8 +3153,8 @@ pub fn library_buffer<R>(graph: &mut FrameGraph<R>, r: LibraryResource) -> Resou
 /// The units' shadow map as a graph declares it (`External`).
 pub fn library_shadow_map<R>(graph: &mut FrameGraph<R>) -> ResourceId {
     use ae_render_abi::module as m;
-    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
-    let desc = ImageDesc::depth_2d(
+    let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
+    let desc = ImageDesc::color_2d(
         vk::Format::from_raw(m::SHADOW_MAP_FORMAT as i32),
         m::SHADOW_MAP_WIDTH,
         m::SHADOW_MAP_HEIGHT,

@@ -127,7 +127,10 @@ impl fmt::Display for BakeError {
             BakeError::PresentShape { pass } => {
                 write!(f, "present pass {pass:?} must have exactly one Present intent")
             }
-            BakeError::NoAttachment { pass } => write!(f, "graphics pass {pass:?} has no attachment"),
+            BakeError::NoAttachment { pass } => write!(
+                f,
+                "graphics pass {pass:?} has no attachment or fragment storage image output"
+            ),
             BakeError::HostReadShape { pass } => {
                 write!(f, "transfer pass {pass:?} mixes host reads with other accesses")
             }
@@ -280,6 +283,7 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
         let mut seen: Vec<ResourceId> = Vec::with_capacity(pass.intents.len());
         let mut extent: Option<vk::Extent2D> = None;
         let mut attachments = 0;
+        let mut storage_target = false;
         for intent in &pass.intents {
             let Some(resource) = graph.resources.get(intent.resource.index()) else {
                 return Err(BakeError::UnknownResource {
@@ -351,6 +355,11 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
                     resource: resource_name(),
                 });
             }
+            storage_target |= matches!(
+                intent.role,
+                Role::StorageImageWrite(crate::ShaderStage::Fragment | crate::ShaderStage::Graphics)
+                    | Role::StorageImageReadWrite(crate::ShaderStage::Fragment | crate::ShaderStage::Graphics)
+            );
             if intent.role.is_attachment() {
                 attachments += 1;
                 if let ResourceDesc::Image(image) = resource.desc {
@@ -366,7 +375,7 @@ fn validate<R>(graph: &FrameGraph<R>) -> Result<(), BakeError> {
         if pass.intents.iter().filter(|intent| intent.role.is_depth()).count() > 1 {
             return Err(BakeError::DepthShape { pass: name() });
         }
-        if pass.kind == PassKind::Graphics && attachments == 0 {
+        if pass.kind == PassKind::Graphics && attachments == 0 && !storage_target {
             return Err(BakeError::NoAttachment { pass: name() });
         }
         // Barriers precede a pass's recording, so a host read in the same

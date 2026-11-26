@@ -155,13 +155,19 @@ impl RenderModule for Post {
         // The units' shadows: the units drawn from the sun, before the
         // passes that sample the map.
         if let (Some([instances, visible, draws, _, palette]), Some(map)) = (units, map) {
+            g.pass("shadow pages", PassKind::Compute, p.library("shadows.prepare"))
+                .access(instances, Role::StorageBufferRead(ShaderStage::Compute))
+                .access(visible, Role::StorageBufferReadWrite(ShaderStage::Compute))
+                .access(draws, Role::StorageBufferReadWrite(ShaderStage::Compute))
+                .access(map, Role::StorageImageReadWrite(ShaderStage::Compute))
+                .id();
             let shadows = p.library("shadows.draw");
             g.pass("shadows", PassKind::Graphics, shadows)
                 .access(instances, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(visible, Role::StorageBufferRead(ShaderStage::Vertex))
                 .access(draws, Role::IndirectBuffer)
                 .access(palette, Role::StorageBufferRead(ShaderStage::Vertex))
-                .depth(map, LoadOp::Clear)
+                .access(map, Role::StorageImageReadWrite(ShaderStage::Fragment))
                 .id();
         }
         // The particles' coloured shadows: this frame's particles (the

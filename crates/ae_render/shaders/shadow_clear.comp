@@ -1,0 +1,17 @@
+#version 460
+#include "bindless.glsl"
+#include "shadow_storage.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    uint slot = gl_WorkGroupID.x;
+    if (slot >= imageLoad(shadowStorage, ivec2(int(SHADOW_POOL_PAGES), SHADOW_CLEAR_ROW)).r
+        || imageLoad(shadowStorage, ivec2(int(slot), SHADOW_CLEAR_ROW)).r == 0u) return;
+    ivec2 texel = shadowPhysicalPage(slot) + ivec2(gl_LocalInvocationID.xy);
+    for (int y = 0; y < SHADOW_PAGE_SIZE; y += 8) {
+        for (int x = 0; x < SHADOW_PAGE_SIZE; x += 8) {
+            imageStore(shadowStorage, texel + ivec2(x, y), uvec4(0u));
+        }
+    }
+}

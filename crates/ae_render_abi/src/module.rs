@@ -96,11 +96,9 @@ pub const DECLARE_READBACK: u32 = 1 << 1;
 /// exists).
 pub const DECLARE_WATER: u32 = 1 << 2;
 /// `declare` flag: the units cast shadows (set only with
-/// [`DECLARE_UNITS`]): the `shadows.draw` library pass and the
-/// `shadows.map` library image exist. A graph that declares `shadows.map`
-/// has `shadows.draw` write it and every `terrain.draw`, `units.draw` and
-/// `water.draw` pass sample it (`sampled:fragment`); a graph that does not
-/// simply renders without the units' shadows.
+/// [`DECLARE_UNITS`]): the `shadows.prepare` and `shadows.draw` library passes
+/// and the `shadows.map` library image exist. The passes prepare and rasterize
+/// virtual pages before terrain, unit and water draws sample them.
 pub const DECLARE_SHADOWS: u32 = 1 << 3;
 /// `declare` flag: the scene has particles: the `particles.sim` (compute)
 /// and `particles.draw` (graphics) library passes and the
@@ -256,26 +254,28 @@ impl DeclareInput {
     }
 }
 
-/// The `shadows.map` library image as a graph declares it (`External`):
-/// [`SHADOW_MAP_FORMAT`], [`SHADOW_MAP_WIDTH`] × [`SHADOW_MAP_HEIGHT`],
-/// usage depth attachment and sampled, depth aspect.
-pub const SHADOW_MAP_FORMAT: u32 = 126; // VK_FORMAT_D32_SFLOAT
-/// The map's cascades side by side, each [`SHADOW_MAP_HEIGHT`] square.
+/// The external unsigned depth pool. Rows above the pool store the virtual
+/// page table, coarse level first, and the number of allocated pages.
+pub const SHADOW_MAP_FORMAT: u32 = 98; // VK_FORMAT_R32_UINT
 pub const SHADOW_CASCADES: u32 = 3;
-pub const SHADOW_MAP_HEIGHT: u32 = 1536;
-pub const SHADOW_MAP_WIDTH: u32 = SHADOW_CASCADES * SHADOW_MAP_HEIGHT;
+pub const SHADOW_PAGE_TEXELS: u32 = 64;
+pub const SHADOW_LEVEL_PAGES: u32 = 32;
+pub const SHADOW_LEVEL_TEXELS: u32 = SHADOW_LEVEL_PAGES * SHADOW_PAGE_TEXELS;
+/// Physical pool columns and rows. Keep the metadata above the last row.
+pub const SHADOW_POOL_COLUMNS: u32 = 64;
+pub const SHADOW_POOL_PAGES: u32 = SHADOW_POOL_COLUMNS * SHADOW_LEVEL_PAGES;
+pub const SHADOW_MAP_WIDTH: u32 = SHADOW_POOL_COLUMNS * SHADOW_PAGE_TEXELS;
+pub const SHADOW_MAP_HEIGHT: u32 = SHADOW_LEVEL_TEXELS + SHADOW_CASCADES * SHADOW_LEVEL_PAGES + 1;
 
-/// The name and spec a graph declares `shadows.map` with (class `External`).
 pub const SHADOW_MAP_NAME: &str = "shadows.map";
 pub fn shadow_map_spec() -> crate::ImageSpec {
-    // Usage: sampled (0x4) | depth-stencil attachment (0x20).
-    crate::ImageSpec::depth_2d(SHADOW_MAP_FORMAT, SHADOW_MAP_WIDTH, SHADOW_MAP_HEIGHT, 0x4 | 0x20)
+    // Usage: sampled (0x4) | storage (0x8).
+    crate::ImageSpec::color_2d(SHADOW_MAP_FORMAT, SHADOW_MAP_WIDTH, SHADOW_MAP_HEIGHT, 0x4 | 0x8)
 }
 
 /// The particles' coloured shadows (`shadows.color`), in a scene whose
 /// units cast shadows ([`DECLARE_SHADOWS`]) and that has particles
-/// ([`DECLARE_PARTICLES`]): laid out like `shadows.map` (the same cascades
-/// side by side) at a quarter of its resolution, smoke being soft. RGB: the
+/// ([`DECLARE_PARTICLES`]): a low-resolution dense atlas of the same light clipmaps, side by side. RGB: the
 /// optical depth of the particles between the sun and each texel, per
 /// channel (cleared to 0, summed); A: the depth toward the sun of the
 /// particle nearest the sun (kept by a max). Written by the
@@ -284,8 +284,8 @@ pub fn shadow_map_spec() -> crate::ImageSpec {
 /// indirect buffer). A graph that declares it also
 /// declares `shadows.map`, and every receiver samples both.
 pub const PARTICLE_SHADOW_FORMAT: u32 = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
-pub const PARTICLE_SHADOW_WIDTH: u32 = SHADOW_MAP_WIDTH / 4;
-pub const PARTICLE_SHADOW_HEIGHT: u32 = SHADOW_MAP_HEIGHT / 4;
+pub const PARTICLE_SHADOW_WIDTH: u32 = SHADOW_CASCADES * PARTICLE_SHADOW_HEIGHT;
+pub const PARTICLE_SHADOW_HEIGHT: u32 = 384;
 pub const PARTICLE_SHADOW_NAME: &str = "shadows.color";
 pub fn particle_shadow_spec() -> crate::ImageSpec {
     // Usage: sampled (0x4) | colour attachment (0x10).

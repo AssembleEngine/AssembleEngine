@@ -4825,7 +4825,7 @@ fn units_cast_shadows() {
     use ae_render::terrain::renderer::TerrainInfo;
     use ae_render::terrain::sun;
     use ae_render::thread::{Headless, TargetInfo};
-    use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
+    use ae_render::units::{ATTR_PREV_ROT_X, ATTR_ROT_X, AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Vec2, Vec3};
 
     let gpu = gpu();
@@ -4923,7 +4923,7 @@ fn units_cast_shadows() {
     let shaded = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, sun_dir, t)));
     let hidden = |p: Vec3| units.iter().any(|&u| triangles(u).any(|t| hits(p, eye - p, t)));
 
-    let render = |shadows: bool, view_shadows: bool, states: [u32; 3]| -> Vec<u8> {
+    let render = |shadows: bool, view_shadows: bool, states: [u32; 3], prime_cache: bool| -> Vec<u8> {
         let mut columns: [Vec<u32>; ATTRIBUTE_COUNT] = Default::default();
         columns[ATTR_VIEW].extend(states);
         for &(x, z, hx, hz, r) in &units {
@@ -4939,21 +4939,34 @@ fn units_cast_shadows() {
             }
         }
         let feed = Arc::new(UnitFeed::default());
-        feed.publish(Arc::new(InstanceStream {
-            tick: 1,
-            published: std::time::Instant::now(),
-            tick_seconds: 0.0,
-            sim_seconds: 0.0,
-            columns: at_rest(columns),
-            anim: AnimWrites::default(),
-        }));
+        let publish = |tick, columns| {
+            feed.publish(Arc::new(InstanceStream {
+                tick,
+                published: std::time::Instant::now(),
+                tick_seconds: 0.0,
+                sim_seconds: 0.0,
+                columns: at_rest(columns),
+                anim: AnimWrites::default(),
+            }));
+        };
+        if prime_cache {
+            let mut old = columns.clone();
+            old[ATTR_VIEW][1] = 0;
+            for (i, word) in yaw(0.0, 1.0).map(f32::to_bits).into_iter().enumerate() {
+                old[ATTR_ROT_X + i][0] = word;
+                old[ATTR_PREV_ROT_X + i][0] = word;
+            }
+            publish(1, old);
+        } else {
+            publish(1, columns.clone());
+        }
         let classes = vec![UnitClass {
             gamut: ae_render::colorspace::Gamut::Bt709,
             color: [0.45, 0.45, 0.45],
             floats: false,
         }];
         let mut app = TerrainApp::new(source.clone(), TerrainOutput::Readback).with_units(UnitsSetup {
-            feed,
+            feed: feed.clone(),
             capacity: 16,
             classes,
             min_pixels: 6.0,
@@ -4983,6 +4996,10 @@ fn units_cast_shadows() {
             record_threads: 1,
         };
         let mut run = Headless::new(&gpu, &mut app, target, config).unwrap();
+        if prime_cache {
+            run.frames(&mut app, 4).unwrap();
+            publish(2, columns);
+        }
         run.frames(&mut app, 8).unwrap();
         run.wait().unwrap();
         run.finish().unwrap();
@@ -4999,11 +5016,11 @@ fn units_cast_shadows() {
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         pixels
     };
-    let plain = render(false, true, [0; 3]);
-    let switched_off = render(true, false, [0; 3]);
-    let on = render(true, true, [0; 3]);
-    let blip = render(true, true, [0, 2, 0]);
-    let ghost = render(true, true, [0, 3, 0]);
+    let plain = render(false, true, [0; 3], false);
+    let switched_off = render(true, false, [0; 3], false);
+    let on = render(true, true, [0; 3], false);
+    let blip = render(true, true, [0, 2, 0], false);
+    let ghost = render(true, true, [0, 3, 0], true);
 
     // The ground on a 0.5 m grid: deep in a dart's shadow (and its
     // neighbours 0.75 m away), or lit with no shadow within 2 m; visible
@@ -5053,7 +5070,10 @@ fn units_cast_shadows() {
 
     let rgb = |p: &[u8], i: usize| [p[i], p[i + 1], p[i + 2]];
     let luma = |p: &[u8], i: usize| p[i] as f32 * 0.3 + p[i + 1] as f32 * 0.59 + p[i + 2] as f32 * 0.11;
-    assert_eq!(blip, ghost, "blip and ghost both skip the shadow pass");
+    assert_eq!(
+        blip, ghost,
+        "cached pages must match a fresh render after a caster turns and another becomes a ghost"
+    );
     assert!(
         deep_a.iter().all(|&i| rgb(&blip, i) == rgb(&on, i)),
         "A still casts its shadow"
@@ -8435,7 +8455,7 @@ fn units_model_shadows_culled() {
     use ae_render::terrain::app::{TerrainApp, TerrainOutput, TerrainSource, lod_view};
     use ae_render::terrain::heightmap::{Heightmap, build_pyramid};
     use ae_render::terrain::renderer::TerrainInfo;
-    use ae_render::thread::{TargetInfo, run_headless};
+    use ae_render::thread::{Headless, TargetInfo};
     use ae_render::units::{AnimWrites, InstanceStream, UnitClass, UnitFeed, UnitsSetup};
     use glam::{Mat4, Vec2, Vec3, Vec4};
     /// What one frame renders: colour bytes, its extent and the cascade lists.
@@ -8622,7 +8642,12 @@ fn units_model_shadows_culled() {
             bake: BakeOptions::default(),
             record_threads: 1,
         };
-        run_headless(&gpu, &mut app, info, 8, config).unwrap();
+        let mut run = Headless::new(&gpu, &mut app, info, config).unwrap();
+        run.frames(&mut app, 1).unwrap();
+        run.wait().unwrap();
+        let cascades = app.last_unit_cascade_counts();
+        run.frames(&mut app, 7).unwrap();
+        run.finish().unwrap();
         let pixels = app.readback().unwrap();
         if let Ok(dir) = std::env::var("AE_TEST_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
@@ -8634,7 +8659,11 @@ fn units_model_shadows_culled() {
             .unwrap();
         }
         let counts = app.last_unit_counts();
-        let cascades = app.last_unit_cascade_counts();
+        assert_eq!(
+            app.last_unit_cascade_counts(),
+            vec![[0; 3]; 2],
+            "cached models skip shadow draws"
+        );
         ae_render::thread::RenderApp::destroy(&mut app, &gpu);
         (pixels, counts, cascades)
     };

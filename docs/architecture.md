@@ -236,11 +236,12 @@ Render modules wire these; the engine owns their implementations.
 | `terrain.lod` | compute | heightfield, error pyramid, camera | `terrain.leaves`, `terrain.indirect` |
 | `terrain.draw` | graphics | leaves, indirect, tilesets | colour 1, depth (write) |
 | `units.reset` | transfer | — | `units.indirect` (reset) |
-| `units.cull` | compute | `units.instances`, camera, shadow cascades; with reflection the mirror frame and terrain pyramid | `units.visible` (the lists, then every row's placement record), `units.indirect` (with refraction, blips and ghosts under the water overlay's commands); with reflection also `units.visible_reflect`, `units.indirect_reflect` |
+| `units.cull` | compute | `units.instances`, camera; with reflection the mirror frame and terrain pyramid | `units.visible` (the lists, then every row's placement record), `units.indirect` (with refraction, blips and ghosts under the water overlay's commands); with reflection also `units.visible_reflect`, `units.indirect_reflect` |
 | `units.draw` | graphics | instances, visible, indirect | colour 1, depth (write) |
 | `units.count` | transfer | `units.indirect` | `units.counts` |
-| `shadows.draw` | graphics | instances (all units), placement records in `units.visible` | `shadows.map` (depth) |
-| `shadows.particles` | graphics | particle state, keys, indirect | `shadows.particles` (colour) |
+| `shadows.prepare` | compute | caster bounds, camera frustum, terrain min/max pyramid, page history | page table, dirty page clears and compacted shadow model lists |
+| `shadows.draw` | graphics | caster lists and poses, page table | reverse-Z depth in the dirty pages of `shadows.map` |
+| `shadows.particles` | graphics | particle state, keys, indirect | `shadows.color` (optical depth) |
 | `water.draw` | graphics | depth (read), water tier inputs, sky and fog | scene and glow |
 | `water.volume` | graphics | scene, depth, refraction, optional displacement | `water.volume.out` |
 | `particles.sim` | compute | — | state, keys, indirect |
@@ -324,7 +325,7 @@ units (ae_render::units)
 
 shadows (ae_render::shadow)
   heightfield → exact terrain shadow at any distance
-  units → cascaded shadow map (virtual shadow map later)
+  units → virtual shadow map with cached pages in nested light clipmaps
   particles → coloured optical depth
 
 particles / decals

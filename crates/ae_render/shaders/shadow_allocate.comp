@@ -1,0 +1,73 @@
+#version 460
+#include "bindless.glsl"
+#include "shadow_storage.glsl"
+#include "shadow_cache.glsl"
+
+layout(local_size_x = 128) in;
+const uint THREADS = 128u;
+const uint PAGES_PER_THREAD = uint(SHADOW_PAGE_ROWS * SHADOW_LEVEL_PAGES) / THREADS;
+shared uvec2 prefix[THREADS];
+
+ivec2 address(uint page) {
+    return ivec2(page % uint(SHADOW_LEVEL_PAGES), SHADOW_LEVEL_SIZE + page / uint(SHADOW_LEVEL_PAGES));
+}
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uint first = lane * PAGES_PER_THREAD;
+    uint requests = 0u;
+    uint outerRequests = 0u;
+    uint dirtyPages = 0u;
+    const uint demand = SHADOW_REQUEST_CASTER | SHADOW_REQUEST_VIEW;
+    for (uint i = 0u; i < PAGES_PER_THREAD; ++i) {
+        uint flags = imageLoad(shadowStorage, shadowRequestAddress(address(first + i))).r;
+        if ((flags & demand) == demand) {
+            requests |= 1u << i;
+            if ((flags & SHADOW_REQUEST_INNER) == 0u) outerRequests |= 1u << i;
+        }
+        if ((flags & SHADOW_REQUEST_DIRTY) != 0u) dirtyPages |= 1u << i;
+    }
+    uvec2 count = uvec2(bitCount(requests), bitCount(outerRequests));
+    prefix[lane] = count;
+    barrier();
+
+    // Inclusive scan of contiguous blocks in virtual table order. Coarse
+    // pages always fit and remain available if fine pages exhaust the pool.
+    for (uint stride = 1u; stride < THREADS; stride *= 2u) {
+        uvec2 preceding = lane >= stride ? prefix[lane - stride] : uvec2(0u);
+        barrier();
+        prefix[lane] += preceding;
+        barrier();
+    }
+    // Omit the redundant interior of coarse levels when all remaining
+    // requests fit. Under pressure keep those pages for finer-level fallback.
+    bool prune = prefix[THREADS - 1u].y <= SHADOW_POOL_PAGES;
+    uvec2 preceding = prefix[lane] - count;
+    uint slot = prune ? preceding.y : preceding.x;
+    if (prune) requests = outerRequests;
+    bool reuse = shadowCache.reuse != 0u;
+    for (uint i = 0u; i < PAGES_PER_THREAD; ++i) {
+        ivec2 page = address(first + i);
+        uint mask = 1u << i;
+        uint entry = SHADOW_PAGE_EMPTY;
+        if ((requests & mask) != 0u) {
+            entry = SHADOW_PAGE_UNBACKED;
+            if (slot < SHADOW_POOL_PAGES) {
+                entry = slot + 1u;
+                bool dirty = !reuse || (dirtyPages & mask) != 0u;
+                if (!dirty) {
+                    uint old = imageLoad(shadowStorage, page).r;
+                    dirty = (old & SHADOW_SLOT_MASK) != entry;
+                }
+                if (dirty) entry |= SHADOW_PAGE_DIRTY;
+                imageStore(shadowStorage, ivec2(int(slot), SHADOW_CLEAR_ROW), uvec4(uint(dirty)));
+            }
+            ++slot;
+        }
+        imageStore(shadowStorage, page, uvec4(entry));
+    }
+    if (lane == THREADS - 1u) {
+        uint total = prune ? prefix[lane].y : prefix[lane].x;
+        imageStore(shadowStorage, ivec2(int(SHADOW_POOL_PAGES), SHADOW_CLEAR_ROW), uvec4(min(total, SHADOW_POOL_PAGES)));
+    }
+}

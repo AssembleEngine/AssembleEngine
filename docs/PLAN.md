@@ -5766,7 +5766,7 @@ plan; this section records what exists, what is open and what was measured.
 - **M16.8 planar reflection.** `--water-quality reflect` uses a mirrored reverse-Z camera
   and clips terrain and units at the water plane into half-resolution HDR colour and depth.
   The reflection redraws terrain from the current CBT and culls observer-eligible units into
-  its own indirect lists. Reflected geometry uses sunlight, sky and the scene's shadow maps.
+  its own indirect lists. Reflected geometry uses sunlight, sky and the hills' shadows. Units cast no shadows in the reflection.
   The water surface samples the colour with its Fresnel weight and wave normals. Clear pixels
   use the analytic sky. Native, WASM and JSON default graphs agree, and the coast GPU test
   checks the reflected tower, clear sky and filtering of blips, ghosts and submerged units.
@@ -6423,10 +6423,24 @@ Pie in the sky, some time:
 ## Later improvements
 
 - **Virtual shadow maps** (https://graphics-programming.org/blog/virtual-shadow-maps).
-  - What: one very large virtual shadow map; pages are allocated only where the view needs them,
-    and cached while nothing in them moves.
-  - It replaces the units' cascades (M7) behind the same `shadows.map` / `shadows.draw` contract.
-  - The particles' coloured shadows need a colour page for each depth page.
+  - Opaque units use three nested 2048² clipmaps backed by 2,048 shared 64² pages.
+    Receiver depth intervals in the camera frustum combine with caster bounds to determine
+    demand. Each page's light-space column is clipped below by a ground floor: the lowest
+    terrain in its footprint, read from the min/max pyramid, which terrain edits keep current.
+    Receivers stand on the ground or above it, and the camera's projection has no far plane,
+    so without the floor, columns passing under the visible terrain requested pages nothing samples.
+    Static pages are reused while their clipmap projection and physical slot remain stable.
+    Animated casters and moved, removed or hidden units dirty the pages they affect.
+  - The water reflection requests no pages, and units cast no shadows in it. Its upward,
+    unbounded mirrored frustum used to fill the pool before the finest clipmap, because coarse
+    levels are assigned first. In a level-tint capture (headless 1280x720, 10,000 scripted foxes,
+    camera distance 47, default water settings), every caster page of the finest clipmap was
+    unbacked and fell back to the next level, which has twice the texel size. After the change the
+    whole view samples the finest clipmap.
+  - The `shadows.map` resource is now an unsigned storage image. `shadows.prepare`
+    allocates and clears pages and compacts model-caster lists before `shadows.draw`.
+  - Still open for this path: depth-buffer page marking, page reuse across clipmap
+    shifts, and migrating particle optical depth from its dense colour atlas to pages.
 - **Anti-tiling of the terrain's material tilesets** — done (2026-11-16; a tileset degree since
   2026-11-21).
   - After Quílez's "texture repetition", technique 3: a smooth tiling noise texture (one fetch)

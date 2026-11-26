@@ -75,6 +75,7 @@ void main() {
         n = -n;
         t = -t;
     }
+    vec3 surfaceNormal = n;
     if (m.tex.y != 0u && dot(t, t) > 1e-12) {
         t = normalize(t - n * dot(n, t));
         vec3 b = cross(n, t) * inTangent.w;
@@ -99,7 +100,7 @@ void main() {
 
     vec3 v = normalize(UNIT_VIEW_POS - inWorld);
     vec3 tint;
-    float units = unitSunAt(inWorld, n, tint);
+    float units = unitSunAt(inWorld, surfaceNormal, tint);
     // Illuminance (lux) before the cosine; the particles' tint colours the
     // sunlight they shade.
     vec3 sunE = aeUnitTint(AE_SUN_TINT, wide) * (u.photometry.z * min(sunAt(inWorld), units)) * tint;

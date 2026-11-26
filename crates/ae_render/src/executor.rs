@@ -15,7 +15,7 @@ use crate::device::GpuDevice;
 use crate::memory::{OwnedBuffer, OwnedImage};
 use ae_framegraph::barriers::{AccessState, BarrierDesc, StateKey, StateStore, pass_barriers};
 use ae_framegraph::{
-    BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, Role, bake,
+    BakeOptions, BakedGraph, FrameGraph, LoadOp, PassId, PassKind, ResourceDesc, ResourceId, Role, ShaderStage, bake,
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use ash::vk;
@@ -865,6 +865,27 @@ impl<R> Executor<R> {
                                 color: vk::ClearColorValue { float32: clear },
                             },
                         });
+                    }
+                    if rendering.area.width == 0 {
+                        // Attachmentless raster passes take their render area
+                        // from the fragment storage image they write to.
+                        rendering.area = baked_pass
+                            .accesses
+                            .iter()
+                            .find_map(|access| {
+                                if !matches!(
+                                    access.role,
+                                    Role::StorageImageWrite(ShaderStage::Fragment | ShaderStage::Graphics)
+                                        | Role::StorageImageReadWrite(ShaderStage::Fragment | ShaderStage::Graphics)
+                                ) {
+                                    return None;
+                                }
+                                match bindings[access.resource.index()] {
+                                    Some(Binding::Image(image)) => Some(image.extent),
+                                    _ => None,
+                                }
+                            })
+                            .context("missing fragment storage image output")?;
                     }
                     Some(rendering)
                 }

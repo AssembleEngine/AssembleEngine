@@ -146,8 +146,11 @@ pub struct DeclareEnv {
     /// The units cast shadows (only with `units`): the `shadows.draw`
     /// library pass and the `shadows.map` library image
     /// ([`shadow_map_spec`], `External`) exist. Declaring the map, the
-    /// graph has `shadows.draw` write it (`depth:clear`, reading
-    /// `units.instances` in the vertex stage) and every terrain, unit and
+    /// graph allocates pages with `shadows.prepare` (`storage_image_read_write:compute`,
+    /// reading `units.instances`). It fills the shadow draw lists in
+    /// `units.visible` and `units.indirect` (`storage_buffer_read_write:compute`).
+    /// `shadows.draw` rasterizes into the pool (`storage_image_read_write:fragment`)
+    /// and every terrain, unit and
     /// water draw sample it (`sampled:fragment`).
     pub shadows: bool,
     /// The scene has particles: the `particles.sim` and `particles.draw`

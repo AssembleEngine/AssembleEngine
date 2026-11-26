@@ -1,0 +1,84 @@
+#version 460
+#include "units_common.glsl"
+#ifdef MODELS
+#include "units_models.glsl"
+#endif
+#include "units_dart.glsl"
+#include "water_patch.glsl"
+#include "shadow_storage.glsl"
+#include "shadow_cache.glsl"
+
+layout(local_size_x = 64) in;
+
+ShadowCaster currentCaster(uint row) {
+    Unit unit = placedUnit(row);
+    vec3 centre = unit.pos;
+    float radius = 1.6 * unit.size;
+    bool dynamic = false;
+#ifdef MODELS
+    ModelClass model = modelClasses[unit.cls];
+    if (model.cmd.y != 0u) {
+        vec4 sphere = model.sphere;
+        uint pose = attru(ATTR_POSE, row);
+        if (model.fit.y > 0.0 && pose != NO_POSE && (pose & POSE_MANUAL) != 0u) {
+            sphere = vec4(model.sphere.xyz * model.fit.z, model.fit.y);
+        }
+        dynamic = pose != NO_POSE;
+        centre = place(unit, sphere.xyz);
+        radius = sphere.w * unit.size;
+    }
+#endif
+    // Wave riding tilts the sphere around the unit and raises or lowers its base.
+    if (u.height.w > 0.5 && (uint(u.classes[unit.cls].w) & 1u) != 0u) {
+        radius += length(centre - unit.pos);
+        centre = unit.pos;
+        radius += WAVE_BOUND + 0.26;
+        dynamic = true;
+    }
+
+    vec3 light = vec3(dot(u.unitShadowAxes[0].xyz, centre),
+                      dot(u.unitShadowAxes[1].xyz, centre),
+                      dot(u.unitShadowAxes[2].xyz, centre));
+    return ShadowCaster(vec4(unit.pos, unit.size), unit.rot, vec4(light, radius), uvec4(unit.cls + 1u, uint(dynamic), 0u, 0u));
+}
+
+#include "shadow_bounds.glsl"
+
+void markPages(vec4 bounds, uint flags) {
+    for (int level = 0; level < UNIT_CASCADES; ++level) {
+        ivec2 first, last;
+        if (!shadowPageBounds(bounds, level, first, last)) continue;
+        for (int y = first.y; y <= last.y; ++y) {
+            for (int x = first.x; x <= last.x; ++x) {
+                imageAtomicOr(shadowStorage, shadowRequestAddress(shadowTableAddress(ivec2(x, y), level)), flags);
+            }
+        }
+    }
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    uint casterCount = shadowCache.casterCount;
+    uint oldRows = shadowCache.previousRows;
+    if (row >= max(casterCount, oldRows)) return;
+
+    ShadowCaster current = ShadowCaster(vec4(0.0), vec4(0.0), vec4(0.0), uvec4(0u));
+    if (row < casterCount && eligible(row)) current = currentCaster(row);
+
+    bool changed = true;
+    if (row < oldRows) {
+        ShadowCaster previous = shadowCache.casters[row];
+        if (previous.state.x != 0u) {
+            changed = current.state.x != previous.state.x || (current.state.y | previous.state.y) != 0u
+                || any(notEqual(current.positionSize, previous.positionSize))
+                || any(notEqual(current.rotation, previous.rotation));
+            if (changed && (current.state.x == 0u || any(notEqual(current.bounds, previous.bounds)))) {
+                markPages(previous.bounds, SHADOW_REQUEST_DIRTY);
+            }
+        }
+    }
+    if (current.state.x != 0u) {
+        markPages(current.bounds, SHADOW_REQUEST_CASTER | (changed ? SHADOW_REQUEST_DIRTY : 0u));
+    }
+    if (row < casterCount) shadowCache.casters[row] = current;
+}

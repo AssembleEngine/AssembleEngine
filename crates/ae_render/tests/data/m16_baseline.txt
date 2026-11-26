@@ -19,8 +19,11 @@
 # frame the gate draws: its sky specular is roughness-aware and its scars
 # carry heightfields and signed normals. The M16 water frames themselves are
 # unchanged by M16's closing benchmark work.
+# Re-pinned after virtual shadow pages changed clipmap coverage and filtering
+# in the four shadowed fixtures.
+# The dry fixture also covers the blended clipmap transition and heightfield bias.
 # NVIDIA GeForce RTX 3060 Ti | 0x9b124100
-dry 9e740f2cbc5b8090
-wet 59d224d6a630d03c
-observer 9290fa751cdc6843
-off b89acc7652dad45c
+dry 2d0f4932cbde0816
+wet b904fc12b8f2e2ee
+observer 6cbc708a063b9109
+off 6958a02fef24d408

@@ -1,0 +1,35 @@
+#version 460
+#define CULL
+#define MODELS
+#include "units_common.glsl"
+#include "units_models.glsl"
+#include "units_models_lists.glsl"
+#include "shadow_storage.glsl"
+#include "shadow_cache.glsl"
+#include "shadow_bounds.glsl"
+
+layout(local_size_x = 64) in;
+
+bool touchesDirtyPage(vec4 bounds, int level) {
+    ivec2 first, last;
+    if (!shadowPageBounds(bounds, level, first, last)) return false;
+    for (int y = first.y; y <= last.y; ++y) {
+        for (int x = first.x; x <= last.x; ++x) {
+            uint entry = imageLoad(shadowStorage, shadowTableAddress(ivec2(x, y), level)).r;
+            if ((entry & SHADOW_PAGE_DIRTY) != 0u && entry != SHADOW_PAGE_UNBACKED) return true;
+        }
+    }
+    return false;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= shadowCache.casterCount) return;
+    ShadowCaster caster = shadowCache.casters[row];
+    if (caster.state.x == 0u) return;
+    ModelClass model = modelClasses[caster.state.x - 1u];
+    if (model.cmd.y == 0u) return;
+    for (int level = 0; level < UNIT_CASCADES; ++level) {
+        if (touchesDirtyPage(caster.bounds, level)) append(row, model, uint(level + 1));
+    }
+}

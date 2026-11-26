@@ -4,172 +4,176 @@ digraph frame_graph {
   p5 [label="0: shore bake\nCompute", fillcolor="#d1e7dd"];
   p8 [label="1: units reset\nTransfer", fillcolor="#fff3cd"];
   p9 [label="2: units reset reflect\nTransfer", fillcolor="#fff3cd"];
-  p28 [label="3: exposure clear\nTransfer", fillcolor="#fff3cd"];
-  p0 [label="4: water emit\nCompute", fillcolor="#d1e7dd"];
-  p1 [label="5: water splat\nGraphics", fillcolor="#cfe2ff"];
-  p2 [label="6: water churn\nGraphics", fillcolor="#cfe2ff"];
-  p3 [label="7: water blur\nCompute", fillcolor="#d1e7dd"];
-  p4 [label="8: water lod\nCompute", fillcolor="#d1e7dd"];
-  p6 [label="9: terrain lod\nCompute", fillcolor="#d1e7dd"];
-  p14 [label="10: terrain cull reflect\nCompute", fillcolor="#d1e7dd"];
-  p7 [label="11: units pose\nCompute", fillcolor="#d1e7dd"];
-  p10 [label="12: units cull\nCompute", fillcolor="#d1e7dd"];
-  p19 [label="13: units count\nTransfer", fillcolor="#fff3cd"];
-  p20 [label="14: units count read\nTransfer", fillcolor="#fff3cd"];
-  p12 [label="15: shadows\nGraphics", fillcolor="#cfe2ff"];
-  p11 [label="16: lights\nCompute", fillcolor="#d1e7dd"];
-  p21 [label="17: particles sim\nCompute", fillcolor="#d1e7dd"];
-  p13 [label="18: particle shadows\nGraphics", fillcolor="#cfe2ff"];
-  p15 [label="19: terrain reflect\nGraphics", fillcolor="#cfe2ff"];
-  p16 [label="20: units reflect\nGraphics", fillcolor="#cfe2ff"];
-  p17 [label="21: terrain\nGraphics", fillcolor="#cfe2ff"];
-  p18 [label="22: units\nGraphics", fillcolor="#cfe2ff"];
-  p22 [label="23: water underwater\nGraphics", fillcolor="#cfe2ff"];
-  p23 [label="24: particles underwater\nGraphics", fillcolor="#cfe2ff"];
-  p24 [label="25: water\nGraphics", fillcolor="#cfe2ff"];
-  p25 [label="26: units water overlay\nGraphics", fillcolor="#cfe2ff"];
-  p26 [label="27: particles\nGraphics", fillcolor="#cfe2ff"];
-  p27 [label="28: water volume\nGraphics", fillcolor="#cfe2ff"];
-  p29 [label="29: exposure meter\nCompute", fillcolor="#d1e7dd"];
-  p30 [label="30: exposure adapt\nCompute", fillcolor="#d1e7dd"];
-  p31 [label="31: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
-  p32 [label="32: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
-  p33 [label="33: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
-  p34 [label="34: tonemap\nGraphics", fillcolor="#cfe2ff"];
-  p35 [label="35: present\nPresent", fillcolor="#e2e3e5"];
+  p10 [label="3: units cull\nCompute", fillcolor="#d1e7dd"];
+  p29 [label="4: exposure clear\nTransfer", fillcolor="#fff3cd"];
+  p0 [label="5: water emit\nCompute", fillcolor="#d1e7dd"];
+  p1 [label="6: water splat\nGraphics", fillcolor="#cfe2ff"];
+  p2 [label="7: water churn\nGraphics", fillcolor="#cfe2ff"];
+  p3 [label="8: water blur\nCompute", fillcolor="#d1e7dd"];
+  p4 [label="9: water lod\nCompute", fillcolor="#d1e7dd"];
+  p6 [label="10: terrain lod\nCompute", fillcolor="#d1e7dd"];
+  p15 [label="11: terrain cull reflect\nCompute", fillcolor="#d1e7dd"];
+  p12 [label="12: shadow pages\nCompute", fillcolor="#d1e7dd"];
+  p20 [label="13: units count\nTransfer", fillcolor="#fff3cd"];
+  p21 [label="14: units count read\nTransfer", fillcolor="#fff3cd"];
+  p7 [label="15: units pose\nCompute", fillcolor="#d1e7dd"];
+  p13 [label="16: shadows\nGraphics", fillcolor="#cfe2ff"];
+  p11 [label="17: lights\nCompute", fillcolor="#d1e7dd"];
+  p22 [label="18: particles sim\nCompute", fillcolor="#d1e7dd"];
+  p14 [label="19: particle shadows\nGraphics", fillcolor="#cfe2ff"];
+  p16 [label="20: terrain reflect\nGraphics", fillcolor="#cfe2ff"];
+  p17 [label="21: units reflect\nGraphics", fillcolor="#cfe2ff"];
+  p18 [label="22: terrain\nGraphics", fillcolor="#cfe2ff"];
+  p19 [label="23: units\nGraphics", fillcolor="#cfe2ff"];
+  p23 [label="24: water underwater\nGraphics", fillcolor="#cfe2ff"];
+  p24 [label="25: particles underwater\nGraphics", fillcolor="#cfe2ff"];
+  p25 [label="26: water\nGraphics", fillcolor="#cfe2ff"];
+  p26 [label="27: units water overlay\nGraphics", fillcolor="#cfe2ff"];
+  p27 [label="28: particles\nGraphics", fillcolor="#cfe2ff"];
+  p28 [label="29: water volume\nGraphics", fillcolor="#cfe2ff"];
+  p30 [label="30: exposure meter\nCompute", fillcolor="#d1e7dd"];
+  p31 [label="31: exposure adapt\nCompute", fillcolor="#d1e7dd"];
+  p32 [label="32: bloom downsample\nGraphics", fillcolor="#cfe2ff"];
+  p33 [label="33: bloom blur x\nGraphics", fillcolor="#cfe2ff"];
+  p34 [label="34: bloom blur y\nGraphics", fillcolor="#cfe2ff"];
+  p35 [label="35: tonemap\nGraphics", fillcolor="#cfe2ff"];
+  p36 [label="36: present\nPresent", fillcolor="#e2e3e5"];
   p0 -> p1 [label="water.particles"];
   p0 -> p2 [label="water.particles"];
   p1 -> p3 [label="water.raw"];
   p2 -> p3 [label="water.churn"];
-  p2 -> p24 [label="water.churn"];
+  p2 -> p25 [label="water.churn"];
   p3 -> p4 [label="water.waves"];
-  p3 -> p12 [label="water.waves"];
-  p3 -> p16 [label="water.waves"];
-  p3 -> p18 [label="water.waves"];
-  p3 -> p21 [label="water.waves"];
+  p3 -> p13 [label="water.waves"];
+  p3 -> p17 [label="water.waves"];
+  p3 -> p19 [label="water.waves"];
   p3 -> p22 [label="water.waves"];
   p3 -> p23 [label="water.waves"];
   p3 -> p24 [label="water.waves"];
-  p3 -> p27 [label="water.waves"];
-  p4 -> p24 [label="water.mesh.leaves"];
-  p4 -> p24 [label="water.mesh.indirect"];
-  p5 -> p24 [label="water.shore"];
-  p6 -> p14 [label="terrain.indirect"];
-  p6 -> p17 [label="terrain.leaves"];
-  p6 -> p17 [label="terrain.indirect"];
-  p7 -> p12 [label="units.palette"];
-  p7 -> p16 [label="units.palette"];
-  p7 -> p18 [label="units.palette"];
-  p7 -> p25 [label="units.palette"];
+  p3 -> p25 [label="water.waves"];
+  p3 -> p28 [label="water.waves"];
+  p4 -> p25 [label="water.mesh.leaves"];
+  p4 -> p25 [label="water.mesh.indirect"];
+  p5 -> p25 [label="water.shore"];
+  p6 -> p15 [label="terrain.indirect"];
+  p6 -> p18 [label="terrain.leaves"];
+  p6 -> p18 [label="terrain.indirect"];
+  p7 -> p13 [label="units.palette"];
+  p7 -> p17 [label="units.palette"];
+  p7 -> p19 [label="units.palette"];
+  p7 -> p26 [label="units.palette"];
   p8 -> p10 [label="units.indirect"];
   p9 -> p10 [label="units.indirect_reflect"];
   p10 -> p12 [label="units.visible"];
   p10 -> p12 [label="units.indirect"];
-  p10 -> p16 [label="units.visible_reflect"];
-  p10 -> p16 [label="units.indirect_reflect"];
-  p10 -> p18 [label="units.visible"];
-  p10 -> p18 [label="units.indirect"];
-  p10 -> p19 [label="units.indirect"];
-  p10 -> p25 [label="units.visible"];
-  p10 -> p25 [label="units.indirect"];
-  p11 -> p17 [label="lights.list"];
-  p11 -> p17 [label="lights.clusters"];
+  p10 -> p17 [label="units.visible_reflect"];
+  p10 -> p17 [label="units.indirect_reflect"];
   p11 -> p18 [label="lights.list"];
   p11 -> p18 [label="lights.clusters"];
-  p11 -> p21 [label="lights.list"];
-  p11 -> p21 [label="lights.clusters"];
-  p11 -> p24 [label="lights.list"];
-  p11 -> p24 [label="lights.clusters"];
+  p11 -> p19 [label="lights.list"];
+  p11 -> p19 [label="lights.clusters"];
+  p11 -> p22 [label="lights.list"];
+  p11 -> p22 [label="lights.clusters"];
   p11 -> p25 [label="lights.list"];
   p11 -> p25 [label="lights.clusters"];
-  p12 -> p15 [label="shadows.map"];
-  p12 -> p16 [label="shadows.map"];
-  p12 -> p17 [label="shadows.map"];
-  p12 -> p18 [label="shadows.map"];
-  p12 -> p22 [label="shadows.map"];
-  p12 -> p24 [label="shadows.map"];
-  p12 -> p25 [label="shadows.map"];
-  p13 -> p15 [label="shadows.color"];
-  p13 -> p16 [label="shadows.color"];
-  p13 -> p17 [label="shadows.color"];
-  p13 -> p18 [label="shadows.color"];
-  p13 -> p22 [label="shadows.color"];
-  p13 -> p24 [label="shadows.color"];
-  p13 -> p25 [label="shadows.color"];
-  p14 -> p15 [label="terrain.leaves_reflect"];
-  p14 -> p15 [label="terrain.indirect_reflect"];
-  p15 -> p16 [label="water.reflection"];
-  p15 -> p16 [label="water.reflection.depth"];
-  p16 -> p24 [label="water.reflection"];
-  p17 -> p18 [label="depth"];
-  p17 -> p18 [label="scene"];
-  p17 -> p18 [label="glow"];
-  p18 -> p22 [label="depth"];
-  p18 -> p22 [label="scene"];
-  p18 -> p23 [label="depth"];
-  p18 -> p24 [label="depth"];
-  p18 -> p24 [label="scene"];
-  p18 -> p24 [label="glow"];
-  p18 -> p25 [label="depth"];
-  p19 -> p20 [label="units.counts"];
-  p21 -> p13 [label="particles.state"];
-  p21 -> p13 [label="particles.keys"];
-  p21 -> p13 [label="particles.indirect"];
-  p21 -> p23 [label="particles.state"];
-  p21 -> p23 [label="particles.keys"];
-  p21 -> p23 [label="particles.indirect"];
-  p21 -> p26 [label="particles.state"];
-  p21 -> p26 [label="particles.keys"];
-  p21 -> p26 [label="particles.indirect"];
-  p22 -> p23 [label="water.refraction"];
-  p22 -> p24 [label="scene"];
-  p22 -> p25 [label="depth"];
+  p11 -> p26 [label="lights.list"];
+  p11 -> p26 [label="lights.clusters"];
+  p12 -> p13 [label="units.visible"];
+  p12 -> p13 [label="units.indirect"];
+  p12 -> p13 [label="shadows.map"];
+  p12 -> p19 [label="units.visible"];
+  p12 -> p19 [label="units.indirect"];
+  p12 -> p20 [label="units.indirect"];
+  p12 -> p26 [label="units.visible"];
+  p12 -> p26 [label="units.indirect"];
+  p13 -> p16 [label="shadows.map"];
+  p13 -> p17 [label="shadows.map"];
+  p13 -> p18 [label="shadows.map"];
+  p13 -> p19 [label="shadows.map"];
+  p13 -> p23 [label="shadows.map"];
+  p13 -> p25 [label="shadows.map"];
+  p13 -> p26 [label="shadows.map"];
+  p14 -> p16 [label="shadows.color"];
+  p14 -> p17 [label="shadows.color"];
+  p14 -> p18 [label="shadows.color"];
+  p14 -> p19 [label="shadows.color"];
+  p14 -> p23 [label="shadows.color"];
+  p14 -> p25 [label="shadows.color"];
+  p14 -> p26 [label="shadows.color"];
+  p15 -> p16 [label="terrain.leaves_reflect"];
+  p15 -> p16 [label="terrain.indirect_reflect"];
+  p16 -> p17 [label="water.reflection"];
+  p16 -> p17 [label="water.reflection.depth"];
+  p17 -> p25 [label="water.reflection"];
+  p18 -> p19 [label="depth"];
+  p18 -> p19 [label="scene"];
+  p18 -> p19 [label="glow"];
+  p19 -> p23 [label="depth"];
+  p19 -> p23 [label="scene"];
+  p19 -> p24 [label="depth"];
+  p19 -> p25 [label="depth"];
+  p19 -> p25 [label="scene"];
+  p19 -> p25 [label="glow"];
+  p19 -> p26 [label="depth"];
+  p20 -> p21 [label="units.counts"];
+  p22 -> p14 [label="particles.state"];
+  p22 -> p14 [label="particles.keys"];
+  p22 -> p14 [label="particles.indirect"];
+  p22 -> p24 [label="particles.state"];
+  p22 -> p24 [label="particles.keys"];
+  p22 -> p24 [label="particles.indirect"];
+  p22 -> p27 [label="particles.state"];
+  p22 -> p27 [label="particles.keys"];
+  p22 -> p27 [label="particles.indirect"];
   p23 -> p24 [label="water.refraction"];
-  p23 -> p25 [label="depth"];
-  p23 -> p27 [label="water.refraction"];
-  p24 -> p25 [label="depth"];
-  p24 -> p25 [label="scene"];
-  p24 -> p25 [label="glow"];
+  p23 -> p25 [label="scene"];
+  p23 -> p26 [label="depth"];
+  p24 -> p25 [label="water.refraction"];
+  p24 -> p26 [label="depth"];
+  p24 -> p28 [label="water.refraction"];
   p25 -> p26 [label="depth"];
   p25 -> p26 [label="scene"];
   p25 -> p26 [label="glow"];
-  p25 -> p27 [label="depth"];
-  p25 -> p29 [label="depth"];
+  p26 -> p27 [label="depth"];
   p26 -> p27 [label="scene"];
-  p26 -> p29 [label="glow"];
-  p26 -> p31 [label="glow"];
-  p27 -> p29 [label="water.volume.out"];
-  p27 -> p34 [label="water.volume.out"];
-  p28 -> p29 [label="exposure.histogram"];
+  p26 -> p27 [label="glow"];
+  p26 -> p28 [label="depth"];
+  p26 -> p30 [label="depth"];
+  p27 -> p28 [label="scene"];
+  p27 -> p30 [label="glow"];
+  p27 -> p32 [label="glow"];
+  p28 -> p30 [label="water.volume.out"];
+  p28 -> p35 [label="water.volume.out"];
   p29 -> p30 [label="exposure.histogram"];
-  p30 -> p31 [label="exposure"];
-  p30 -> p34 [label="exposure"];
-  p31 -> p32 [label="bloom.0"];
-  p31 -> p33 [label="bloom.0"];
+  p30 -> p31 [label="exposure.histogram"];
+  p31 -> p32 [label="exposure"];
+  p31 -> p35 [label="exposure"];
   p32 -> p33 [label="bloom.0"];
-  p32 -> p33 [label="bloom.1"];
+  p32 -> p34 [label="bloom.0"];
   p33 -> p34 [label="bloom.0"];
-  p34 -> p35 [label="target"];
+  p33 -> p34 [label="bloom.1"];
+  p34 -> p35 [label="bloom.0"];
+  p35 -> p36 [label="target"];
   // physical 0 Transient: units.indirect_reflect
   // resource units.indirect_reflect: sampled -, storage image -, storage buffer 4
-  // physical 1 Transient: water.particles
-  // resource water.particles: sampled -, storage image -, storage buffer 5
-  // physical 2 Transient: water.raw
-  // resource water.raw: sampled 11, storage image -, storage buffer -
-  // physical 3 Transient: water.churn
-  // resource water.churn: sampled 12, storage image -, storage buffer -
-  // physical 4 Transient: water.waves
-  // resource water.waves: sampled 13, storage image 1, storage buffer -
-  // physical 5 Transient: water.mesh.leaves
-  // resource water.mesh.leaves: sampled -, storage image -, storage buffer 6
-  // physical 6 Transient: water.mesh.indirect
-  // resource water.mesh.indirect: sampled -, storage image -, storage buffer 7
-  // physical 7 Transient: terrain.leaves_reflect
-  // resource terrain.leaves_reflect: sampled -, storage image -, storage buffer 1
-  // physical 8 Transient: terrain.indirect_reflect
-  // resource terrain.indirect_reflect: sampled -, storage image -, storage buffer 2
-  // physical 9 Transient: units.visible_reflect
+  // physical 1 Transient: units.visible_reflect
   // resource units.visible_reflect: sampled -, storage image -, storage buffer 3
+  // physical 2 Transient: water.particles
+  // resource water.particles: sampled -, storage image -, storage buffer 5
+  // physical 3 Transient: water.raw
+  // resource water.raw: sampled 11, storage image -, storage buffer -
+  // physical 4 Transient: water.churn
+  // resource water.churn: sampled 12, storage image -, storage buffer -
+  // physical 5 Transient: water.waves
+  // resource water.waves: sampled 13, storage image 1, storage buffer -
+  // physical 6 Transient: water.mesh.leaves
+  // resource water.mesh.leaves: sampled -, storage image -, storage buffer 6
+  // physical 7 Transient: water.mesh.indirect
+  // resource water.mesh.indirect: sampled -, storage image -, storage buffer 7
+  // physical 8 Transient: terrain.leaves_reflect
+  // resource terrain.leaves_reflect: sampled -, storage image -, storage buffer 1
+  // physical 9 Transient: terrain.indirect_reflect
+  // resource terrain.indirect_reflect: sampled -, storage image -, storage buffer 2
   // physical 10 Transient: water.reflection
   // resource water.reflection: sampled 8, storage image -, storage buffer -
   // physical 11 Transient: water.reflection.depth

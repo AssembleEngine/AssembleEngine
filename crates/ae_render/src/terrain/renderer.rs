@@ -1910,8 +1910,8 @@ impl TerrainRenderer {
         self.push.sampler_at(3)
     }
 
-    /// The units' shadow map's comparison sampler.
-    pub fn shadow_compare_sampler_index(&self) -> u32 {
+    /// The nearest sampler for the units' unsigned shadow map.
+    pub fn shadow_sampler_index(&self) -> u32 {
         self.push.sampler_at(4)
     }
 

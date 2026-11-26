@@ -24,9 +24,9 @@
 //! `units reset` (transfer: the indirect instance counts to 0), `units
 //! cull` (compute: frustum test per unit, appends visible indices and
 //! counts them; with models and shadows, also each model unit per shadow
-//! cascade), with shadows `shadows` (`shadows.draw`: depth only, every
-//! dart and the model units the cull found per cascade, into each cascade
-//! of the units' shadow map, [`crate::shadow`]), `units` (graphics: draws
+//! clipmap), with shadows `shadows.prepare` (assign and clear virtual pages)
+//! and `shadows.draw` (rasterize the casters into dirty pages,
+//! [`crate::shadow`]), `units` (graphics: draws
 //! the visible list over the terrain, loading its colour target and depth
 //! buffer, reverse-Z), and `units count` + `units count read` (copy the
 //! indirect arguments to a host buffer per slot, read back in `prepare`
@@ -555,6 +555,10 @@ pub struct UnitRenderer {
     /// Into the units' shadow map (`None` when the terrain renderer has
     /// only its stand-in).
     caster: Option<vk::Pipeline>,
+    shadow_pages: Option<[vk::Pipeline; 4]>,
+    shadow_storage: u32,
+    shadow_cache: Option<(OwnedBuffer, u32)>,
+    shadow_cull: Option<vk::Pipeline>,
     /// Per slot: the frame draws the units' shadows.
     casting: Vec<bool>,
     /// Per slot: the stream's columns, `capacity` words each.
@@ -811,7 +815,7 @@ impl UnitRenderer {
         push.image(5, terrain.pyramid_index());
         push.sampler(1, terrain.linear_sampler_index());
         push.sampler(3, terrain.shadow_color_sampler_index());
-        push.sampler(4, terrain.shadow_compare_sampler_index());
+        push.sampler(4, terrain.shadow_sampler_index());
         // Every buffer is in the global set at 0 (M15 step E).
         let pipeline_layout = bindless.pipeline_layout();
         let cull_code: &[u8] = if model_set.is_some() {
@@ -832,17 +836,10 @@ impl UnitRenderer {
                     fragment,
                     layout: pipeline_layout,
                     color_formats: if color { &color_formats } else { &[] },
-                    depth: Some(match color {
-                        true => DepthState {
-                            format: depth_format,
-                            write: true,
-                            compare: vk::CompareOp::GREATER_OR_EQUAL,
-                        },
-                        false => DepthState {
-                            format: crate::shadow::format(),
-                            write: true,
-                            compare: vk::CompareOp::GREATER_OR_EQUAL,
-                        },
+                    depth: color.then_some(DepthState {
+                        format: depth_format,
+                        write: true,
+                        compare: vk::CompareOp::GREATER_OR_EQUAL,
                     }),
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
@@ -858,6 +855,49 @@ impl UnitRenderer {
                     .context("unit shadow pipeline")?,
             ),
             false => None,
+        };
+        let shadow_pages = casts
+            .then(|| {
+                let mark: &[u8] = if model_set.is_some() {
+                    spirv!("shadow_mark_models.comp")
+                } else {
+                    spirv!("shadow_mark.comp")
+                };
+                let shaders: [&[u8]; 4] = [
+                    spirv!("shadow_reset.comp"),
+                    mark,
+                    spirv!("shadow_allocate.comp"),
+                    spirv!("shadow_clear.comp"),
+                ];
+                reflect::pipelines(device, |i| {
+                    pipeline::compute_pipeline(device, shaders[i], pipeline_layout)
+                })
+            })
+            .transpose()
+            .context("virtual shadow page pipelines")?;
+        let shadow_cull = (casts && model_set.is_some())
+            .then(|| pipeline::compute_pipeline(device, spirv!("shadow_cull.comp"), pipeline_layout))
+            .transpose()
+            .context("virtual shadow model culling pipeline")?;
+        let shadow_cache = if casts {
+            // std430 ShadowCache header (four uints and six vec4s), then
+            // four vec4s per caster. Only the header's valid word needs initialization.
+            let buffer = OwnedBuffer::new(
+                gpu,
+                BufferDesc {
+                    size: 112 + 64 * u64::from(capacity),
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                },
+                MemoryLocation::GpuOnly,
+                "virtual shadow caster history",
+            )?;
+            crate::upload::one_shot(gpu, |cmd| unsafe {
+                device.cmd_fill_buffer(cmd, buffer.buffer, 0, 4, 0);
+            })?;
+            let index = bindless.whole_buffer(&buffer)?.index;
+            Some((buffer, index))
+        } else {
+            None
         };
         let models = match model_set {
             Some(set) => Some(Self::models(
@@ -917,6 +957,10 @@ impl UnitRenderer {
             wave_draws: None,
             wave_casters: None,
             caster,
+            shadow_pages,
+            shadow_storage: terrain.unit_shadow_map().storage_index(),
+            shadow_cache,
+            shadow_cull,
             casting: vec![false; frames_in_flight],
             instances,
             uploaded: vec![None; frames_in_flight],
@@ -1459,7 +1503,7 @@ impl UnitRenderer {
             let [cull, darts] = reflect::pipelines(device, create)?;
             (cull, darts, None, None)
         };
-        // Depth-only, into the units' shadow map, like the base casters.
+        // Attachmentless rasterization into the virtual shadow map.
         let shadow = |vertex: &[u8], fragment: &[u8]| {
             pipeline::graphics_pipeline(
                 device,
@@ -1468,11 +1512,7 @@ impl UnitRenderer {
                     fragment,
                     layout: self.pipeline_layout,
                     color_formats: &[],
-                    depth: Some(DepthState {
-                        format: crate::shadow::format(),
-                        write: true,
-                        compare: vk::CompareOp::GREATER_OR_EQUAL,
-                    }),
+                    depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
                     glow_blend: Blend::Off,
@@ -1562,7 +1602,7 @@ impl UnitRenderer {
         })?;
         let [dart, opaque, masked, sub_dart, sub_opaque, sub_masked] = built;
         self.wave_draws = Some([[dart, opaque, masked], [sub_dart, sub_opaque, sub_masked]]);
-        // The casters, depth-only into the units' shadow map like the base
+        // The casters write virtual shadow pages like the base
         // ones; one the base renderer lacks stays null.
         let dart_casts = self.caster.is_some();
         let model_casts = self.models.as_ref().is_some_and(|m| m.caster.is_some());
@@ -1592,11 +1632,7 @@ impl UnitRenderer {
                     fragment,
                     layout: self.pipeline_layout,
                     color_formats: &[],
-                    depth: Some(DepthState {
-                        format: crate::shadow::format(),
-                        write: true,
-                        compare: vk::CompareOp::GREATER_OR_EQUAL,
-                    }),
+                    depth: None,
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     blend: Blend::Off,
                     glow_blend: Blend::Off,
@@ -1947,12 +1983,73 @@ impl UnitRenderer {
         }
     }
 
-    /// The units into each cascade of the units' shadow map: every dart,
-    /// and the model units the cull found in the cascade (nothing when the
-    /// frame casts no shadows: the map stays cleared). Records inside a
-    /// depth-only graphics pass that reads [`Self::instances`],
-    /// [`Self::visible`] and [`Self::palette`] in the vertex stage and
-    /// [`Self::indirect`] as an indirect buffer, and writes the map.
+    /// Build the page table and clear the assigned physical pages.
+    pub fn record_shadow_pages(&self, ctx: &PassContext<'_>) {
+        let (Some([reset, mark, allocate, clear]), Some((cache, index))) = (self.shadow_pages, &self.shadow_cache)
+        else {
+            return;
+        };
+        use ae_render_abi::module as m;
+        let stage = vk::PipelineStageFlags2::COMPUTE_SHADER;
+        let barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(stage)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(stage)
+            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE);
+        let sync = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
+        // The private history buffer is shared across slots and is touched
+        // only by this pass. The graph synchronizes the page pool separately.
+        let history = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(stage | vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(stage)
+            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(cache.buffer)
+            .size(vk::WHOLE_SIZE);
+        let point = vk::PipelineBindPoint::COMPUTE;
+        let (device, cmd) = (ctx.device, ctx.cmd);
+        unsafe {
+            device.cmd_pipeline_barrier2(
+                cmd,
+                &vk::DependencyInfo::default().buffer_memory_barriers(std::slice::from_ref(&history)),
+            );
+        }
+        self.bind_global(ctx, point, [0, *index, self.shadow_storage, 0]);
+        let dispatch = |pipeline, x, y| unsafe {
+            device.cmd_bind_pipeline(cmd, point, pipeline);
+            device.cmd_dispatch(cmd, x, y, 1);
+        };
+        dispatch(
+            reset,
+            m::SHADOW_LEVEL_PAGES / 8,
+            m::SHADOW_LEVEL_PAGES * m::SHADOW_CASCADES / 8,
+        );
+        unsafe { device.cmd_pipeline_barrier2(cmd, &sync) };
+        if self.casting[ctx.slot] && self.rows(ctx.slot) != 0 {
+            // Previous frames can have more rows. Their old bounds must be
+            // dirtied when a caster is removed from an otherwise live page.
+            dispatch(mark, self.capacity.div_ceil(64), 1);
+            unsafe { device.cmd_pipeline_barrier2(cmd, &sync) };
+        }
+        dispatch(allocate, 1, 1);
+        unsafe { device.cmd_pipeline_barrier2(cmd, &sync) };
+        dispatch(clear, m::SHADOW_POOL_PAGES, 1);
+        if let Some(cull) = self
+            .shadow_cull
+            .filter(|_| self.casting[ctx.slot] && self.rows(ctx.slot) != 0)
+        {
+            unsafe { device.cmd_pipeline_barrier2(cmd, &sync) };
+            dispatch(cull, self.rows(ctx.slot).div_ceil(64), 1);
+        }
+    }
+
+    /// The units into each clipmap of the units' shadow map: every dart,
+    /// and the model units the cull found in that clipmap. The graphics
+    /// pass reads [`Self::instances`], [`Self::visible`] and [`Self::palette`]
+    /// in the vertex stage, reads [`Self::indirect`] as an indirect buffer,
+    /// and writes the physical page pool in the fragment stage.
     pub fn record_shadows(&self, ctx: &PassContext<'_>) {
         self.record_shadows_riding(ctx, None);
     }
@@ -1991,7 +2088,6 @@ impl UnitRenderer {
         let (device, cmd) = (ctx.device, ctx.cmd);
         let side = crate::shadow::CASCADE_TEXELS;
         unsafe {
-            bind([0; 4]);
             let model_caster = self
                 .models
                 .as_ref()
@@ -2010,7 +2106,7 @@ impl UnitRenderer {
             }
             for k in 0..crate::shadow::CASCADES as u32 {
                 let viewport = vk::Viewport {
-                    x: (k * side) as f32,
+                    x: 0.0,
                     y: 0.0,
                     width: side as f32,
                     height: side as f32,
@@ -2022,10 +2118,7 @@ impl UnitRenderer {
                     cmd,
                     0,
                     &[vk::Rect2D {
-                        offset: vk::Offset2D {
-                            x: (k * side) as i32,
-                            y: 0,
-                        },
+                        offset: vk::Offset2D::default(),
                         extent: vk::Extent2D {
                             width: side,
                             height: side,
@@ -2033,7 +2126,7 @@ impl UnitRenderer {
                     }],
                 );
                 device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, caster);
-                bind([k, 0, 0, 0]);
+                bind([k, 0, self.shadow_storage, 0]);
                 device.cmd_draw(cmd, UNIT_VERTICES, rows, 0, 0);
                 // The model units the cull found in this cascade (the darts'
                 // caster skipped model classes), by this cascade's copy of
@@ -2050,7 +2143,7 @@ impl UnitRenderer {
                             continue;
                         }
                         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        bind([k, first, 0, 0]);
+                        bind([k, first, self.shadow_storage, 0]);
                         device.cmd_draw_indexed_indirect(
                             cmd,
                             self.indirect.buffer,
@@ -2066,6 +2159,9 @@ impl UnitRenderer {
 
     pub fn destroy(&mut self, gpu: &GpuDevice) {
         let device = &gpu.device;
+        if let Some((mut history, _)) = self.shadow_cache.take() {
+            history.destroy(gpu);
+        }
         if let Some(mut m) = self.models.take() {
             unsafe {
                 for p in [m.pose, m.scatter, m.opaque, m.masked, m.lights_append]
@@ -2091,6 +2187,15 @@ impl UnitRenderer {
         unsafe {
             if let Some(caster) = self.caster.take() {
                 device.destroy_pipeline(caster, None);
+            }
+            for pipeline in self
+                .shadow_pages
+                .take()
+                .into_iter()
+                .flatten()
+                .chain(self.shadow_cull.take())
+            {
+                device.destroy_pipeline(pipeline, None);
             }
             device.destroy_pipeline(self.cull, None);
             device.destroy_pipeline(self.draw, None);
