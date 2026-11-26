@@ -70,11 +70,11 @@ shadow_cull.comp 09b316c8f9377d48
 shadow_mark.comp 5cc6aadd6ace79e8
 shadow_mark_models.comp fce1835e23f5e666
 shadow_reset.comp 575bdb9d501b2adb
-terrain.frag bc754e89b8e8df4b
+terrain.frag a3b8a668c003dc92
 terrain.vert 89fff78324476b3a
-terrain_mirror.frag 7ad2d3db00789b36
+terrain_mirror.frag 8314b88dbf09a946
 terrain_mirror.vert c0ca9dd2aea7dcc2
-terrain_refract_owner.frag 2f859f240921f8a1
+terrain_refract_owner.frag 0c725340920fdd5b
 terrain_wire.frag f7bb3efc3bd81475
 test_flat.frag f905f2e6571b8399
 test_mixed.frag d768aa0745d7c8b4

@@ -18,10 +18,16 @@ Switching modes keeps the same decal instances, textures, lifetimes and lighting
 `--decal-debug VIEW` or **F7** selects an unlit view. The names are `off`,
 `height`, `coverage`, `normal`,
 `tangent-normal`, `cone`, `cell-bounds`, `iterations`, `depth`, `uv`, `failed`,
-`overlap`, and `lod`. In `uv`, blue indicates a validated hit. `failed` marks
+`overlap`, `lod`, `frame` and `grid`. In `uv`, blue indicates a validated hit. `failed` marks
 attempted traces that used the bump fallback in red. `overlap` marks conservative
 fallback in green. The `lod` view encodes requested quality, successful quality
-and the amount of bump fallback in RGB.
+and the amount of bump fallback in RGB. `frame` (RCSM only) compares the local
+frame the trace steps in with a finite difference of the unfold along the view's
+tangent offset: red is the error along the decal's radius, green across it (both
+relative to the measured step), blue is half the predicted step's length over the
+measured one (0.5 when they agree). `grid` draws eight lines across each unfolded
+axis (red u, green v) over the heightmap's cells, alternate cells darkened, and
+paints a fold (the unfold's plan Jacobian turning over) solid red.
 
 ## Source and shading
 

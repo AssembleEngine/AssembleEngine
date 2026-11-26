@@ -347,6 +347,46 @@ Decals applyDecals(vec3 albedo, float roughness, float metallic, vec3 n, vec3 P,
             if (debug == 11u) debugColour = vec3(0.0, trace.overlap ? 1.0 : 0.0, 0.0);
             if (debug == 12u) debugColour = vec3(trace.quality, trace.hit.valid ? trace.quality : 0.0, 1.0 - trace.quality);
         }
+        if (debug == 13u && mode == RELIEF_CONE) {
+            // The frame the trace steps in against the projection it samples:
+            // move a tenth of a cell in plan along the view's tangent offset,
+            // re-run the unfold, and compare in unfolded metres (world xz).
+            // Red: the error along the decal's radius, green: across it,
+            // both relative to the measured step; blue: half the predicted
+            // step's length over the measured one (0.5 when they agree).
+            float plan = length(tangentPerHeight.xz);
+            if (plan > 1e-4) {
+                vec3 s = tangentPerHeight / plan;
+                float eps = 0.1 * u.map.w;
+                vec2 moved = P.xz + eps * s.xz;
+                vec2 q1 = decalPoint(a, b, vec3(moved.x, 0.0, moved.y), groundAt(moved));
+                vec2 measured = (q1 - q) * a.zw / eps;
+                vec2 predicted = decalUvStep(s, gradU, gradV) * 2.0 * a.zw;
+                vec2 mw = measured.x * ax + measured.y * az;
+                vec2 pw = predicted.x * ax + predicted.y * az;
+                vec2 rw = q.x * a.z * ax + q.y * a.w * az;
+                vec2 radial = dot(rw, rw) > 1e-8 ? normalize(rw) : normalize(mw);
+                vec2 e = pw - mw;
+                float ml = max(length(mw), 1e-6);
+                debugColour = clamp(vec3(abs(dot(e, radial)) / ml,
+                                         abs(dot(e, vec2(-radial.y, radial.x))) / ml,
+                                         0.5 * length(pw) / ml), 0.0, 1.0);
+            }
+        }
+        if (debug == 14u) {
+            // Eight lines across each axis (red u, green v), about a pixel
+            // wide, on the drawn mesh's heightmap cells (alternate ones dark).
+            vec2 w = abs(fract(q * 4.0 + 0.5) - 0.5) / max(8.0 * (abs(gx) + abs(gy)), vec2(1e-6));
+            ivec2 cc = ivec2(floor(P.xz / u.map.w));
+            debugColour = vec3(1.0 - clamp(w, 0.0, 1.0), 1.0) * (0.03 + 0.97 * float((cc.x + cc.y) & 1));
+            // A fold: the map's plan Jacobian (finite differences over a
+            // twentieth of a cell) turns over. Solid red.
+            float eps = 0.05 * u.map.w;
+            vec2 px = P.xz + vec2(eps, 0.0), pz = P.xz + vec2(0.0, eps);
+            vec2 jx = decalPoint(a, b, vec3(px.x, 0.0, px.y), groundAt(px)) - q;
+            vec2 jz = decalPoint(a, b, vec3(pz.x, 0.0, pz.y), groundAt(pz)) - q;
+            if (determinant(mat2(jx, jz)) <= 0.0) debugColour = vec3(1.0, 0.0, 0.0);
+        }
         if (debug == 5u) debugColour = vec3(textureLod(decalCones, uv, 0.0).r);
         if (debug == 6u) {
             ivec2 dim = textureSize(decalCones, 0).xy;

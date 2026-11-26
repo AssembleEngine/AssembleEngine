@@ -929,10 +929,12 @@ pub enum DecalDebug {
     IntersectionFailure = 10,
     OverlapFallback = 11,
     ReliefLod = 12,
+    FrameError = 13,
+    UnfoldGrid = 14,
 }
 
 impl DecalDebug {
-    pub const VIEWS: [(&'static str, Self); 13] = [
+    pub const VIEWS: [(&'static str, Self); 15] = [
         ("off", Self::Off),
         ("height", Self::Height),
         ("coverage", Self::Coverage),
@@ -946,6 +948,8 @@ impl DecalDebug {
         ("failed", Self::IntersectionFailure),
         ("overlap", Self::OverlapFallback),
         ("lod", Self::ReliefLod),
+        ("frame", Self::FrameError),
+        ("grid", Self::UnfoldGrid),
     ];
 
     pub fn next(self) -> Self {
