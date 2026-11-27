@@ -10,9 +10,9 @@ are in [spikes/README.md](spikes/README.md).
 
 ## Status
 
-M0 (workspace, lifted prototypes, benchmarks, risk spikes) is done except one check: running the nav
-golden test on aarch64, which the f32 body-math decision depends on. It needs
-`sudo pacman -S qemu-user aarch64-linux-gnu-gcc` or an aarch64 CI runner.
+M0 (workspace, lifted prototypes, benchmarks, risk spikes) is done, including the nav golden test on
+aarch64 that the f32 body-math decision rests on: the CI test matrix runs it on a native aarch64
+runner. Locally it needs `sudo pacman -S qemu-user aarch64-linux-gnu-gcc`.
 
 M1 (parallel deterministic sim core) runs end to end: a game is a WASM module built with `ae-sdk`
 (components, events and systems declared with macros into a schema section); the runtime derives the
@@ -21,9 +21,10 @@ merges commands and events by key, and digests the world. The sandbox game at 50
 digest at 1, 2, 4, 8 and 16 workers and in dev and release builds, and runs about 5× faster on 8
 workers than on 1 (mean tick, 4.97-5.18× over four runs). Guest heap allocation (`Vec`, `BTreeMap`,
 `String`, boxes freed by another worker) from parallel systems is correct, but wasi-libc's one heap
-lock serialises it: an allocation-heavy probe runs slower at 8 workers than at 4. Not done yet:
-per-worker bump arenas, enable-bit columns, batched structural apply, editor hints in the schema,
-cross-platform digest CI. Details: [docs/PLAN.md](docs/PLAN.md) "M1 progress".
+lock serialises it: an allocation-heavy probe runs slower at 8 workers than at 4. Its digests are
+checked on Linux x86-64 and aarch64, Windows x86-64 and macOS in CI. Not done yet: per-worker bump
+arenas, enable-bit columns, batched structural apply, editor hints in the schema. Details:
+[docs/PLAN.md](docs/PLAN.md) "M1 progress".
 
 M2 (native services) runs inside the sim: the columnar navigation service carved from pathsim
 (bit-equal to it), movement classes with water (ships, hovercraft, amphibious, fording land units) and
@@ -231,6 +232,36 @@ changes (`docs/PLAN.md` § M17 progress). It is a local guard, not a security bo
 `git commit --no-verify` skips it, and such a commit must be re-run through the hook before it is
 shared. It reads the working tree, not the index, so with a partially staged file, stage everything
 first.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `master`, on pull requests and on manual dispatch, with
+stale runs cancelled:
+
+- `Format`: `tools/fmt.sh --check`, the check the hook runs.
+- `Clippy`: `cargo clippy --locked --workspace --all-targets -- -D warnings`.
+- `Test`: `cargo test --locked --workspace` on `ubuntu-26.04` (x86-64), `ubuntu-26.04-arm`,
+  `windows-latest` (x86-64) and `macos-latest` (aarch64), with `fail-fast: false`, so the pinned
+  digests and the nav goldens are compared across platforms. The `#[ignore]`d GPU tests are skipped:
+  no hosted runner has a Vulkan device.
+
+The Linux jobs install `glslc`, `libfontconfig1-dev` and `libsdl3-dev` from apt (26.04 is the first
+Ubuntu that packages SDL3); macOS uses `brew install sdl3 shaderc`; Windows takes `glslc` from the
+Vulkan SDK and SDL3 from the official MSVC zip, wired in through `LIB` and `PATH`. Each test job also
+builds `render/*` once before the tests, so a module that no longer compiles fails as its own step
+rather than inside a test.
+
+With a warm cache the jobs take about 5 minutes on Linux (5m14s x86-64, 4m43s aarch64), 8m49s on
+Windows and 5m25s on macOS; the installs are about 15 s of the Linux jobs, the rest is the build.
+`cargo test` then compiles 32 crates and reaches its first test binary in 136 s. Caches are per job
+and platform, ~560-590 MB each; a *hit* that restores under ~100 MB is a dead entry, left by a job
+that failed before it built anything — delete that key (`docs/PLAN.md` § TODO).
+The SPIR-V hash gate stays advisory there, because the runners' `glslc` is not the pinned 2026.4.
+
+Not built yet: a GPU runner (`ae_render --test gpu -- --ignored --test-threads=1`,
+`ae-client --test water_visibility`), clippy on the wasm guest crates, `ae-headless` digest and
+`--replay --verify` jobs of their own, and a nightly wall-time bench on one machine
+(`docs/PLAN.md` § TODO).
 
 ## Commands
 

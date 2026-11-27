@@ -7,7 +7,7 @@
 use ae_sdk::life::{self, Dying};
 use ae_sdk::nav::{ANY_DEPTH, Body, Goal, MoveOrder, MovementClass, NavAgent};
 use ae_sdk::script::Callins;
-use ae_sdk::{Component, Entity, Run, Spawn, despawn, emit, movement_classes, schedule, system};
+use ae_sdk::{Component, Run, Spawn, despawn, emit, movement_classes, schedule, system};
 
 movement_classes![
     MovementClass {

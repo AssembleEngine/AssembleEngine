@@ -265,7 +265,11 @@ fn run() -> Result<bool> {
         }
         net.flush(&socket)?;
         let finals = peers.values().filter(|p| p.final_digest.is_some()).count();
-        if end > 0 && (finals == peers.len() || ended_at.is_some_and(|t| t.elapsed() > Duration::from_secs(20))) {
+        // 60 s after the last tick, not 20: a client on a loaded runner can run
+        // the game at a fraction of 30 Hz (measured 6.9 Hz on a Windows runner
+        // with three clients and the relay on four cores) and still arrive, and
+        // waiting is free when they report promptly.
+        if end > 0 && (finals == peers.len() || ended_at.is_some_and(|t| t.elapsed() > Duration::from_secs(60))) {
             // Keep telling stragglers the game ended for a moment.
             if finals == peers.len() {
                 for _ in 0..20 {

@@ -21,7 +21,9 @@ use ae_render_abi::module::{
     Program, ProgramTable,
 };
 use ash::vk;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 fn dot_of<R>(graph: &FrameGraph<R>) -> String {
     let baked = bake(graph, BakeOptions::default()).expect("the graph bakes");
@@ -101,12 +103,35 @@ fn scene_hdr(encoding: OutputEncoding) -> String {
     dot_of(&graph)
 }
 
+/// An in-repo module's bytes, built once per test binary.
+///
+/// `ae_render::module::build` runs `cargo`, and a build that is not a no-op
+/// replaces the artifact (remove, then link the new one). The tests below run
+/// in threads, so two of them building the same module can make one read land
+/// in that replacement and find no file (seen on macOS: `read .../release/
+/// ae_render_default.wasm: No such file or directory`). Building under one
+/// lock and keeping the bytes removes the overlap, and saves the repeated
+/// builds.
+fn module(name: &str) -> Vec<u8> {
+    static MODULES: OnceLock<Mutex<BTreeMap<String, Vec<u8>>>> = OnceLock::new();
+    let mut modules = MODULES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(bytes) = modules.get(name) {
+        return bytes.clone();
+    }
+    let bytes = build(name).unwrap_or_else(|e| panic!("build render/{name}: {e:#}"));
+    modules.insert(name.to_owned(), bytes.clone());
+    bytes
+}
+
 /// An in-repo module's graph with the full scene, presenting, for an HDR
 /// encoding: the same plan the client bakes with `--render-module`.
 fn module_hdr(name: &str, encoding: OutputEncoding) -> String {
     let env = env_with(true, true, true, true, encoding);
     let flags = DECLARE_UNITS | DECLARE_WATER | DECLARE_SHADOWS | DECLARE_PARTICLES;
-    let wasm = build(name).unwrap_or_else(|e| panic!("build render/{name}: {e:#}"));
+    let wasm = module(name);
     module_dot(&wasm, &env, flags)
 }
 
@@ -263,7 +288,7 @@ fn baked_plans_match_the_golden_dot_files() {
 
 #[test]
 fn water_reflection_has_the_same_plan_in_all_three_entry_points() {
-    let wasm = build("default").expect("build default module");
+    let wasm = module("default");
     let json = include_bytes!("../../../render/default.graph.json");
     for units in [false, true] {
         let env = env_with(units, true, units, units, OutputEncoding::Sdr);
@@ -297,7 +322,7 @@ fn water_reflection_has_the_same_plan_in_all_three_entry_points() {
 
 #[test]
 fn dry_m7_refraction_surface_dynamics_and_volume_agree_in_all_three_entry_points() {
-    let default = build("default").expect("build default module");
+    let default = module("default");
     let graph_file = include_bytes!("../../../render/default.graph.json");
     for (label, wet, reflect, refract, waves, volume) in [
         ("dry", false, false, false, false, false),

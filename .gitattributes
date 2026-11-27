@@ -1,0 +1,7 @@
+# Every text file is LF, in the index and on disk, on every platform. Two
+# kinds of file are compared byte for byte with text the tests write back —
+# the frame graph goldens (`crates/ae_render/tests/golden/*.dot`) and the game
+# content (`games/*/content/.../units.json`, which the catalogue test requires
+# to be in canonical form) — so a Windows checkout under `core.autocrlf`
+# fails them while every line matches.
+* text=auto eol=lf

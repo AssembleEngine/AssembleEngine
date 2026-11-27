@@ -826,9 +826,8 @@ pipeline declares the stencil format, the executor binds the stencil attachment)
 messages.
 
 Open: `ae_render` and `ae-client` are workspace members with no feature gate, so `cargo test
---workspace` (and the headless CI targets, including the pending aarch64 check) now needs `glslc` and
-SDL3 installed. Fix when CI is set up: `default-members` without them for headless runners, or
-checked-in SPIR-V.
+--workspace` needs `glslc` and SDL3 installed. The CI test jobs install both; a `default-members`
+split without them for headless runners, or checked-in SPIR-V, is still open.
 
 `ae-client` (new): SDL3 window plus `ae_render`'s render thread, for now showing the demo graph (triangle,
 compute blur/invert, composite to the swapchain). `--seconds S` exits after S seconds; `--exercise`
@@ -1023,7 +1022,7 @@ Render modules (the M3 exit item "topology hot-reload without restart"):
   validation messages. GPU over the army view: grade 0.14 ms at 1280x720 (profiling with
   validation; noisy as noted above).
 - `cargo test --workspace` now also needs the `wasm32-unknown-unknown` target (the tests build
-  `render/default` and `render/post`): part of the open CI gating issue with `glslc` and SDL3.
+  `render/default` and `render/post`); CI adds both wasm targets the toolchain file lists.
 - Fullscreen pipelines always blend (straight alpha). A first write with `DontCare` into a float
   target could blend with undefined contents (NaN × 0); today's targets are 8-bit sRGB. Give programs
   a blend switch before float targets.
@@ -6080,27 +6079,48 @@ overlay split. `afe4e62`, before M15 and the water, ran about 126 fps.
   apart from the per-tick positions. This needs a stable per-entity slot (stream rows are rebuilt
   in entity order every tick, so a row index is good for one tick only), allocated and freed as
   `poser.rs` already does for the animation table, with the slot index as an instance attribute.
-- **Establish GitLab CI/CD pipelines** (requested 2026-11-22). There is no CI yet: M17's
-  pre-commit hook is local (see `### M17 progress` for what it gates and its measured times), and
-  several notes above wait on it (the `glslc`/SDL3 gating of `cargo test --workspace`, clippy on
-  the wasm guests, the cross-platform digest runs). Scope, as a `.gitlab-ci.yml`:
-  - `fmt` (`tools/fmt.sh --check`: the workspace packages and the guest crates, since
-    `cargo fmt --all` would reach `vendor/`) and `clippy`
-    (`cargo clippy --workspace --all-targets -- -D warnings`) on the pinned toolchain
-    (`rust-toolchain.toml`), with `target/` cached;
-  - `test` on a runner that has `glslc`, SDL3 and a Vulkan driver: `cargo test --workspace`
-    and the `ae_sim` digest/sandbox tests;
-  - digest and `ae-headless --replay --verify` jobs on Linux x86-64, Windows x86-64 and Linux
-    aarch64 (the determinism targets);
-  - a GPU runner for `ae_render --test gpu -- --ignored --test-threads=1` with the validation
-    layers, which must report zero messages;
-  - `ae-client --bench` on one pinned machine (nightly, `AE_BENCH_MACHINE` set) with
-    `ae-tool bench-diff` against `bench/results/baseline`, while the deterministic counter
-    benches run on every merge request.
-  Conditions: a `default-members` split (or checked-in SPIR-V) so the headless runners need no
-  `glslc`, SDL3 or GPU; a named machine for the wall-time bench, since those numbers compare
-  only within one machine; and the guest crates built through `ae_sim::build::game` so their
-  format and clippy checks join the same jobs.
+- **CI: GitHub Actions, the CPU half** (requested 2026-11-22 as GitLab; the remote is GitHub,
+  so it is `.github/workflows/ci.yml`, built 2026-11-27). It runs on pushes to `master`, on
+  pull requests and on manual dispatch, with stale runs cancelled:
+  - `Format`: `tools/fmt.sh --check`, which reaches the non-member guest manifests (`games/*`,
+    `render/*`, the test guests) that `cargo fmt --all` cannot, and never `vendor/`.
+  - `Clippy`: `cargo clippy --locked --workspace --all-targets -- -D warnings`, the same gate
+    as the pre-commit hook. It installs `glslc` (the `ae_render` build script compiles the
+    shaders) and `libfontconfig1-dev` (`ae_text` → `parley/system` → `yeslogic-fontconfig-sys`
+    probes it with `pkg_config`), but not SDL3: clippy never links.
+  - `Test`: `cargo test --locked --workspace` on Linux x86-64 (`ubuntu-26.04`), Linux aarch64
+    (`ubuntu-26.04-arm`), Windows x86-64 and macOS arm64, `fail-fast: false`. The
+    `#[ignore]`d GPU tests are skipped, so this is every CPU test, the pinned `ae_sim` digests
+    included. Each job installs `glslc` and SDL3 — apt `libsdl3-dev` on 26.04, which is the
+    first Ubuntu that packages it; `brew install sdl3 shaderc`; the official MSVC zip wired in
+    through `LIB` and `PATH` — and builds `render/*` once before the tests, so a module that no
+    longer compiles fails as its own step rather than inside a test.
+  - The SPIR-V hash gate stays advisory: the runners' `glslc` is not the pinned 2026.4, which
+    is the toolchain the test keys strictness to.
+  - `.gitattributes` pins `*.dot text eol=lf`, because the frame graph goldens are compared
+    byte for byte and a Windows checkout under `core.autocrlf` compared unequal on the last
+    line while every line matched. (The catalogue test's canonical-form check on
+    `games/skirmish/content/defs/units.json` was the second casualty, so the rule is `*
+    text=auto eol=lf` for every text file.)
+  First green run: 2026-11-27, all six jobs (Format 25 s, Clippy 1m20s, Linux x86-64 9m33s,
+  Linux aarch64 8m46s, Windows 8m22s, macOS 5m56s).
+  Caching is `Swatinem/rust-cache` under that action: the cargo registry plus the workspace
+  `target/`, keyed on the rustc versions, a few `CARGO_*` variables and the workspace manifests,
+  ~560-590 MB per job and platform, saved in the post step. The times above were *not* taking
+  it: the first run, the one that failed at SDL, saved a registry-only 79.8 MB entry under
+  exactly the key later Linux runs compute, and `actions/cache` never overwrites a key while
+  rust-cache saves nothing on a hit, so both Linux jobs restored 79.8 MB of nothing and
+  recompiled every crate on every run for an hour. After deleting the two dead entries, a run
+  compiles 32 crates and reaches its first test binary in 136 s, against 298 and 337 s before,
+  and the jobs take 5m14s (Linux x86-64), 4m43s (Linux aarch64), 8m49s (Windows) and 5m25s
+  (macOS). A hit that restores under ~100 MB is that failure; delete the key.
+  Not built yet: a GPU runner (`ae_render --test gpu -- --ignored --test-threads=1` with the
+  validation layers reporting zero messages, and `ae-client --test water_visibility`); clippy
+  on the wasm guest crates; `ae-headless` digest and `--replay --verify` jobs that isolate the
+  worker-count sweep rather than riding inside `cargo test`; a nightly wall-time bench on one
+  pinned machine with `AE_BENCH_MACHINE` set, `ae-tool bench-diff` against
+  `bench/results/baseline`; and a `default-members` split (or checked-in SPIR-V) so a job that
+  only needs the sim stops installing `glslc` and SDL3.
 
 From the M14 hybrid animation work (2026-11-18); each needs a decision before it is done.
 
